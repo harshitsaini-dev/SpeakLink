@@ -265,6 +265,13 @@ def dispatch_command(snapshot: ReceiverSnapshot, command: Literal["play", "start
     return snapshot
 
 
+def activate_session(snapshot: ReceiverSnapshot, session_id: int) -> ReceiverSnapshot:
+    """Attach the server-selected session without claiming receiver playback."""
+    if session_id <= 0:
+        raise ValueError("session_id must be positive")
+    return dispatch_command(replace(snapshot, active_session_id=session_id), "play")
+
+
 def _bounded_append(values: tuple[UUID, ...], value: UUID) -> tuple[UUID, ...]:
     return (*values, value)[-MAX_DEDUPLICATION_IDS:]
 

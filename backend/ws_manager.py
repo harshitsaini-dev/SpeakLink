@@ -9,10 +9,24 @@ Design:
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Set
 
 from fastapi import WebSocket
+
+from receiver_contract import (
+    OFFLINE_AFTER_SECONDS,
+    STALE_AFTER_SECONDS,
+    ConnectionState,
+    ReceiverAcknowledgement,
+    ReceiverSnapshot,
+    activate_session,
+    apply_receiver_ack,
+    evaluate_freshness,
+    mark_connected,
+    mark_disconnected,
+    parse_receiver_ack,
+)
 
 logger = logging.getLogger("echocast.ws")
 
@@ -21,6 +35,10 @@ class WSManager:
     def __init__(self):
         # store_id -> WebSocket
         self.receivers: Dict[int, WebSocket] = {}
+        # Process-local immutable state; acknowledgements never mutate snapshots in place.
+        self.receiver_snapshots: Dict[int, ReceiverSnapshot] = {}
+        self.stale_after = timedelta(seconds=STALE_AFTER_SECONDS)
+        self.offline_after = timedelta(seconds=OFFLINE_AFTER_SECONDS)
         # hq_user_id -> WebSocket (dashboards) — multiple HQ dashboards allowed
         self.hq_dashboards: Dict[str, WebSocket] = {}
         # The single active broadcaster WS (mic uplink)
@@ -31,7 +49,12 @@ class WSManager:
         self._lock = asyncio.Lock()
 
     # ---------- Receivers ----------
-    async def connect_receiver(self, store_id: int, ws: WebSocket):
+    async def connect_receiver(
+        self,
+        store_id: int,
+        ws: WebSocket,
+        received_at: datetime | None = None,
+    ):
         await ws.accept()
         # Kick out an older connection for the same store
         old = self.receivers.get(store_id)
@@ -40,19 +63,93 @@ class WSManager:
                 await old.close(code=4001)
             except Exception:
                 pass
+            previous = self.receiver_snapshots.get(store_id)
+            if previous is not None and previous.connection is not ConnectionState.OFFLINE:
+                self.receiver_snapshots[store_id] = mark_disconnected(
+                    previous,
+                    received_at or datetime.now(timezone.utc),
+                )
         self.receivers[store_id] = ws
+        previous = self.receiver_snapshots.get(store_id, ReceiverSnapshot())
+        self.receiver_snapshots[store_id] = mark_connected(
+            previous,
+            received_at or datetime.now(timezone.utc),
+        )
         await self._notify_dashboards({"type": "receiver_status", "store_id": store_id, "status": "online"})
 
-    def disconnect_receiver(self, store_id: int, ws: WebSocket):
+    def disconnect_receiver(
+        self,
+        store_id: int,
+        ws: WebSocket,
+        received_at: datetime | None = None,
+    ) -> bool:
         cur = self.receivers.get(store_id)
         if cur is ws:
             self.receivers.pop(store_id, None)
+            snapshot = self.receiver_snapshots.get(store_id)
+            if snapshot is not None and snapshot.connection is not ConnectionState.OFFLINE:
+                self.receiver_snapshots[store_id] = mark_disconnected(
+                    snapshot,
+                    received_at or datetime.now(timezone.utc),
+                )
+            return True
+        if cur is None:
+            return True
+        return False
+
+    def get_receiver_snapshot(self, store_id: int) -> ReceiverSnapshot | None:
+        return self.receiver_snapshots.get(store_id)
+
+    def apply_receiver_payload(
+        self,
+        store_id: int,
+        payload: object,
+        received_at: datetime | None = None,
+    ) -> tuple[ReceiverAcknowledgement, ReceiverSnapshot]:
+        snapshot = self.receiver_snapshots.get(store_id)
+        if snapshot is None or store_id not in self.receivers:
+            raise RuntimeError("receiver has no authenticated connection snapshot")
+        acknowledgement = parse_receiver_ack(payload)
+        updated = apply_receiver_ack(
+            snapshot,
+            acknowledgement,
+            received_at or datetime.now(timezone.utc),
+        )
+        self.receiver_snapshots[store_id] = updated
+        return acknowledgement, updated
+
+    def evaluate_receiver_freshness(
+        self,
+        store_id: int,
+        now: datetime | None = None,
+    ) -> ReceiverSnapshot:
+        snapshot = self.receiver_snapshots.get(store_id)
+        if snapshot is None:
+            raise KeyError(f"receiver snapshot unavailable for store {store_id}")
+        updated = evaluate_freshness(snapshot, now or datetime.now(timezone.utc))
+        self.receiver_snapshots[store_id] = updated
+        return updated
+
+    def prepare_receiver_session(self, store_id: int, session_id: int) -> None:
+        snapshot = self.receiver_snapshots.get(store_id)
+        if snapshot is None:
+            return
+        self.receiver_snapshots[store_id] = activate_session(snapshot, session_id)
 
     def is_receiver_online(self, store_id: int) -> bool:
-        return store_id in self.receivers
+        snapshot = self.receiver_snapshots.get(store_id)
+        return (
+            store_id in self.receivers
+            and snapshot is not None
+            and snapshot.connection is ConnectionState.CONNECTED
+        )
 
     def online_store_ids(self) -> Set[int]:
-        return set(self.receivers.keys())
+        return {
+            store_id
+            for store_id in self.receivers
+            if self.is_receiver_online(store_id)
+        }
 
     async def send_to_receiver(self, store_id: int, message: dict):
         ws = self.receivers.get(store_id)
@@ -61,9 +158,13 @@ class WSManager:
         try:
             await ws.send_text(json.dumps(message))
             return True
-        except Exception as e:
-            logger.warning(f"send_to_receiver({store_id}) failed: {e}")
-            self.receivers.pop(store_id, None)
+        except Exception as error:
+            logger.warning(
+                "send_to_receiver(%s) failed after %s",
+                store_id,
+                type(error).__name__,
+            )
+            self.disconnect_receiver(store_id, ws)
             return False
 
     async def send_binary_to_receiver(self, store_id: int, data: bytes):
@@ -73,9 +174,13 @@ class WSManager:
         try:
             await ws.send_bytes(data)
             return True
-        except Exception as e:
-            logger.warning(f"send_binary({store_id}) failed: {e}")
-            self.receivers.pop(store_id, None)
+        except Exception as error:
+            logger.warning(
+                "send_binary(%s) failed after %s",
+                store_id,
+                type(error).__name__,
+            )
+            self.disconnect_receiver(store_id, ws)
             return False
 
     # ---------- HQ Dashboards ----------
@@ -118,6 +223,8 @@ class WSManager:
     def start_live_session(self, session_id: int, store_ids: Set[int]):
         self.live_session_id = session_id
         self.live_target_store_ids = set(store_ids)
+        for store_id in store_ids:
+            self.prepare_receiver_session(store_id, session_id)
 
     def stop_live_session(self):
         self.live_session_id = None

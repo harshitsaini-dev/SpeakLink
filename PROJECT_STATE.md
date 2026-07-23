@@ -32,6 +32,8 @@ with one Uvicorn worker.
 - Stores appear OFFLINE when no receiver is connected; this is expected.
 - The configurable Windows SQLite path fixes are present.
 - A pure receiver status and acknowledgement contract is defined and unit-tested.
+- The authenticated receiver WebSocket path now applies that contract to
+  process-local immutable receiver snapshots.
 
 These statements are the verified starting state supplied for this baseline.
 They do not establish receiver playback, audible speakers, production
@@ -41,6 +43,7 @@ readiness, or end-to-end WebSocket audio streaming.
 
 - Current branch: `feature/receiver-status-contract`
 - Historical baseline branch: `feature/baseline-verification`
+- `2d3c4f8 feat: define receiver acknowledgement contract`
 - `e3477a4 test: make local integration tests safe`
 - `44f6f63 docs: document verified local baseline`
 - `07a8392 fix: preserve configurable SQLite path`
@@ -76,12 +79,12 @@ Stop each process with `Ctrl+C` in its own terminal.
   speaker output have not been tested.
 - WebSocket broadcast and receiver state is process-local and supports only one
   backend worker.
-- The current broadcast start path records a target as `playing` when a PLAY
-  command is sent to an online receiver. That is not playback confirmation and
-  must not be treated as such in future design.
 - Receiver connection, readiness, audio receipt, playback confirmation, and
-  speaker verification are modeled as independent axes in the pure contract,
-  but the runtime server and frontend do not use that contract yet.
+  speaker verification are modeled as independent axes. The runtime receiver
+  WebSocket uses these axes, but the frontend still displays its existing
+  coarse store/target fields.
+- Live receiver snapshots are process-local and are lost on backend restart.
+- No real Receiver Agent has exercised the typed acknowledgement protocol yet.
 
 ## Receiver status contract
 
@@ -94,12 +97,24 @@ Stop each process with `Ctrl+C` in its own terminal.
 - Server-derived stale state at 15 seconds and offline state at 30 seconds.
 - A separate trusted EchoGuard schema/path for `SPEAKER_VERIFIED` that ordinary
   receiver parsing cannot invoke.
-- Pure immutable state functions with no FastAPI, WebSocket, database, frontend,
-  Receiver Agent, or audio-streaming integration.
+- Pure immutable state functions that remain independent of FastAPI,
+  WebSockets, SQLAlchemy, the frontend, Receiver Agent, and audio streaming.
 
-PLAY/START dispatch is explicitly a no-op for receiver state in this contract.
-The existing runtime still has the previously documented command-implies-playing
-behavior until a separate integration task changes it.
+The authenticated receiver WebSocket now parses every ordinary acknowledgement
+through this contract. Each accepted connection gets an immutable live
+snapshot. Message UUID deduplication, monotonic sequence enforcement, active
+session matching, and the 15-second stale/30-second offline boundaries are
+applied in memory. Heartbeats refresh freshness only. PLAY dispatch leaves the
+snapshot `STOPPED`, leaves the target `pending`, and does not set
+`started_playing_at`.
+
+Meaningful acknowledgements are recorded using the existing schema. A matching
+`audio_receiving` changes the target to `audio_receiving`; a matching
+`playback_confirmed` changes it to `playback_confirmed` and uses server UTC
+receipt time for `started_playing_at`; errors and matching `stopped` events are
+also recorded. Heartbeats are not written to SQLite. Receiver-supplied free-form
+error details are not persisted; only the bounded error code is retained.
+Ordinary receiver parsing cannot invoke the trusted speaker-verification path.
 
 ## Current security limitations
 
@@ -131,6 +146,11 @@ passwords, JWTs, or receiver tokens.
 - Existing `backend/pytest.ini` xdist configuration is preserved.
 - Pure contract tests do not import the server, start Uvicorn, use sockets, or
   access SQLite.
+- Receiver WebSocket integration tests use an in-process fake WebSocket and a
+  unique pytest temporary SQLite database. They do not start Uvicorn, open a
+  network socket, stream audio, or access `backend/echocast_live.db`.
+- The isolated backend suite currently reports 59 passed and 1 guarded skip;
+  dependency/deprecation warnings remain.
 
 ## Database safety
 
@@ -142,7 +162,8 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Integrate ordinary acknowledgement parsing and the immutable receiver snapshot
-reducer into the authenticated receiver WebSocket path without changing the
-database schema. That work must remove command-implies-playing behavior and
-remain separate from frontend, Receiver Agent, and audio-streaming work.
+Create a local, non-audio receiver protocol simulator that authenticates over a
+real loopback WebSocket and exercises connect, heartbeat, readiness, session
+acknowledgements, rejection codes, stale recovery, and disconnect. Keep it
+isolated from the production database and do not turn it into the Windows
+Receiver Agent yet.
