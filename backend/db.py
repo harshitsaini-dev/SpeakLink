@@ -1,10 +1,11 @@
 """SQLite DB setup for EchoCast Live (independent from any existing systems)."""
 import os
+from pathlib import Path
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-DB_PATH = os.environ.get("ECHOCAST_DB_PATH", "/app/backend/echocast_live.db")
-DATABASE_URL = f"sqlite:///{DB_PATH}"
+DB_PATH = Path(__file__).resolve().parent / "echocast_live.db"
+DATABASE_URL = f"sqlite:///{DB_PATH.as_posix()}"
 
 engine = create_engine(
     DATABASE_URL,
