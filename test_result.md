@@ -102,7 +102,7 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Establish a documented, reproducible local baseline and a safe isolated backend smoke-test path."
+user_problem_statement: "Define and unit-test the pure Receiver Status and Acknowledgement Contract without runtime or database integration."
 backend:
   - task: "Safe isolated backend smoke tests"
     implemented: true
@@ -135,16 +135,34 @@ backend:
       - working: true
         agent: "main"
         comment: "No-target collection skipped the module, a non-local target without opt-in was refused at collection, and the full tests directory completed with 6 passed and 1 skipped."
+  - task: "Pure receiver status and acknowledgement contract"
+    implemented: true
+    working: true
+    file: "backend/receiver_contract.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: contract tests failed during collection because receiver_contract did not exist; no server, network, or database was used."
+      - working: false
+        agent: "main"
+        comment: "First implementation run reached 30 passed and 1 failed because stopped.reason was overconstrained as mandatory."
+      - working: true
+        agent: "main"
+        comment: "Made stopped.reason explicitly optional and bounded. Pure contract result: 31 passed in 0.14 seconds; broader regression validation is pending."
+      - working: true
+        agent: "main"
+        comment: "Expanded allowed-transition and sequence-boundary coverage. Final pure unit result: 38 passed in 0.17 seconds. Full backend result: 44 passed, 1 skipped, 3 warnings in 2.86 seconds."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 2
+  test_sequence: 4
   run_ui: false
 test_plan:
-  current_focus:
-    - "Safe isolated backend smoke tests"
-    - "Guard legacy integration tests"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -153,3 +171,7 @@ agent_communication:
     message: "Run only the isolated smoke suite and safety/compile checks; do not target the old Emergent URL or the real SQLite database."
   - agent: "main"
     message: "Focused validation completed: Python compilation succeeded; isolated smoke tests passed; guarded integration tests did not contact a remote service."
+  - agent: "main"
+    message: "Pure contract unit tests are green. Run the preserved full backend suite next; do not integrate runtime behavior or access the real database."
+  - agent: "main"
+    message: "Receiver contract and full isolated backend validation completed. Runtime server, WebSocket manager, models, database schema, and frontend remain unchanged."
