@@ -4,7 +4,15 @@ from pathlib import Path
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-DB_PATH = Path(__file__).resolve().parent / "echocast_live.db"
+DEFAULT_DB_PATH = Path(__file__).resolve().parent / "echocast_live.db"
+configured_db_path = os.environ.get("ECHOCAST_DB_PATH")
+
+DB_PATH = (
+    Path(configured_db_path).expanduser().resolve()
+    if configured_db_path
+    else DEFAULT_DB_PATH
+)
+
 DATABASE_URL = f"sqlite:///{DB_PATH.as_posix()}"
 
 engine = create_engine(
