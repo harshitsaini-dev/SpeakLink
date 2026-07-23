@@ -102,7 +102,7 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Add a safe non-audio receiver protocol simulator and exercise it against an isolated real loopback WebSocket server."
+user_problem_statement: "Replace receiver WebSocket URL-token authentication with strict Authorization Bearer handshake authentication."
 backend:
   - task: "Safe isolated backend smoke tests"
     implemented: true
@@ -189,11 +189,28 @@ backend:
       - working: true
         agent: "main"
         comment: "Focused simulator result: 3 passed in 2.35 seconds. Pure contract result: 38 passed. Complete isolated backend result: 62 passed, 1 skipped, 6 warnings in 3.77 seconds."
+  - task: "Receiver WebSocket header authentication"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_ws_auth.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: 4 failed and 2 passed. Failures demonstrated the old token function signature, simulator URL concatenation, and acceptance of the legacy credential path."
+      - working: true
+        agent: "main"
+        comment: "Focused header-auth result: 2 passed. Simulator result: 4 passed. Receiver contract plus WebSocket state result: 53 passed. Smoke result: 6 passed."
+      - working: true
+        agent: "main"
+        comment: "Complete isolated backend result: 65 passed, 1 skipped, 8 warnings in 4.17 seconds. Failed authentication produced no snapshot, online state, health write, or credential-bearing response."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 6
+  test_sequence: 7
   run_ui: false
 test_plan:
   current_focus: []
@@ -213,3 +230,5 @@ agent_communication:
     message: "Authenticated receiver integration is green in isolated tests. No frontend, model, migration, Receiver Agent, EchoGuard transport, audio stream, or production database change was made."
   - agent: "main"
     message: "The non-audio simulator passed real-loopback scenarios using generated credentials and a temporary database. It made no server, frontend, model, migration, FFmpeg, audio, or production database change."
+  - agent: "main"
+    message: "Receiver WebSocket header authentication is green. The legacy credential path was removed, the simulator uses Authorization Bearer, and browser compatibility was intentionally not weakened."

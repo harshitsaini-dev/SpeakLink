@@ -311,16 +311,20 @@ class TestLogs:
 class TestWebsocket:
     def test_ws_receiver_invalid(self):
         async def go():
-            uri = f"{WS_BASE}/api/ws/receiver/BADTOKEN_XYZ"
+            uri = f"{WS_BASE}/api/ws/receiver"
             try:
-                async with websockets.connect(uri, open_timeout=8):
+                async with websockets.connect(
+                    uri,
+                    additional_headers={"Authorization": "Bearer BADTOKEN_XYZ"},
+                    open_timeout=8,
+                ):
                     return "connected"
             except websockets.exceptions.InvalidStatus as e:
                 return f"http-{e.response.status_code}"
             except websockets.exceptions.ConnectionClosed as e:
                 return f"closed-{e.code}"
             except Exception as e:
-                return f"err-{type(e).__name__}-{e}"
+                return f"err-{type(e).__name__}"
 
         result = asyncio.run(go())
         # Starlette converts pre-accept close() into HTTP 403 during handshake.
@@ -335,8 +339,16 @@ class TestWebsocket:
         tok1, tok2 = s1["receiver_token"], s2["receiver_token"]
 
         async def scenario():
-            ws1 = await websockets.connect(f"{WS_BASE}/api/ws/receiver/{tok1}", open_timeout=10)
-            ws2 = await websockets.connect(f"{WS_BASE}/api/ws/receiver/{tok2}", open_timeout=10)
+            ws1 = await websockets.connect(
+                f"{WS_BASE}/api/ws/receiver",
+                additional_headers={"Authorization": f"Bearer {tok1}"},
+                open_timeout=10,
+            )
+            ws2 = await websockets.connect(
+                f"{WS_BASE}/api/ws/receiver",
+                additional_headers={"Authorization": f"Bearer {tok2}"},
+                open_timeout=10,
+            )
             try:
                 # allow server to register
                 await asyncio.sleep(1.0)

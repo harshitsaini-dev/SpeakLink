@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 import sys
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import websockets
@@ -191,15 +191,13 @@ class ReceiverProtocolSimulator:
     async def __aexit__(self, exc_type, exc, traceback) -> None:
         await self.close()
 
-    def _credential_url(self) -> str:
-        return f"{self._endpoint}/{quote(self._token, safe='')}"
-
     async def connect(self) -> None:
         if self._websocket is not None:
             raise SimulatorConnectionError("receiver simulator is already connected")
         try:
             self._websocket = await websockets.connect(
-                self._credential_url(),
+                self._endpoint,
+                additional_headers={"Authorization": f"Bearer {self._token}"},
                 open_timeout=self._timeout,
             )
         except Exception:
