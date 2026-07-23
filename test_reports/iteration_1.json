@@ -1,0 +1,78 @@
+{
+  "summary": "SpeakLink: full backend (21 pytest cases) + frontend E2E (Playwright) done. All 21 backend tests pass; all critical frontend flows pass (login, console widgets, store selection, confirm modal, emergency stop, store management, history, logs, receiver invalid/valid token). One functional spec gap identified: emergency-stop does NOT broadcast STOP to all connected receivers (only to targeted ones). Also flagged minor code-quality issues.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "/api/broadcast/emergency-stop and /api/broadcast/sessions/{id}/stop",
+        "issue": "Spec says emergency-stop should broadcast STOP to ALL connected receivers as a safety net, but _end_session() only iterates manager.live_target_store_ids. Non-targeted receivers never receive the STOP JSON message. Test observed: ws2 (not targeted) got no stop. Recommend: in emergency path, iterate set(live_target_store_ids) | set(receivers.keys())."
+      },
+      {
+        "endpoint": "GET /api/",
+        "issue": "@api.get('/') is defined AFTER app.include_router(api), so it never registers. GET /api/ returns 404. Move the route above include_router (cosmetic)."
+      },
+      {
+        "endpoint": "WS /api/ws/receiver/{token}",
+        "issue": "Store status persistence: on abrupt WS drop, store.status stays 'online' in DB. No server-side stale-connection heartbeat/timeout cleanup — a killed pod can leave receivers 'online' until the WS TCP finally errors out."
+      },
+      {
+        "endpoint": "WS /api/ws/broadcaster",
+        "issue": "When a broadcast session ends via /stop or /emergency-stop, the active broadcaster WS is not force-closed server-side; relies on frontend to call bc.stop(). If the operator loses network mid-broadcast, session ends but broadcaster slot remains taken until TCP dies."
+      },
+      {
+        "endpoint": "GET /api/stores",
+        "issue": "list_stores mutates loaded SQLAlchemy objects (s.status = ...) without persisting. Because autoflush=False & session is closed without commit, it works, but this is fragile — a future refactor enabling autoflush would silently overwrite DB status. Consider computing status in a plain dict for response instead of mutating ORM objects."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Broadcast Console HQ dashboard WS",
+        "issue": "WS to /api/ws/hq occasionally logs 'closed before the connection is established' on rapid nav — not blocking; reconnect logic on receiver side exists but HQ dashboard has none (fine for MVP).",
+        "affected_selectors": []
+      }
+    ],
+    "design_issues": [
+      {
+        "screen": "Broadcast Console",
+        "issues": [
+          "Store table row is highlighted only in blue-50/40 for targeted rows — contrast with white/even:slate-50 is subtle; consider a left border accent for stronger visual affordance.",
+          "Stat cards font-mono with tight numbers looks good, but 'Selected/Online/Offline' labels are 10px tracking-widest which is hard to read at 14\"+ desktop distance."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Fix _end_session (server.py) to also send STOP to all currently-connected receivers when triggered via emergency-stop, per spec. This is the only functional deviation from the requirement spec.",
+    "Move @api.get('/') declaration ABOVE app.include_router(api) so GET /api/ returns 200 (currently 404).",
+    "Remove stray /app/backend/=2.0.0 file (pip install artifact — file literally named '=2.0.0').",
+    "Consider adding server-side WS heartbeat timeout to reset stale 'online' store.status entries.",
+    "Optional: force-close active broadcaster WS when a session is stopped/emergency-stopped, so a stuck client can't hold the broadcaster slot."
+  ],
+  "critical_code_review_comments": [
+    "server.py 542-543: `@api.get('/')` is dead code (registered after include_router).",
+    "server.py 113-118: mutating ORM objects (`s.status = ...`) during read endpoint. Safe today due to autoflush=False but bug-prone.",
+    "server.py 265-278 (_end_session): emergency stop does NOT fan out STOP to non-targeted receivers. Spec violation.",
+    "ws_manager.py: `receivers` map has no TTL/heartbeat sweep — abandoned connections linger and mislead online counts.",
+    "Broadcaster WS handler: no auto-timeout while idle; combined with above, a broken TCP could hold the broadcaster slot forever.",
+    "backend/.env still contains MONGO_URL/DB_NAME even though module uses SQLite (harmless leftover from template).",
+    "Stray file /app/backend/=2.0.0 (accidental pip install output redirected to file)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/__init__.py"
+  ],
+  "success_rate": {"backend": "100% (21/21)", "frontend": "100% of critical flows"},
+  "test_credentials": "admin / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Backend tests create 'TEST_*' stores (soft-deleted at end of duplicate test) and 'TEST_*' broadcast sessions. Visible on /stores page as disabled entries — safe to leave (or main agent can delete rows where store_code LIKE 'TEST-%').",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend tests live at /app/backend/tests/backend_test.py — run with `pytest -n 0` (serial). The pytest.ini uses -n 2 loadscope but Broadcast + Websocket tests need serial execution to avoid state races; hence `-n 0` override recommended. Frontend: use data-testids listed in problem statement — they are all present and functional. Note that the receiver page's WS may show DISCONNECTED momentarily when the receiver-store's WS already has an active connection (server kicks the older with 4001). Also BLR-001 might appear 'online' in DB if a prior lingering WS existed — that is a real backend caching gap and not test noise.",
+  "rca of the issue": "Emergency-stop safety-net gap: `_end_session` iterates `manager.live_target_store_ids` only. Fix: in emergency path (or in `_end_session` when reason='emergency'), broadcast STOP to `set(manager.live_target_store_ids) | set(manager.receivers.keys())`. This preserves current-target behavior for normal /stop and adds the required all-receivers safety broadcast for emergency-stop."
+}
