@@ -1,0 +1,77 @@
+{
+  "theme": "light",
+  "archetype": "Archetype 4: Swiss & High-Contrast",
+  "design_philosophy": "Tactical Minimalism meets Broadcast Control Room. The UI must feel like a high-performance Human-Machine Interface (HMI). Actionable clarity over decoration. Bootstrap-familiar structure (grids, striped tables) elevated with modern typography and sharp contrasts.",
+  "typography": {
+    "primary_font": "IBM Plex Sans",
+    "mono_font": "IBM Plex Mono",
+    "fallback": "sans-serif",
+    "setup_instruction": "Add IBM Plex Sans and IBM Plex Mono via Google Fonts in index.html.",
+    "hierarchy": {
+      "h1": "text-3xl sm:text-4xl font-bold tracking-tight text-slate-900",
+      "h2": "text-xl sm:text-2xl font-semibold tracking-tight text-slate-900",
+      "h3": "text-lg font-medium text-slate-800",
+      "body": "text-sm text-slate-700 leading-relaxed",
+      "mono_timer": "font-mono text-5xl sm:text-7xl tracking-tighter text-slate-900",
+      "labels_overlines": "text-xs font-bold uppercase tracking-[0.1em] text-slate-500"
+    }
+  },
+  "colors": {
+    "background": "bg-slate-50",
+    "surface": "bg-white",
+    "border": "border-slate-200",
+    "text_primary": "text-slate-900",
+    "text_secondary": "text-slate-600",
+    "brand_primary": "bg-blue-700 hover:bg-blue-800 text-white",
+    "emergency_stop": "bg-red-600 hover:bg-red-700 text-white active:bg-red-800",
+    "status": {
+      "online": "bg-emerald-100 text-emerald-800 border-emerald-200",
+      "offline": "bg-slate-100 text-slate-700 border-slate-200",
+      "playing": "bg-blue-100 text-blue-800 border-blue-200 animate-pulse",
+      "error": "bg-red-100 text-red-800 border-red-200"
+    }
+  },
+  "layout_and_spacing": {
+    "dashboard_structure": "Sidebar (w-64, bg-slate-900 text-white) + Top Header (h-16, white bg, border-b) + Main Content (p-4 sm:p-6 bg-slate-50).",
+    "grid_system": "Control Room Grid (Mode B). Dense layout, grid-cols-1 md:grid-cols-3 lg:grid-cols-4 with gap-4 or gap-6. Direct children only.",
+    "kiosk_layout": "Single-screen centered layout for Store Receiver. Massive Typography. No scrolling. Use flex-col items-center justify-center min-h-screen.",
+    "borders_and_radius": "Sharp and crisp. Use rounded-md (4px-6px max) for cards and buttons. 1px solid borders (border-slate-200) for all cards."
+  },
+  "components": {
+    "cards": "Flat solid surfaces. border border-slate-200 bg-white rounded-md shadow-sm. No glassmorphism.",
+    "tables": "Bootstrap-style. Dense spacing (py-2 px-3). text-sm. Striped rows (even:bg-slate-50). Left-aligned text, fixed sticky headers (bg-white border-b-2 border-slate-200).",
+    "buttons": {
+      "primary": "bg-blue-700 hover:bg-blue-800 text-white rounded-md px-4 py-2 font-medium transition-colors focus:ring-2 focus:ring-blue-300",
+      "emergency_stop": "h-24 sm:h-32 w-full text-2xl sm:text-4xl font-bold bg-red-600 hover:bg-red-700 text-white rounded-lg shadow-md border border-red-800 uppercase tracking-widest flex items-center justify-center gap-4 transition-all"
+    },
+    "badges": "rounded-full px-2.5 py-0.5 text-xs font-semibold border. Crisp contrast.",
+    "live_indicator": "Red dot with absolute animate-pulse ring, text-red-600 font-bold."
+  },
+  "icons_and_media": {
+    "icon_library": "lucide-react",
+    "image_urls": {
+      "login_kiosk_background": {
+        "url": "https://images.unsplash.com/photo-1621947081720-86970823b77a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1NzZ8MHwxfHNlYXJjaHwxfHxzb3VuZCUyMHdhdmUlMjBhYnN0cmFjdCUyMGJhY2tncm91bmR8ZW58MHx8fHwxNzgzNDIzMzQ1fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Abstract sound wave background for Login and Kiosk screens. Use with a heavy overlay (e.g., bg-slate-900/80) to ensure text legibility."
+      },
+      "store_context_image": {
+        "url": "https://images.unsplash.com/photo-1759050486852-fdfe2fdc7bea?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjd8MHwxfHNlYXJjaHwxfHxjbGVhbiUyMG1vZGVybiUyMHJldGFpbCUyMHN0b3JlJTIwaW50ZXJpb3J8ZW58MHx8fHwxNzgzNDIzMzQ0fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Clean retail store interior. Can be used as a subtle sidebar bottom image or placeholder if store images are needed."
+      }
+    }
+  },
+  "testing_requirements": {
+    "data_testid_rule": "ALL interactive elements (buttons, inputs, toggles), key informational elements (status badges, timer, specific table rows), and major containers MUST include a data-testid attribute.",
+    "format": "kebab-case, role-based. e.g., data-testid='emergency-stop-btn', data-testid='store-status-badge-online'."
+  },
+  "instructions_to_main_agent": [
+    "Use standard HTML+Tailwind for complex layouts, wrapping Shadcn primitives inside.",
+    "Build the dashboard using a Sidebar (left) + Topbar (right) layout pattern. Mobile responsive with hamburger menu.",
+    "The 'Emergency Stop' button must be visually dominant on the Broadcast Console.",
+    "Store Receiver page must be a separate route (e.g., /receiver) that acts as a full-screen kiosk. It requires an 'Enable Audio' interaction to bypass browser autoplay policies.",
+    "For the Receiver Status grid, use tight cards showing store name, location, and a color-coded status badge.",
+    "DO NOT use Inter or Roboto. Strictly setup IBM Plex Sans and Mono in index.css.",
+    "Ensure the timer has a distinct monospaced font so the numbers don't jitter while ticking.",
+    "All React files must be .js or .jsx, NOT .tsx."
+  ]
+}
