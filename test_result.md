@@ -102,7 +102,7 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Integrate strict receiver acknowledgements and immutable live snapshots into the authenticated Receiver WebSocket path."
+user_problem_statement: "Add a safe non-audio receiver protocol simulator and exercise it against an isolated real loopback WebSocket server."
 backend:
   - task: "Safe isolated backend smoke tests"
     implemented: true
@@ -172,11 +172,28 @@ backend:
       - working: true
         agent: "main"
         comment: "Pure contract result: 38 passed. Complete isolated backend result: 59 passed, 1 skipped, 6 warnings. The guarded legacy module remained skipped and backend/speaklink_live.db was not used."
+  - task: "Local non-audio receiver protocol simulator"
+    implemented: true
+    working: true
+    file: "tools/receiver_simulator.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: focused collection failed because tools.receiver_simulator did not exist. No server or database was accessed."
+      - working: false
+        agent: "main"
+        comment: "First implementation run reached the real loopback scenario successfully; one safety-unit input omitted its explicit port and was correctly rejected before the intended non-loopback opt-in assertion."
+      - working: true
+        agent: "main"
+        comment: "Focused simulator result: 3 passed in 2.35 seconds. Pure contract result: 38 passed. Complete isolated backend result: 62 passed, 1 skipped, 6 warnings in 3.77 seconds."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 5
+  test_sequence: 6
   run_ui: false
 test_plan:
   current_focus: []
@@ -194,3 +211,5 @@ agent_communication:
     message: "Receiver contract and full isolated backend validation completed. Runtime server, WebSocket manager, models, database schema, and frontend remain unchanged."
   - agent: "main"
     message: "Authenticated receiver integration is green in isolated tests. No frontend, model, migration, Receiver Agent, LinkGuard transport, audio stream, or production database change was made."
+  - agent: "main"
+    message: "The non-audio simulator passed real-loopback scenarios using generated credentials and a temporary database. It made no server, frontend, model, migration, FFmpeg, audio, or production database change."
