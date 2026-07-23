@@ -36,6 +36,8 @@ with one Uvicorn worker.
   process-local immutable receiver snapshots.
 - A local non-audio protocol simulator has exercised the authenticated contract
   over a real `127.0.0.1` WebSocket against an isolated Uvicorn instance.
+- The production receiver WebSocket uses a credential-free endpoint and strict
+  `Authorization: Bearer` handshake authentication.
 
 These statements are the verified starting state supplied for this baseline.
 They do not establish receiver playback, audible speakers, production
@@ -45,6 +47,8 @@ readiness, or end-to-end WebSocket audio streaming.
 
 - Current branch: `feature/receiver-status-contract`
 - Historical baseline branch: `feature/baseline-verification`
+- `873c655 test: add receiver protocol simulator`
+- `fc0b350 feat: integrate receiver acknowledgement state`
 - `2d3c4f8 feat: define receiver acknowledgement contract`
 - `e3477a4 test: make local integration tests safe`
 - `44f6f63 docs: document verified local baseline`
@@ -127,6 +131,10 @@ FFmpeg. By default it accepts only an explicit `ws://` URL using a literal
 loopback IP address and port. A clearly named `--allow-non-loopback` option is
 required to override that safety boundary.
 
+The simulator connects to `/api/ws/receiver` and sends its credential only in
+the WebSocket handshake `Authorization: Bearer` header. It never appends the
+credential to the URL or prints handshake headers.
+
 Supply the receiver credential without placing it in simulator output:
 
 ```powershell
@@ -144,11 +152,35 @@ Media-scoped scenarios require `--session-id` and a matching active server
 session. The simulator always generates UUID message IDs, UTC timestamps, and
 monotonic normal-message sequences. It cannot generate `speaker_verified`.
 
+## Receiver WebSocket authentication
+
+The production endpoint is `/api/ws/receiver`. Missing, malformed, duplicate,
+or invalid Authorization credentials are rejected before WebSocket acceptance,
+snapshot creation, online registration, or database health updates. All
+failures use close code `4401` and the fixed reason `Receiver authentication
+failed`, without revealing whether a token exists. Active store credentials are
+checked with constant-time comparisons.
+
+The old `/api/ws/receiver/{token}` route has been removed with no compatibility
+fallback. Query-string receiver credentials are not accepted by the production
+endpoint. Production deployments must use TLS and `wss://`; header
+authentication does not protect credentials over plaintext networks.
+
+The React Receiver page is development-only legacy code. Native browser
+WebSocket cannot set an Authorization header, and the page still obtains a
+credential from its own `?token=` URL and uses the legacy verification API.
+It therefore cannot connect to the production Receiver WebSocket. No insecure
+browser compatibility route or development flag was added. Store Management's
+generated receiver link and historical PRD/test-report references are also
+legacy and must not be used for a production receiver.
+
 ## Current security limitations
 
 - CORS defaults to `*` unless `CORS_ORIGINS` is configured.
 - HQ WebSocket authentication currently places JWTs in query parameters.
-- Receiver tokens are used in receiver URLs and are returned by store APIs.
+- The authenticated HQ store APIs still return raw receiver tokens.
+- The development-only browser Receiver page and verification endpoint still
+  use receiver credentials in query strings; they are not production transport.
 - Development credential defaults exist in current application/UI code.
 - JWT revocation is not implemented; logout only removes the browser token.
 - TLS termination, secret rotation, receiver provisioning, authorization roles,
@@ -180,7 +212,10 @@ passwords, JWTs, or receiver tokens.
 - Simulator integration tests start one Uvicorn worker on a random
   `127.0.0.1` port, provision generated credentials, and use a unique temporary
   SQLite database. Production database metadata is checked before and after.
-- The isolated backend suite currently reports 62 passed and 1 guarded skip;
+- Header-authentication tests verify fixed rejection behavior and prove failed
+  handshakes create no snapshot, online state, last-seen change, status change,
+  or receiver event.
+- The isolated backend suite currently reports 65 passed and 1 guarded skip;
   dependency/deprecation warnings remain.
 
 ## Database safety
@@ -193,7 +228,6 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Design and test header-based Receiver WebSocket authentication so production
-receiver credentials no longer need to appear in URL paths. Keep any transition
-backward-compatible and do not begin audio or Windows Receiver Agent work in
-the same change.
+Design the receiver credential lifecycle: secure enrolment, rotation,
+revocation, and hashed-at-rest storage with a safe migration plan. Keep that
+work separate from audio and the production Windows Receiver Agent.

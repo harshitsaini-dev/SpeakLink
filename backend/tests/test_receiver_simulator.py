@@ -11,6 +11,7 @@ import time
 
 import pytest
 import requests
+import websockets
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +25,17 @@ from tools.receiver_simulator import (  # noqa: E402
     SimulatorConfigurationError,
     main,
 )
+
+
+class SecretSafeServer(dict):
+    def __repr__(self):
+        return (
+            "SecretSafeServer("
+            f"http_url={self['http_url']!r}, "
+            f"ws_url={self['ws_url']!r}, "
+            f"database_path={self['database_path']!r}, "
+            f"store_id={self['store_id']!r}, credentials=<redacted>)"
+        )
 
 
 def database_metadata(path: Path):
@@ -110,14 +122,14 @@ def isolated_server(tmp_path_factory):
         )
         assert store_response.status_code == 201
         store = store_response.json()
-        yield {
+        yield SecretSafeServer({
             "database_path": database_path,
             "http_url": http_url,
             "ws_url": f"ws://127.0.0.1:{port}/api/ws/receiver",
             "admin_headers": {"Authorization": f"Bearer {admin_token}"},
             "store_id": store["id"],
             "receiver_token": store["receiver_token"],
-        }
+        })
     finally:
         if process.poll() is None:
             process.terminate()
@@ -171,6 +183,16 @@ def receiver_event_types(server, session_id: int | None = None) -> list[str]:
     return [row[0] for row in rows]
 
 
+def receiver_database_health(server):
+    with sqlite3.connect(server["database_path"]) as connection:
+        return connection.execute(
+            "SELECT status, last_seen, "
+            "(SELECT COUNT(*) FROM receiver_events WHERE store_id = stores.id) "
+            "FROM stores WHERE id = ?",
+            (server["store_id"],),
+        ).fetchone()
+
+
 async def wait_until(predicate, timeout: float = 5.0):
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
@@ -212,10 +234,53 @@ def test_cli_failure_does_not_print_environment_credential(monkeypatch, capsys):
         pytest.fail("Simulator output contained a receiver credential", pytrace=False)
 
 
+def test_simulator_uses_bearer_header_without_credential_url(monkeypatch):
+    receiver_credential = secrets.token_urlsafe(32)
+    endpoint = "ws://127.0.0.1:8765/api/ws/receiver"
+    captured = {}
+
+    class StubConnection:
+        async def close(self):
+            return None
+
+    async def fake_connect(url, **kwargs):
+        captured["url"] = url
+        captured["headers"] = kwargs.get("additional_headers")
+        return StubConnection()
+
+    monkeypatch.setattr("tools.receiver_simulator.websockets.connect", fake_connect)
+
+    async def scenario():
+        simulator = ReceiverProtocolSimulator(endpoint, receiver_credential)
+        await simulator.connect()
+        await simulator.close()
+
+    asyncio.run(scenario())
+    if receiver_credential in captured.get("url", ""):
+        pytest.fail("Simulator placed a receiver credential in its URL", pytrace=False)
+    assert captured["url"] == endpoint
+    if captured.get("headers") != {"Authorization": f"Bearer {receiver_credential}"}:
+        pytest.fail("Simulator did not use the required Bearer header", pytrace=False)
+
+
 def test_real_loopback_receiver_scenarios(isolated_server, capsys):
     server = isolated_server
 
     async def scenario():
+        before_rejections = receiver_database_health(server)
+
+        async def rejected(uri):
+            try:
+                connection = await websockets.connect(uri, open_timeout=3)
+            except Exception:
+                return True
+            await connection.close()
+            return False
+
+        assert await rejected(f"{server['ws_url']}/{server['receiver_token']}")
+        assert await rejected(f"{server['ws_url']}?token={server['receiver_token']}")
+        assert receiver_database_health(server) == before_rejections
+
         async with ReceiverProtocolSimulator(
             server["ws_url"], server["receiver_token"]
         ) as simulator:

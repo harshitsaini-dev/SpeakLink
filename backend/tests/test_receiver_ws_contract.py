@@ -33,7 +33,8 @@ class StoreIdentity:
 
 
 class FakeWebSocket:
-    def __init__(self):
+    def __init__(self, authorization=None):
+        self.headers = {} if authorization is None else {"authorization": authorization}
         self.accepted = False
         self.closed_codes = []
         self.sent_text = []
@@ -147,8 +148,8 @@ async def wait_until(predicate, timeout=1.0):
 
 
 async def open_receiver(runtime, store):
-    websocket = FakeWebSocket()
-    task = asyncio.create_task(runtime.server.ws_receiver(websocket, store.token))
+    websocket = FakeWebSocket(f"Bearer {store.token}")
+    task = asyncio.create_task(runtime.server.ws_receiver(websocket))
     await wait_until(
         lambda: websocket.accepted and runtime.manager.get_receiver_snapshot(store.id)
     )

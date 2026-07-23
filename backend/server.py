@@ -12,6 +12,7 @@ import uuid
 import logging
 import asyncio
 import json
+import secrets
 from datetime import datetime, timezone
 from typing import List, Optional, Set
 
@@ -53,6 +54,10 @@ from receiver_contract import (
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("speaklink")
+
+RECEIVER_AUTH_FAILURE_CODE = 4401
+RECEIVER_AUTH_FAILURE_REASON = "Receiver authentication failed"
+MAX_RECEIVER_TOKEN_LENGTH = 128
 
 
 # ---- app + startup ----
@@ -459,14 +464,58 @@ def _receiver_rejection_code(error: Exception) -> str:
     return "INVALID_TRANSITION"
 
 
-@app.websocket("/api/ws/receiver/{token}")
-async def ws_receiver(websocket: WebSocket, token: str):
-    # Verify token
+def _receiver_bearer_token(websocket: WebSocket) -> str | None:
+    headers = websocket.headers
+    getlist = getattr(headers, "getlist", None)
+    values = getlist("authorization") if getlist is not None else []
+    if values and len(values) != 1:
+        return None
+    authorization = values[0] if values else headers.get("authorization")
+    if not isinstance(authorization, str):
+        return None
+    parts = authorization.split(" ")
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
+        return None
+    candidate = parts[1]
+    if len(candidate) > MAX_RECEIVER_TOKEN_LENGTH:
+        return None
+    try:
+        candidate.encode("ascii")
+    except UnicodeEncodeError:
+        return None
+    return candidate
+
+
+def _constant_time_receiver_store(db: Session, candidate: str) -> Store | None:
+    candidate_bytes = candidate.encode("ascii")
+    matched_store = None
+    active_stores = db.query(Store).filter(Store.is_active.is_(True)).all()
+    for store in active_stores:
+        expected_bytes = store.receiver_token.encode("ascii")
+        if secrets.compare_digest(expected_bytes, candidate_bytes):
+            matched_store = store
+    return matched_store
+
+
+async def _reject_receiver_authentication(websocket: WebSocket) -> None:
+    await websocket.close(
+        code=RECEIVER_AUTH_FAILURE_CODE,
+        reason=RECEIVER_AUTH_FAILURE_REASON,
+    )
+
+
+@app.websocket("/api/ws/receiver")
+async def ws_receiver(websocket: WebSocket):
+    candidate = _receiver_bearer_token(websocket)
+    if candidate is None:
+        await _reject_receiver_authentication(websocket)
+        return
+
     db = SessionLocal()
     try:
-        store = db.query(Store).filter(Store.receiver_token == token, Store.is_active.is_(True)).first()
+        store = _constant_time_receiver_store(db, candidate)
         if not store:
-            await websocket.close(code=4401)
+            await _reject_receiver_authentication(websocket)
             return
         store_id = store.id
         # mark last_seen
