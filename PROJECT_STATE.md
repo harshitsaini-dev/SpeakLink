@@ -34,6 +34,8 @@ with one Uvicorn worker.
 - A pure receiver status and acknowledgement contract is defined and unit-tested.
 - The authenticated receiver WebSocket path now applies that contract to
   process-local immutable receiver snapshots.
+- A local non-audio protocol simulator has exercised the authenticated contract
+  over a real `127.0.0.1` WebSocket against an isolated Uvicorn instance.
 
 These statements are the verified starting state supplied for this baseline.
 They do not establish receiver playback, audible speakers, production
@@ -84,7 +86,8 @@ Stop each process with `Ctrl+C` in its own terminal.
   WebSocket uses these axes, but the frontend still displays its existing
   coarse store/target fields.
 - Live receiver snapshots are process-local and are lost on backend restart.
-- No real Receiver Agent has exercised the typed acknowledgement protocol yet.
+- No production Windows Receiver Agent has exercised the typed acknowledgement
+  protocol yet; only the local non-audio simulator has done so.
 
 ## Receiver status contract
 
@@ -115,6 +118,31 @@ receipt time for `started_playing_at`; errors and matching `stopped` events are
 also recorded. Heartbeats are not written to SQLite. Receiver-supplied free-form
 error details are not persisted; only the bounded error code is retained.
 Ordinary receiver parsing cannot invoke the trusted speaker-verification path.
+
+## Local receiver protocol simulator
+
+`tools/receiver_simulator.py` is a standalone Python 3.12 client for protocol
+testing. It does not capture, send, decode, or play audio and does not invoke
+FFmpeg. By default it accepts only an explicit `ws://` URL using a literal
+loopback IP address and port. A clearly named `--allow-non-loopback` option is
+required to override that safety boundary.
+
+Supply the receiver credential without placing it in simulator output:
+
+```powershell
+$env:ECHOCAST_RECEIVER_TOKEN = '<isolated-test-receiver-credential>'
+python tools\receiver_simulator.py `
+  --url ws://127.0.0.1:8000/api/ws/receiver `
+  --scenario ready-only
+Remove-Item Env:ECHOCAST_RECEIVER_TOKEN
+```
+
+Available deterministic scenarios are `ready-only`, `successful-playback`,
+`playback-error`, `device-error`, `duplicate-message-rejection`,
+`out-of-order-sequence-rejection`, `wrong-session-rejection`, and `stopped`.
+Media-scoped scenarios require `--session-id` and a matching active server
+session. The simulator always generates UUID message IDs, UTC timestamps, and
+monotonic normal-message sequences. It cannot generate `speaker_verified`.
 
 ## Current security limitations
 
@@ -149,7 +177,10 @@ passwords, JWTs, or receiver tokens.
 - Receiver WebSocket integration tests use an in-process fake WebSocket and a
   unique pytest temporary SQLite database. They do not start Uvicorn, open a
   network socket, stream audio, or access `backend/echocast_live.db`.
-- The isolated backend suite currently reports 59 passed and 1 guarded skip;
+- Simulator integration tests start one Uvicorn worker on a random
+  `127.0.0.1` port, provision generated credentials, and use a unique temporary
+  SQLite database. Production database metadata is checked before and after.
+- The isolated backend suite currently reports 62 passed and 1 guarded skip;
   dependency/deprecation warnings remain.
 
 ## Database safety
@@ -162,8 +193,7 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Create a local, non-audio receiver protocol simulator that authenticates over a
-real loopback WebSocket and exercises connect, heartbeat, readiness, session
-acknowledgements, rejection codes, stale recovery, and disconnect. Keep it
-isolated from the production database and do not turn it into the Windows
-Receiver Agent yet.
+Design and test header-based Receiver WebSocket authentication so production
+receiver credentials no longer need to appear in URL paths. Keep any transition
+backward-compatible and do not begin audio or Windows Receiver Agent work in
+the same change.
