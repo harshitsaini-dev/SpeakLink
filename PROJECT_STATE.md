@@ -1,7 +1,7 @@
 # SpeakLink Project State
 
 Last updated: 2026-07-23
-Baseline branch: `feature/baseline-verification`
+Current branch: `feature/receiver-status-contract`
 
 ## Current architecture
 
@@ -31,6 +31,7 @@ with one Uvicorn worker.
 - The dashboard and seeded stores load after authentication.
 - Stores appear OFFLINE when no receiver is connected; this is expected.
 - The configurable Windows SQLite path fixes are present.
+- A pure receiver status and acknowledgement contract is defined and unit-tested.
 
 These statements are the verified starting state supplied for this baseline.
 They do not establish receiver playback, audible speakers, production
@@ -38,7 +39,10 @@ readiness, or end-to-end WebSocket audio streaming.
 
 ## Git baseline
 
-- Branch: `feature/baseline-verification`
+- Current branch: `feature/receiver-status-contract`
+- Historical baseline branch: `feature/baseline-verification`
+- `e3477a4 test: make local integration tests safe`
+- `44f6f63 docs: document verified local baseline`
 - `07a8392 fix: preserve configurable SQLite path`
 - `e540ae8 fix: resolve SQLite path on Windows`
 - `ae4c368 chore: import original SpeakLink baseline`
@@ -75,8 +79,27 @@ Stop each process with `Ctrl+C` in its own terminal.
 - The current broadcast start path records a target as `playing` when a PLAY
   command is sent to an online receiver. That is not playback confirmation and
   must not be treated as such in future design.
-- Receiver connection, audio receipt, playback confirmation, and speaker
-  verification are not yet modeled as separate end-to-end states.
+- Receiver connection, readiness, audio receipt, playback confirmation, and
+  speaker verification are modeled as independent axes in the pure contract,
+  but the runtime server and frontend do not use that contract yet.
+
+## Receiver status contract
+
+`RECEIVER_STATUS_CONTRACT.md` and `backend/receiver_contract.py` define:
+
+- Independent connection, readiness, playback, and acoustic state axes.
+- Strict Pydantic acknowledgement schemas with UTC timestamps, UUID message
+  identifiers, monotonic sequence numbers, and session matching.
+- Explicit transition, duplicate, ordering, session, and timestamp errors.
+- Server-derived stale state at 15 seconds and offline state at 30 seconds.
+- A separate trusted LinkGuard schema/path for `SPEAKER_VERIFIED` that ordinary
+  receiver parsing cannot invoke.
+- Pure immutable state functions with no FastAPI, WebSocket, database, frontend,
+  Receiver Agent, or audio-streaming integration.
+
+PLAY/START dispatch is explicitly a no-op for receiver state in this contract.
+The existing runtime still has the previously documented command-implies-playing
+behavior until a separate integration task changes it.
 
 ## Current security limitations
 
@@ -106,6 +129,8 @@ passwords, JWTs, or receiver tokens.
 - WebSocket streaming, concurrent receivers, audio delivery, Windows playback,
   and acoustic speaker output remain untested.
 - Existing `backend/pytest.ini` xdist configuration is preserved.
+- Pure contract tests do not import the server, start Uvicorn, use sockets, or
+  access SQLite.
 
 ## Database safety
 
@@ -117,8 +142,7 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Define and test a receiver-state contract before building the Windows Receiver
-Agent. The contract should keep `CONNECTED`, `AUDIO_RECEIVING`,
-`PLAYBACK_CONFIRMED`, and `SPEAKER_VERIFIED` separate, specify acknowledgements
-and timeouts, and prevent a sent PLAY command from being reported as confirmed
-playback.
+Integrate ordinary acknowledgement parsing and the immutable receiver snapshot
+reducer into the authenticated receiver WebSocket path without changing the
+database schema. That work must remove command-implies-playing behavior and
+remain separate from frontend, Receiver Agent, and audio-streaming work.
