@@ -101,3 +101,55 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: "Establish a documented, reproducible local baseline and a safe isolated backend smoke-test path."
+backend:
+  - task: "Safe isolated backend smoke tests"
+    implemented: true
+    working: true
+    file: "backend/tests/test_smoke.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Added in-process smoke coverage using a pytest temporary SQLite database; validation is pending."
+      - working: false
+        agent: "main"
+        comment: "Initial collection failed because the existing virtual environment does not have httpx installed; no test executed and the real database was not used."
+      - working: true
+        agent: "main"
+        comment: "Reworked the harness to use an ephemeral loopback Uvicorn process and requests. Result: 6 passed with 3 dependency/deprecation warnings."
+  - task: "Guard legacy integration tests"
+    implemented: true
+    working: true
+    file: "backend/tests/backend_test.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Removed the remote fallback and added explicit URL, isolated-database, non-local opt-in, and environment credential gates; validation is pending."
+      - working: true
+        agent: "main"
+        comment: "No-target collection skipped the module, a non-local target without opt-in was refused at collection, and the full tests directory completed with 6 passed and 1 skipped."
+frontend: []
+metadata:
+  created_by: "main_agent"
+  version: "1.0"
+  test_sequence: 2
+  run_ui: false
+test_plan:
+  current_focus:
+    - "Safe isolated backend smoke tests"
+    - "Guard legacy integration tests"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+agent_communication:
+  - agent: "main"
+    message: "Run only the isolated smoke suite and safety/compile checks; do not target the old Emergent URL or the real SQLite database."
+  - agent: "main"
+    message: "Focused validation completed: Python compilation succeeded; isolated smoke tests passed; guarded integration tests did not contact a remote service."

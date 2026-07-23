@@ -1,24 +1,62 @@
-"""EchoCast Live backend tests (pytest).
+"""Explicit-target EchoCast Live integration tests.
 
-Covers: auth, stores CRUD, receiver verify, broadcast sessions (create/start/stop/emergency),
-concurrency prevention, targeted PLAY dispatch, history, logs, WS handshake for receiver.
-Uses public REACT_APP_BACKEND_URL to mimic real end-user traffic through k8s ingress.
+These tests perform writes. They never choose a server implicitly: callers must
+provide a test-only base URL, confirm its database is isolated, and provide test
+credentials through environment variables. Non-loopback targets require a
+separate, clearly named opt-in.
 """
 import asyncio
 import json
 import os
 import time
 import uuid
+from urllib.parse import urlparse
 
 import pytest
 import requests
 import websockets
 
-BASE_URL = os.environ["REACT_APP_BACKEND_URL"].rstrip("/") if os.environ.get("REACT_APP_BACKEND_URL") else "https://hq-broadcast.preview.emergentagent.com"
+def _enabled(name):
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+raw_base_url = os.environ.get("ECHOCAST_TEST_BASE_URL", "").strip()
+if not raw_base_url:
+    pytest.skip(
+        "Integration tests require an explicit ECHOCAST_TEST_BASE_URL; "
+        "use tests/test_smoke.py for the isolated local baseline.",
+        allow_module_level=True,
+    )
+
+parsed_base_url = urlparse(raw_base_url)
+if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.hostname:
+    raise pytest.UsageError("ECHOCAST_TEST_BASE_URL must be an absolute HTTP(S) URL")
+
+is_loopback = parsed_base_url.hostname.lower() in {"localhost", "127.0.0.1", "::1"}
+if not is_loopback and not _enabled("ECHOCAST_ALLOW_NONLOCAL_WRITE_TESTS"):
+    raise pytest.UsageError(
+        "Refusing write tests against a non-local URL. Set "
+        "ECHOCAST_ALLOW_NONLOCAL_WRITE_TESTS=1 only for an isolated test server."
+    )
+
+if not _enabled("ECHOCAST_TEST_DATABASE_ISOLATED"):
+    pytest.skip(
+        "Integration tests require ECHOCAST_TEST_DATABASE_ISOLATED=1 after "
+        "confirming the target server uses a disposable or dedicated test database.",
+        allow_module_level=True,
+    )
+
+BASE_URL = raw_base_url.rstrip("/")
 WS_BASE = BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
 
-ADMIN_USER = "admin"
-ADMIN_PASS = "admin123"
+ADMIN_USER = os.environ.get("ECHOCAST_TEST_ADMIN_USERNAME")
+ADMIN_PASS = os.environ.get("ECHOCAST_TEST_ADMIN_PASSWORD")
+if not ADMIN_USER or not ADMIN_PASS:
+    pytest.skip(
+        "Integration tests require ECHOCAST_TEST_ADMIN_USERNAME and "
+        "ECHOCAST_TEST_ADMIN_PASSWORD.",
+        allow_module_level=True,
+    )
 
 
 # ------------- fixtures -------------
