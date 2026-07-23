@@ -102,7 +102,7 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Define and unit-test the pure Receiver Status and Acknowledgement Contract without runtime or database integration."
+user_problem_statement: "Integrate strict receiver acknowledgements and immutable live snapshots into the authenticated Receiver WebSocket path."
 backend:
   - task: "Safe isolated backend smoke tests"
     implemented: true
@@ -155,11 +155,28 @@ backend:
       - working: true
         agent: "main"
         comment: "Expanded allowed-transition and sequence-boundary coverage. Final pure unit result: 38 passed in 0.17 seconds. Full backend result: 44 passed, 1 skipped, 3 warnings in 2.86 seconds."
+  - task: "Authenticated receiver acknowledgement integration"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_ws_contract.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: 13 isolated WebSocket cases failed at the first missing snapshot-manager seam. No Uvicorn, network socket, audio path, or real database was used."
+      - working: true
+        agent: "main"
+        comment: "Implemented strict parsing, immutable per-store snapshots, ordering/deduplication/session checks, stale/offline handling, pending PLAY semantics, and meaningful transition persistence without a migration. Focused result after expanded malformed/stopped/error coverage: 15 passed with 3 warnings."
+      - working: true
+        agent: "main"
+        comment: "Pure contract result: 38 passed. Complete isolated backend result: 59 passed, 1 skipped, 6 warnings. The guarded legacy module remained skipped and backend/speaklink_live.db was not used."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 4
+  test_sequence: 5
   run_ui: false
 test_plan:
   current_focus: []
@@ -175,3 +192,5 @@ agent_communication:
     message: "Pure contract unit tests are green. Run the preserved full backend suite next; do not integrate runtime behavior or access the real database."
   - agent: "main"
     message: "Receiver contract and full isolated backend validation completed. Runtime server, WebSocket manager, models, database schema, and frontend remain unchanged."
+  - agent: "main"
+    message: "Authenticated receiver integration is green in isolated tests. No frontend, model, migration, Receiver Agent, LinkGuard transport, audio stream, or production database change was made."

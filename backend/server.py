@@ -10,6 +10,8 @@ load_dotenv(Path(__file__).parent / ".env")
 import os
 import uuid
 import logging
+import asyncio
+import json
 from datetime import datetime, timezone
 from typing import List, Optional, Set
 
@@ -17,6 +19,7 @@ from fastapi import FastAPI, APIRouter, Depends, HTTPException, Query, WebSocket
 from starlette.middleware.cors import CORSMiddleware
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from pydantic import ValidationError
 
 from db import engine, get_db, SessionLocal
 from models import (
@@ -32,6 +35,20 @@ from schemas import (
 from auth import verify_password, create_access_token, get_current_user
 from seed import seed_admin, seed_stores
 from ws_manager import manager
+from receiver_contract import (
+    HEARTBEAT_INTERVAL_SECONDS,
+    AudioReceivingAcknowledgement,
+    ConnectionState,
+    DeviceErrorAcknowledgement,
+    DuplicateMessageError,
+    HeartbeatAcknowledgement,
+    NonMonotonicSequenceError,
+    PlaybackConfirmedAcknowledgement,
+    PlaybackErrorAcknowledgement,
+    ReceiverContractError,
+    StoppedAcknowledgement,
+    WrongSessionError,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -249,8 +266,9 @@ async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = 
     for t in targets:
         t.command_sent_at = now
         if t.store_id in online_ids:
-            t.play_status = "playing"
-            t.started_playing_at = now
+            t.play_status = "pending"
+            t.started_playing_at = None
+            t.error_message = None
         else:
             t.play_status = "failed"
             t.error_message = "Receiver offline at broadcast start"
@@ -390,6 +408,57 @@ def list_logs(
 
 
 # ================ WEBSOCKETS ================
+def _persist_receiver_ack(store_id: int, acknowledgement, received_at: datetime) -> None:
+    """Persist meaningful transitions only; heartbeat freshness remains in memory."""
+    if isinstance(acknowledgement, HeartbeatAcknowledgement):
+        return
+
+    event_type = acknowledgement.type
+    details = None
+    if isinstance(acknowledgement, (PlaybackErrorAcknowledgement, DeviceErrorAcknowledgement)):
+        # Persist the bounded code, not receiver-supplied free text that could contain secrets.
+        details = acknowledgement.error_code
+
+    with SessionLocal() as db:
+        db.add(ReceiverEvent(store_id=store_id, event_type=event_type, details=details))
+        if isinstance(
+            acknowledgement,
+            (AudioReceivingAcknowledgement, PlaybackConfirmedAcknowledgement,
+             PlaybackErrorAcknowledgement, StoppedAcknowledgement),
+        ):
+            target = db.query(BroadcastTarget).filter(
+                BroadcastTarget.store_id == store_id,
+                BroadcastTarget.session_id == acknowledgement.session_id,
+            ).first()
+            if target is not None:
+                if isinstance(acknowledgement, AudioReceivingAcknowledgement):
+                    target.play_status = "audio_receiving"
+                    target.started_playing_at = None
+                elif isinstance(acknowledgement, PlaybackConfirmedAcknowledgement):
+                    target.play_status = "playback_confirmed"
+                    target.started_playing_at = received_at
+                    target.error_message = None
+                elif isinstance(acknowledgement, PlaybackErrorAcknowledgement):
+                    target.play_status = "playback_error"
+                    target.error_message = details
+                elif isinstance(acknowledgement, StoppedAcknowledgement):
+                    target.play_status = "stopped"
+                    target.stopped_at = received_at
+        db.commit()
+
+
+def _receiver_rejection_code(error: Exception) -> str:
+    if isinstance(error, DuplicateMessageError):
+        return "DUPLICATE_MESSAGE"
+    if isinstance(error, NonMonotonicSequenceError):
+        return "NON_MONOTONIC_SEQUENCE"
+    if isinstance(error, WrongSessionError):
+        return "WRONG_SESSION"
+    if isinstance(error, (ValidationError, ValueError)):
+        return "INVALID_ACKNOWLEDGEMENT"
+    return "INVALID_TRANSITION"
+
+
 @app.websocket("/api/ws/receiver/{token}")
 async def ws_receiver(websocket: WebSocket, token: str):
     # Verify token
@@ -411,57 +480,73 @@ async def ws_receiver(websocket: WebSocket, token: str):
     await manager.connect_receiver(store_id, websocket)
     # If a session is currently live and this store is a target -> send PLAY immediately
     if manager.is_live() and store_id in manager.live_target_store_ids:
+        manager.prepare_receiver_session(store_id, manager.live_session_id)
         await manager.send_to_receiver(store_id, {"type": "play", "session_id": manager.live_session_id})
 
     try:
         while True:
-            msg = await websocket.receive_text()
-            # Expect JSON heartbeat / ack / error
             try:
-                import json as _json
-                data = _json.loads(msg)
-            except Exception:
-                continue
-            evt_type = data.get("type")
-            if evt_type == "heartbeat":
-                db2 = SessionLocal()
-                try:
-                    s = db2.query(Store).filter(Store.id == store_id).first()
-                    if s:
-                        s.last_seen = datetime.now(timezone.utc)
-                        db2.commit()
-                finally:
-                    db2.close()
-            elif evt_type in ("play_ack", "stop_ack", "error"):
-                db2 = SessionLocal()
-                try:
-                    db2.add(ReceiverEvent(
-                        store_id=store_id, event_type=evt_type, details=str(data.get("details", ""))
-                    ))
-                    db2.commit()
-                finally:
-                    db2.close()
-                if evt_type == "error":
+                msg = await asyncio.wait_for(
+                    websocket.receive_text(),
+                    timeout=HEARTBEAT_INTERVAL_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                before = manager.get_receiver_snapshot(store_id)
+                after = manager.evaluate_receiver_freshness(store_id)
+                if before is not None and after.connection is not before.connection:
                     await manager.notify_dashboards({
-                        "type": "receiver_error", "store_id": store_id,
-                        "details": data.get("details", "")
+                        "type": "receiver_status",
+                        "store_id": store_id,
+                        "status": after.connection.value.lower(),
                     })
+                if after.connection is ConnectionState.OFFLINE:
+                    await websocket.close(code=4408)
+                    break
+                continue
+
+            received_at = datetime.now(timezone.utc)
+            try:
+                data = json.loads(msg)
+                if not isinstance(data, dict):
+                    raise ValueError("receiver acknowledgement must be an object")
+                acknowledgement, _ = manager.apply_receiver_payload(
+                    store_id,
+                    data,
+                    received_at,
+                )
+            except (ReceiverContractError, ValidationError, ValueError, json.JSONDecodeError) as error:
+                code = _receiver_rejection_code(error)
+                await websocket.send_text(json.dumps({"type": "ack_rejected", "code": code}))
+                continue
+
+            _persist_receiver_ack(store_id, acknowledgement, received_at)
+            if isinstance(acknowledgement, (PlaybackErrorAcknowledgement, DeviceErrorAcknowledgement)):
+                await manager.notify_dashboards({
+                    "type": "receiver_error",
+                    "store_id": store_id,
+                    "code": acknowledgement.error_code,
+                })
     except WebSocketDisconnect:
         pass
-    except Exception as e:
-        logger.warning(f"Receiver WS error store={store_id}: {e}")
+    except Exception as error:
+        logger.warning(
+            "Receiver WS closed after %s for store=%s",
+            type(error).__name__,
+            store_id,
+        )
     finally:
-        manager.disconnect_receiver(store_id, websocket)
-        db = SessionLocal()
-        try:
-            s = db.query(Store).filter(Store.id == store_id).first()
-            if s:
-                s.status = "offline"
-                db.add(ReceiverEvent(store_id=store_id, event_type="disconnected"))
-                db.commit()
-        finally:
-            db.close()
-        await manager.notify_dashboards({"type": "receiver_status", "store_id": store_id, "status": "offline"})
+        disconnected_current = manager.disconnect_receiver(store_id, websocket)
+        if disconnected_current:
+            db = SessionLocal()
+            try:
+                s = db.query(Store).filter(Store.id == store_id).first()
+                if s:
+                    s.status = "offline"
+                    db.add(ReceiverEvent(store_id=store_id, event_type="disconnected"))
+                    db.commit()
+            finally:
+                db.close()
+            await manager.notify_dashboards({"type": "receiver_status", "store_id": store_id, "status": "offline"})
 
 
 @app.websocket("/api/ws/hq")
