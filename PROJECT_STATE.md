@@ -1,7 +1,7 @@
 # SpeakLink Project State
 
 Last updated: 2026-07-24
-Current branch: `feature/receiver-migration-state-transitions`
+Current branch: `feature/receiver-connection-inventory`
 
 ## Current architecture
 
@@ -47,7 +47,8 @@ readiness, or end-to-end WebSocket audio streaming.
 
 ## Git baseline
 
-- Current branch: `feature/receiver-migration-state-transitions`
+- Current branch: `feature/receiver-connection-inventory`
+- `210b0a2 security: rehearse receiver migration state transitions`
 - `a647a9f security: add isolated receiver dual verification`
 - `3ab9d0f security: rehearse receiver credential backfill`
 - Historical baseline branch: `feature/baseline-verification`
@@ -305,6 +306,34 @@ does not inspect, disconnect, re-authenticate, or create live WebSockets and
 does not modify receiver snapshots or health axes. `raw_neutralized` remains
 out of scope.
 
+## Isolated active Receiver connection inventory
+
+`backend/receiver_connection_inventory.py` provides a bounded, thread-safe,
+process-local inventory for future WebSocket integration. Immutable records
+contain only connection ID, Store ID, optional Device/Credential IDs, UTC
+authentication time, and the handshake source (`legacy_store_token` or
+`hashed_device_credential`). No socket, credential material, receiver snapshot,
+health axis, session, or audio data is stored.
+
+Registration is capacity-limited (256 by default, configurable from 1 through
+4096). An identical duplicate is idempotent; a conflicting reuse of a
+connection ID fails closed without replacement. Exact removal is idempotent,
+and the generation changes only on real mutations. Lock-protected snapshots
+atomically reconcile total, source, and per-Store counts, sort records
+deterministically, and remain immutable after later changes.
+
+The transition-summary adapter populates the existing summary shape from one
+atomic snapshot via an injected constructor. It does not query SQLite, invoke a
+transition, or couple the pure inventory module to SQLAlchemy. Authentication
+source remains identity metadata only and never implies READY, playback, or
+speaker verification.
+
+The inventory is not imported by `server.py`, `ws_manager.py`, production
+authentication, or the transition service. It is lost on restart and is not
+shared across workers, so the backend remains limited to one Uvicorn worker.
+An empty new inventory after restart is not independent proof that remote
+sockets or speakers are inactive.
+
 ## Current testing limitations
 
 - The pre-existing integration suite was designed for an old Emergent endpoint
@@ -357,6 +386,14 @@ out of scope.
   report 17 passed with 5 existing dependency/deprecation warnings. The
   complete isolated backend suite reports 212 passed, 1 guarded skip, and 8
   existing warnings. Python compilation succeeds.
+- Focused connection-inventory tests report 65 passed. They use no SQLite,
+  FastAPI, Uvicorn, WebSocket, network socket, or production secret and cover
+  capacity races, duplicate/conflict races, snapshot reconciliation, immutable
+  history, source counts, and representative 40-Store load. Authentication and
+  transition regressions report 81 passed; lifecycle regressions report 66
+  passed; existing Receiver WebSocket regressions report 17 passed with 5
+  existing warnings. The complete isolated backend suite reports 277 passed,
+  1 guarded skip, and 8 existing warnings. Python compilation succeeds.
 
 ## Database safety
 
@@ -368,6 +405,8 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Design and pure-test a source-tagged active Receiver connection inventory that
-can distinguish legacy Store-token and hash-backed handshakes. Do not invoke
-the transition service or change production authentication in that task.
+Design a test-first, single-worker production WebSocket integration that
+registers the isolated authentication result only after a successful handshake,
+removes the exact inventory entry on replacement/disconnect, and supplies a
+fresh atomic inventory summary to separately controlled migration transitions.
+Keep real migration execution and raw credential neutralization out of that task.

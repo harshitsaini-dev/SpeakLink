@@ -102,7 +102,7 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Design a secure Receiver Device credential lifecycle and SQLite-safe migration plan, with pure schema-independent helpers only."
+user_problem_statement: "Design and pure-test a bounded, source-tagged active Receiver connection inventory without production runtime integration."
 backend:
   - task: "Safe isolated backend smoke tests"
     implemented: true
@@ -326,11 +326,31 @@ backend:
       - working: true
         agent: "main"
         comment: "Final complete backend result: 212 passed, 1 skipped, 8 existing dependency/deprecation warnings in 5.87 seconds. The protected database metadata remained unchanged."
+  - task: "Pure active Receiver connection source inventory"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_connection_inventory.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: focused collection failed because receiver_connection_inventory.py did not exist. No database, server, socket, environment secret, or network connection was used."
+      - working: false
+        agent: "main"
+        comment: "The first complete contract run reached 64 passed and one test assertion mismatch: Python 3.12 reports TypeError when adding an unknown attribute to a frozen slotted dataclass. Inventory behavior remained immutable."
+      - working: true
+        agent: "main"
+        comment: "Focused pure inventory result: 65 passed in 0.15 seconds, covering source identity, bounded capacity, deterministic concurrency, immutable snapshots, process-local restart behavior, and transition-summary construction. Broader regression validation was pending."
+      - working: true
+        agent: "main"
+        comment: "Final results: focused inventory rerun 65 passed in 0.19 seconds; authentication/transition regressions 81 passed in 2.49 seconds; lifecycle regressions 66 passed in 1.24 seconds; Receiver WebSocket regressions 17 passed with 5 existing warnings in 1.42 seconds; final complete backend 277 passed, 1 skipped, and 8 existing warnings in 6.12 seconds. Python compilation and diff checks succeeded."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 13
+  test_sequence: 14
   run_ui: false
 test_plan:
   current_focus: []
@@ -374,3 +394,7 @@ agent_communication:
     message: "The isolated migration-state transition rehearsal is ready for complete backend validation. It changes only temporary state/audit rows and performs no runtime socket action or real-database migration."
   - agent: "main"
     message: "Migration-state transition validation is complete. Runtime authentication, live sockets, receiver snapshots, frontend, schema, and the protected database remain unchanged."
+  - agent: "main"
+    message: "The pure source-tagged inventory is ready for complete backend regression testing. It is not connected to FastAPI, WebSockets, authentication runtime, transition runtime, SQLite, frontend, or the protected database."
+  - agent: "main"
+    message: "Connection inventory validation is complete. Runtime and frontend files remain unchanged; focused tests required no database, and the protected database was not opened or modified."
