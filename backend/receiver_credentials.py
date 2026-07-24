@@ -18,7 +18,8 @@ from typing import Mapping
 TOKEN_SECRET_BYTES = 32
 PUBLIC_ID_BYTES = 12
 MIN_HASH_KEY_BYTES = 32
-MAX_ROTATION_GRACE = timedelta(hours=24)
+MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE = 2
+MAX_ROTATION_GRACE = timedelta(minutes=15)
 MAX_AUDIT_REASON_LENGTH = 256
 
 _TOKEN_PATTERN = re.compile(
@@ -43,6 +44,14 @@ class InvalidCredentialError(ReceiverCredentialError):
 
 class UnsafeAuditPayloadError(ReceiverCredentialError):
     """Raised when audit metadata is unbounded, unstructured, or secret-like."""
+
+
+def validate_active_receiver_device_count(active_device_count: int) -> None:
+    """Enforce the approved per-Store active Receiver Device limit."""
+    if isinstance(active_device_count, bool) or not isinstance(active_device_count, int):
+        raise ValueError("active receiver device count must be an integer")
+    if not 0 <= active_device_count <= MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE:
+        raise ValueError("active receiver device count exceeds the approved limit")
 
 
 @dataclass(frozen=True, slots=True, repr=False)
