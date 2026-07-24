@@ -303,11 +303,34 @@ backend:
       - working: true
         agent: "main"
         comment: "Final results: focused authentication 32 passed in 1.18 seconds; credential lifecycle regressions 66 passed in 1.18 seconds; Receiver WebSocket regressions 17 passed with 5 warnings in 1.47 seconds; complete backend 163 passed, 1 skipped, 8 warnings in 5.36 seconds."
+  - task: "Isolated Receiver migration-state transition rehearsal"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_migration_transition_service.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: focused collection failed because receiver_migration_transition_service.py did not exist. No server, socket, environment secret, or database connection was used."
+      - working: true
+        agent: "main"
+        comment: "Initial focused implementation result: 41 passed in 1.30 seconds using generated test keys and pytest temporary SQLite files only."
+      - working: false
+        agent: "main"
+        comment: "One hardening run exposed a test-fixture SQL interpolation error after duplicate-token coverage was added; no service behavior or persistent data was involved."
+      - working: true
+        agent: "main"
+        comment: "Hardened focused result: 49 passed in 1.57 seconds, including an explicit active-Device-without-Credential readiness case. Lifecycle service regressions: 98 passed in 2.12 seconds. Existing Receiver WebSocket tests: 17 passed with 5 warnings in 1.36 seconds. Complete backend validation is pending."
+      - working: true
+        agent: "main"
+        comment: "Final complete backend result: 212 passed, 1 skipped, 8 existing dependency/deprecation warnings in 5.87 seconds. The protected database metadata remained unchanged."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 12
+  test_sequence: 13
   run_ui: false
 test_plan:
   current_focus: []
@@ -347,3 +370,7 @@ agent_communication:
     message: "The isolated read-only Receiver Credential verifier is ready for complete backend regression testing. It is not connected to FastAPI, WebSockets, runtime state, frontend, or the protected real database."
   - agent: "main"
     message: "Dual-verification service validation is complete. Authentication is read-only and remains isolated; production WebSocket authentication, runtime status, frontend, migration state, and the real database are unchanged."
+  - agent: "main"
+    message: "The isolated migration-state transition rehearsal is ready for complete backend validation. It changes only temporary state/audit rows and performs no runtime socket action or real-database migration."
+  - agent: "main"
+    message: "Migration-state transition validation is complete. Runtime authentication, live sockets, receiver snapshots, frontend, schema, and the protected database remain unchanged."
