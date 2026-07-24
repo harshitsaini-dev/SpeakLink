@@ -1,7 +1,7 @@
 # EchoCast AI Project State
 
 Last updated: 2026-07-24
-Current branch: `feature/receiver-credential-service-phase2`
+Current branch: `feature/receiver-credential-backfill-rehearsal`
 
 ## Current architecture
 
@@ -47,8 +47,9 @@ readiness, or end-to-end WebSocket audio streaming.
 
 ## Git baseline
 
-- Current branch: `feature/receiver-credential-service-phase2`
+- Current branch: `feature/receiver-credential-backfill-rehearsal`
 - Historical baseline branch: `feature/baseline-verification`
+- `6cb48a1 security: add isolated receiver enrollment service`
 - `139f39f security: add receiver credential migration phase one`
 - `f3c021b security: authenticate receiver websocket by header`
 - `873c655 test: add receiver protocol simulator`
@@ -240,6 +241,27 @@ the simulator, frontend, or Receiver Agent. `Store.receiver_token`, Store
 runtime health, `schema_migrations`, and migration state remain unchanged.
 These isolated-test credentials are not accepted by production authentication.
 
+## Legacy Receiver Credential backfill rehearsal
+
+`backend/receiver_credential_backfill.py` provides an isolated, fleet-wide
+legacy backfill rehearsal over an explicitly injected temporary SQLite engine.
+It refuses the protected real database before connection and uses one
+`BEGIN IMMEDIATE` transaction.
+
+Every Store receives one Device and one `legacy_uuid_hex` hash-only credential.
+Active Stores map to active Devices; inactive Stores map to disabled Devices
+with the supplied UTC timestamp. The service validates every legacy token
+before writes, preserves every Store identity/token/operational field and the
+schema ledger, writes two sanitized events per Store plus one state-change
+event, and changes only temporary migration state from `legacy_only` to
+`backfilled`. Empty fleets and partial/conflicting data fail closed.
+
+All intermediate inserts and state changes roll back together. A validated
+second call raises `BackfillAlreadyAppliedError` without duplicating rows, and
+concurrent calls serialize so only one can perform the rehearsal. Legacy
+verification remains enabled. Production WebSocket authentication is still
+legacy Store-token verification only; dual verification is not implemented.
+
 ## Current testing limitations
 
 - The pre-existing integration suite was designed for an old Emergent endpoint
@@ -277,6 +299,10 @@ These isolated-test credentials are not accepted by production authentication.
 - Phase 2 enrollment service tests report 26 passed. The complete isolated
   backend suite reports 112 passed, 1 guarded skip, and 8 existing dependency/
   deprecation warnings. Python compilation succeeds.
+- Focused legacy backfill rehearsal tests report 19 passed. Phase 1,
+  credential-helper, and Phase 2 enrollment regressions report 47 passed. The
+  complete isolated backend suite reports 131 passed, 1 guarded skip, and 8
+  existing dependency/deprecation warnings. Python compilation succeeds.
 
 ## Database safety
 
@@ -288,7 +314,6 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Design the next isolated legacy-hash backfill rehearsal, including HMAC key
-custody, count validation, and rollback artifacts. Do not expose the enrollment
-service, enable dual verification, or run migrations against the real database
-in that task.
+Design and test a dual-verification authentication service using isolated
+databases and explicit migration state. Do not integrate it into production
+WebSocket authentication or execute any migration against the real database.
