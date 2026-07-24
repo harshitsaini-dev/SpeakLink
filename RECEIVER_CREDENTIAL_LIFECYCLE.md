@@ -1,6 +1,6 @@
 # SpeakLink Receiver Credential Lifecycle Design
 
-Status: Phase 1 additive schema implemented and validated only on isolated SQLite databases
+Status: Phase 1 schema and isolated Phase 2 enrollment service implemented; no runtime integration
 
 Last updated: 2026-07-24
 
@@ -226,6 +226,46 @@ default. Invalid or unknown states fail closed.
 5. Return the raw credential exactly once over TLS to a controlled client.
 6. If delivery is lost, rotate; never add an endpoint that reads the raw value.
 
+### Phase 2 isolated enrollment service
+
+`backend/receiver_device_service.py` implements the service-layer portion of
+enrollment using only an explicitly supplied SQLite engine. It is not imported
+by FastAPI, startup, Store creation, WebSocket authentication, the simulator,
+or any frontend code. Credentials produced by this service in isolated tests
+are therefore not accepted by the current production authentication path.
+
+The service fails closed unless migration version 1, all required Phase 1
+tables/columns/indexes/named constraints, SQLite foreign-key enforcement, and
+the singleton `legacy_only` state are present and consistent. It also requires
+an existing active Store and active HQ actor. Broad role authorization remains
+an API-layer responsibility for a later task.
+
+Enrollment uses one `BEGIN IMMEDIATE` transaction. After acquiring the write
+lock it counts only `active` devices, rejects enrollment when two are already
+active, generates UUID device and credential public IDs plus a high-entropy
+credential, stores its versioned HMAC hash, and inserts `device_enrolled` and
+`credential_issued` audit events. A disabled or retired device does not consume
+an active-device slot; disabling is a separate future service operation.
+
+The initial credential uses version 1 and `speaklink_rcv` format. Absence of an
+expiry produces the explicit `non_expiring` policy; a supplied expiry must be
+future, timezone-aware UTC and produces the `expires_at` policy. The HMAC key
+and version are injected, and only the key version is persisted.
+
+`ReceiverEnrollmentResult.take_raw_credential()` releases the raw credential
+once and permanently clears the result's reference. Its string representation
+is redacted. There is intentionally no retrieval helper. If the caller loses
+the response, recovery is a future replacement/rotation operation—not reading
+the previous credential.
+
+Any validation, constraint, audit, injected test failure, or persistence error
+rolls back the device, credential, and both audit rows. Enrollment never changes
+`stores.receiver_token`, Store runtime status, `schema_migrations`, or receiver
+credential migration state. Audit JSON is created through the existing strict
+allowlist and contains only public identifiers, integer IDs, version, and fixed
+outcome; it excludes tokens, hashes, keys, Authorization values, passwords, and
+free-form exception details.
+
 ### Authentication
 
 1. Strictly parse the Bearer credential outside logs.
@@ -293,7 +333,7 @@ script, maintenance plan, verified backup, and isolated rehearsal.
   connection unless a future maintenance caller explicitly opts in.
 - No Store, device, credential, or event rows are backfilled in Phase 1.
 
-### Phase 2: backfill hashes
+### Future legacy backfill
 
 - Use one reviewed backfill transaction for the current approximately 40
   Stores, or deterministic bounded batches tagged with a migration batch ID.
@@ -411,7 +451,7 @@ window exceeds policy, and confirm migration-state transitions are monotonic.
 
 These helpers are not wired into APIs, WebSockets, or runtime authentication.
 
-## Approved initial policies and remaining Phase 2 decisions
+## Approved initial policies and remaining Phase 3 work
 
 Approved: maximum two active devices per Store, initially non-expiring but
 revocable credentials, maximum 15-minute planned rotation grace, immediate
@@ -423,10 +463,14 @@ Remaining decisions and implementation work:
 1. HMAC key custody, initial version, disaster recovery, and key-rotation plan.
    Existing hashes cannot be re-HMACed without seeing a raw credential; key
    rotation requires dual keys plus rehash-on-success or credential rotation.
-2. HQ authorization roles for enrollment, rotation, revocation, and audit read.
-3. Transactional service implementation for the two-active-device limit,
-   enrollment naming/ownership, one-time secret delivery, and audit writes.
-4. Active-socket disconnect coordination after revocation commits.
+2. HQ authorization roles and API design for enrollment, rotation, revocation,
+   and audit read. The isolated enrollment service must not be exposed before
+   this review.
+3. A separately reviewed legacy backfill that creates hashes without printing
+   or altering `Store.receiver_token`, followed later by controlled dual
+   verification. Neither is implemented now.
+4. Rotation/replacement and revocation services, including active-socket
+   disconnect coordination after revocation commits.
 5. Authentication-failure aggregation and external security audit export.
 6. Removal schedule for the legacy browser Receiver page, query verifier, event
    token body, raw Store schema field, and Store Management kiosk links.
