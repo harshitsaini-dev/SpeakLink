@@ -1,6 +1,6 @@
 # SpeakLink Receiver Credential Lifecycle Design
 
-Status: Phase 1 schema and isolated Phase 2 enrollment service implemented; no runtime integration
+Status: Phase 1 schema, isolated enrollment, and isolated legacy backfill rehearsal implemented; no runtime integration
 
 Last updated: 2026-07-24
 
@@ -333,20 +333,46 @@ script, maintenance plan, verified backup, and isolated rehearsal.
   connection unless a future maintenance caller explicitly opts in.
 - No Store, device, credential, or event rows are backfilled in Phase 1.
 
-### Future legacy backfill
+### Isolated legacy backfill rehearsal
 
-- Use one reviewed backfill transaction for the current approximately 40
-  Stores, or deterministic bounded batches tagged with a migration batch ID.
-- Create one legacy Receiver Device per Store, including disabled Stores with a
-  disabled device status.
-- Generate independent public IDs and HMAC each legacy UUID-hex token in
-  memory. Never select tokens into console output, logs, audit details, or
-  reports.
-- Create credential version 1 with `token_format=legacy_uuid_hex`.
-- Validate relationships and counts inside the transaction before commit.
-- Set migration state to `backfilled` only after all validations pass.
-- On any failure, roll back the whole transaction/batch. Legacy authentication
-  remains authoritative and unchanged.
+`backend/receiver_credential_backfill.py` rehearses the complete fleet mapping
+only against an explicitly injected SQLite engine. It refuses the protected
+`backend/speaklink_live.db` path before connection and is not imported by
+startup, FastAPI, WebSockets, Store APIs, the simulator, or frontend code.
+
+One `BEGIN IMMEDIATE` transaction validates the Phase 1 ledger/schema, exact
+`legacy_only` state, enabled legacy verification, foreign keys, the complete
+Store fleet, every legacy UUID-hex token, and absence of partial/conflicting
+new rows before inserting anything. A zero-Store fleet fails closed without
+writes or a state transition.
+
+Every active Store receives an `active` legacy Receiver Device with no
+`disabled_at`. Every inactive Store receives a `disabled` Device whose
+`disabled_at` is the supplied UTC rehearsal time. Each Store receives one
+credential version 1 with a generated UUID public ID,
+`token_format=legacy_uuid_hex`, an injected-key HMAC hash, explicit
+`non_expiring` policy, and nullable migration actor. The deterministic display
+name uses only the Store integer ID. Store operational status is never copied
+into readiness, playback, or acoustic health.
+
+For every Store, the transaction creates `device_enrolled` and
+`credential_issued` audit events. After fleet count, relationship, hash,
+Store-snapshot, schema-ledger, raw-token-absence, and foreign-key checks pass,
+it changes temporary migration state to `backfilled` and records one
+`migration_state_changed` event. Legacy verification remains enabled because
+dual verification is not implemented.
+
+Any failure rolls back every Device, credential, audit event, and state change.
+A validated replay in `backfilled` state raises `BackfillAlreadyAppliedError`
+without writes. The rehearsal never changes `stores.receiver_token`, Store
+IDs/counts, operational fields, or `schema_migrations`.
+
+A future real migration still requires maintenance mode, verified database/
+WAL/SHM and HMAC-key backups, integrity/foreign-key checks, reviewed key
+custody, count reconciliation, pilot validation, and retained rollback
+artifacts. This rehearsal is not authorization: future hashed authentication
+must require an active Store, active Device, usable credential, and migration
+state that explicitly permits hash verification.
 
 ### Phase 3: controlled dual verification
 
@@ -466,9 +492,9 @@ Remaining decisions and implementation work:
 2. HQ authorization roles and API design for enrollment, rotation, revocation,
    and audit read. The isolated enrollment service must not be exposed before
    this review.
-3. A separately reviewed legacy backfill that creates hashes without printing
-   or altering `Store.receiver_token`, followed later by controlled dual
-   verification. Neither is implemented now.
+3. Design and isolate-test controlled dual verification that requires active
+   Store, active Device, usable credential, and an explicitly permitting
+   migration state. Do not integrate it into production authentication yet.
 4. Rotation/replacement and revocation services, including active-socket
    disconnect coordination after revocation commits.
 5. Authentication-failure aggregation and external security audit export.
