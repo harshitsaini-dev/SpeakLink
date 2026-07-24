@@ -1,7 +1,7 @@
 # SpeakLink Project State
 
 Last updated: 2026-07-24
-Current branch: `feature/receiver-connection-inventory`
+Current branch: `feature/receiver-connection-inventory-runtime`
 
 ## Current architecture
 
@@ -47,7 +47,8 @@ readiness, or end-to-end WebSocket audio streaming.
 
 ## Git baseline
 
-- Current branch: `feature/receiver-connection-inventory`
+- Current branch: `feature/receiver-connection-inventory-runtime`
+- `09077e0 feat: add receiver connection source inventory`
 - `210b0a2 security: rehearse receiver migration state transitions`
 - `a647a9f security: add isolated receiver dual verification`
 - `3ab9d0f security: rehearse receiver credential backfill`
@@ -328,11 +329,41 @@ transition, or couple the pure inventory module to SQLAlchemy. Authentication
 source remains identity metadata only and never implies READY, playback, or
 speaker verification.
 
-The inventory is not imported by `server.py`, `ws_manager.py`, production
-authentication, or the transition service. It is lost on restart and is not
+The pure inventory does not import FastAPI, WebSockets, SQLAlchemy, production
+authentication, or the transition service. The runtime manager now owns one
+instance as described next, but the state is still lost on restart and is not
 shared across workers, so the backend remains limited to one Uvicorn worker.
 An empty new inventory after restart is not independent proof that remote
 sockets or speakers are inactive.
+
+## Legacy Receiver WebSocket inventory runtime
+
+The current production Receiver WebSocket now registers each successfully
+accepted legacy Store-token handshake in the manager-owned process-local
+inventory. The server generates an immutable UUID-hex connection ID and UTC
+authentication time; records contain Store identity and
+`legacy_store_token` only, with no Device/Credential ID or credential material.
+Failed authentication never reaches manager or inventory registration.
+
+The existing one-current-socket-per-Store design remains. A replacement removes
+the old exact inventory ID before installing a new ID. Disconnect and finally
+cleanup require both the socket and connection ID to remain current, so delayed
+cleanup from an older socket cannot remove or mark its replacement offline.
+Cleanup is idempotent across normal disconnect, abrupt failure, protocol error,
+send failure, cancellation, and replacement. Stale sockets cannot apply
+acknowledgements or freshness changes to replacement snapshots.
+
+The manager can construct the existing transition summary from one atomic
+inventory snapshot. No transition is invoked and no API route is exposed.
+Runtime counts are legacy-only and hashed authentication remains disabled.
+Authentication/connection identity still does not imply READY, audio receipt,
+playback confirmation, LinkGuard verification, or audible speaker output.
+
+This runtime state is process-local, observes only post-start registrations,
+and disappears on restart. Multiple workers would have independent inventories,
+so exactly one Uvicorn worker remains required. No credential migration, schema
+change, real-database transition, dual-verification cutover, frontend change,
+Receiver Agent, or audio behavior is included.
 
 ## Current testing limitations
 
@@ -394,6 +425,16 @@ sockets or speakers are inactive.
   passed; existing Receiver WebSocket regressions report 17 passed with 5
   existing warnings. The complete isolated backend suite reports 277 passed,
   1 guarded skip, and 8 existing warnings. Python compilation succeeds.
+- Focused legacy WebSocket inventory integration tests report 20 passed with 3
+  existing dependency/deprecation warnings using one pytest temporary SQLite
+  database and in-process fake WebSockets. They cover authentication failure,
+  legacy-only registration, exact disconnect/replacement cleanup, capacity,
+  summaries, contract-axis separation, concurrency, browser query-token
+  rejection, and protected-database metadata. Pure inventory regressions report
+  65 passed; authentication/transition regressions report 81 passed; existing
+  Receiver WebSocket regressions report 17 passed with 5 existing warnings.
+  The complete backend suite reports 297 passed, 1 guarded skip, and 10 existing
+  warnings. Python compilation succeeds.
 
 ## Database safety
 
@@ -405,8 +446,9 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Design a test-first, single-worker production WebSocket integration that
-registers the isolated authentication result only after a successful handshake,
-removes the exact inventory entry on replacement/disconnect, and supplies a
-fresh atomic inventory summary to separately controlled migration transitions.
-Keep real migration execution and raw credential neutralization out of that task.
+Design and test the next dual-authentication runtime integration boundary using
+temporary databases and explicit migration state. It should replace the direct
+Store-token lookup with the isolated authentication service while preserving
+generic failure responses, exact inventory source tagging, and rollback to the
+legacy path. Do not expose migration transitions through a public API or run a
+real-database cutover in that task.
