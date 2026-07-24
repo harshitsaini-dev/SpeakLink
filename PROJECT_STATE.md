@@ -402,6 +402,36 @@ transition API, public configuration route, frontend change, or real-database
 migration. Migration-aware behavior remains explicit temporary-test injection.
 Inventory remains process-local, so one Uvicorn worker is still required.
 
+## Isolated Receiver credential cutover rehearsal
+
+`backend/receiver_cutover_rehearsal.py` now composes the explicit
+migration-aware authenticator, manager-owned source inventory, bounded injected
+HMAC key ring, and transactional transition service for temporary databases.
+It validates that the independently supplied authenticator, engine, and key
+ring describe the same isolated rehearsal and refuses the protected real
+database path before connection. It creates no FastAPI route, startup action,
+environment switch, or default key loader.
+
+The tested forward sequence is `backfilled -> dual_verify -> hash_only`; the
+rollback is `hash_only -> dual_verify -> backfilled`. Expanding transitions do
+not disconnect or relabel existing sockets. Narrowing to hash-only requires a
+fresh inventory summary with zero legacy-source connections; narrowing to
+backfilled requires zero hash-source connections. A socket source remains
+immutable until disconnect and a new authenticated connection ID.
+
+Test fixtures inject generated version-1 backfill and version-2 enrollment
+keys. Both versions are required for full hash readiness. Each successful step
+changes only the temporary migration-state row and appends one sanitized audit
+event. Blocked, stale, missing-key, wrong-key, concurrent stale-state, and
+injected-hook failures leave state and protected rows unchanged.
+
+A one-worker loopback application on a random `127.0.0.1` port exercises real
+Bearer handshakes, canonical legacy/hashed inventory sources, replacement,
+acknowledgement separation, capacity failure, and the complete rollback. The
+normal imported application remains bound to the legacy-only authenticator.
+No real cutover, public transition API, frontend change, Receiver Agent, audio,
+FFmpeg, or EchoGuard behavior is included.
+
 ## Current testing limitations
 
 - The pre-existing integration suite was designed for an old Emergent endpoint
@@ -480,6 +510,14 @@ Inventory remains process-local, so one Uvicorn worker is still required.
   regressions report 66 passed; existing Receiver WebSocket regressions report
   17 passed. The complete backend suite reports 331 passed, 1 guarded skip, and
   12 existing warnings. Python compilation succeeds.
+- Focused controlled-cutover rehearsal tests report 7 passed with 21
+  dependency/deprecation warnings. They use generated credentials and HMAC
+  keys, temporary file-backed SQLite databases, a random `127.0.0.1` port, and
+  exactly one Uvicorn worker. Runtime/inventory regressions report 119 passed;
+  authentication/transition regressions 81 passed; lifecycle regressions 66
+  passed; and existing Receiver WebSocket regressions 17 passed. The complete
+  backend suite reports 338 passed, 1 guarded skip, and 32 warnings. Python
+  compilation succeeds.
 
 ## Database safety
 
@@ -491,8 +529,8 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Design and test a controlled cutover rehearsal that composes the explicit
-runtime authenticator, connection inventory, and existing transition service in
-temporary databases. It must define key custody/configuration validation and
-operator rollback without exposing a public transition API or enabling the
-normal application's hashed-authentication path.
+Design a production cutover runbook and key-custody configuration contract for
+review, without executing it. It should define maintenance-mode authorization,
+verified database/WAL/SHM and external-key backups, operator approvals,
+connection draining, rollback checkpoints, observability, and pilot acceptance
+criteria before any real migration or default-runtime change.
