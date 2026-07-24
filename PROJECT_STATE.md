@@ -1,7 +1,7 @@
 # EchoCast AI Project State
 
 Last updated: 2026-07-24
-Current branch: `feature/receiver-connection-inventory-runtime`
+Current branch: `docs/receiver-production-cutover-runbook`
 
 ## Current architecture
 
@@ -47,7 +47,10 @@ readiness, or end-to-end WebSocket audio streaming.
 
 ## Git baseline
 
-- Current branch: `feature/receiver-connection-inventory-runtime`
+- Current branch: `docs/receiver-production-cutover-runbook`
+- `9b6a936 test: rehearse receiver credential cutover`
+- `1fc09f5 feat: add receiver dual authentication runtime boundary`
+- `21ba47d feat: track receiver authentication source connections`
 - `09077e0 feat: add receiver connection source inventory`
 - `210b0a2 security: rehearse receiver migration state transitions`
 - `a647a9f security: add isolated receiver dual verification`
@@ -432,6 +435,31 @@ normal imported application remains bound to the legacy-only authenticator.
 No real cutover, public transition API, frontend change, Receiver Agent, audio,
 FFmpeg, or EchoGuard behavior is included.
 
+## Production cutover and key-custody review documents
+
+`RECEIVER_PRODUCTION_CUTOVER_RUNBOOK.md` now defines a review-only,
+maintenance-mode sequence from authorization through staged pilot expansion.
+It covers separate database/WAL/SHM and HMAC-key backups, isolated restore
+verification, additive migration, complete fleet backfill, controlled
+`backfilled -> dual_verify -> hash_only` transitions, both approved rollbacks,
+fresh source-count blockers, stop conditions, and emergency abort behavior.
+The pilot expands through 1, 3, 5, and 10 Stores before the remaining fleet.
+
+`RECEIVER_HMAC_KEY_CUSTODY.md` defines key purpose, positive versioning,
+fail-closed lookup, Windows-compatible storage choices, role separation,
+handling controls, separate encrypted recovery, loss/compromise response, and
+rotation design. It selects no final platform and contains no real key material.
+Stored HMACs cannot be converted to a new-key hash without a presented raw
+credential; old versions remain required until no usable rows depend on them.
+
+These documents do not authorize or execute production work. The default app
+remains legacy Store-token-only; no migration, backup, cutover, key loading,
+Receiver connection, frontend change, or database operation was performed.
+`raw_neutralized` is excluded from the first pilot and requires a separate
+reviewed migration because raw credentials cannot be reconstructed from hashes.
+Authentication, connection freshness, readiness, software playback, and
+trusted acoustic speaker verification remain separate evidence.
+
 ## Current testing limitations
 
 - The pre-existing integration suite was designed for an old Emergent endpoint
@@ -518,6 +546,15 @@ FFmpeg, or EchoGuard behavior is included.
   passed; and existing Receiver WebSocket regressions 17 passed. The complete
   backend suite reports 338 passed, 1 guarded skip, and 32 warnings. Python
   compilation succeeds.
+- Pure production-runbook contract tests report 9 passed. They read only the
+  two Markdown deliverables and validate required phases, transition order,
+  one-worker/source blockers, separate backups, staged cohorts, status-axis
+  separation, neutralization exclusion, emergency controls, and absence of
+  executable destructive or credential-bearing examples. Cutover/transition
+  regressions report 56 passed with 21 existing dependency/deprecation
+  warnings; runtime/inventory regressions report 54 passed with 5 existing
+  warnings. The complete backend suite reports 347 passed, 1 guarded skip, and
+  32 existing warnings.
 
 ## Database safety
 
@@ -529,8 +566,8 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Design a production cutover runbook and key-custody configuration contract for
-review, without executing it. It should define maintenance-mode authorization,
-verified database/WAL/SHM and external-key backups, operator approvals,
-connection draining, rollback checkpoints, observability, and pilot acceptance
-criteria before any real migration or default-runtime change.
+Perform a formal security and operations review of the two new documents and
+select the production hosting/service-identity and secret-storage mechanism.
+Record named approvers, recovery ownership, non-secret acceptance criteria, and
+required changes as a reviewed decision—without loading a key, accessing the
+real database, or executing any migration or cutover.
