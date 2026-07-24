@@ -12,11 +12,11 @@ import hashlib
 import hmac
 import re
 import secrets
+import uuid
 from typing import Mapping
 
 
 TOKEN_SECRET_BYTES = 32
-PUBLIC_ID_BYTES = 12
 MIN_HASH_KEY_BYTES = 32
 MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE = 2
 MAX_ROTATION_GRACE = timedelta(minutes=15)
@@ -24,7 +24,8 @@ MAX_AUDIT_REASON_LENGTH = 256
 
 _TOKEN_PATTERN = re.compile(
     r"^echocast_rcv_v(?P<version>[1-9][0-9]*)\."
-    r"(?P<public_id>rcv_[a-f0-9]{24})\."
+    r"(?P<public_id>[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-"
+    r"[a-f0-9]{4}-[a-f0-9]{12})\."
     r"(?P<secret>[A-Za-z0-9_-]{43,128})$"
 )
 _HASH_PATTERN = re.compile(
@@ -93,7 +94,7 @@ def generate_receiver_credential(version: int = 1) -> IssuedReceiverCredential:
     """Generate a versioned credential with an independent non-secret public ID."""
     if version <= 0:
         raise ValueError("credential version must be positive")
-    public_id = f"rcv_{secrets.token_hex(PUBLIC_ID_BYTES)}"
+    public_id = str(uuid.uuid4())
     secret = secrets.token_urlsafe(TOKEN_SECRET_BYTES)
     raw_token = f"echocast_rcv_v{version}.{public_id}.{secret}"
     return IssuedReceiverCredential(raw_token, public_id, version, secret)

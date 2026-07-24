@@ -1,7 +1,7 @@
 # EchoCast AI Project State
 
-Last updated: 2026-07-23
-Current branch: `feature/receiver-status-contract`
+Last updated: 2026-07-24
+Current branch: `feature/receiver-credential-service-phase2`
 
 ## Current architecture
 
@@ -47,8 +47,9 @@ readiness, or end-to-end WebSocket audio streaming.
 
 ## Git baseline
 
-- Current branch: `feature/receiver-status-contract`
+- Current branch: `feature/receiver-credential-service-phase2`
 - Historical baseline branch: `feature/baseline-verification`
+- `139f39f security: add receiver credential migration phase one`
 - `f3c021b security: authenticate receiver websocket by header`
 - `873c655 test: add receiver protocol simulator`
 - `fc0b350 feat: integrate receiver acknowledgement state`
@@ -219,6 +220,26 @@ non-expiring but revocable credentials, maximum 15-minute planned rotation
 grace, immediate compromise invalidation, external HMAC keys, and at least 12
 months of credential-audit retention.
 
+## Receiver Device enrollment service Phase 2
+
+`backend/receiver_device_service.py` now provides an isolated, typed enrollment
+service over an explicitly injected SQLite engine. It validates the complete
+Phase 1 contract and exact `legacy_only` state, active Store and actor, bounded
+display name, injected HMAC key/version, UTC expiry, and the maximum two active
+devices per Store. Disabled and retired devices do not count as active slots.
+
+One `BEGIN IMMEDIATE` transaction creates an active device, version-1 hashed
+credential, and two sanitized audit events. The raw credential is returned
+through a redacted one-time delivery object and is never persisted. Rollback
+tests cover failures after both device and credential insertion, and a
+barrier-synchronized test proves concurrent connections cannot exceed two
+active devices.
+
+The service is not called by server startup, FastAPI, WebSockets, Store APIs,
+the simulator, frontend, or Receiver Agent. `Store.receiver_token`, Store
+runtime health, `schema_migrations`, and migration state remain unchanged.
+These isolated-test credentials are not accepted by production authentication.
+
 ## Current testing limitations
 
 - The pre-existing integration suite was designed for an old Emergent endpoint
@@ -253,6 +274,9 @@ months of credential-audit retention.
 - Phase 1 migration plus pure credential tests report 21 passed. The complete
   isolated backend suite reports 86 passed, 1 guarded skip, and 8 existing
   dependency/deprecation warnings. Python compilation also succeeds.
+- Phase 2 enrollment service tests report 26 passed. The complete isolated
+  backend suite reports 112 passed, 1 guarded skip, and 8 existing dependency/
+  deprecation warnings. Python compilation succeeds.
 
 ## Database safety
 
@@ -264,7 +288,7 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Design Phase 2 backfill and enrollment service transactions against disposable
-database copies. Do not enable dual verification or run Phase 1 against the
-real database until HMAC key custody and a reviewed maintenance procedure are
-ready.
+Design the next isolated legacy-hash backfill rehearsal, including HMAC key
+custody, count validation, and rollback artifacts. Do not expose the enrollment
+service, enable dual verification, or run migrations against the real database
+in that task.

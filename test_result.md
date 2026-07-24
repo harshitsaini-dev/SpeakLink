@@ -243,11 +243,31 @@ backend:
       - working: true
         agent: "main"
         comment: "Final focused result: 21 passed in 0.33 seconds. Receiver header-auth result: 2 passed with 3 warnings. Complete isolated backend result: 86 passed, 1 skipped, 8 warnings in 4.26 seconds. Python compilation succeeded."
+  - task: "Isolated Receiver Device enrollment service Phase 2"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_device_service.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: focused collection failed because receiver_device_service.py did not exist. No server, socket, environment secret, or database was accessed."
+      - working: true
+        agent: "main"
+        comment: "Focused isolated service result: 22 passed in 0.64 seconds. The service was then hardened so generation occurs under BEGIN IMMEDIATE and display names cannot persist credential-like input."
+      - working: true
+        agent: "main"
+        comment: "Final focused service result: 26 passed in 0.81 seconds. Phase 1 migration and pure credential regression result: 21 passed in 0.32 seconds. Broader backend validation is pending."
+      - working: true
+        agent: "main"
+        comment: "Final secret-scan focused result: 26 passed in 0.73 seconds. Receiver header-auth result: 2 passed with 3 warnings. Complete isolated backend result: 112 passed, 1 skipped, 8 warnings in 4.47 seconds. Python compilation succeeded."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 9
+  test_sequence: 10
   run_ui: false
 test_plan:
   current_focus: []
@@ -275,3 +295,7 @@ agent_communication:
     message: "Phase 1 additive migration implementation is ready for isolated regression testing. Do not invoke it against backend/echocast_live.db or enable runtime authentication changes."
   - agent: "main"
     message: "Phase 1 isolated validation is complete. The explicit runner remains disconnected from startup and refused the protected real database; Phase 2 backfill and dual verification remain unimplemented."
+  - agent: "main"
+    message: "The isolated Phase 2 enrollment service is ready for backend regression testing. It is not connected to FastAPI, startup, WebSockets, Store APIs, frontend, or the real database."
+  - agent: "main"
+    message: "Phase 2 service validation is complete. Enrollment remains isolated and legacy_only; no runtime authentication, backfill, migration-state, frontend, or protected-database change was made."
