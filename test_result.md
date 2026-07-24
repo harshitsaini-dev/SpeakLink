@@ -412,11 +412,31 @@ backend:
       - working: true
         agent: "main"
         comment: "Final results: focused rehearsal 7 passed with 21 warnings in 2.01 seconds; runtime/inventory regressions 119 passed with 5 warnings in 1.92 seconds; authentication/transition 81 passed in 2.55 seconds; lifecycle 66 passed in 1.25 seconds; existing WebSocket 17 passed with 5 warnings in 1.54 seconds; complete backend 338 passed, 1 skipped, and 32 warnings in 6.89 seconds. Python compilation succeeded."
+  - task: "Receiver production cutover runbook and HMAC key-custody policy"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_production_runbook.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: all 9 pure document-contract tests failed because RECEIVER_PRODUCTION_CUTOVER_RUNBOOK.md and RECEIVER_HMAC_KEY_CUSTODY.md did not exist. No application, database, migration, key, socket, or network operation ran."
+      - working: false
+        agent: "main"
+        comment: "The first documentation run reached 7 passed and 2 wording-contract failures, followed by 8 passed and 1 wrapping failure. The required policy was present; exact contract phrases were split across Markdown lines."
+      - working: true
+        agent: "main"
+        comment: "Focused pure documentation contract result: 9 passed in 0.03 seconds. Broader cutover, transition, runtime, inventory, and complete backend regression validation is pending."
+      - working: true
+        agent: "main"
+        comment: "Final results: document contract 9 passed in 0.03 seconds; cutover/transition regressions 56 passed with 21 existing warnings in 3.15 seconds; runtime/inventory regressions 54 passed with 5 existing warnings in 1.63 seconds; complete backend 347 passed, 1 skipped, and 32 existing warnings in 6.63 seconds. No runtime Python or frontend file changed, and no production database, key, migration, backup, cutover, or Receiver operation was performed."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 17
+  test_sequence: 18
   run_ui: false
 test_plan:
   current_focus: []
@@ -476,3 +496,7 @@ agent_communication:
     message: "The isolated cutover rehearsal is ready for complete backend validation. It uses generated keys, temporary SQLite, one loopback worker, and the existing transition service; the default app, real database, and production migration state remain untouched."
   - agent: "main"
     message: "Controlled cutover rehearsal validation is complete. Forward and rollback state sequences, source blockers, key readiness, loopback handshakes, transactional rollback, and default legacy-only preservation are green; no production cutover occurred."
+  - agent: "main"
+    message: "The review-only production runbook and HMAC key-custody policy are ready for regression validation. Focused tests read Markdown only; no real database, key, migration, cutover, server, Receiver, or frontend operation is authorized."
+  - agent: "main"
+    message: "Production runbook validation is complete. Required phases, separate key/database recovery, source blockers, staged pilot, rollback, stop/abort controls, and status separation are documented; all regressions are green and no production operation occurred."
