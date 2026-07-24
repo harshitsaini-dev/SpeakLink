@@ -402,10 +402,47 @@ The inventory is lost on backend restart and each Uvicorn worker would own an
 independent copy. EchoCast therefore remains limited to one worker until a
 shared authoritative coordination design exists. A newly empty inventory after
 restart is not, by itself, proof about remote speakers or sockets; the restart
-must actually have terminated those network connections. Future production
-integration must register only after authentication succeeds, remove the exact
-connection on disconnect/replacement, and reconcile restart and narrowing-
-transition behavior explicitly.
+must actually have terminated those network connections. The current legacy
+runtime integration described next registers only after authentication and
+removes exact identities. Future narrowing transitions must still reconcile
+restart and active-connection behavior explicitly.
+
+### Current legacy WebSocket inventory integration
+
+`WSManager` now owns exactly one injectable `ActiveReceiverConnectionInventory`
+and a separate Store-to-current-connection-ID map. The production Receiver
+handshake still authenticates only the raw active `Store.receiver_token` from
+the `Authorization: Bearer` header. After authentication, the server generates
+a new UUID-hex connection ID and UTC authentication time; manager acceptance
+then registers a `legacy_store_token` record with no Device or Credential ID.
+The existing Store online/`last_seen` write occurs only after this registration
+succeeds. Failed authentication creates neither manager nor inventory state,
+and capacity failure after acceptance closes the socket with a fixed,
+credential-free response without marking the Store online.
+
+The one-current-connection-per-Store policy is unchanged. When B replaces A,
+the manager closes A, removes A's exact inventory ID, and installs B under a new
+ID. All normal, abrupt, exceptional, cancellation, send-failure, and delayed
+finally cleanup paths compare the socket and immutable connection ID. A's late
+cleanup is idempotent and cannot remove B, mark B offline, or mutate B's
+receiver snapshot. A stale socket is also prevented from applying messages or
+freshness changes to the replacement connection.
+
+The manager exposes a read-only transition summary built from one atomic
+inventory snapshot. It does not invoke a transition, query or modify SQLite,
+or expose a FastAPI route. Current runtime summaries contain legacy-source
+connections only; the hashed-source count remains zero. The isolated
+dual-verification service is not called, hashed runtime credentials are not
+enabled, and migration state is unchanged.
+
+Inventory identity does not imply READY, audio receipt, playback confirmation,
+acoustic verification, or audible speakers. It remains process-local, observes
+only connections registered after process startup, disappears on restart, and
+is not shared across workers. EchoCast must continue using one Uvicorn worker.
+A restart terminates sockets owned by that process, but loss of inventory state
+alone is not proof of Receiver Agent or speaker health. Transition execution
+and dual-authentication runtime cutover remain separately controlled future
+work.
 
 ### Rotation
 

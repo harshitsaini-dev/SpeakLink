@@ -14,6 +14,11 @@ from typing import Dict, Optional, Set
 
 from fastapi import WebSocket
 
+from receiver_connection_inventory import (
+    ActiveReceiverConnectionInventory,
+    AuthenticatedReceiverConnection,
+    ConnectionAuthenticationSource,
+)
 from receiver_contract import (
     OFFLINE_AFTER_SECONDS,
     STALE_AFTER_SECONDS,
@@ -32,9 +37,18 @@ logger = logging.getLogger("echocast.ws")
 
 
 class WSManager:
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        receiver_connection_inventory: ActiveReceiverConnectionInventory | None = None,
+    ):
         # store_id -> WebSocket
         self.receivers: Dict[int, WebSocket] = {}
+        # store_id -> server-generated ID for the exact current Receiver socket.
+        self.receiver_connection_ids: Dict[int, str] = {}
+        self.receiver_connection_inventory = (
+            receiver_connection_inventory or ActiveReceiverConnectionInventory()
+        )
         # Process-local immutable state; acknowledgements never mutate snapshots in place.
         self.receiver_snapshots: Dict[int, ReceiverSnapshot] = {}
         self.stale_after = timedelta(seconds=STALE_AFTER_SECONDS)
@@ -47,45 +61,76 @@ class WSManager:
         self.live_session_id: Optional[int] = None
         self.live_target_store_ids: Set[int] = set()
         self._lock = asyncio.Lock()
+        self._receiver_lock = asyncio.Lock()
 
     # ---------- Receivers ----------
     async def connect_receiver(
         self,
         store_id: int,
         ws: WebSocket,
+        connection_id: str,
+        authenticated_at: datetime,
         received_at: datetime | None = None,
-    ):
+    ) -> AuthenticatedReceiverConnection:
         await ws.accept()
-        # Kick out an older connection for the same store
-        old = self.receivers.get(store_id)
-        if old is not None:
-            try:
-                await old.close(code=4001)
-            except Exception:
-                pass
-            previous = self.receiver_snapshots.get(store_id)
-            if previous is not None and previous.connection is not ConnectionState.OFFLINE:
-                self.receiver_snapshots[store_id] = mark_disconnected(
-                    previous,
-                    received_at or datetime.now(timezone.utc),
-                )
-        self.receivers[store_id] = ws
-        previous = self.receiver_snapshots.get(store_id, ReceiverSnapshot())
-        self.receiver_snapshots[store_id] = mark_connected(
-            previous,
-            received_at or datetime.now(timezone.utc),
+        event_time = received_at or authenticated_at
+        record = AuthenticatedReceiverConnection(
+            connection_id=connection_id,
+            store_id=store_id,
+            device_id=None,
+            credential_id=None,
+            authentication_source=ConnectionAuthenticationSource.LEGACY_STORE_TOKEN,
+            authenticated_at=authenticated_at,
         )
+
+        async with self._receiver_lock:
+            # Preserve the existing one-current-connection-per-Store policy.
+            old = self.receivers.get(store_id)
+            old_connection_id = self.receiver_connection_ids.get(store_id)
+            if old is not None:
+                try:
+                    await old.close(code=4001)
+                except Exception:
+                    pass
+                self.receivers.pop(store_id, None)
+                self.receiver_connection_ids.pop(store_id, None)
+                if old_connection_id is not None:
+                    self.receiver_connection_inventory.remove(old_connection_id)
+                previous = self.receiver_snapshots.get(store_id)
+                if previous is not None and previous.connection is not ConnectionState.OFFLINE:
+                    self.receiver_snapshots[store_id] = mark_disconnected(
+                        previous,
+                        event_time,
+                    )
+
+            # Registration occurs before manager online state. A capacity or
+            # conflict failure therefore cannot leave an orphan current socket.
+            self.receiver_connection_inventory.register(record)
+            self.receivers[store_id] = ws
+            self.receiver_connection_ids[store_id] = connection_id
+            previous = self.receiver_snapshots.get(store_id, ReceiverSnapshot())
+            self.receiver_snapshots[store_id] = mark_connected(previous, event_time)
+
         await self._notify_dashboards({"type": "receiver_status", "store_id": store_id, "status": "online"})
+        return record
 
     def disconnect_receiver(
         self,
         store_id: int,
         ws: WebSocket,
+        connection_id: str | None = None,
         received_at: datetime | None = None,
     ) -> bool:
         cur = self.receivers.get(store_id)
-        if cur is ws:
+        current_connection_id = self.receiver_connection_ids.get(store_id)
+        exact_connection_id = connection_id or (
+            current_connection_id if cur is ws else None
+        )
+        if cur is ws and exact_connection_id == current_connection_id:
             self.receivers.pop(store_id, None)
+            self.receiver_connection_ids.pop(store_id, None)
+            if exact_connection_id is not None:
+                self.receiver_connection_inventory.remove(exact_connection_id)
             snapshot = self.receiver_snapshots.get(store_id)
             if snapshot is not None and snapshot.connection is not ConnectionState.OFFLINE:
                 self.receiver_snapshots[store_id] = mark_disconnected(
@@ -93,9 +138,40 @@ class WSManager:
                     received_at or datetime.now(timezone.utc),
                 )
             return True
-        if cur is None:
-            return True
+
+        # Cleanup after replacement is intentionally a no-op for manager state.
+        # Remove only an exact orphan that is not the identity of any current
+        # Store connection; never remove a newer replacement by Store ID alone.
+        if (
+            exact_connection_id is not None
+            and exact_connection_id not in self.receiver_connection_ids.values()
+        ):
+            self.receiver_connection_inventory.remove(exact_connection_id)
         return False
+
+    def get_receiver_connection_id(self, store_id: int) -> str | None:
+        return self.receiver_connection_ids.get(store_id)
+
+    def is_current_receiver_connection(
+        self,
+        store_id: int,
+        ws: WebSocket,
+        connection_id: str,
+    ) -> bool:
+        return (
+            self.receivers.get(store_id) is ws
+            and self.receiver_connection_ids.get(store_id) == connection_id
+        )
+
+    def get_active_receiver_transition_summary(self, now: datetime | None = None):
+        """Return source counts only; never invoke a migration transition."""
+
+        from receiver_migration_transition_service import ActiveReceiverConnectionSummary
+
+        return self.receiver_connection_inventory.build_transition_summary(
+            ActiveReceiverConnectionSummary,
+            captured_at=now or datetime.now(timezone.utc),
+        )
 
     def get_receiver_snapshot(self, store_id: int) -> ReceiverSnapshot | None:
         return self.receiver_snapshots.get(store_id)

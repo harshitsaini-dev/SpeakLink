@@ -102,7 +102,7 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Design and pure-test a bounded, source-tagged active Receiver connection inventory without production runtime integration."
+user_problem_statement: "Integrate the process-local Receiver connection-source inventory into the current legacy-authenticated WebSocket lifecycle without enabling hashed authentication."
 backend:
   - task: "Safe isolated backend smoke tests"
     implemented: true
@@ -346,11 +346,34 @@ backend:
       - working: true
         agent: "main"
         comment: "Final results: focused inventory rerun 65 passed in 0.19 seconds; authentication/transition regressions 81 passed in 2.49 seconds; lifecycle regressions 66 passed in 1.24 seconds; Receiver WebSocket regressions 17 passed with 5 existing warnings in 1.42 seconds; final complete backend 277 passed, 1 skipped, and 8 existing warnings in 6.12 seconds. Python compilation and diff checks succeeded."
+  - task: "Legacy Receiver WebSocket connection inventory integration"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_connection_inventory_ws.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: the initial focused test failed because WSManager had no owned connection inventory. The expanded pre-implementation suite reported 19 failures for the missing ownership, connection-ID, summary, and lifecycle integration."
+      - working: false
+        agent: "main"
+        comment: "The first implementation run reached 17 passed and 2 test-input failures: the capacity case observed the old fixture manager and receiver_ready omitted its two required check fields. Runtime inventory behavior was not the cause."
+      - working: true
+        agent: "main"
+        comment: "Focused legacy WebSocket inventory integration result: 19 passed with 3 existing warnings in 1.07 seconds. Full regression validation is pending."
+      - working: false
+        agent: "main"
+        comment: "The first complete xdist suite run reported 294 passed and 2 pure-service boundary failures because the focused test imported ws_manager during collection on both workers. Runtime behavior passed; the focused test import boundary required correction."
+      - working: true
+        agent: "main"
+        comment: "Final results after explicit cancellation and metadata-redaction coverage: focused runtime integration 20 passed with 3 warnings in 1.10 seconds; pure inventory 65 passed in 0.12 seconds; authentication/transition regressions 81 passed in 2.40 seconds; existing Receiver WebSocket regressions 17 passed with 5 warnings in 1.38 seconds; complete backend 297 passed, 1 skipped, and 10 existing warnings in 7.08 seconds."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 14
+  test_sequence: 15
   run_ui: false
 test_plan:
   current_focus: []
@@ -398,3 +421,7 @@ agent_communication:
     message: "The pure source-tagged inventory is ready for complete backend regression testing. It is not connected to FastAPI, WebSockets, authentication runtime, transition runtime, SQLite, frontend, or the protected database."
   - agent: "main"
     message: "Connection inventory validation is complete. Runtime and frontend files remain unchanged; focused tests required no database, and the protected database was not opened or modified."
+  - agent: "main"
+    message: "Legacy-only Receiver WebSocket inventory wiring is ready for complete backend regression testing. Hashed authentication, transition execution, schema changes, frontend behavior, and the protected database remain out of scope."
+  - agent: "main"
+    message: "Legacy-only runtime inventory validation is complete. Exact connection cleanup and summary counts are green; production authentication remains raw Store-token only and no migration transition or protected-database operation was added."

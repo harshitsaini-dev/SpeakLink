@@ -36,6 +36,7 @@ from schemas import (
 from auth import verify_password, create_access_token, get_current_user
 from seed import seed_admin, seed_stores
 from ws_manager import manager
+from receiver_connection_inventory import ReceiverConnectionInventoryError
 from receiver_contract import (
     HEARTBEAT_INTERVAL_SECONDS,
     AudioReceivingAcknowledgement,
@@ -57,6 +58,8 @@ logger = logging.getLogger("echocast")
 
 RECEIVER_AUTH_FAILURE_CODE = 4401
 RECEIVER_AUTH_FAILURE_REASON = "Receiver authentication failed"
+RECEIVER_CONNECTION_FAILURE_CODE = 1013
+RECEIVER_CONNECTION_FAILURE_REASON = "Receiver connection unavailable"
 MAX_RECEIVER_TOKEN_LENGTH = 128
 
 
@@ -518,28 +521,60 @@ async def ws_receiver(websocket: WebSocket):
             await _reject_receiver_authentication(websocket)
             return
         store_id = store.id
-        # mark last_seen
-        store.last_seen = datetime.now(timezone.utc)
-        store.status = "online"
-        db.add(ReceiverEvent(store_id=store_id, event_type="connected"))
-        db.commit()
     finally:
         db.close()
 
-    await manager.connect_receiver(store_id, websocket)
-    # If a session is currently live and this store is a target -> send PLAY immediately
-    if manager.is_live() and store_id in manager.live_target_store_ids:
-        manager.prepare_receiver_session(store_id, manager.live_session_id)
-        await manager.send_to_receiver(store_id, {"type": "play", "session_id": manager.live_session_id})
+    authenticated_at = datetime.now(timezone.utc)
+    connection_id = uuid.uuid4().hex
 
     try:
+        await manager.connect_receiver(
+            store_id,
+            websocket,
+            connection_id,
+            authenticated_at,
+        )
+
+        # Preserve the existing runtime health write, but only after the exact
+        # accepted connection has been registered successfully.
+        db = SessionLocal()
+        try:
+            connected_store = db.query(Store).filter(Store.id == store_id).first()
+            if connected_store:
+                connected_store.last_seen = authenticated_at
+                connected_store.status = "online"
+                db.add(ReceiverEvent(store_id=store_id, event_type="connected"))
+                db.commit()
+        finally:
+            db.close()
+
+        # If a session is currently live and this store is a target -> send PLAY immediately
+        if manager.is_live() and store_id in manager.live_target_store_ids:
+            manager.prepare_receiver_session(store_id, manager.live_session_id)
+            await manager.send_to_receiver(
+                store_id,
+                {"type": "play", "session_id": manager.live_session_id},
+            )
+
         while True:
+            if not manager.is_current_receiver_connection(
+                store_id,
+                websocket,
+                connection_id,
+            ):
+                break
             try:
                 msg = await asyncio.wait_for(
                     websocket.receive_text(),
                     timeout=HEARTBEAT_INTERVAL_SECONDS,
                 )
             except asyncio.TimeoutError:
+                if not manager.is_current_receiver_connection(
+                    store_id,
+                    websocket,
+                    connection_id,
+                ):
+                    break
                 before = manager.get_receiver_snapshot(store_id)
                 after = manager.evaluate_receiver_freshness(store_id)
                 if before is not None and after.connection is not before.connection:
@@ -553,6 +588,12 @@ async def ws_receiver(websocket: WebSocket):
                     break
                 continue
 
+            if not manager.is_current_receiver_connection(
+                store_id,
+                websocket,
+                connection_id,
+            ):
+                break
             received_at = datetime.now(timezone.utc)
             try:
                 data = json.loads(msg)
@@ -575,6 +616,11 @@ async def ws_receiver(websocket: WebSocket):
                     "store_id": store_id,
                     "code": acknowledgement.error_code,
                 })
+    except ReceiverConnectionInventoryError:
+        await websocket.close(
+            code=RECEIVER_CONNECTION_FAILURE_CODE,
+            reason=RECEIVER_CONNECTION_FAILURE_REASON,
+        )
     except WebSocketDisconnect:
         pass
     except Exception as error:
@@ -584,7 +630,11 @@ async def ws_receiver(websocket: WebSocket):
             store_id,
         )
     finally:
-        disconnected_current = manager.disconnect_receiver(store_id, websocket)
+        disconnected_current = manager.disconnect_receiver(
+            store_id,
+            websocket,
+            connection_id,
+        )
         if disconnected_current:
             db = SessionLocal()
             try:
