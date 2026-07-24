@@ -38,6 +38,8 @@ with one Uvicorn worker.
   over a real `127.0.0.1` WebSocket against an isolated Uvicorn instance.
 - The production receiver WebSocket uses a credential-free endpoint and strict
   `Authorization: Bearer` handshake authentication.
+- A proposed Receiver Device/Credential lifecycle, SQLite-safe migration plan,
+  and schema-independent security helpers are documented and pure-tested.
 
 These statements are the verified starting state supplied for this baseline.
 They do not establish receiver playback, audible speakers, production
@@ -47,6 +49,7 @@ readiness, or end-to-end WebSocket audio streaming.
 
 - Current branch: `feature/receiver-status-contract`
 - Historical baseline branch: `feature/baseline-verification`
+- `f3c021b security: authenticate receiver websocket by header`
 - `873c655 test: add receiver protocol simulator`
 - `fc0b350 feat: integrate receiver acknowledgement state`
 - `2d3c4f8 feat: define receiver acknowledgement contract`
@@ -189,6 +192,26 @@ legacy and must not be used for a production receiver.
 Do not place raw receiver tokens in production URLs. Do not print or log
 passwords, JWTs, or receiver tokens.
 
+## Proposed receiver credential lifecycle
+
+`RECEIVER_CREDENTIAL_LIFECYCLE.md` proposes separate `receiver_devices`,
+`receiver_credentials`, structured credential audit events, and an explicit
+migration-state record. The plan covers one-time raw credential delivery,
+versioned HMAC-SHA-256 storage, expiry policy, immediate revocation, bounded
+rotation overlap, legacy backfill, validation queries, backups, partial failure,
+and rollback across five SQLite-safe phases.
+
+`backend/receiver_credentials.py` contains pure helpers for secure credential
+generation, strict new/legacy migration formats, keyed hashing, constant-time
+verification, UTC lifecycle boundaries, rotation planning, redacted
+representations, and allowlisted audit metadata. These helpers are not wired
+into models, schemas, APIs, WebSockets, the frontend, or SQLite.
+
+No migration is approved or implemented. Expiry policy, rotation grace, HMAC
+key custody/rotation, device limits, HQ authorization roles, active-socket
+revocation behavior, audit retention, migration tooling, and legacy UI/API
+removal require review first.
+
 ## Current testing limitations
 
 - The pre-existing integration suite was designed for an old Emergent endpoint
@@ -215,7 +238,9 @@ passwords, JWTs, or receiver tokens.
 - Header-authentication tests verify fixed rejection behavior and prove failed
   handshakes create no snapshot, online state, last-seen change, status change,
   or receiver event.
-- The isolated backend suite currently reports 65 passed and 1 guarded skip;
+- Pure credential lifecycle helpers run without FastAPI, SQLAlchemy, sockets,
+  environment secrets, or SQLite.
+- The isolated backend suite currently reports 77 passed and 1 guarded skip;
   dependency/deprecation warnings remain.
 
 ## Database safety
@@ -228,6 +253,6 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Design the receiver credential lifecycle: secure enrolment, rotation,
-revocation, and hashed-at-rest storage with a safe migration plan. Keep that
-work separate from audio and the production Windows Receiver Agent.
+Review and approve the credential data model and unresolved lifecycle policies.
+Only after that review, implement Phase 1 additive migration infrastructure as
+a separate change against an isolated database first.
