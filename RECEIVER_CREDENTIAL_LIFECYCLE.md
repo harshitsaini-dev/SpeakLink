@@ -1,6 +1,6 @@
 # SpeakLink Receiver Credential Lifecycle Design
 
-Status: Phase 1 schema, isolated enrollment, and isolated legacy backfill rehearsal implemented; no runtime integration
+Status: Phase 1 schema, isolated enrollment/backfill, and isolated read-only authentication implemented; no runtime integration
 
 Last updated: 2026-07-24
 
@@ -279,6 +279,45 @@ free-form exception details.
 
 Authentication establishes CONNECTED only. It never establishes READY,
 PLAYBACK_CONFIRMED, or SPEAKER_VERIFIED.
+
+### Isolated migration-state authentication service
+
+`backend/receiver_auth_service.py` implements the future verifier as a
+read-only service over an explicitly injected SQLite engine and bounded,
+external HMAC key ring. It is not imported by FastAPI, server startup,
+WebSockets, Store APIs, the simulator, frontend, or the Receiver Agent.
+Production WebSocket authentication therefore remains unchanged.
+
+| State | Required legacy flag | Raw Store path | Hashed legacy path | Hashed `speaklink_rcv` path |
+| --- | ---: | --- | --- | --- |
+| `legacy_only` | 1 | active Store only | disabled | disabled |
+| `backfilled` | 1 | complete eligible mapping required | disabled | disabled |
+| `dual_verify` | 1 | allowed | allowed | allowed |
+| `hash_only` | 0 | ignored | allowed | allowed |
+| `raw_neutralized` | 0 | ignored | allowed | allowed |
+
+Unknown states and inconsistent state/flag combinations fail closed.
+`backfilled` and `dual_verify` require exactly one consistent legacy
+Device/Credential mapping per Store. Active Stores map to active Devices;
+inactive Stores retain disabled mappings but cannot authenticate.
+
+Hash-backed verification requires an active Store, active Device, usable
+credential, matching strict token format, available hash-key version, and a
+state that permits hashes. Expiry, revocation, issuance, and replacement-grace
+boundaries use `credential_is_usable`. New credentials use their public ID for
+bounded lookup; legacy hash work is bounded by the injected key ring.
+
+In `dual_verify`, a legacy token matching both raw and HMAC paths must resolve
+to the same Store, Device, and Credential. The service returns one canonical
+hash-backed identity; disagreement fails closed. External rejections always
+use `Receiver authentication failed`. Schema, migration, foreign-key, state,
+and key-ring failures use the separate fixed `Receiver authentication
+configuration is not ready` message.
+
+The immutable result exposes only non-secret identity, migration state, and
+verification source. Authentication performs no commit, audit, `last_used_at`,
+Store health, receiver-snapshot, readiness, playback, or speaker-verification
+write. Success proves identity only.
 
 ### Rotation
 

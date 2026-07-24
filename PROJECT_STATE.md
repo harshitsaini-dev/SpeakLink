@@ -1,7 +1,7 @@
 # SpeakLink Project State
 
 Last updated: 2026-07-24
-Current branch: `feature/receiver-credential-backfill-rehearsal`
+Current branch: `feature/receiver-dual-verification-service`
 
 ## Current architecture
 
@@ -47,7 +47,8 @@ readiness, or end-to-end WebSocket audio streaming.
 
 ## Git baseline
 
-- Current branch: `feature/receiver-credential-backfill-rehearsal`
+- Current branch: `feature/receiver-dual-verification-service`
+- `3ab9d0f security: rehearse receiver credential backfill`
 - Historical baseline branch: `feature/baseline-verification`
 - `6cb48a1 security: add isolated receiver enrollment service`
 - `139f39f security: add receiver credential migration phase one`
@@ -260,7 +261,28 @@ All intermediate inserts and state changes roll back together. A validated
 second call raises `BackfillAlreadyAppliedError` without duplicating rows, and
 concurrent calls serialize so only one can perform the rehearsal. Legacy
 verification remains enabled. Production WebSocket authentication is still
-legacy Store-token verification only; dual verification is not implemented.
+legacy Store-token verification only; runtime dual verification is disabled.
+
+## Isolated Receiver Credential authentication service
+
+`backend/receiver_auth_service.py` now provides a read-only, migration-state
+governed identity verifier over an explicitly injected temporary SQLite engine
+and external HMAC key ring. It implements the exact `legacy_only`, `backfilled`,
+`dual_verify`, `hash_only`, and `raw_neutralized` policy matrix and fails closed
+on inconsistent flags, schema, foreign keys, mappings, key versions, or
+credential lifecycle state.
+
+Legacy UUID-hex and `speaklink_rcv` formats remain strictly separated. Dual
+verification canonicalizes a matching raw/HMAC legacy identity and rejects
+disagreement. Hash-backed verification requires an active Store, active Device,
+and usable credential. Results are immutable, redacted identity records, and
+external credential rejection messages are identical.
+
+The service performs no commits or persistent updates: Store operational
+fields, `last_used_at`, audit events, migration state, schema ledger, and live
+receiver snapshots remain unchanged. It is not connected to runtime or the
+frontend. Authentication success does not imply READY, playback confirmation,
+or speaker verification.
 
 ## Current testing limitations
 
@@ -303,6 +325,12 @@ legacy Store-token verification only; dual verification is not implemented.
   credential-helper, and Phase 2 enrollment regressions report 47 passed. The
   complete isolated backend suite reports 131 passed, 1 guarded skip, and 8
   existing dependency/deprecation warnings. Python compilation succeeds.
+- Focused read-only authentication-service tests report 32 passed. Credential
+  lifecycle regressions report 66 passed; existing Receiver WebSocket
+  authentication and contract regressions report 17 passed with 5 existing
+  dependency/deprecation warnings. The complete isolated backend suite reports
+  163 passed, 1 guarded skip, and 8 existing warnings. Python compilation
+  succeeds.
 
 ## Database safety
 
@@ -314,6 +342,7 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Design and test a dual-verification authentication service using isolated
-databases and explicit migration state. Do not integrate it into production
-WebSocket authentication or execute any migration against the real database.
+Rehearse transactional state transitions and rollback from `backfilled` to
+`dual_verify` to `hash_only` using temporary databases. Include safe downgrade
+rules and active-connection implications; do not integrate the verifier into
+production WebSocket authentication yet.

@@ -283,11 +283,31 @@ backend:
       - working: true
         agent: "main"
         comment: "Final results: focused backfill 19 passed in 0.62 seconds; Phase 1/credential/enrollment regressions 47 passed in 0.78 seconds; receiver header auth 2 passed with 3 warnings in 1.01 seconds; complete backend 131 passed, 1 skipped, 8 warnings in 4.78 seconds; compilation succeeded."
+  - task: "Isolated Receiver Credential dual-verification service"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_auth_service.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: focused collection failed because receiver_auth_service.py did not exist. No server, socket, environment secret, or database connection was used."
+      - working: true
+        agent: "main"
+        comment: "Focused isolated authentication result after mapping, redaction, and import-boundary hardening: 32 passed in 1.18 seconds using only generated test credentials/keys and pytest temporary SQLite files."
+      - working: true
+        agent: "main"
+        comment: "Credential lifecycle regressions: 66 passed in 1.19 seconds. Existing Receiver WebSocket authentication and acknowledgement-contract regressions: 17 passed with 5 existing warnings in 1.38 seconds. Complete backend validation is pending."
+      - working: true
+        agent: "main"
+        comment: "Final results: focused authentication 32 passed in 1.18 seconds; credential lifecycle regressions 66 passed in 1.18 seconds; Receiver WebSocket regressions 17 passed with 5 warnings in 1.47 seconds; complete backend 163 passed, 1 skipped, 8 warnings in 5.36 seconds."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 11
+  test_sequence: 12
   run_ui: false
 test_plan:
   current_focus: []
@@ -323,3 +343,7 @@ agent_communication:
     message: "The isolated legacy backfill rehearsal is ready for backend regression testing. It changes migration state only in temporary databases and does not enable dual verification or touch runtime authentication."
   - agent: "main"
     message: "Legacy backfill rehearsal validation is complete. The real database and production authentication remain untouched; temporary state reaches backfilled with legacy verification still enabled."
+  - agent: "main"
+    message: "The isolated read-only Receiver Credential verifier is ready for complete backend regression testing. It is not connected to FastAPI, WebSockets, runtime state, frontend, or the protected real database."
+  - agent: "main"
+    message: "Dual-verification service validation is complete. Authentication is read-only and remains isolated; production WebSocket authentication, runtime status, frontend, migration state, and the real database are unchanged."
