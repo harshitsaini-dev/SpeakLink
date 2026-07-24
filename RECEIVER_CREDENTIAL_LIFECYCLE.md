@@ -1,6 +1,6 @@
 # SpeakLink Receiver Credential Lifecycle Design
 
-Status: Phase 1 schema and isolated lifecycle services implemented; explicit Receiver runtime authentication boundary added with legacy-only default
+Status: Phase 1 schema and isolated lifecycle services implemented; controlled cutover rehearsal added while the default runtime remains legacy-only
 
 Last updated: 2026-07-24
 
@@ -505,6 +505,63 @@ temporary-database test applications. There is no cutover flag, transition API,
 key auto-loading, default hashed verification, frontend change, or real-database
 migration. The inventory remains process-local and the initial deployment still
 requires one Uvicorn worker.
+
+### Isolated controlled cutover rehearsal
+
+`backend/receiver_cutover_rehearsal.py` coordinates the previously isolated
+runtime-authentication, connection-inventory, and migration-transition
+components without creating a route or startup hook. Construction requires an
+explicit SQLite engine, the exact migration-aware runtime authenticator for
+that engine, an injected manager, active HQ actor ID, and an immutable copy of
+a bounded strong HMAC key map. It rejects the protected
+`backend/speaklink_live.db` path before connection and does not read keys from
+environment variables or persist them.
+
+The rehearsal fixtures use generated test-only key version 1 for backfilled
+`legacy_uuid_hex` HMAC rows and version 2 for newly enrolled `speaklink_rcv`
+rows. Both versions must be present and correct before hash readiness can
+succeed. Key versions may appear as non-secret routing metadata; key material
+is redacted from results and never enters logs, exceptions, inventory records,
+or audit metadata.
+
+Each operation obtains legacy/hashed connection counts from one atomic manager
+inventory snapshot and delegates the state change to the existing
+`BEGIN IMMEDIATE` transition service. Immutable results contain only states,
+the legacy flag, source counts, fleet readiness counts, UTC time, runtime
+action, and a fixed result code. The supported sequence is:
+
+```text
+backfilled -> dual_verify -> hash_only
+backfilled <- dual_verify <- hash_only
+```
+
+- `backfilled -> dual_verify` expands acceptance and needs no disconnect.
+  Existing legacy sockets remain classified as legacy until reconnecting.
+- `dual_verify -> hash_only` narrows acceptance and requires a fresh atomic
+  summary with zero legacy-source sockets.
+- `hash_only -> dual_verify` expands acceptance while raw Store tokens remain
+  intact and valid; it does not relabel or disconnect existing hash sockets.
+- `dual_verify -> backfilled` narrows acceptance and requires a fresh summary
+  with zero hash-source sockets.
+
+Blocked or stale-summary transitions change neither state nor audit rows and do
+not disconnect sockets. A successful transition changes only the singleton
+migration-state row and appends one sanitized `migration_state_changed` event;
+Store, Device, Credential, and schema-ledger rows remain unchanged. Injected
+failures after state update roll back both state and audit writes.
+
+The loopback rehearsal uses a random `127.0.0.1` port and one Uvicorn worker.
+It proves legacy and hash-backed handshakes, canonical inventory sources,
+same-Store replacement, delayed cleanup safety, capacity rejection, and the
+complete forward/rollback sequence. An existing socket is never automatically
+re-authenticated: changing its source requires disconnect, a new handshake,
+and a new server connection ID.
+
+This remains temporary-database-only infrastructure. The normal application
+still constructs the legacy authenticator, no public transition endpoint or
+environment cutover flag exists, and no real migration or raw-token
+neutralization occurs. Authentication continues to prove identity only—not
+READY, audio receipt, playback, LinkGuard verification, or audible speakers.
 
 ### Rotation
 

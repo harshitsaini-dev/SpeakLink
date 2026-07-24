@@ -392,11 +392,31 @@ backend:
       - working: true
         agent: "main"
         comment: "Final hardening rerun after bounded legacy input and generic Store-reconciliation failure handling: focused boundary 34 passed with 3 warnings in 1.33 seconds; complete backend 331 passed, 1 skipped, and 12 existing warnings in 7.11 seconds. Python compilation succeeded."
+  - task: "Isolated controlled Receiver credential cutover rehearsal"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_cutover_rehearsal.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: focused collection failed because receiver_cutover_rehearsal.py did not exist. No server, socket, database, or secret was accessed."
+      - working: false
+        agent: "main"
+        comment: "The first implementation run reached 4 passed and 3 test-harness assertion mismatches involving earlier key rejection, legitimate hashed-count text, and post-accept capacity close semantics. No transition or runtime rule failed."
+      - working: true
+        agent: "main"
+        comment: "Focused cutover rehearsal: 7 passed with 21 dependency/deprecation warnings in 1.91 seconds using temporary SQLite, generated keys/credentials, a random loopback port, and one Uvicorn worker. Runtime/inventory regressions: 119 passed with 5 warnings; authentication/transition: 81 passed; lifecycle: 66 passed; existing WebSocket: 17 passed with 5 warnings. Complete validation is pending."
+      - working: true
+        agent: "main"
+        comment: "Final results: focused rehearsal 7 passed with 21 warnings in 2.01 seconds; runtime/inventory regressions 119 passed with 5 warnings in 1.92 seconds; authentication/transition 81 passed in 2.55 seconds; lifecycle 66 passed in 1.25 seconds; existing WebSocket 17 passed with 5 warnings in 1.54 seconds; complete backend 338 passed, 1 skipped, and 32 warnings in 6.89 seconds. Python compilation succeeded."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 16
+  test_sequence: 17
   run_ui: false
 test_plan:
   current_focus: []
@@ -452,3 +472,7 @@ agent_communication:
     message: "The explicit runtime authentication boundary is ready for complete backend regression testing. The normal app remains legacy-only; migration-aware behavior requires an injected temporary engine/key ring, and no production cutover or transition API exists."
   - agent: "main"
     message: "Dual-authentication runtime-boundary validation is complete. The default application remains legacy-only; explicit temporary-app injection preserves canonical source IDs without credential-table writes or a production migration-state cutover."
+  - agent: "main"
+    message: "The isolated cutover rehearsal is ready for complete backend validation. It uses generated keys, temporary SQLite, one loopback worker, and the existing transition service; the default app, real database, and production migration state remain untouched."
+  - agent: "main"
+    message: "Controlled cutover rehearsal validation is complete. Forward and rollback state sequences, source blockers, key readiness, loopback handshakes, transactional rollback, and default legacy-only preservation are green; no production cutover occurred."
