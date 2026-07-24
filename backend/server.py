@@ -12,7 +12,6 @@ import uuid
 import logging
 import asyncio
 import json
-import secrets
 from datetime import datetime, timezone
 from typing import List, Optional, Set
 
@@ -37,6 +36,9 @@ from auth import verify_password, create_access_token, get_current_user
 from seed import seed_admin, seed_stores
 from ws_manager import manager
 from receiver_connection_inventory import ReceiverConnectionInventoryError
+from receiver_runtime_auth import (
+    LegacyStoreTokenRuntimeAuthenticator,
+)
 from receiver_contract import (
     HEARTBEAT_INTERVAL_SECONDS,
     AudioReceivingAcknowledgement,
@@ -65,6 +67,30 @@ MAX_RECEIVER_TOKEN_LENGTH = 128
 
 # ---- app + startup ----
 app = FastAPI(title="EchoCast Live", version="1.0.0")
+
+
+def configure_receiver_runtime(
+    application: FastAPI,
+    *,
+    authenticator,
+    connection_manager,
+) -> None:
+    """Explicitly configure Receiver runtime dependencies for one app instance."""
+
+    if not callable(getattr(authenticator, "authenticate", None)):
+        raise TypeError("Receiver runtime authenticator is invalid")
+    application.state.receiver_runtime_authenticator = authenticator
+    application.state.receiver_connection_manager = connection_manager
+
+
+default_receiver_runtime_authenticator = LegacyStoreTokenRuntimeAuthenticator(
+    SessionLocal
+)
+configure_receiver_runtime(
+    app,
+    authenticator=default_receiver_runtime_authenticator,
+    connection_manager=manager,
+)
 
 
 def _write_log(db: Session, level: str, message: str):
@@ -489,22 +515,31 @@ def _receiver_bearer_token(websocket: WebSocket) -> str | None:
     return candidate
 
 
-def _constant_time_receiver_store(db: Session, candidate: str) -> Store | None:
-    candidate_bytes = candidate.encode("ascii")
-    matched_store = None
-    active_stores = db.query(Store).filter(Store.is_active.is_(True)).all()
-    for store in active_stores:
-        expected_bytes = store.receiver_token.encode("ascii")
-        if secrets.compare_digest(expected_bytes, candidate_bytes):
-            matched_store = store
-    return matched_store
-
-
 async def _reject_receiver_authentication(websocket: WebSocket) -> None:
     await websocket.close(
         code=RECEIVER_AUTH_FAILURE_CODE,
         reason=RECEIVER_AUTH_FAILURE_REASON,
     )
+
+
+def _receiver_runtime_dependencies(websocket: WebSocket):
+    runtime_app = getattr(websocket, "app", None)
+    if runtime_app is None:
+        scope = getattr(websocket, "scope", None)
+        if isinstance(scope, dict):
+            runtime_app = scope.get("app")
+    state = getattr(runtime_app, "state", None)
+    authenticator = getattr(
+        state,
+        "receiver_runtime_authenticator",
+        default_receiver_runtime_authenticator,
+    )
+    connection_manager = getattr(
+        state,
+        "receiver_connection_manager",
+        manager,
+    )
+    return authenticator, connection_manager
 
 
 @app.websocket("/api/ws/receiver")
@@ -514,25 +549,45 @@ async def ws_receiver(websocket: WebSocket):
         await _reject_receiver_authentication(websocket)
         return
 
-    db = SessionLocal()
-    try:
-        store = _constant_time_receiver_store(db, candidate)
-        if not store:
-            await _reject_receiver_authentication(websocket)
-            return
-        store_id = store.id
-    finally:
-        db.close()
-
     authenticated_at = datetime.now(timezone.utc)
+    authenticator, connection_manager = _receiver_runtime_dependencies(websocket)
+    try:
+        identity = authenticator.authenticate(
+            presented_token=candidate,
+            authenticated_at=authenticated_at,
+        )
+    except Exception:
+        await _reject_receiver_authentication(websocket)
+        return
+
+    try:
+        db = SessionLocal()
+        try:
+            store = (
+                db.query(Store)
+                .filter(Store.id == identity.store_id, Store.is_active.is_(True))
+                .first()
+            )
+            if not store:
+                raise LookupError
+            store_id = store.id
+        finally:
+            db.close()
+    except Exception:
+        await _reject_receiver_authentication(websocket)
+        return
+
     connection_id = uuid.uuid4().hex
 
     try:
-        await manager.connect_receiver(
+        await connection_manager.connect_receiver(
             store_id,
             websocket,
             connection_id,
             authenticated_at,
+            authentication_source=identity.authentication_source,
+            device_id=identity.device_id,
+            credential_id=identity.credential_id,
         )
 
         # Preserve the existing runtime health write, but only after the exact
@@ -549,15 +604,24 @@ async def ws_receiver(websocket: WebSocket):
             db.close()
 
         # If a session is currently live and this store is a target -> send PLAY immediately
-        if manager.is_live() and store_id in manager.live_target_store_ids:
-            manager.prepare_receiver_session(store_id, manager.live_session_id)
-            await manager.send_to_receiver(
+        if (
+            connection_manager.is_live()
+            and store_id in connection_manager.live_target_store_ids
+        ):
+            connection_manager.prepare_receiver_session(
                 store_id,
-                {"type": "play", "session_id": manager.live_session_id},
+                connection_manager.live_session_id,
+            )
+            await connection_manager.send_to_receiver(
+                store_id,
+                {
+                    "type": "play",
+                    "session_id": connection_manager.live_session_id,
+                },
             )
 
         while True:
-            if not manager.is_current_receiver_connection(
+            if not connection_manager.is_current_receiver_connection(
                 store_id,
                 websocket,
                 connection_id,
@@ -569,16 +633,16 @@ async def ws_receiver(websocket: WebSocket):
                     timeout=HEARTBEAT_INTERVAL_SECONDS,
                 )
             except asyncio.TimeoutError:
-                if not manager.is_current_receiver_connection(
+                if not connection_manager.is_current_receiver_connection(
                     store_id,
                     websocket,
                     connection_id,
                 ):
                     break
-                before = manager.get_receiver_snapshot(store_id)
-                after = manager.evaluate_receiver_freshness(store_id)
+                before = connection_manager.get_receiver_snapshot(store_id)
+                after = connection_manager.evaluate_receiver_freshness(store_id)
                 if before is not None and after.connection is not before.connection:
-                    await manager.notify_dashboards({
+                    await connection_manager.notify_dashboards({
                         "type": "receiver_status",
                         "store_id": store_id,
                         "status": after.connection.value.lower(),
@@ -588,7 +652,7 @@ async def ws_receiver(websocket: WebSocket):
                     break
                 continue
 
-            if not manager.is_current_receiver_connection(
+            if not connection_manager.is_current_receiver_connection(
                 store_id,
                 websocket,
                 connection_id,
@@ -599,7 +663,7 @@ async def ws_receiver(websocket: WebSocket):
                 data = json.loads(msg)
                 if not isinstance(data, dict):
                     raise ValueError("receiver acknowledgement must be an object")
-                acknowledgement, _ = manager.apply_receiver_payload(
+                acknowledgement, _ = connection_manager.apply_receiver_payload(
                     store_id,
                     data,
                     received_at,
@@ -611,7 +675,7 @@ async def ws_receiver(websocket: WebSocket):
 
             _persist_receiver_ack(store_id, acknowledgement, received_at)
             if isinstance(acknowledgement, (PlaybackErrorAcknowledgement, DeviceErrorAcknowledgement)):
-                await manager.notify_dashboards({
+                await connection_manager.notify_dashboards({
                     "type": "receiver_error",
                     "store_id": store_id,
                     "code": acknowledgement.error_code,
@@ -630,7 +694,7 @@ async def ws_receiver(websocket: WebSocket):
             store_id,
         )
     finally:
-        disconnected_current = manager.disconnect_receiver(
+        disconnected_current = connection_manager.disconnect_receiver(
             store_id,
             websocket,
             connection_id,
@@ -645,7 +709,11 @@ async def ws_receiver(websocket: WebSocket):
                     db.commit()
             finally:
                 db.close()
-            await manager.notify_dashboards({"type": "receiver_status", "store_id": store_id, "status": "offline"})
+            await connection_manager.notify_dashboards({
+                "type": "receiver_status",
+                "store_id": store_id,
+                "status": "offline",
+            })
 
 
 @app.websocket("/api/ws/hq")

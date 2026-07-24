@@ -1,6 +1,6 @@
 # EchoCast Receiver Credential Lifecycle Design
 
-Status: Phase 1 schema plus isolated enrollment, backfill, authentication, and state-transition rehearsals implemented; no runtime integration
+Status: Phase 1 schema and isolated lifecycle services implemented; explicit Receiver runtime authentication boundary added with legacy-only default
 
 Last updated: 2026-07-24
 
@@ -284,9 +284,10 @@ PLAYBACK_CONFIRMED, or SPEAKER_VERIFIED.
 
 `backend/receiver_auth_service.py` implements the future verifier as a
 read-only service over an explicitly injected SQLite engine and bounded,
-external HMAC key ring. It is not imported by FastAPI, server startup,
-WebSockets, Store APIs, the simulator, frontend, or the Receiver Agent.
-Production WebSocket authentication therefore remains unchanged.
+external HMAC key ring. It is reachable only through the explicitly injected
+migration-aware runtime adapter; normal server startup, Store APIs, the
+simulator, frontend, and Receiver Agent do not construct that adapter.
+Default production WebSocket authentication therefore remains unchanged.
 
 | State | Required legacy flag | Raw Store path | Hashed legacy path | Hashed `echocast_rcv` path |
 | --- | ---: | --- | --- | --- |
@@ -392,8 +393,9 @@ mutations. A pure constructor adapter uses one snapshot to populate the existing
 migration transition. The caller supplies the transition summary constructor,
 so the inventory itself imports no SQLAlchemy or transition-service code.
 
-This infrastructure is not wired to `server.py`, `ws_manager.py`, authentication,
-or the transition service. It stores no WebSocket, token, hash, key, header,
+The runtime manager now owns this inventory, but the inventory remains
+independent of authentication implementations and the transition service. It
+stores no WebSocket, token, hash, key, header,
 receiver health, session, or audio data. Authentication source proves only the
 credential path used at handshake; it is not evidence of READY, audio receipt,
 playback confirmation, or speaker verification.
@@ -443,6 +445,66 @@ A restart terminates sockets owned by that process, but loss of inventory state
 alone is not proof of Receiver Agent or speaker health. Transition execution
 and dual-authentication runtime cutover remain separately controlled future
 work.
+
+### Explicit Receiver runtime authentication boundary
+
+`backend/receiver_runtime_auth.py` now defines the typed boundary used by the
+Receiver WebSocket handshake. `ReceiverRuntimeIdentity` contains only Store,
+optional Device/Credential row IDs, and the canonical server-selected
+authentication source. It contains no token, hash, key, header, ORM object,
+socket, or Receiver health state.
+
+The normal imported application explicitly constructs
+`LegacyStoreTokenRuntimeAuthenticator`. It preserves the existing active-Store
+raw-token comparison, uses constant-time comparison, never reads migration
+tables, and always returns `legacy_store_token` without Device/Credential IDs.
+No environment flag or startup behavior enables hashed authentication.
+
+`MigrationAwareReceiverRuntimeAuthenticator` is a separate adapter that must be
+constructed with an explicit SQLite engine and bounded HMAC key ring, then
+injected into a specific application instance. It delegates to the read-only
+credential authentication service and preserves its exact state matrix:
+
+| State | Accepted runtime paths when explicitly injected | Canonical source |
+| --- | --- | --- |
+| `legacy_only` | Active raw Store legacy token only | `legacy_store_token` |
+| `backfilled` | Active raw Store legacy token only, with complete consistent mapping | `legacy_store_token` |
+| `dual_verify` | Identity-consistent dual-matched legacy UUID or usable `echocast_rcv` | `hashed_device_credential` |
+| `hash_only` | Hash-backed legacy UUID or usable `echocast_rcv` only | `hashed_device_credential` |
+| `raw_neutralized` | Hash-backed credentials only | `hashed_device_credential` |
+
+In `dual_verify`, a legacy UUID that succeeds through both raw and backfilled
+hash verification is canonically hash-backed and carries exact Device and
+Credential IDs. The Receiver cannot select a path, and classification is not
+based only on token shape. Source is immutable for the socket lifetime;
+reclassification requires disconnect, re-authentication, and a new server
+connection ID.
+
+This classification means a dual-matched legacy UUID socket increments the
+hashed—not legacy—transition-summary count. It does not block a future
+`dual_verify -> hash_only` narrowing, but it does block
+`dual_verify -> backfilled` until disconnect/re-authentication because
+`backfilled` disables hashed authentication.
+
+The WebSocket verifies identity before acceptance, manager/inventory
+registration, snapshot creation, or Store health writes. It then reconciles the
+returned Store ID without querying by raw token again and registers the exact
+source and optional canonical IDs. Replacement in either source direction
+retains the existing exact connection-ID rule, so delayed cleanup from the old
+socket cannot remove or mark the replacement offline.
+
+Credential tables, migration state, and the schema ledger remain read-only.
+Only the pre-existing Store connection-health fields and Receiver connection
+event may be written after successful registration. Authentication failure and
+inventory-capacity failure occur without those health writes. Authentication
+proves identity only; it never implies READY, audio receipt, playback,
+EchoGuard verification, or audible speakers.
+
+Migration-aware runtime behavior is exercised only by explicitly configured
+temporary-database test applications. There is no cutover flag, transition API,
+key auto-loading, default hashed verification, frontend change, or real-database
+migration. The inventory remains process-local and the initial deployment still
+requires one Uvicorn worker.
 
 ### Rotation
 
@@ -639,7 +701,9 @@ window exceeds policy, and confirm migration-state transitions are monotonic.
 - redacted credential representations
 - allowlisted, bounded audit metadata sanitization
 
-These helpers are not wired into APIs, WebSockets, or runtime authentication.
+These helpers remain outside public APIs. The explicitly injected
+migration-aware runtime adapter reaches them through the read-only
+authentication service; the default WebSocket path does not.
 
 ## Approved initial policies and remaining Phase 3 work
 
