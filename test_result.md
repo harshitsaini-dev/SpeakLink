@@ -102,7 +102,7 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Replace receiver WebSocket URL-token authentication with strict Authorization Bearer handshake authentication."
+user_problem_statement: "Design a secure Receiver Device credential lifecycle and SQLite-safe migration plan, with pure schema-independent helpers only."
 backend:
   - task: "Safe isolated backend smoke tests"
     implemented: true
@@ -206,11 +206,28 @@ backend:
       - working: true
         agent: "main"
         comment: "Complete isolated backend result: 65 passed, 1 skipped, 8 warnings in 4.17 seconds. Failed authentication produced no snapshot, online state, health write, or credential-bearing response."
+  - task: "Receiver credential lifecycle design and pure helpers"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_credentials.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: pure credential tests failed collection because receiver_credentials.py did not exist. No server, socket, environment secret, or database was accessed."
+      - working: false
+        agent: "main"
+        comment: "Migration-specific red phase: the explicit legacy UUID-hex hashing helpers were absent; the new-token parser was intentionally not weakened."
+      - working: true
+        agent: "main"
+        comment: "Pure credential lifecycle result: 12 passed in 0.03 seconds. Existing header-auth result: 2 passed with 3 warnings. Complete isolated backend result: 77 passed, 1 skipped, 8 warnings in 4.24 seconds."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 7
+  test_sequence: 8
   run_ui: false
 test_plan:
   current_focus: []
@@ -232,3 +249,5 @@ agent_communication:
     message: "The non-audio simulator passed real-loopback scenarios using generated credentials and a temporary database. It made no server, frontend, model, migration, FFmpeg, audio, or production database change."
   - agent: "main"
     message: "Receiver WebSocket header authentication is green. The legacy credential path was removed, the simulator uses Authorization Bearer, and browser compatibility was intentionally not weakened."
+  - agent: "main"
+    message: "Credential lifecycle design and pure helpers are complete. No model, schema, server, frontend, migration, or real database change was made; migration remains gated on design review."
