@@ -192,25 +192,32 @@ legacy and must not be used for a production receiver.
 Do not place raw receiver tokens in production URLs. Do not print or log
 passwords, JWTs, or receiver tokens.
 
-## Proposed receiver credential lifecycle
+## Receiver credential lifecycle Phase 1
 
-`RECEIVER_CREDENTIAL_LIFECYCLE.md` proposes separate `receiver_devices`,
+`RECEIVER_CREDENTIAL_LIFECYCLE.md` defines separate `receiver_devices`,
 `receiver_credentials`, structured credential audit events, and an explicit
-migration-state record. The plan covers one-time raw credential delivery,
-versioned HMAC-SHA-256 storage, expiry policy, immediate revocation, bounded
-rotation overlap, legacy backfill, validation queries, backups, partial failure,
-and rollback across five SQLite-safe phases.
+migration-state record. Phase 1 now has an explicit versioned runner in
+`backend/migrations.py`, validated only with pytest temporary SQLite files.
+It creates additive tables, indexes, foreign keys, check/unique constraints,
+and initial `legacy_only` state in one `BEGIN IMMEDIATE` transaction.
 
 `backend/receiver_credentials.py` contains pure helpers for secure credential
 generation, strict new/legacy migration formats, keyed hashing, constant-time
 verification, UTC lifecycle boundaries, rotation planning, redacted
-representations, and allowlisted audit metadata. These helpers are not wired
-into models, schemas, APIs, WebSockets, the frontend, or SQLite.
+representations, allowlisted audit metadata, the approved two-active-device
+limit, and the approved maximum 15-minute rotation grace.
 
-No migration is approved or implemented. Expiry policy, rotation grace, HMAC
-key custody/rotation, device limits, HQ authorization roles, active-socket
-revocation behavior, audit retention, migration tooling, and legacy UI/API
-removal require review first.
+Phase 1 is deliberately not invoked by `server.py`, not registered with
+`Base.metadata.create_all`, and does not add ORM models. It preserves
+`Store.receiver_token` and current WebSocket authentication unchanged. The
+runner takes an explicitly supplied SQLite engine and refuses the protected
+`backend/echocast_live.db` path before connecting unless a future reviewed
+maintenance-mode caller explicitly opts in. No credentials are backfilled.
+
+Approved initial policies are maximum two active devices per Store,
+non-expiring but revocable credentials, maximum 15-minute planned rotation
+grace, immediate compromise invalidation, external HMAC keys, and at least 12
+months of credential-audit retention.
 
 ## Current testing limitations
 
@@ -240,8 +247,12 @@ removal require review first.
   or receiver event.
 - Pure credential lifecycle helpers run without FastAPI, SQLAlchemy, sockets,
   environment secrets, or SQLite.
-- The isolated backend suite currently reports 77 passed and 1 guarded skip;
-  dependency/deprecation warnings remain.
+- Phase 1 migration tests use only pytest temporary SQLite files and cover an
+  empty file, an isolated legacy Store, indexes/constraints, foreign-key
+  enforcement, idempotency, deliberate rollback, and protected-path refusal.
+- Phase 1 migration plus pure credential tests report 21 passed. The complete
+  isolated backend suite reports 86 passed, 1 guarded skip, and 8 existing
+  dependency/deprecation warnings. Python compilation also succeeds.
 
 ## Database safety
 
@@ -253,6 +264,7 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Review and approve the credential data model and unresolved lifecycle policies.
-Only after that review, implement Phase 1 additive migration infrastructure as
-a separate change against an isolated database first.
+Design Phase 2 backfill and enrollment service transactions against disposable
+database copies. Do not enable dual verification or run Phase 1 against the
+real database until HMAC key custody and a reviewed maintenance procedure are
+ready.

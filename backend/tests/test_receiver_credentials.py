@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from receiver_credentials import (
+    MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE,
     MAX_ROTATION_GRACE,
     CredentialState,
     InvalidCredentialError,
@@ -17,6 +18,7 @@ from receiver_credentials import (
     sanitize_audit_payload,
     verify_legacy_receiver_token,
     verify_receiver_token,
+    validate_active_receiver_device_count,
 )
 
 
@@ -125,6 +127,15 @@ def test_rotation_plan_versions_and_bounds_grace_period():
         plan_rotation(4, UTC_NOW, MAX_ROTATION_GRACE + timedelta(seconds=1))
     with pytest.raises(ValueError):
         plan_rotation(0, UTC_NOW, timedelta(0))
+
+
+def test_approved_device_and_rotation_limits_are_enforced():
+    assert MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE == 2
+    assert MAX_ROTATION_GRACE == timedelta(minutes=15)
+    validate_active_receiver_device_count(0)
+    validate_active_receiver_device_count(2)
+    with pytest.raises(ValueError):
+        validate_active_receiver_device_count(3)
 
 
 def test_naive_or_non_utc_lifecycle_timestamps_are_rejected():

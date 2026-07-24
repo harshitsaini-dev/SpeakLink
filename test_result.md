@@ -223,11 +223,31 @@ backend:
       - working: true
         agent: "main"
         comment: "Pure credential lifecycle result: 12 passed in 0.03 seconds. Existing header-auth result: 2 passed with 3 warnings. Complete isolated backend result: 77 passed, 1 skipped, 8 warnings in 4.24 seconds."
+  - task: "Receiver credential migration Phase 1"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_credential_migration.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: focused collection failed because migrations.py and the approved device-limit API did not exist. No server, socket, or database was accessed."
+      - working: false
+        agent: "main"
+        comment: "First implementation run: 19 passed and one test-harness transaction-boundary check failed after read-only PRAGMAs; migration behavior itself was not the failure."
+      - working: true
+        agent: "main"
+        comment: "Focused Phase 1 and pure credential result: 21 passed in 0.32 seconds using only pytest temporary SQLite databases. Broader regression validation is pending."
+      - working: true
+        agent: "main"
+        comment: "Final focused result: 21 passed in 0.33 seconds. Receiver header-auth result: 2 passed with 3 warnings. Complete isolated backend result: 86 passed, 1 skipped, 8 warnings in 4.26 seconds. Python compilation succeeded."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 8
+  test_sequence: 9
   run_ui: false
 test_plan:
   current_focus: []
@@ -251,3 +271,7 @@ agent_communication:
     message: "Receiver WebSocket header authentication is green. The legacy credential path was removed, the simulator uses Authorization Bearer, and browser compatibility was intentionally not weakened."
   - agent: "main"
     message: "Credential lifecycle design and pure helpers are complete. No model, schema, server, frontend, migration, or real database change was made; migration remains gated on design review."
+  - agent: "main"
+    message: "Phase 1 additive migration implementation is ready for isolated regression testing. Do not invoke it against backend/echocast_live.db or enable runtime authentication changes."
+  - agent: "main"
+    message: "Phase 1 isolated validation is complete. The explicit runner remains disconnected from startup and refused the protected real database; Phase 2 backfill and dual verification remain unimplemented."

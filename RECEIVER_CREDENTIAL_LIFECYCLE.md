@@ -1,8 +1,8 @@
 # EchoCast Receiver Credential Lifecycle Design
 
-Status: proposed for review; no schema or runtime migration implemented
+Status: Phase 1 additive schema implemented and validated only on isolated SQLite databases
 
-Last updated: 2026-07-23
+Last updated: 2026-07-24
 
 ## Scope and security goals
 
@@ -24,6 +24,13 @@ Core rules:
 - Revocation prevents new authentication immediately. Closing an already
   connected device is a separate manager action performed after the revocation
   transaction commits.
+- A Store may have at most two active Receiver Devices. This is enforced by a
+  pure policy helper now and must be enforced transactionally by the Phase 2
+  device service.
+- Credentials are initially non-expiring but explicitly revocable.
+- Planned rotation grace is capped at 15 minutes; compromise rotation uses no
+  grace period.
+- Credential audit retention is at least 12 months.
 
 ## Current credential behavior
 
@@ -106,9 +113,11 @@ HMAC key adds defense if the database alone is stolen.
 Legacy UUID-hex tokens are accepted only by explicitly named migration helpers.
 The new parser never silently treats a legacy token as a new credential.
 
-## Proposed data model
+## Phase 1 additive data model
 
-The following is a design target, not executable migration SQL.
+`backend/migrations.py` now creates the following schema through migration
+version 1. It is not registered with application startup and is not created by
+`Base.metadata.create_all`.
 
 ### `receiver_devices`
 
@@ -235,9 +244,8 @@ PLAYBACK_CONFIRMED, or SPEAKER_VERIFIED.
 
 Create the new version and link it to the previous credential in one
 transaction. Recommended default is immediate invalidation. If operations
-require grace, use an explicit bounded policy; the pure helper hard-limits it
-to 24 hours, while a shorter operational maximum such as 15 minutes is
-recommended. Return the new raw token once after commit.
+require grace, the pure helper enforces the approved maximum of 15 minutes.
+Compromise rotation has zero grace. Return the new raw token once after commit.
 
 ### Revocation
 
@@ -253,25 +261,37 @@ script, maintenance plan, verified backup, and isolated rehearsal.
 
 ### Backup preparation for every phase
 
-1. Stop the single Uvicorn worker and confirm no process holds the application
-   database for schema-changing phases.
-2. Use SQLite's online backup API or `sqlite3 .backup` to create a timestamped
-   backup. Do not copy only the main file while WAL data may be outstanding.
-3. Securely back up the external HMAC key and its version separately.
-4. Run `PRAGMA integrity_check` and `PRAGMA foreign_key_check` against the
-   backup, not by experimenting on the production file.
-5. Record file metadata, migration version, row counts, and backup location;
-   never record raw-token values.
+1. Stop Uvicorn and confirm no process holds the application database.
+2. Capture the database, WAL, and SHM as one consistent backup set, or use the
+   SQLite online backup API after the writer is stopped. Never copy only the
+   main file while WAL data may be outstanding.
+3. Verify the backup can be opened and record its file metadata and Store count
+   without selecting raw credential values.
+4. Securely back up the external HMAC keys and versions separately from SQLite.
+5. Run `PRAGMA integrity_check` and `PRAGMA foreign_key_check` against the
+   verified backup.
+6. Enter maintenance mode and invoke the reviewed migration runner with the
+   explicit protected-database opt-in.
+7. Validate Store counts, identifiers, indexes, foreign keys, and migration
+   state before leaving maintenance mode.
+8. Keep the database/WAL/SHM backup set and HMAC-key rollback artifacts until
+   pilot validation is complete.
 
 ### Phase 1: additive schema
 
-- In one `BEGIN IMMEDIATE` transaction, create the device, credential,
-  credential-event, and migration-state tables plus indexes.
+- Implemented by `run_receiver_credential_phase_one(engine)` using one
+  `BEGIN IMMEDIATE` transaction and an explicit `schema_migrations` ledger.
+- Creates the device, credential, credential-event, and migration-state tables
+  plus indexes. UUID public IDs, foreign keys, uniqueness, bounded enum/check
+  constraints, expiry/revocation indexes, and HMAC lookup indexes are present.
 - Do not alter or clear `stores.receiver_token`.
 - Set migration state to `legacy_only`.
 - Deploy code that ignores the new tables, preserving existing behavior.
-- Rollback before runtime adoption may drop only the empty new tables and state
-  record, or restore the backup.
+- The runner is idempotent, installs SQLite foreign-key enforcement, and rolls
+  back all Phase 1 DDL/state on failure. It accepts an injected engine, imports
+  no default database engine, and refuses `backend/echocast_live.db` before
+  connection unless a future maintenance caller explicitly opts in.
+- No Store, device, credential, or event rows are backfilled in Phase 1.
 
 ### Phase 2: backfill hashes
 
@@ -385,26 +405,28 @@ window exceeds policy, and confirm migration-state transitions are monotonic.
 - versioned HMAC-SHA-256 hashing and constant-time verification
 - UTC expiry, revocation, inactive, and replacement-grace evaluation
 - bounded rotation planning
+- approved two-active-device and 15-minute rotation-grace policy validation
 - redacted credential representations
 - allowlisted, bounded audit metadata sanitization
 
-These helpers are not wired into models, APIs, WebSockets, or the database.
+These helpers are not wired into APIs, WebSockets, or runtime authentication.
 
-## Decisions required before migration implementation
+## Approved initial policies and remaining Phase 2 decisions
 
-1. Credential expiry: initial explicit non-expiring policy versus a target such
-   as 180 days once automated rotation exists.
-2. Rotation default: immediate invalidation versus a short operational grace
-   period, and who may approve grace.
-3. Maximum Receiver Devices per Store and device naming/ownership rules.
-4. HMAC key custody, initial version, disaster recovery, and key-rotation plan.
+Approved: maximum two active devices per Store, initially non-expiring but
+revocable credentials, maximum 15-minute planned rotation grace, immediate
+compromise invalidation, eventual active-socket disconnect after revocation,
+external HMAC keys, and at least 12 months of audit retention.
+
+Remaining decisions and implementation work:
+
+1. HMAC key custody, initial version, disaster recovery, and key-rotation plan.
    Existing hashes cannot be re-HMACed without seeing a raw credential; key
    rotation requires dual keys plus rehash-on-success or credential rotation.
-5. HQ authorization roles for enrollment, rotation, revocation, and audit read.
-6. Whether revocation must forcibly close an active socket immediately or at
-   the next validated receiver message in addition to blocking reconnect.
-7. Audit retention, failure-event aggregation, and external security export.
-8. The migration runner/versioning mechanism; `Base.metadata.create_all` is not
-   an adequate production migration system.
-9. Removal schedule for the legacy browser Receiver page, query verifier, event
+2. HQ authorization roles for enrollment, rotation, revocation, and audit read.
+3. Transactional service implementation for the two-active-device limit,
+   enrollment naming/ownership, one-time secret delivery, and audit writes.
+4. Active-socket disconnect coordination after revocation commits.
+5. Authentication-failure aggregation and external security audit export.
+6. Removal schedule for the legacy browser Receiver page, query verifier, event
    token body, raw Store schema field, and Store Management kiosk links.
