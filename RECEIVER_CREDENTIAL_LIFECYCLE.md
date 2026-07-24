@@ -368,6 +368,45 @@ credentials is a destructive storage migration that needs separately verified
 backups and rollback artifacts; a state-row change cannot recreate erased
 secrets.
 
+### Isolated active Receiver connection inventory
+
+`backend/receiver_connection_inventory.py` defines a pure, process-local
+inventory for future WebSocket integration. Each immutable connection record
+contains a bounded connection ID, Store row ID, optional Device/Credential row
+IDs, UTC authentication time, and exactly one handshake source:
+`legacy_store_token` or `hashed_device_credential`. A legacy result may omit
+Device/Credential identity before migration, while a hash-backed result must
+include both. Authentication source cannot be changed in place; re-authentication
+requires removing the old connection and registering a new connection ID.
+
+The inventory uses a lock, defaults to a maximum of 256 active connections,
+and rejects capacities outside 1 through 4096. Identical duplicate registration
+is an idempotent no-change; a different immutable record using the same
+connection ID fails closed. Removal is exact and idempotent. Generation changes
+only for an actual registration or removal, and no attempt history is retained.
+
+Snapshots atomically copy and sort the bounded record set, reconcile total,
+source, and per-Store counts, and preserve older snapshots after later
+mutations. A pure constructor adapter uses one snapshot to populate the existing
+`ActiveReceiverConnectionSummary` shape without querying SQLite or invoking a
+migration transition. The caller supplies the transition summary constructor,
+so the inventory itself imports no SQLAlchemy or transition-service code.
+
+This infrastructure is not wired to `server.py`, `ws_manager.py`, authentication,
+or the transition service. It stores no WebSocket, token, hash, key, header,
+receiver health, session, or audio data. Authentication source proves only the
+credential path used at handshake; it is not evidence of READY, audio receipt,
+playback confirmation, or speaker verification.
+
+The inventory is lost on backend restart and each Uvicorn worker would own an
+independent copy. EchoCast therefore remains limited to one worker until a
+shared authoritative coordination design exists. A newly empty inventory after
+restart is not, by itself, proof about remote speakers or sockets; the restart
+must actually have terminated those network connections. Future production
+integration must register only after authentication succeeds, remove the exact
+connection on disconnect/replacement, and reconcile restart and narrowing-
+transition behavior explicitly.
+
 ### Rotation
 
 Create the new version and link it to the previous credential in one
