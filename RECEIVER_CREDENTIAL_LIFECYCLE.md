@@ -1,6 +1,6 @@
 # SpeakLink Receiver Credential Lifecycle Design
 
-Status: Phase 1 schema, isolated enrollment/backfill, and isolated read-only authentication implemented; no runtime integration
+Status: Phase 1 schema plus isolated enrollment, backfill, authentication, and state-transition rehearsals implemented; no runtime integration
 
 Last updated: 2026-07-24
 
@@ -318,6 +318,55 @@ The immutable result exposes only non-secret identity, migration state, and
 verification source. Authentication performs no commit, audit, `last_used_at`,
 Store health, receiver-snapshot, readiness, playback, or speaker-verification
 write. Success proves identity only.
+
+### Isolated migration-state transition rehearsal
+
+`backend/receiver_migration_transition_service.py` applies only these adjacent
+edges to an explicitly injected temporary SQLite engine:
+
+```text
+backfilled -> dual_verify -> hash_only
+backfilled <- dual_verify <- hash_only
+```
+
+The exact state/flag results are `backfilled/1`, `dual_verify/1`, and
+`hash_only/0`. Direct `backfilled -> hash_only`, direct
+`hash_only -> backfilled`, transitions from `legacy_only`, transitions to or
+from `raw_neutralized`, unknown edges, and same-state replay are rejected
+without writes. Same-state replay uses a typed already-applied error.
+
+Every approved edge uses one `BEGIN IMMEDIATE` transaction. The service
+validates the Phase 1 ledger/schema, state/flag consistency, foreign keys,
+active HQ actor, non-empty Store fleet, strict unique raw Store tokens,
+complete legacy mappings, HMAC key availability, hash structure, and applicable
+credential lifecycle boundaries. `backfilled -> dual_verify`,
+`dual_verify -> hash_only`, and `hash_only -> dual_verify` additionally require
+complete hash readiness for every active Store and active Device.
+
+Narrowing transitions require an injected immutable connection summary no more
+than 30 seconds old. `dual_verify -> hash_only` requires zero active
+`legacy_store_token` connections; `dual_verify -> backfilled` requires zero
+active hash-authenticated connections. Expanding transitions require no
+disconnect. The summary contains counts and a UTC capture time only—never
+credentials or receiver health state.
+
+Success changes the singleton state/flag and appends exactly one sanitized
+`migration_state_changed` event. Store, Device, Credential, schema-ledger, and
+existing audit rows remain unchanged. Any validation, injected hook, state
+update, audit, or final-check failure rolls back both the state and appended
+event.
+
+Current WebSockets authenticate only during handshake. A database transition
+does not re-authenticate or disconnect an existing socket. Future production
+integration must obtain a trustworthy source-tagged connection inventory and
+either prove the removed source has zero sockets or perform an explicit
+disconnect/re-authentication procedure. This rehearsal accepts an injected
+summary only and performs no runtime action.
+
+`raw_neutralized` remains outside this service because erasing raw Store
+credentials is a destructive storage migration that needs separately verified
+backups and rollback artifacts; a state-row change cannot recreate erased
+secrets.
 
 ### Rotation
 

@@ -1,7 +1,7 @@
 # SpeakLink Project State
 
 Last updated: 2026-07-24
-Current branch: `feature/receiver-dual-verification-service`
+Current branch: `feature/receiver-migration-state-transitions`
 
 ## Current architecture
 
@@ -47,7 +47,8 @@ readiness, or end-to-end WebSocket audio streaming.
 
 ## Git baseline
 
-- Current branch: `feature/receiver-dual-verification-service`
+- Current branch: `feature/receiver-migration-state-transitions`
+- `a647a9f security: add isolated receiver dual verification`
 - `3ab9d0f security: rehearse receiver credential backfill`
 - Historical baseline branch: `feature/baseline-verification`
 - `6cb48a1 security: add isolated receiver enrollment service`
@@ -284,6 +285,26 @@ receiver snapshots remain unchanged. It is not connected to runtime or the
 frontend. Authentication success does not imply READY, playback confirmation,
 or speaker verification.
 
+## Isolated migration-state transition service
+
+`backend/receiver_migration_transition_service.py` rehearses only the four
+approved adjacent transitions among `backfilled`, `dual_verify`, and
+`hash_only`. It uses an explicitly injected temporary SQLite engine, bounded
+HMAC key ring, active HQ actor, UTC time, and one `BEGIN IMMEDIATE` transaction.
+
+Raw readiness, complete backfilled mappings, hash readiness, key versions,
+foreign keys, and state/flag consistency are validated before the state row is
+changed. Exactly one sanitized `migration_state_changed` audit event is
+appended on success. Store, Device, Credential, schema-ledger, and existing
+audit rows are preserved; state and audit changes roll back together.
+
+An immutable connection summary contains only legacy/hash-authenticated counts
+and a UTC capture time. Narrowing acceptance requires a summary no older than
+30 seconds and zero connections using the path being disabled. The service
+does not inspect, disconnect, re-authenticate, or create live WebSockets and
+does not modify receiver snapshots or health axes. `raw_neutralized` remains
+out of scope.
+
 ## Current testing limitations
 
 - The pre-existing integration suite was designed for an old Emergent endpoint
@@ -331,6 +352,11 @@ or speaker verification.
   dependency/deprecation warnings. The complete isolated backend suite reports
   163 passed, 1 guarded skip, and 8 existing warnings. Python compilation
   succeeds.
+- Focused migration-transition tests report 49 passed. Credential lifecycle
+  service regressions report 98 passed; existing Receiver WebSocket tests
+  report 17 passed with 5 existing dependency/deprecation warnings. The
+  complete isolated backend suite reports 212 passed, 1 guarded skip, and 8
+  existing warnings. Python compilation succeeds.
 
 ## Database safety
 
@@ -342,7 +368,6 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Rehearse transactional state transitions and rollback from `backfilled` to
-`dual_verify` to `hash_only` using temporary databases. Include safe downgrade
-rules and active-connection implications; do not integrate the verifier into
-production WebSocket authentication yet.
+Design and pure-test a source-tagged active Receiver connection inventory that
+can distinguish legacy Store-token and hash-backed handshakes. Do not invoke
+the transition service or change production authentication in that task.
