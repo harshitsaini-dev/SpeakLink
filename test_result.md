@@ -369,11 +369,34 @@ backend:
       - working: true
         agent: "main"
         comment: "Final results after explicit cancellation and metadata-redaction coverage: focused runtime integration 20 passed with 3 warnings in 1.10 seconds; pure inventory 65 passed in 0.12 seconds; authentication/transition regressions 81 passed in 2.40 seconds; existing Receiver WebSocket regressions 17 passed with 5 warnings in 1.38 seconds; complete backend 297 passed, 1 skipped, and 10 existing warnings in 7.08 seconds."
+  - task: "Explicit Receiver dual-authentication runtime boundary"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_dual_auth_runtime.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase: focused collection failed because receiver_runtime_auth.py did not exist. No production database, network socket, or migration was used."
+      - working: false
+        agent: "main"
+        comment: "The first expanded run exposed two isolated-fixture API/time assumptions: enrollment returns public rather than row IDs, and the fixed issuance time was later than machine UTC. No runtime credential logic failed."
+      - working: true
+        agent: "main"
+        comment: "Focused runtime-boundary result: 33 passed with 3 existing dependency/deprecation warnings in 1.31 seconds. Inventory regressions: 85 passed with 3 warnings. Existing Receiver WebSocket regressions: 17 passed with 5 warnings. Complete regression validation is pending."
+      - working: true
+        agent: "main"
+        comment: "Final results: focused boundary 33 passed with 3 warnings in 1.33 seconds; authentication/transition regressions 81 passed in 2.68 seconds; lifecycle regressions 66 passed in 1.31 seconds; inventory regressions 85 passed with 3 warnings; existing Receiver WebSocket regressions 17 passed with 5 warnings; complete backend 330 passed, 1 skipped, and 12 existing warnings in 6.82 seconds. Python compilation succeeded."
+      - working: true
+        agent: "main"
+        comment: "Final hardening rerun after bounded legacy input and generic Store-reconciliation failure handling: focused boundary 34 passed with 3 warnings in 1.33 seconds; complete backend 331 passed, 1 skipped, and 12 existing warnings in 7.11 seconds. Python compilation succeeded."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 15
+  test_sequence: 16
   run_ui: false
 test_plan:
   current_focus: []
@@ -425,3 +448,7 @@ agent_communication:
     message: "Legacy-only Receiver WebSocket inventory wiring is ready for complete backend regression testing. Hashed authentication, transition execution, schema changes, frontend behavior, and the protected database remain out of scope."
   - agent: "main"
     message: "Legacy-only runtime inventory validation is complete. Exact connection cleanup and summary counts are green; production authentication remains raw Store-token only and no migration transition or protected-database operation was added."
+  - agent: "main"
+    message: "The explicit runtime authentication boundary is ready for complete backend regression testing. The normal app remains legacy-only; migration-aware behavior requires an injected temporary engine/key ring, and no production cutover or transition API exists."
+  - agent: "main"
+    message: "Dual-authentication runtime-boundary validation is complete. The default application remains legacy-only; explicit temporary-app injection preserves canonical source IDs without credential-table writes or a production migration-state cutover."

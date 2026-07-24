@@ -70,6 +70,11 @@ class WSManager:
         ws: WebSocket,
         connection_id: str,
         authenticated_at: datetime,
+        authentication_source: ConnectionAuthenticationSource = (
+            ConnectionAuthenticationSource.LEGACY_STORE_TOKEN
+        ),
+        device_id: int | None = None,
+        credential_id: int | None = None,
         received_at: datetime | None = None,
     ) -> AuthenticatedReceiverConnection:
         await ws.accept()
@@ -77,9 +82,9 @@ class WSManager:
         record = AuthenticatedReceiverConnection(
             connection_id=connection_id,
             store_id=store_id,
-            device_id=None,
-            credential_id=None,
-            authentication_source=ConnectionAuthenticationSource.LEGACY_STORE_TOKEN,
+            device_id=device_id,
+            credential_id=credential_id,
+            authentication_source=authentication_source,
             authenticated_at=authenticated_at,
         )
 

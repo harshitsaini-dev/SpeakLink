@@ -355,7 +355,8 @@ acknowledgements or freshness changes to replacement snapshots.
 
 The manager can construct the existing transition summary from one atomic
 inventory snapshot. No transition is invoked and no API route is exposed.
-Runtime counts are legacy-only and hashed authentication remains disabled.
+Normal-application runtime counts are legacy-only; hashed authentication is
+available only to explicitly injected isolated applications.
 Authentication/connection identity still does not imply READY, audio receipt,
 playback confirmation, LinkGuard verification, or audible speaker output.
 
@@ -364,6 +365,42 @@ and disappears on restart. Multiple workers would have independent inventories,
 so exactly one Uvicorn worker remains required. No credential migration, schema
 change, real-database transition, dual-verification cutover, frontend change,
 Receiver Agent, or audio behavior is included.
+
+## Explicit dual-authentication runtime boundary
+
+The Receiver WebSocket now asks an injected typed authenticator for an immutable
+non-secret identity before acceptance. The normal application explicitly uses
+the legacy implementation, so production behavior remains active raw
+`Store.receiver_token` verification only and runtime inventory records remain
+`legacy_store_token` with no Device/Credential IDs. Default startup does not
+read migration state or require an HMAC key.
+
+An isolated application may explicitly inject the migration-aware adapter with
+a temporary SQLite engine and bounded HMAC key ring. It preserves the existing
+read-only service matrix: legacy-only/backfilled raw success is classified
+`legacy_store_token`; dual-verified, hash-only, and raw-neutralized hash-backed
+success is `hashed_device_credential`. In `dual_verify`, an identity-consistent
+legacy UUID match across raw and hash paths is canonically hash-backed with its
+exact Device/Credential IDs. The client cannot choose or change this source.
+
+Manager registration propagates that authoritative source and identity into the
+process-local inventory. Replacements work in both source directions and exact
+connection-ID cleanup prevents an older finally block from removing or marking
+the replacement offline. A dual-matched legacy UUID therefore contributes to
+the hashed summary count: it does not block `dual_verify -> hash_only`, but it
+does block `dual_verify -> backfilled` until it disconnects or re-authenticates.
+
+The credential, audit, migration-state, and schema-ledger tables remain
+read-only during handshake. Existing Store connection-health writes occur only
+after successful manager/inventory registration. Authentication failure and
+inventory capacity failure produce no health write or Receiver snapshot.
+Authentication source is immutable connection identity—not READY, playback,
+acoustic verification, or speaker-output proof.
+
+There is no automatic hashed-authentication cutover, environment switch,
+transition API, public configuration route, frontend change, or real-database
+migration. Migration-aware behavior remains explicit temporary-test injection.
+Inventory remains process-local, so one Uvicorn worker is still required.
 
 ## Current testing limitations
 
@@ -435,6 +472,14 @@ Receiver Agent, or audio behavior is included.
   Receiver WebSocket regressions report 17 passed with 5 existing warnings.
   The complete backend suite reports 297 passed, 1 guarded skip, and 10 existing
   warnings. Python compilation succeeds.
+- Focused explicit dual-authentication runtime-boundary tests report 34 passed
+  with 3 existing dependency/deprecation warnings using generated credentials,
+  injected test-only HMAC keys, in-process fake WebSockets, and one pytest
+  temporary SQLite database. Runtime inventory regressions report 85 passed;
+  authentication/transition regressions report 81 passed; lifecycle
+  regressions report 66 passed; existing Receiver WebSocket regressions report
+  17 passed. The complete backend suite reports 331 passed, 1 guarded skip, and
+  12 existing warnings. Python compilation succeeds.
 
 ## Database safety
 
@@ -446,9 +491,8 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Design and test the next dual-authentication runtime integration boundary using
-temporary databases and explicit migration state. It should replace the direct
-Store-token lookup with the isolated authentication service while preserving
-generic failure responses, exact inventory source tagging, and rollback to the
-legacy path. Do not expose migration transitions through a public API or run a
-real-database cutover in that task.
+Design and test a controlled cutover rehearsal that composes the explicit
+runtime authenticator, connection inventory, and existing transition service in
+temporary databases. It must define key custody/configuration validation and
+operator rollback without exposing a public transition API or enabling the
+normal application's hashed-authentication path.
