@@ -46,6 +46,9 @@ class WSManager:
         self.receivers: Dict[int, WebSocket] = {}
         # store_id -> server-generated ID for the exact current Receiver socket.
         self.receiver_connection_ids: Dict[int, str] = {}
+        # Connection IDs handed over to a replacement but not yet torn down.
+        # Their own cleanup must never claim to be the current connection.
+        self._superseded_connection_ids: Set[str] = set()
         self.receiver_connection_inventory = (
             receiver_connection_inventory or ActiveReceiverConnectionInventory()
         )
@@ -93,6 +96,16 @@ class WSManager:
             old = self.receivers.get(store_id)
             old_connection_id = self.receiver_connection_ids.get(store_id)
             if old is not None:
+                # Mark the outgoing connection before yielding to close().
+                # close() yields the event loop, and the old socket's cleanup
+                # path (disconnect_receiver) is synchronous and does not take
+                # this lock, so without this marker the old handler's finally
+                # block would see itself as the Store's current connection and
+                # drive a Store health write for a connection this replacement
+                # already owns. The Store keeps a current connection ID
+                # throughout the handover, so no observer sees a gap.
+                if old_connection_id is not None:
+                    self._superseded_connection_ids.add(old_connection_id)
                 try:
                     await old.close(code=4001)
                 except Exception:
@@ -101,6 +114,7 @@ class WSManager:
                 self.receiver_connection_ids.pop(store_id, None)
                 if old_connection_id is not None:
                     self.receiver_connection_inventory.remove(old_connection_id)
+                    self._superseded_connection_ids.discard(old_connection_id)
                 previous = self.receiver_snapshots.get(store_id)
                 if previous is not None and previous.connection is not ConnectionState.OFFLINE:
                     self.receiver_snapshots[store_id] = mark_disconnected(
@@ -131,6 +145,14 @@ class WSManager:
         exact_connection_id = connection_id or (
             current_connection_id if cur is ws else None
         )
+        if (
+            exact_connection_id is not None
+            and exact_connection_id in self._superseded_connection_ids
+        ):
+            # A replacement already owns this Store. The outgoing socket must
+            # not report itself as current, so the caller performs no Store
+            # health write. connect_receiver removes its inventory record.
+            return False
         if cur is ws and exact_connection_id == current_connection_id:
             self.receivers.pop(store_id, None)
             self.receiver_connection_ids.pop(store_id, None)

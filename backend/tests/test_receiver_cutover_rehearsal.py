@@ -775,8 +775,13 @@ def test_full_loopback_forward_cutover_and_rollback(loopback_cutover, capsys, ca
         ).authentication_source is ConnectionAuthenticationSource.LEGACY_STORE_TOKEN
         assert await _rejected(runtime.ws_url, runtime.enrolled_tokens[12])
         await final_legacy.close()
+        # The inventory record is removed before the server writes Store health,
+        # so waiting on the inventory alone can observe a stale 'online' row and
+        # let the pending 'offline' write land mid-assertion below. Wait for the
+        # health write itself to settle.
         await _wait_until(
             lambda: runtime.manager.receiver_connection_inventory.snapshot().total_active_count == 0
+            and _store_health(runtime.engine, 11).status == "offline"
         )
 
         # Capacity rejection happens after authentication but before health mutation.
