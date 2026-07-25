@@ -466,11 +466,31 @@ backend:
       - working: true
         agent: "main"
         comment: "Focused catalog result: 22 passed. Receiver WebSocket/auth/inventory regressions: 71 passed with 9 existing warnings. Credential/migration regressions: 53 passed. Isolated smoke: 6 passed with 3 existing warnings. Complete backend suite: 384 passed, 1 skipped, 32 existing warnings in 7.95 seconds (previous baseline 362 passed + 22 new catalog tests). The known real-loopback WebSocket test test_full_loopback_forward_cutover_and_rollback passed in this run. python -m compileall -q backend succeeded. Frontend: yarn test --watchAll=false --passWithNoTests reported 'No tests found, exiting with code 0' because the project has no frontend test files; CI=false yarn build reported 'Compiled successfully.' git diff --check reported no whitespace errors. Protected database backend/speaklink_live.db metadata was identical before and after: 487424 bytes, LastWriteTimeUtc 2026-07-24 08:48:46; it was never opened, queried, migrated, seeded or modified. All tests used pytest temporary SQLite databases only."
+  - task: "Catalog contract realignment and Receiver replacement handover fix"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_replacement_race.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Preflight blocker (2026-07-25 UTC, branch feat/canonical-store-zone-catalog). HEAD was d29e18e 'Correct Store names in seed file', not the expected e8b75dd; the operator had corrected 14 Store codes/names (UN Old->UN, UN ASR->ASR, Vikaspuri New Store/VP New->Vikaspuri New/VP2, RRPL New Rajapuri/RRPL RP->RRPL/RRPL, JHA6->JHA, JHA6 New->JHA2, ME DP->RMME, ME New->ME3, RG New->RG2, Vishnu Garden 2->Vishnu Garden New, Bhogal CR->RMCR, Noida->NS104, GZB->GZBD, NIT 1 Faridabad/NIT1->NIT Faridabad/NIT). The catalog contract test caught it exactly as designed: 3 failed, 381 passed, 1 skipped. Work stopped before editing and the mismatch was reported. Protected database mtime had also moved from 24/07 08:48:46 to 25/07 11:12:47 with size unchanged at 487424; the operator confirmed this was a normal backend startup, not a task command."
+      - working: false
+        agent: "main"
+        comment: "After realigning EXPECTED_CATALOG to the corrected codes the focused suite reached 22 passed, but the full suite became approximately 50% flaky (2 of 4 runs failed) at test_receiver_cutover_rehearsal.py:799 with 'offline' != 'online'. Measured at HEAD without the change: 4 of 4 runs passed. The change was therefore not dismissed as unrelated flakiness; it had unmasked latent defects by shifting xdist worker timing away from fail-fast catalog tests."
+      - working: false
+        agent: "main"
+        comment: "Two distinct latent defects were isolated. First, WSManager.connect_receiver awaited old.close() while the outgoing socket was still installed as the Store's current connection, and disconnect_receiver is synchronous and takes no lock, so the old handler's finally block could claim currency and drive a status='offline' write for a Store that had just received a healthy replacement. A first attempt that popped the old entry before the close was rejected: it introduced a transient window where get_receiver_connection_id returned None mid-handover, which broke the cutover test's polling and could surface as a spurious dashboard offline. Second, test_receiver_cutover_rehearsal.py waited only for the connection inventory to empty after closing a socket, but the server removes the inventory record before writing Store health, so the test could capture a stale 'online' row that the pending 'offline' write then invalidated mid-assertion."
+      - working: true
+        agent: "main"
+        comment: "Final implementation: WSManager tracks _superseded_connection_ids, marking a connection before its close is awaited and clearing it once the inventory record is removed; disconnect_receiver returns False for a marked ID. Existing capacity-rejection semantics and the no-gap current-connection-ID behaviour are preserved. backend/tests/test_receiver_replacement_race.py forces the interleaving deterministically (4 tests, no SQLite, no socket, no credentials) and imports ws_manager lazily so it cannot break other suites' sys.modules purity assertions under --dist loadscope. The cutover test's wait now also requires the offline health write to land. Results: focused race tests 4 passed; focused catalog 22 passed; WebSocket/inventory/cutover/auth regressions 78 passed; complete backend suite 388 passed, 1 skipped, 32 existing warnings, green across 8 consecutive runs (previously approximately 50% flaky). python -m compileall -q backend succeeded and git diff --check was clean. No frontend file changed. Protected database backend/speaklink_live.db was never opened, queried, migrated, seeded or modified; all database tests used pytest temporary files."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 20
+  test_sequence: 21
   run_ui: false
 test_plan:
   current_focus: []
@@ -542,3 +562,7 @@ agent_communication:
     message: "The canonical 9-Zone / 44-Store catalog is ready for regression validation. Zone is carried by the existing indexed Store.region field, so no schema change or migration was needed. The 13-entry demo SAMPLE_STORES list was removed from backend/seed.py; no frontend mock catalog existed because the dashboard already read /api/stores. Do not run catalog reconciliation against backend/speaklink_live.db: that needs a separate backup, dry run and approval."
   - agent: "main"
     message: "Canonical catalog validation is complete. Focused catalog 22 passed; WebSocket/auth/inventory regressions 71 passed; credential/migration regressions 53 passed; complete backend 384 passed, 1 skipped, 32 existing warnings; compileall succeeded; frontend build compiled successfully and no frontend test files exist. seed_stores is a first-run bootstrap only, so an existing fleet is never mutated at startup. The protected database metadata was unchanged, and the old demo rows it may still hold require a separate reviewed cleanup task."
+  - agent: "main"
+    message: "The Store Catalog Reconciliation Report was NOT started. Preflight found HEAD at d29e18e with 14 operator-corrected Store codes and 3 red catalog contract tests, which is a documented stop condition, so no reconciliation code exists yet. That task should be restarted from a clean, green baseline."
+  - agent: "main"
+    message: "Catalog contract realigned to the operator's corrected Store codes, and two latent defects that this unmasked are fixed: the Receiver replacement handover race in ws_manager, and a wait-condition gap in the cutover rehearsal test. The full backend suite is 388 passed, 1 skipped, 32 warnings and green across 8 consecutive runs. No frontend file changed and the protected database was never opened."

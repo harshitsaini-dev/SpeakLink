@@ -609,8 +609,13 @@ migration**:
   city data, so no city value was invented.
 
 Short names are preserved verbatim, including the irregular ones
-(Bhogal -> `CR`, Taimoor Nagar -> `TNS`, Noida Sector 104 -> `Noida`,
-Devli -> `DEVLI`, Krishna Nagar 2 -> `KN2`, NIT 1 Faridabad -> `NIT1`).
+(Bhogal -> `RMCR`, Mahavir Enclave Dashrathpuri -> `RMME`,
+Taimoor Nagar -> `TNS`, Noida Sector 104 -> `NS104`, Devli -> `DEVLI`,
+Krishna Nagar 2 -> `KN2`, NIT Faridabad -> `NIT`, RRPL -> `RRPL`).
+These are the operator's real store codes and must never be "corrected"
+by code. Commit `d29e18e` corrected 14 of them after the initial import;
+the contract test in `backend/tests/test_store_catalog.py` is what caught
+that change, and it was realigned to the corrected values.
 
 Backend demo seed data was removed: the previous 13-entry `SAMPLE_STORES`
 list in `backend/seed.py` (Mumbai/Pune/Delhi/Gurgaon/Bangalore/Hyderabad/
@@ -650,9 +655,45 @@ SPEAKER_VERIFIED.
 
 Tests: focused catalog 22 passed; Receiver WebSocket/auth/inventory
 regressions 71 passed; credential/migration regressions 53 passed;
-complete backend suite 384 passed, 1 skipped, 32 existing warnings.
-`compileall` succeeded, `yarn build` compiled successfully, and
-`yarn test --passWithNoTests` reported no frontend test files exist.
+complete backend suite 388 passed, 1 skipped, 32 existing warnings, green
+across 8 consecutive runs. `compileall` succeeded. The frontend was not
+changed by the catalog-correction/stabilisation work; its last verified state
+is `yarn build` compiling successfully with no frontend test files present.
+
+## Receiver replacement handover fix
+
+`WSManager.connect_receiver` closes the Store's previous socket while holding
+`_receiver_lock`. `await old.close(...)` yields the event loop, and
+`disconnect_receiver` is synchronous and does not take that lock, so the
+outgoing socket's `finally` block could observe itself as the Store's current
+connection. The server then wrote `status='offline'` for a Store whose
+connection had just been handed to a healthy replacement, breaking the
+documented invariant that a superseded or rejected connection produces no
+Store health write.
+
+`WSManager` now tracks `_superseded_connection_ids`. A connection is marked
+before the close is awaited and cleared once its inventory record is removed;
+`disconnect_receiver` returns `False` for a marked ID. The Store keeps a
+current connection ID throughout the handover, so no observer sees a gap and
+the existing capacity-rejection semantics are unchanged.
+
+`backend/tests/test_receiver_replacement_race.py` forces the interleaving
+explicitly rather than relying on scheduler timing, so the ordering cannot
+regress silently. It uses no SQLite database, no socket and no credentials,
+and imports `ws_manager` lazily so it cannot pollute the other suites'
+`sys.modules` purity assertions under `--dist loadscope`.
+
+A separate synchronisation gap was fixed in
+`backend/tests/test_receiver_cutover_rehearsal.py`: after closing a socket it
+waited only for the connection inventory to empty, but the server removes the
+inventory record *before* writing Store health. The wait now also requires the
+`offline` health write to land, so the test no longer captures a stale
+`online` row that the pending write invalidates mid-assertion.
+
+Both issues were latent. They surfaced when the catalog contract tests changed
+from failing fast to passing, which shifted xdist worker timing. The full
+backend suite was approximately 50% flaky at that point and is now green
+across 8 consecutive runs.
 
 ## Windows Deployment Specification
 
