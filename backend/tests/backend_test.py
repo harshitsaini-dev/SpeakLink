@@ -119,25 +119,30 @@ class TestStores:
         r = api.get(f"{BASE_URL}/api/stores", headers=auth)
         assert r.status_code == 200
         data = r.json()
-        assert len(data) >= 13
+        # The canonical catalog defines 9 Zones and 44 Stores.
+        assert len(data) >= 44
         codes = [s["store_code"] for s in data]
-        for c in ["MUM-001", "DEL-001", "BLR-001", "ONL-001"]:
+        for c in ["UN Old", "PV", "KN", "NIT1"]:
             assert c in codes
 
     def test_search_filter(self, api, auth):
-        r = api.get(f"{BASE_URL}/api/stores?q=MUM", headers=auth)
+        r = api.get(f"{BASE_URL}/api/stores?q=Krishna", headers=auth)
         assert r.status_code == 200
-        assert all("MUM" in s["store_code"] or "MUM" in s["store_name"].upper() for s in r.json())
+        assert all(
+            "KRISHNA" in s["store_code"].upper() or "KRISHNA" in s["store_name"].upper()
+            for s in r.json()
+        )
 
     def test_region_filter(self, api, auth):
-        r = api.get(f"{BASE_URL}/api/stores?region=South", headers=auth)
+        # Zone is carried by the existing indexed Store.region field.
+        r = api.get(f"{BASE_URL}/api/stores?region=SOUTH ZONE", headers=auth)
         assert r.status_code == 200
-        assert all(s["region"] == "South" for s in r.json())
+        assert all(s["region"] == "SOUTH ZONE" for s in r.json())
 
     def test_city_filter(self, api, auth):
-        r = api.get(f"{BASE_URL}/api/stores?city=Bangalore", headers=auth)
+        r = api.get(f"{BASE_URL}/api/stores?city=SOUTH ZONE", headers=auth)
         assert r.status_code == 200
-        assert all(s["city"] == "Bangalore" for s in r.json())
+        assert all(s["city"] == "SOUTH ZONE" for s in r.json())
 
     def test_create_and_duplicate(self, api, auth):
         code = f"TEST-{uuid.uuid4().hex[:6].upper()}"

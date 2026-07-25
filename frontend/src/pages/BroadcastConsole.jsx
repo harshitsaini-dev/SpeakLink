@@ -7,7 +7,7 @@ import StatusBadge from "@/components/StatusBadge";
 const TARGET_MODES = [
   { value: "selected", label: "Selected Stores" },
   { value: "all", label: "All Stores" },
-  { value: "region", label: "By Region" },
+  { value: "region", label: "By Zone" },
   { value: "city", label: "By City" },
   { value: "online_only", label: "Online Stores Only" },
 ];
@@ -280,7 +280,7 @@ export default function BroadcastConsole() {
 
             {targetMode === "region" && (
               <div>
-                <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Region</label>
+                <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Zone</label>
                 <select data-testid="region-select" value={region} onChange={(e) => setRegion(e.target.value)}
                         className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm bg-white" disabled={isLive}>
                   <option value="">— select —</option>
@@ -390,7 +390,7 @@ export default function BroadcastConsole() {
                 {targetMode === "selected" && <th className="px-3 py-2 w-10"></th>}
                 <th className="px-3 py-2">Code</th>
                 <th className="px-3 py-2">Name</th>
-                <th className="px-3 py-2">City / Region</th>
+                <th className="px-3 py-2">City / Zone</th>
                 <th className="px-3 py-2">Status</th>
                 <th className="px-3 py-2">Play Status</th>
               </tr>

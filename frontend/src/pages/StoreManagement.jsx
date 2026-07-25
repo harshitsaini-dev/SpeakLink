@@ -53,7 +53,7 @@ export default function StoreManagement() {
               <th className="px-3 py-2">Code</th>
               <th className="px-3 py-2">Name</th>
               <th className="px-3 py-2">City</th>
-              <th className="px-3 py-2">Region</th>
+              <th className="px-3 py-2">Zone</th>
               <th className="px-3 py-2">Type</th>
               <th className="px-3 py-2">Status</th>
               <th className="px-3 py-2">Receiver URL</th>
@@ -110,7 +110,7 @@ function AddStoreModal({ onClose, onCreated }) {
         <h3 className="text-lg font-semibold">Add Store</h3>
         {["store_code", "store_name", "city", "region"].map((k) => (
           <div key={k}>
-            <label className="block text-xs font-bold uppercase tracking-widest text-slate-500 mb-1">{k.replace("_", " ")}</label>
+            <label className="block text-xs font-bold uppercase tracking-widest text-slate-500 mb-1">{(k === "region" ? "zone" : k).replace("_", " ")}</label>
             <input required data-testid={`add-${k.replace("_", "-")}-input`} value={f[k]}
                    onChange={(e) => setF({ ...f, [k]: e.target.value })}
                    className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
