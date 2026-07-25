@@ -55,35 +55,35 @@ CANONICAL_ZONES: tuple[str, ...] = (
 # Devli -> DEVLI, Krishna Nagar 2 -> KN2, NIT 1 Faridabad -> NIT1).
 CANONICAL_STORES: tuple[CanonicalStore, ...] = (
     # ZONE 1 - UN ZONE
-    CanonicalStore("UN ZONE", "Uttam Nagar Old", "UN Old"),
-    CanonicalStore("UN ZONE", "Uttam Nagar ASR", "UN ASR"),
+    CanonicalStore("UN ZONE", "Uttam Nagar Old", "UN"),
+    CanonicalStore("UN ZONE", "Uttam Nagar ASR", "ASR"),
     CanonicalStore("UN ZONE", "Kiran Garden", "KG"),
     CanonicalStore("UN ZONE", "Mohan Garden", "MG"),
     CanonicalStore("UN ZONE", "Dwarka Mor", "DM"),
     CanonicalStore("UN ZONE", "Rajapuri", "RP"),
     CanonicalStore("UN ZONE", "Vikaspuri", "VP"),
-    CanonicalStore("UN ZONE", "Vikaspuri New Store", "VP New"),
-    CanonicalStore("UN ZONE", "RRPL New Rajapuri", "RRPL RP"),
+    CanonicalStore("UN ZONE", "Vikaspuri New", "VP2"),
+    CanonicalStore("UN ZONE", "RRPL", "RRPL"),
     # ZONE 2 - PV ZONE
     CanonicalStore("PV ZONE", "Paschim Vihar", "PV"),
     CanonicalStore("PV ZONE", "Meerabagh", "MB"),
-    CanonicalStore("PV ZONE", "Jwalaheri A6", "JHA6"),
-    CanonicalStore("PV ZONE", "Jwalaheri A6 New", "JHA6 New"),
+    CanonicalStore("PV ZONE", "Jwalaheri A6", "JHA"),
+    CanonicalStore("PV ZONE", "Jwalaheri A6 New", "JHA2"),
     CanonicalStore("PV ZONE", "Jwalaheri B2", "JHB2"),
     CanonicalStore("PV ZONE", "Nangloi", "NG"),
     # ZONE 3 - ME ZONE
-    CanonicalStore("ME ZONE", "Mahavir Enclave Dashrathpuri", "ME DP"),
-    CanonicalStore("ME ZONE", "Mahavir Enclave New", "ME New"),
+    CanonicalStore("ME ZONE", "Mahavir Enclave Dashrathpuri", "RMME"),
+    CanonicalStore("ME ZONE", "Mahavir Enclave New", "ME3"),
     CanonicalStore("ME ZONE", "Bindapur", "BP"),
     CanonicalStore("ME ZONE", "Indrapark", "IP"),
     CanonicalStore("ME ZONE", "Palam", "PC"),
     CanonicalStore("ME ZONE", "Nangal Raya", "NR"),
     # ZONE 4 - RG ZONE
     CanonicalStore("RG ZONE", "Rajouri Garden", "RG"),
-    CanonicalStore("RG ZONE", "Rajouri Garden New", "RG New"),
+    CanonicalStore("RG ZONE", "Rajouri Garden New", "RG2"),
     CanonicalStore("RG ZONE", "Janakpuri", "JP"),
     CanonicalStore("RG ZONE", "Vishnu Garden", "VG"),
-    CanonicalStore("RG ZONE", "Vishnu Garden 2", "VG2"),
+    CanonicalStore("RG ZONE", "Vishnu Garden New", "VG2"),
     CanonicalStore("RG ZONE", "Ganesh Nagar", "GN"),
     CanonicalStore("RG ZONE", "Tilak Nagar", "TN"),
     CanonicalStore("RG ZONE", "Fateh Nagar", "FN"),
@@ -96,17 +96,17 @@ CANONICAL_STORES: tuple[CanonicalStore, ...] = (
     CanonicalStore("SOUTH ZONE", "Malviya Nagar", "MN"),
     CanonicalStore("SOUTH ZONE", "Kalkaji", "KJ"),
     CanonicalStore("SOUTH ZONE", "Khirki Extension", "KE"),
-    CanonicalStore("SOUTH ZONE", "Bhogal", "CR"),
+    CanonicalStore("SOUTH ZONE", "Bhogal", "RMCR"),
     CanonicalStore("SOUTH ZONE", "Taimoor Nagar", "TNS"),
     CanonicalStore("SOUTH ZONE", "Devli", "DEVLI"),
     # ZONE 7 - NORTH ZONE
     CanonicalStore("NORTH ZONE", "Budh Vihar BV2", "BV2"),
     CanonicalStore("NORTH ZONE", "Burari", "BU"),
     # ZONE 8 - NOIDA & GHAZIABAD
-    CanonicalStore("NOIDA & GHAZIABAD", "Noida Sector 104", "Noida"),
-    CanonicalStore("NOIDA & GHAZIABAD", "Ghaziabad Dundahera", "GZB"),
+    CanonicalStore("NOIDA & GHAZIABAD", "Noida Sector 104", "NS104"),
+    CanonicalStore("NOIDA & GHAZIABAD", "Ghaziabad Dundahera", "GZBD"),
     # ZONE 9 - NIT FARIDABAD
-    CanonicalStore("NIT FARIDABAD", "NIT 1 Faridabad", "NIT1"),
+    CanonicalStore("NIT FARIDABAD", "NIT Faridabad", "NIT"),
 )
 
 CATALOG_ZONE_COUNT = 9
