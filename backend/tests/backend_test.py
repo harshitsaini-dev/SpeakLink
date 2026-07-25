@@ -122,7 +122,7 @@ class TestStores:
         # The canonical catalog defines 9 Zones and 44 Stores.
         assert len(data) >= 44
         codes = [s["store_code"] for s in data]
-        for c in ["UN Old", "PV", "KN", "NIT1"]:
+        for c in ["UN", "PV", "KN", "NIT"]:
             assert c in codes
 
     def test_search_filter(self, api, auth):

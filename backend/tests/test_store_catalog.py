@@ -43,32 +43,32 @@ EXPECTED_ZONES = (
 
 # (zone, full name, short name) exactly as approved, in approved order.
 EXPECTED_CATALOG = (
-    ("UN ZONE", "Uttam Nagar Old", "UN Old"),
-    ("UN ZONE", "Uttam Nagar ASR", "UN ASR"),
+    ("UN ZONE", "Uttam Nagar Old", "UN"),
+    ("UN ZONE", "Uttam Nagar ASR", "ASR"),
     ("UN ZONE", "Kiran Garden", "KG"),
     ("UN ZONE", "Mohan Garden", "MG"),
     ("UN ZONE", "Dwarka Mor", "DM"),
     ("UN ZONE", "Rajapuri", "RP"),
     ("UN ZONE", "Vikaspuri", "VP"),
-    ("UN ZONE", "Vikaspuri New Store", "VP New"),
-    ("UN ZONE", "RRPL New Rajapuri", "RRPL RP"),
+    ("UN ZONE", "Vikaspuri New", "VP2"),
+    ("UN ZONE", "RRPL", "RRPL"),
     ("PV ZONE", "Paschim Vihar", "PV"),
     ("PV ZONE", "Meerabagh", "MB"),
-    ("PV ZONE", "Jwalaheri A6", "JHA6"),
-    ("PV ZONE", "Jwalaheri A6 New", "JHA6 New"),
+    ("PV ZONE", "Jwalaheri A6", "JHA"),
+    ("PV ZONE", "Jwalaheri A6 New", "JHA2"),
     ("PV ZONE", "Jwalaheri B2", "JHB2"),
     ("PV ZONE", "Nangloi", "NG"),
-    ("ME ZONE", "Mahavir Enclave Dashrathpuri", "ME DP"),
-    ("ME ZONE", "Mahavir Enclave New", "ME New"),
+    ("ME ZONE", "Mahavir Enclave Dashrathpuri", "RMME"),
+    ("ME ZONE", "Mahavir Enclave New", "ME3"),
     ("ME ZONE", "Bindapur", "BP"),
     ("ME ZONE", "Indrapark", "IP"),
     ("ME ZONE", "Palam", "PC"),
     ("ME ZONE", "Nangal Raya", "NR"),
     ("RG ZONE", "Rajouri Garden", "RG"),
-    ("RG ZONE", "Rajouri Garden New", "RG New"),
+    ("RG ZONE", "Rajouri Garden New", "RG2"),
     ("RG ZONE", "Janakpuri", "JP"),
     ("RG ZONE", "Vishnu Garden", "VG"),
-    ("RG ZONE", "Vishnu Garden 2", "VG2"),
+    ("RG ZONE", "Vishnu Garden New", "VG2"),
     ("RG ZONE", "Ganesh Nagar", "GN"),
     ("RG ZONE", "Tilak Nagar", "TN"),
     ("RG ZONE", "Fateh Nagar", "FN"),
@@ -79,14 +79,14 @@ EXPECTED_CATALOG = (
     ("SOUTH ZONE", "Malviya Nagar", "MN"),
     ("SOUTH ZONE", "Kalkaji", "KJ"),
     ("SOUTH ZONE", "Khirki Extension", "KE"),
-    ("SOUTH ZONE", "Bhogal", "CR"),
+    ("SOUTH ZONE", "Bhogal", "RMCR"),
     ("SOUTH ZONE", "Taimoor Nagar", "TNS"),
     ("SOUTH ZONE", "Devli", "DEVLI"),
     ("NORTH ZONE", "Budh Vihar BV2", "BV2"),
     ("NORTH ZONE", "Burari", "BU"),
-    ("NOIDA & GHAZIABAD", "Noida Sector 104", "Noida"),
-    ("NOIDA & GHAZIABAD", "Ghaziabad Dundahera", "GZB"),
-    ("NIT FARIDABAD", "NIT 1 Faridabad", "NIT1"),
+    ("NOIDA & GHAZIABAD", "Noida Sector 104", "NS104"),
+    ("NOIDA & GHAZIABAD", "Ghaziabad Dundahera", "GZBD"),
+    ("NIT FARIDABAD", "NIT Faridabad", "NIT"),
 )
 
 # Confirmed runtime demo entries retired by this change.
@@ -195,13 +195,18 @@ def test_no_blank_or_untrimmed_catalog_values():
 
 
 def test_unusual_short_names_are_preserved_verbatim():
+    """Short names that do not follow an obvious pattern must never be
+    'corrected' by code. These are the operator's real store codes."""
     by_full_name = {entry.full_name: entry.short_name for entry in CANONICAL_STORES}
-    assert by_full_name["Bhogal"] == "CR"
+    assert by_full_name["Bhogal"] == "RMCR"
+    assert by_full_name["Mahavir Enclave Dashrathpuri"] == "RMME"
     assert by_full_name["Taimoor Nagar"] == "TNS"
-    assert by_full_name["Noida Sector 104"] == "Noida"
+    assert by_full_name["Noida Sector 104"] == "NS104"
     assert by_full_name["Devli"] == "DEVLI"
     assert by_full_name["Krishna Nagar 2"] == "KN2"
-    assert by_full_name["NIT 1 Faridabad"] == "NIT1"
+    assert by_full_name["NIT Faridabad"] == "NIT"
+    # A short name may legitimately equal its full name.
+    assert by_full_name["RRPL"] == "RRPL"
 
 
 def test_validate_catalog_accepts_the_approved_catalog():
