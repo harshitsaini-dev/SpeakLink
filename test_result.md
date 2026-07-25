@@ -449,11 +449,28 @@ backend:
       - working: true
         agent: "main"
         comment: "Focused pure documentation-contract result: 15 passed in 0.04 seconds. Existing production-runbook contract regressions: 9 passed. Cutover/transition regressions: 56 passed with 21 existing warnings (one real-loopback WebSocket test, test_full_loopback_forward_cutover_and_rollback, failed once under xdist contention and passed on every other rerun in isolation and in the full suite; this is pre-existing timing flakiness in a real-socket integration test, not a regression, since no runtime file was changed). Runtime/inventory regressions: 54 passed with 5 existing warnings. Complete backend suite: 362 passed, 1 skipped, 32 existing warnings in ~7 seconds on a clean rerun. Python compilation and `git diff --check` succeeded. No runtime Python file, frontend file, or `backend/echocast_live.db` was touched; no real HMAC key, Windows service, ACL, or TLS configuration was created."
+  - task: "Canonical Zone and Store catalog (9 Zones / 44 Stores)"
+    implemented: true
+    working: true
+    file: "backend/tests/test_store_catalog.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase (2026-07-25 UTC, branch feat/canonical-store-zone-catalog, commit before work af168aa): focused collection failed with ModuleNotFoundError: No module named 'store_catalog'. No application, protected database, migration, key, socket or network operation ran."
+      - working: false
+        agent: "main"
+        comment: "Real regression found and fixed honestly. The first seed_stores implementation was an insert-if-missing reconciler, so it injected all 44 canonical Stores into any non-empty database. That broke the isolated runtime fixtures, which build a controlled 3-Store fleet with complete backfilled credential mappings: test_receiver_dual_auth_runtime.py and neighbours reported 11 failed and 34 errors with 'NOT NULL constraint failed: stores.receiver_token'. Root cause was the seeding design, not the existing tests. seed_stores was changed to a first-run bootstrap that returns immediately when the Store table is non-empty, which is also the safer production behaviour because startup can never mutate an existing fleet. Two of the new catalog tests were updated to assert that safer contract."
+      - working: true
+        agent: "main"
+        comment: "Focused catalog result: 22 passed. Receiver WebSocket/auth/inventory regressions: 71 passed with 9 existing warnings. Credential/migration regressions: 53 passed. Isolated smoke: 6 passed with 3 existing warnings. Complete backend suite: 384 passed, 1 skipped, 32 existing warnings in 7.95 seconds (previous baseline 362 passed + 22 new catalog tests). The known real-loopback WebSocket test test_full_loopback_forward_cutover_and_rollback passed in this run. python -m compileall -q backend succeeded. Frontend: yarn test --watchAll=false --passWithNoTests reported 'No tests found, exiting with code 0' because the project has no frontend test files; CI=false yarn build reported 'Compiled successfully.' git diff --check reported no whitespace errors. Protected database backend/echocast_live.db metadata was identical before and after: 487424 bytes, LastWriteTimeUtc 2026-07-24 08:48:46; it was never opened, queried, migrated, seeded or modified. All tests used pytest temporary SQLite databases only."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 19
+  test_sequence: 20
   run_ui: false
 test_plan:
   current_focus: []
@@ -521,3 +538,7 @@ agent_communication:
     message: "The security/operations review and hosting/key-storage ADR are ready for regression validation (2026-07-25). Focused tests read Markdown only; the ADR is marked Proposed for pilot approval and selects a dedicated Windows Server/VM, one Uvicorn worker, a dedicated non-admin service identity, and DPAPI-protected key storage outside Git/SQLite. No real key, host, service account, TLS config, or database operation was performed."
   - agent: "main"
     message: "Security-operations-review/ADR validation is complete. Focused doc-contract tests, existing production-runbook tests, cutover/transition regressions, runtime/inventory regressions, and the complete backend suite are green (one real-loopback WebSocket test flaked once under parallel load and passed on every rerun, consistent with pre-existing timing sensitivity, not a regression). No runtime Python file, frontend file, or the protected database was touched."
+  - agent: "main"
+    message: "The canonical 9-Zone / 44-Store catalog is ready for regression validation. Zone is carried by the existing indexed Store.region field, so no schema change or migration was needed. The 13-entry demo SAMPLE_STORES list was removed from backend/seed.py; no frontend mock catalog existed because the dashboard already read /api/stores. Do not run catalog reconciliation against backend/echocast_live.db: that needs a separate backup, dry run and approval."
+  - agent: "main"
+    message: "Canonical catalog validation is complete. Focused catalog 22 passed; WebSocket/auth/inventory regressions 71 passed; credential/migration regressions 53 passed; complete backend 384 passed, 1 skipped, 32 existing warnings; compileall succeeded; frontend build compiled successfully and no frontend test files exist. seed_stores is a first-run bootstrap only, so an existing fleet is never mutated at startup. The protected database metadata was unchanged, and the old demo rows it may still hold require a separate reviewed cleanup task."

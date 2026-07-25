@@ -1,27 +1,15 @@
-"""Seed default admin + sample stores."""
+"""Seed the default admin user and the canonical Zone/Store catalog.
+
+The Store catalog is defined once in ``store_catalog`` and is the single
+source of truth. The React dashboard reads it through the existing Store API
+instead of keeping its own copy.
+"""
 import os
 import uuid
 from sqlalchemy.orm import Session
 from models import HQUser, Store
 from auth import hash_password, verify_password
-
-
-SAMPLE_STORES = [
-    # code, name, city, region, is_online
-    ("MUM-001", "Mumbai Andheri Flagship", "Mumbai", "West", False),
-    ("MUM-002", "Mumbai Bandra Outlet", "Mumbai", "West", False),
-    ("PUN-001", "Pune Koregaon Park", "Pune", "West", False),
-    ("DEL-001", "Delhi Connaught Place", "Delhi", "North", False),
-    ("DEL-002", "Delhi Saket Mall", "Delhi", "North", False),
-    ("GUR-001", "Gurgaon Cyber Hub", "Gurgaon", "North", False),
-    ("BLR-001", "Bangalore MG Road", "Bangalore", "South", False),
-    ("BLR-002", "Bangalore Whitefield", "Bangalore", "South", False),
-    ("HYD-001", "Hyderabad Banjara Hills", "Hyderabad", "South", False),
-    ("CHN-001", "Chennai T. Nagar", "Chennai", "South", False),
-    ("KOL-001", "Kolkata Park Street", "Kolkata", "East", False),
-    ("ONL-001", "Online Store - Web", "Online", "Online", True),
-    ("ONL-002", "Online Store - App", "Online", "Online", True),
-]
+from store_catalog import CANONICAL_STORES, validate_catalog
 
 
 def seed_admin(db: Session):
@@ -39,15 +27,32 @@ def seed_admin(db: Session):
 
 
 def seed_stores(db: Session):
+    """Bootstrap the canonical catalog into an empty Store table only.
+
+    This is deliberately a first-run bootstrap, not a reconciler. If the Store
+    table already holds any row, nothing is inserted, updated or deleted, so
+    startup can never mutate an existing fleet, rotate a ``receiver_token``, or
+    disturb Receiver Devices, Broadcast Targets, Events or history.
+
+    Reconciling an already-populated database with the approved catalog
+    (including retiring superseded demo Stores) is intentionally out of scope
+    here: it requires a verified backup, a dry run and explicit execution
+    approval against a real database.
+    """
+    validate_catalog()
+
     if db.query(Store).count() > 0:
         return
-    for code, name, city, region, is_online in SAMPLE_STORES:
+
+    for entry in CANONICAL_STORES:
         db.add(Store(
-            store_code=code,
-            store_name=name,
-            city=city,
-            region=region,
-            is_online_store=is_online,
+            store_code=entry.short_name,
+            store_name=entry.full_name,
+            # The approved catalog supplies no separate city data, so the Zone
+            # display name is used rather than inventing a city value.
+            city=entry.zone,
+            region=entry.zone,
+            is_online_store=False,
             receiver_token=uuid.uuid4().hex,
         ))
     db.commit()

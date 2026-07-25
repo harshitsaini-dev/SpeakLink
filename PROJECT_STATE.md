@@ -1,7 +1,7 @@
 # EchoCast AI Project State
 
 Last updated: 2026-07-25
-Current branch: `docs/receiver-hosting-key-storage-adr`
+Current branch: `feat/canonical-store-zone-catalog`
 
 ## Current architecture
 
@@ -591,6 +591,76 @@ rotation, one-worker startup command, graceful shutdown, health checks, and
 Windows auto-start choice) — without creating a real service account, key,
 Task Scheduler job, or production database.
 
+## Canonical Zone and Store catalog
+
+`backend/store_catalog.py` is now the single source of truth for the approved
+retail catalog: exactly **9 Zones and 44 Stores**. It is validated at import
+time and covered by 22 focused tests in
+`backend/tests/test_store_catalog.py`.
+
+Mapping onto the existing `Store` model, with **no schema change and no
+migration**:
+
+- `Store.store_code` <- canonical short name (already unique and indexed)
+- `Store.store_name` <- canonical full name
+- `Store.region` <- Zone display name (already indexed; the existing `region`
+  broadcast target mode therefore becomes Zone targeting immediately)
+- `Store.city` <- Zone display name. The approved source supplies no separate
+  city data, so no city value was invented.
+
+Short names are preserved verbatim, including the irregular ones
+(Bhogal -> `CR`, Taimoor Nagar -> `TNS`, Noida Sector 104 -> `Noida`,
+Devli -> `DEVLI`, Krishna Nagar 2 -> `KN2`, NIT 1 Faridabad -> `NIT1`).
+
+Backend demo seed data was removed: the previous 13-entry `SAMPLE_STORES`
+list in `backend/seed.py` (Mumbai/Pune/Delhi/Gurgaon/Bangalore/Hyderabad/
+Chennai/Kolkata/Online) no longer exists. No frontend mock catalog was found
+or needed removal — the React dashboard already fetched Stores exclusively
+from the existing `/api/stores` and `/api/stores/meta/regions-cities`
+endpoints, so there is exactly one authoritative catalog definition.
+
+Frontend changes were display-label only: "By Region" -> "By Zone",
+the region `<label>` -> "Zone", the console table header
+"City / Region" -> "City / Zone", the Store Management "Region" column
+header -> "Zone", and the Add Store form's `region` field label -> "zone".
+The `region` API field name, request parameters and `data-testid` values are
+unchanged.
+
+`seed_stores()` is a **first-run bootstrap, not a startup reconciler**. If the
+Store table already holds any row it inserts, updates and deletes nothing, so
+restarting the backend can never mutate an existing fleet, rotate a
+`receiver_token`, or disturb Receiver Devices, Broadcast Targets, Events or
+history. It performs no blanket `DELETE`, no cascade and no reseed.
+
+The protected real database was **not accessed or modified**. Its metadata was
+recorded before and after this task and is byte-identical
+(487,424 bytes, LastWriteTimeUtc 2026-07-24 08:48:46). Consequently
+`backend/echocast_live.db` may still contain the old demo Store rows.
+Reconciling an already-populated database with the approved catalog —
+inserting missing canonical Stores and retiring superseded demo Stores that
+may own Receiver Devices, Broadcast Targets and history — remains a
+**separate reviewed operation** requiring a verified backup, a dry run and
+explicit execution approval. It was deliberately not attempted here.
+
+Store and Receiver Device remain separate entities. The catalog carries
+identity only: no Receiver token, HMAC key, credential or other secret.
+A Store appearing in the catalog proves only that HQ knows the Store — it is
+not evidence of CONNECTED, READY, AUDIO_RECEIVING, PLAYBACK_CONFIRMED or
+SPEAKER_VERIFIED.
+
+Tests: focused catalog 22 passed; Receiver WebSocket/auth/inventory
+regressions 71 passed; credential/migration regressions 53 passed;
+complete backend suite 384 passed, 1 skipped, 32 existing warnings.
+`compileall` succeeded, `yarn build` compiled successfully, and
+`yarn test --passWithNoTests` reported no frontend test files exist.
+
+## Windows Deployment Specification
+
+Status: **not started**. `RECEIVER_HOSTING_KEY_STORAGE_ADR.md` remains
+"Proposed for pilot approval" and no deployment specification, Windows service
+identity, DPAPI secret container, ACL layout or TLS configuration has been
+written or executed.
+
 ## Database safety
 
 The real database is `backend/echocast_live.db` unless `ECHOCAST_DB_PATH` is
@@ -601,10 +671,21 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Write a test-first, implementation-neutral Windows deployment specification
-covering directory layout, dedicated service-identity permissions, a secret-file
-interface contract, the DPAPI protection/unprotection boundary, log rotation,
-the one-worker startup command, graceful shutdown, health checks, and the
-Windows auto-start choice. Keep it implementation-neutral or interface/test-only:
-do not create a real service account, real key, Task Scheduler job, or
-production database.
+Build a test-first, **dry-run-only** catalog reconciliation report for an
+already-populated database. It should compare a supplied SQLite database
+against `backend/store_catalog.py` and report, without writing anything:
+canonical Stores missing, existing Stores matching canonically, and
+non-canonical Stores together with their dependent Receiver Device,
+Broadcast Target and Receiver Event counts, so a human can decide what may
+safely be retired. It must refuse the protected `backend/echocast_live.db`
+path exactly like the existing migration/backfill services do, use only
+pytest temporary SQLite databases, and perform no insert, update or delete.
+
+Applying any reconciliation to real data stays a separate, explicitly
+approved task requiring a verified backup and a reviewed execution record.
+
+The test-first Windows deployment specification (directory layout, dedicated
+service-identity permissions, secret-file interface contract, DPAPI
+protection/unprotection boundary, log rotation, one-worker startup command,
+graceful shutdown, health checks, Windows auto-start choice) remains **not
+started** and can be resumed after the catalog work settles.
