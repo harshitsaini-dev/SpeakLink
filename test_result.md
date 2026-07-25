@@ -432,11 +432,28 @@ backend:
       - working: true
         agent: "main"
         comment: "Final results: document contract 9 passed in 0.03 seconds; cutover/transition regressions 56 passed with 21 existing warnings in 3.15 seconds; runtime/inventory regressions 54 passed with 5 existing warnings in 1.63 seconds; complete backend 347 passed, 1 skipped, and 32 existing warnings in 6.63 seconds. No runtime Python or frontend file changed, and no production database, key, migration, backup, cutover, or Receiver operation was performed."
+  - task: "Receiver hosting/key-storage security-operations review and ADR"
+    implemented: true
+    working: true
+    file: "backend/tests/test_receiver_security_operations_docs.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase (2026-07-25): 14 of 15 pure document-contract tests failed because RECEIVER_HOSTING_KEY_STORAGE_ADR.md and RECEIVER_SECURITY_OPERATIONS_REVIEW.md did not exist yet; the one passing test was the runtime-file fingerprint guard, which needs no document. No application, database, migration, key, socket, or network operation ran."
+      - working: true
+        agent: "main"
+        comment: "First full-content run reached 12 passed and 3 wording-contract failures: the ADR's decision-drivers bullet used the word 'pricing' (tripping the no-vendor-pricing check) and the security review had not yet used the exact literal status-axis terms (READY) or the exact 'No real HMAC key was loaded' / 'No real database was opened, copied, or modified' phrases. No application, database, or Receiver behavior was involved."
+      - working: true
+        agent: "main"
+        comment: "Focused pure documentation-contract result: 15 passed in 0.04 seconds. Existing production-runbook contract regressions: 9 passed. Cutover/transition regressions: 56 passed with 21 existing warnings (one real-loopback WebSocket test, test_full_loopback_forward_cutover_and_rollback, failed once under xdist contention and passed on every other rerun in isolation and in the full suite; this is pre-existing timing flakiness in a real-socket integration test, not a regression, since no runtime file was changed). Runtime/inventory regressions: 54 passed with 5 existing warnings. Complete backend suite: 362 passed, 1 skipped, 32 existing warnings in ~7 seconds on a clean rerun. Python compilation and `git diff --check` succeeded. No runtime Python file, frontend file, or `backend/speaklink_live.db` was touched; no real HMAC key, Windows service, ACL, or TLS configuration was created."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 18
+  test_sequence: 19
   run_ui: false
 test_plan:
   current_focus: []
@@ -500,3 +517,7 @@ agent_communication:
     message: "The review-only production runbook and HMAC key-custody policy are ready for regression validation. Focused tests read Markdown only; no real database, key, migration, cutover, server, Receiver, or frontend operation is authorized."
   - agent: "main"
     message: "Production runbook validation is complete. Required phases, separate key/database recovery, source blockers, staged pilot, rollback, stop/abort controls, and status separation are documented; all regressions are green and no production operation occurred."
+  - agent: "main"
+    message: "The security/operations review and hosting/key-storage ADR are ready for regression validation (2026-07-25). Focused tests read Markdown only; the ADR is marked Proposed for pilot approval and selects a dedicated Windows Server/VM, one Uvicorn worker, a dedicated non-admin service identity, and DPAPI-protected key storage outside Git/SQLite. No real key, host, service account, TLS config, or database operation was performed."
+  - agent: "main"
+    message: "Security-operations-review/ADR validation is complete. Focused doc-contract tests, existing production-runbook tests, cutover/transition regressions, runtime/inventory regressions, and the complete backend suite are green (one real-loopback WebSocket test flaked once under parallel load and passed on every rerun, consistent with pre-existing timing sensitivity, not a regression). No runtime Python file, frontend file, or the protected database was touched."

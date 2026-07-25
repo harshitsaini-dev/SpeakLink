@@ -1,7 +1,7 @@
 # SpeakLink Project State
 
-Last updated: 2026-07-24
-Current branch: `docs/receiver-production-cutover-runbook`
+Last updated: 2026-07-25
+Current branch: `docs/receiver-hosting-key-storage-adr`
 
 ## Current architecture
 
@@ -556,6 +556,41 @@ trusted acoustic speaker verification remain separate evidence.
   warnings. The complete backend suite reports 347 passed, 1 guarded skip, and
   32 existing warnings.
 
+## Receiver hosting, service-identity, and key-storage ADR
+
+A formal security/operations review and hosting/key-storage ADR are complete:
+`RECEIVER_SECURITY_OPERATIONS_REVIEW.md` and `RECEIVER_HOSTING_KEY_STORAGE_ADR.md`.
+The ADR status is "Proposed for pilot approval" — it selects a provisional pilot
+baseline and explicitly does not implement, configure, or execute it.
+
+The provisional selected pilot model is: a dedicated supported Windows
+Server/VM (not a developer laptop, not an all-Store deployment); one Uvicorn
+worker; a dedicated non-admin Windows service identity; a DPAPI-protected
+versioned HMAC-key container stored outside Git and SQLite with ACLs
+restricted to the service identity and approved recovery operators; a separate
+encrypted key backup; local SQLite with strict filesystem permissions and
+verified backups; and HTTPS/WSS termination through a separately approved
+Windows-compatible layer. No multi-worker deployment is selected.
+
+No implementation occurred: no real HMAC key was generated or loaded, no
+Windows service/account/ACL/Task Scheduler job was created, no TLS or network
+configuration changed, and `backend/speaklink_live.db` was not opened, copied,
+backed up, or modified. The normal application still authenticates only
+`Store.receiver_token`; production default behavior remains legacy-only.
+
+Named human approvals are still required before any implementation: a
+security approver, operations approver, product owner, database backup owner,
+and rollback owner must sign off on the ADR, and every "Not ready or
+unresolved" item in the security review's pilot-readiness checklist needs an
+owner before Phase E of `RECEIVER_PRODUCTION_CUTOVER_RUNBOOK.md` can begin.
+
+Next recommended task: a test-first, implementation-neutral Windows
+deployment specification (directory layout, service-identity permissions,
+secret-file interface contract, DPAPI protection/unprotection boundary, log
+rotation, one-worker startup command, graceful shutdown, health checks, and
+Windows auto-start choice) — without creating a real service account, key,
+Task Scheduler job, or production database.
+
 ## Database safety
 
 The real database is `backend/speaklink_live.db` unless `SPEAKLINK_DB_PATH` is
@@ -566,8 +601,10 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Perform a formal security and operations review of the two new documents and
-select the production hosting/service-identity and secret-storage mechanism.
-Record named approvers, recovery ownership, non-secret acceptance criteria, and
-required changes as a reviewed decision—without loading a key, accessing the
-real database, or executing any migration or cutover.
+Write a test-first, implementation-neutral Windows deployment specification
+covering directory layout, dedicated service-identity permissions, a secret-file
+interface contract, the DPAPI protection/unprotection boundary, log rotation,
+the one-worker startup command, graceful shutdown, health checks, and the
+Windows auto-start choice. Keep it implementation-neutral or interface/test-only:
+do not create a real service account, real key, Task Scheduler job, or
+production database.
