@@ -51,8 +51,9 @@ CANONICAL_ZONES: tuple[str, ...] = (
 
 # Approved Store order within each Zone. Short names are intentionally kept
 # exactly as supplied, including the ones that do not follow an obvious
-# pattern (Bhogal -> CR, Taimoor Nagar -> TNS, Noida Sector 104 -> Noida,
-# Devli -> DEVLI, Krishna Nagar 2 -> KN2, NIT 1 Faridabad -> NIT1).
+# pattern (Bhogal -> RMCR, Mahavir Enclave Dashrathpuri -> RMME,
+# Taimoor Nagar -> TNS, Noida Sector 104 -> NS104, Devli -> DEVLI,
+# Krishna Nagar 2 -> KN2, NIT Faridabad -> NIT, RRPL -> RRPL).
 CANONICAL_STORES: tuple[CanonicalStore, ...] = (
     # ZONE 1 - UN ZONE
     CanonicalStore("UN ZONE", "Uttam Nagar Old", "UN"),
