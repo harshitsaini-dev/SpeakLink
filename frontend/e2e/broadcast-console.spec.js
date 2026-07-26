@@ -273,6 +273,76 @@ test.describe('Play status is evidence, never inference', () => {
   });
 });
 
+test.describe('The target summary counts real Receiver states', () => {
+  // The console counted play_status === "playing" and play_status === "failed".
+  // The backend writes neither: it writes pending, audio_receiving,
+  // playback_confirmed, playback_error, device_error and stopped. Both counters
+  // were therefore permanently zero. That erred safe - a merely-sent command
+  // was never shown as Playing - but it also meant an operator watching a live
+  // broadcast had no summary of what the Receivers were actually doing.
+  async function liveWithTargets(page, targets) {
+    await signIn(page);
+    const state = await mockBackend(page);
+    await page.goto('/console');
+    await page.getByTestId('select-all-filtered-btn').click();
+    state.current = {
+      live: true,
+      session: { id: 8, campaign_name: CAMPAIGN, started_at: new Date().toISOString(), status: 'live' },
+      targets,
+      ready_receivers: [1],
+    };
+    await expect(page.getByTestId('live-indicator')).toBeVisible();
+    return state;
+  }
+
+  test('a target that is only pending counts as neither receiving nor confirmed', async ({ page }) => {
+    await liveWithTargets(page, [{ store_id: 1, play_status: 'pending' }]);
+
+    await expect(page.getByTestId('stat-audio-receiving')).toContainText('0');
+    await expect(page.getByTestId('stat-playback-confirmed')).toContainText('0');
+    await expect(page.getByTestId('stat-target-errors')).toContainText('0');
+  });
+
+  test('audio_receiving is counted as receiving, not as confirmed playback', async ({ page }) => {
+    await liveWithTargets(page, [
+      { store_id: 1, play_status: 'audio_receiving' },
+      { store_id: 2, play_status: 'pending' },
+    ]);
+
+    await expect(page.getByTestId('stat-audio-receiving')).toContainText('1');
+    await expect(page.getByTestId('stat-playback-confirmed')).toContainText('0');
+  });
+
+  test('playback_confirmed is counted separately', async ({ page }) => {
+    await liveWithTargets(page, [
+      { store_id: 1, play_status: 'playback_confirmed' },
+      { store_id: 2, play_status: 'audio_receiving' },
+      { store_id: 5, play_status: 'pending' },
+    ]);
+
+    await expect(page.getByTestId('stat-audio-receiving')).toContainText('1');
+    await expect(page.getByTestId('stat-playback-confirmed')).toContainText('1');
+  });
+
+  test('playback_error and device_error are both counted as errors', async ({ page }) => {
+    await liveWithTargets(page, [
+      { store_id: 1, play_status: 'playback_error' },
+      { store_id: 2, play_status: 'device_error' },
+      { store_id: 5, play_status: 'playback_confirmed' },
+    ]);
+
+    await expect(page.getByTestId('stat-target-errors')).toContainText('2');
+    await expect(page.getByTestId('stat-playback-confirmed')).toContainText('1');
+  });
+
+  test('the summary never uses the word Playing for a sent command', async ({ page }) => {
+    await liveWithTargets(page, [{ store_id: 1, play_status: 'pending' }]);
+
+    const summary = await page.getByTestId('target-summary').textContent();
+    expect((summary || '').toLowerCase()).not.toContain('playing');
+  });
+});
+
 test.describe('Stopping a broadcast', () => {
   test('Stop releases the microphone track and the recorder', async ({ page }) => {
     await signIn(page);
