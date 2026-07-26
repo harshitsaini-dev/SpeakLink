@@ -5,12 +5,26 @@
 
 .DESCRIPTION
     Reads only the scoped pilot PID files, verifies that each recorded process
-    really is an SpeakLink pilot process before touching it, asks it to stop
-    gracefully, and only force-terminates a verified pilot PID after a
-    documented timeout.
+    really is an SpeakLink pilot process before touching it, then stops the
+    COMPLETE process tree that PID owns - deepest descendant first - and reports
+    success only after every owned PID is confirmed gone and its port released.
 
-    It never terminates arbitrary Python, Node or Uvicorn processes, and it
-    never deletes the pilot database.
+    Stopping only the recorded PID is not enough on Windows. 'yarn start' becomes
+    a chain of cmd.exe and node.exe hops, and the process that actually holds
+    port 3000 sits several levels below the PID recorded at launch:
+
+        cmd.exe /c yarn start          <- the PID in frontend.pid
+        +- node.exe corepack yarn.js
+           +- cmd.exe /d /s /c "craco start"
+              +- node.exe craco
+                 +- cmd.exe /d /s /c "node ..."
+                    +- node.exe        <- actually listening on 3000
+
+    The ownership decision lives in tools\process_tree.py so it can be tested
+    against a fixed process table (backend\tests\test_process_tree.py).
+
+    It never terminates arbitrary Python, Node or Uvicorn processes, never stops
+    a process by name, and never deletes the pilot database.
 #>
 [CmdletBinding()]
 param(
@@ -25,77 +39,38 @@ if (-not $PilotRoot) {
     $PilotRoot = Join-Path $env:LOCALAPPDATA 'SpeakLink\local-pilot'
 }
 $pilotRuntime = Join-Path $PilotRoot 'runtime'
+$venvPython = Join-Path $repositoryRoot 'backend\.venv\Scripts\python.exe'
+
+. (Join-Path $PSScriptRoot 'SpeakLinkProcessTree.ps1')
 
 Write-Output '=== Stopping SpeakLink LOCAL PILOT MODE ==='
 
-function Stop-PilotProcess {
-    param(
-        [string]$PidFile,
-        [string]$Label,
-        [string[]]$ExpectedCommandFragments
-    )
-
-    if (-not (Test-Path $PidFile)) {
-        Write-Output "  $Label : no PID file, nothing to stop."
-        return
-    }
-
-    $raw = (Get-Content $PidFile -Raw).Trim()
-    $processId = 0
-    if (-not [int]::TryParse($raw, [ref]$processId) -or $processId -le 0) {
-        Write-Output "  $Label : PID file is unreadable; removing the stale file."
-        Remove-Item $PidFile -Force
-        return
-    }
-
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
-    if ($null -eq $process) {
-        Write-Output "  $Label : process $processId is not running; removing the stale PID file."
-        Remove-Item $PidFile -Force
-        return
-    }
-
-    # Only touch a process that is provably an SpeakLink pilot process.
-    $commandLine = [string]$process.CommandLine
-    $belongsToPilot = $false
-    foreach ($fragment in $ExpectedCommandFragments) {
-        if ($commandLine -like "*$fragment*") { $belongsToPilot = $true }
-    }
-    if (-not $belongsToPilot) {
-        Write-Output "  $Label : process $processId does NOT look like an SpeakLink pilot process. Refusing to stop it."
-        Write-Output "           Inspect it yourself, then remove $PidFile if it is stale."
-        return
-    }
-
-    Write-Output "  $Label : stopping process $processId gracefully..."
-    try {
-        Stop-Process -Id $processId -ErrorAction Stop
-    } catch {
-        Write-Output "  $Label : could not signal process $processId; it may have already exited."
-    }
-
-    $deadline = (Get-Date).AddSeconds($GracefulTimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if ($null -eq (Get-Process -Id $processId -ErrorAction SilentlyContinue)) { break }
-        Start-Sleep -Milliseconds 250
-    }
-
-    if ($null -ne (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
-        Write-Output "  $Label : still running after $GracefulTimeoutSeconds s; force-terminating the verified pilot PID."
-        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-    }
-
-    if (Test-Path $PidFile) { Remove-Item $PidFile -Force }
-    Write-Output "  $Label : stopped."
+if (-not (Test-Path $venvPython)) {
+    throw "Python virtual environment not found at $venvPython. It is required to work out which processes the pilot owns; refusing to stop anything by guesswork."
 }
 
-Stop-PilotProcess -PidFile (Join-Path $pilotRuntime 'frontend.pid') `
+$frontendStopped = Stop-SpeakLinkProcessTree `
+    -PidFile (Join-Path $pilotRuntime 'frontend.pid') `
     -Label 'Frontend' `
-    -ExpectedCommandFragments @('yarn', 'craco', 'react-scripts')
+    -ExpectedCommandFragments @('yarn', 'craco', 'react-scripts') `
+    -VenvPython $venvPython `
+    -RepositoryRoot $repositoryRoot `
+    -GracefulTimeoutSeconds $GracefulTimeoutSeconds
 
-Stop-PilotProcess -PidFile (Join-Path $pilotRuntime 'backend.pid') `
+$backendStopped = Stop-SpeakLinkProcessTree `
+    -PidFile (Join-Path $pilotRuntime 'backend.pid') `
     -Label 'Backend ' `
-    -ExpectedCommandFragments @('uvicorn')
+    -ExpectedCommandFragments @('uvicorn') `
+    -VenvPython $venvPython `
+    -RepositoryRoot $repositoryRoot `
+    -GracefulTimeoutSeconds $GracefulTimeoutSeconds
+
+# A released port is the independent check: if either is still bound, something
+# survived whatever the process list said.
+Write-Output ''
+Write-Output 'Verifying the pilot ports were released:'
+$backendPortFree = Test-SpeakLinkPortReleased -Port 8000
+$frontendPortFree = Test-SpeakLinkPortReleased -Port 3000
 
 # Clear process-scoped pilot values from this session.
 foreach ($name in 'ADMIN_PASSWORD', 'JWT_SECRET', 'SPEAKLINK_DB_PATH', 'REACT_APP_BACKEND_URL') {
@@ -103,7 +78,25 @@ foreach ($name in 'ADMIN_PASSWORD', 'JWT_SECRET', 'SPEAKLINK_DB_PATH', 'REACT_AP
 }
 
 Write-Output ''
-Write-Output 'Local pilot processes stopped and session pilot variables cleared.'
 Write-Output "The pilot database was NOT deleted. It remains under $PilotRoot\data."
 Write-Output 'To remove it deliberately, use the reset command documented in'
 Write-Output 'LOCAL_PILOT_TEST_RUNBOOK.md (it requires an explicit --reset-pilot-db flag).'
+Write-Output ''
+
+# Report success only when it is true. The previous version printed "stopped"
+# while the real dev server was still holding port 3000.
+$allClean = $frontendStopped -and $backendStopped -and $backendPortFree -and $frontendPortFree
+if ($allClean) {
+    Write-Output 'Local pilot fully stopped: every owned process is gone, both ports are'
+    Write-Output 'released, PID files are removed and session pilot variables are cleared.'
+    exit 0
+}
+
+Write-Output 'LOCAL PILOT NOT FULLY STOPPED.'
+if (-not $frontendStopped) { Write-Output '  - frontend process tree still has survivors' }
+if (-not $backendStopped) { Write-Output '  - backend process tree still has survivors' }
+if (-not $frontendPortFree) { Write-Output '  - port 3000 is still bound' }
+if (-not $backendPortFree) { Write-Output '  - port 8000 is still bound' }
+Write-Output 'Session pilot variables were cleared, but inspect the survivors above'
+Write-Output 'before starting another pilot. Their PID files were deliberately kept.'
+exit 1
