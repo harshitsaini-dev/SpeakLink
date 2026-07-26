@@ -46,6 +46,19 @@ class AmbiguousDeviceError(AudioDeviceError):
 
 
 INDEX_SELECTOR_PREFIX = "index:"
+# A verified selector pins an index to the exact name that was there when the
+# operator chose it: "index:7@Headphones ()".
+VERIFIED_SELECTOR_SEPARATOR = "@"
+
+# Heuristic markers for a wireless endpoint. PortAudio does not expose the
+# transport, and hardware validation showed a Bluetooth A2DP endpoint named
+# only "Headphones (Nirvana X TWS Stereo)" - no obvious marker at all. This
+# list is therefore a warning aid, never a guarantee: the operator still has
+# to confirm the endpoint is the wired one.
+_WIRELESS_MARKERS = (
+    "bluetooth", "bthhfenum", "hands-free", "handsfree",
+    "a2dp", "tws", "airpods", "wireless", "earbud",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,9 +78,19 @@ class OutputDevice:
         return f"{INDEX_SELECTOR_PREFIX}{self.index}"
 
     @property
-    def looks_like_bluetooth(self) -> bool:
+    def looks_wireless(self) -> bool:
+        """Heuristic only. A false negative is possible, so the operator must
+        still confirm the endpoint is the wired one."""
         lowered = self.name.lower()
-        return "bluetooth" in lowered or "bthhfenum" in lowered or "hands-free" in lowered
+        return any(marker in lowered for marker in _WIRELESS_MARKERS)
+
+    # Kept for readability at call sites that specifically mean Bluetooth.
+    looks_like_bluetooth = looks_wireless
+
+    @property
+    def verified_selector(self) -> str:
+        """Index pinned to the exact name, so a renumber fails closed."""
+        return f"{self.selector}{VERIFIED_SELECTOR_SEPARATOR}{self.name}"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +101,7 @@ class OutputDevice:
             "max_output_channels": self.max_output_channels,
             "name": self.name,
             "selector": self.selector,
+            "verified_selector": self.verified_selector,
         }
 
 
@@ -149,15 +173,31 @@ def resolve_output_device(
     available = tuple(devices) if devices is not None else list_output_devices(backend=backend)
 
     if cleaned.lower().startswith(INDEX_SELECTOR_PREFIX):
-        raw_index = cleaned[len(INDEX_SELECTOR_PREFIX):].strip()
+        remainder = cleaned[len(INDEX_SELECTOR_PREFIX):]
+        expected_name = None
+        if VERIFIED_SELECTOR_SEPARATOR in remainder:
+            raw_index, expected_name = remainder.split(VERIFIED_SELECTOR_SEPARATOR, 1)
+            raw_index = raw_index.strip()
+            expected_name = expected_name.strip()
+        else:
+            raw_index = remainder.strip()
         if not raw_index.isdigit():
             raise DeviceNotFoundError(f"{cleaned!r} is not a valid index selector")
         wanted = int(raw_index)
         for device in available:
-            if device.index == wanted:
-                return device
+            if device.index != wanted:
+                continue
+            if expected_name is not None and device.name != expected_name:
+                raise DeviceNotFoundError(
+                    f"index {wanted} is no longer {expected_name!r}; it is now "
+                    f"{device.name!r}. Windows renumbers devices whenever one is "
+                    "added or removed, so this selector was refused rather than "
+                    "opening the wrong endpoint. Run the device list again."
+                )
+            return device
         raise DeviceNotFoundError(
-            f"no output device has index {wanted}; run the device list command again"
+            f"no output device has index {wanted}; the list may have been "
+            "renumbered. Run the device list command again."
         )
 
     # Exact name match only. No partial matching, no case folding: the same
@@ -190,8 +230,8 @@ def format_device_table(devices: Iterable[OutputDevice]) -> str:
         flags = []
         if device.is_default:
             flags.append("current-default")
-        if device.looks_like_bluetooth:
-            flags.append("bluetooth")
+        if device.looks_wireless:
+            flags.append("wireless?")
         lines.append(
             f"{device.selector:<12} {device.name[:46]:<46} {device.host_api[:22]:<22} "
             f"{device.max_output_channels:>3} {device.default_samplerate:>7}  "
@@ -201,8 +241,16 @@ def format_device_table(devices: Iterable[OutputDevice]) -> str:
         lines.append("(no output devices were reported)")
     lines.extend([
         "",
-        "Copy the SELECTOR of the device you want, for example 'index:3'.",
+        "Bare indices are NOT stable: Windows renumbers every device whenever one",
+        "is added or removed, so a saved 'index:N' can later mean a different",
+        "endpoint. Prefer the VERIFIED selector below, which pins the index to the",
+        "exact name and fails closed after a renumber:",
+        "",
+        *[f"    {device.verified_selector}" for device in rows],
+        "",
         "Prefer a wired USB audio adapter or a 3.5 mm output.",
+        "'wireless?' is a name heuristic only - it can miss a wireless endpoint,",
+        "so confirm the device is the wired one yourself.",
         "The pilot never picks a device for you and never changes the Windows default.",
         "A device being listed does not mean an amplifier or speaker is connected.",
     ])

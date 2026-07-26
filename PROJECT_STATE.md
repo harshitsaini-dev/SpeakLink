@@ -1071,6 +1071,50 @@ audible observation has been recorded yet.
 operator confirmed they had run the application; it was byte-identical before
 and after all pilot work.
 
+## One-Store Windows output hardware validation
+
+Outcome: **`HARDWARE_PILOT_BLOCKED`**. Full evidence is in
+`ONE_STORE_WINDOWS_OUTPUT_VALIDATION_RESULT.md`.
+
+No sound was played, no audio device was ever opened, and no operator audible
+observation was obtained. The operator had **no amplifier and no wired path to
+one**, so the run could not satisfy `HARDWARE_PILOT_PASSED`, which requires
+hearing audio through the intended amplifier/speaker path. Testing over
+Bluetooth TWS earbuds was offered by the operator and recorded as an explicit
+scope deviation, but was **not executed**: the task forbids it and it could not
+have produced a pass.
+
+The validation still paid for itself by finding **four real defects before any
+sound was played**, all fixed test-first with 16 new tests against an injected
+fake backend:
+
+1. **Output format was hardcoded** at 48 kHz mono, ignoring the device. The
+   real endpoint advertised 44.1 kHz stereo under WDM-KS, which is strict about
+   formats. The sink now adopts the device's own sample rate and channel count
+   (capped at 2) and FFmpeg resamples/re-channels to match.
+2. **The test chime crashed** with a raw `EOFError` traceback in a
+   non-interactive shell. The gate correctly blocked playback, but the failure
+   is now a controlled refusal.
+3. **`index:N` was documented as stable — it is not.** Connecting a Bluetooth
+   earbud set renumbered every device and moved the wired endpoint from
+   `index:7` to `index:18`. A **verified selector** `index:N@<exact name>` was
+   added: it pins the index to the name and fails closed after a renumber,
+   naming what is actually at that index now.
+4. **Bluetooth detection missed A2DP endpoints.** `Headphones (Nirvana X TWS
+   Stereo)` was unflagged. The heuristic now also matches tws, a2dp, airpods,
+   wireless, earbud and handsfree, and prints `wireless?` so it reads as a hint,
+   not a guarantee.
+
+Protected database: **not opened, not copied, not modified** —
+507,904 bytes / 2026-07-26 08:43:13, no `-wal` or `-shm`, before and after.
+
+Tests: 65 Windows-output tests, 52 audio tests, complete backend suite
+**581 passed, 1 skipped, 32 existing warnings** across 5 consecutive runs
+(556 baseline plus 25 new).
+
+`SPEAKER_VERIFIED` remains **NOT_IMPLEMENTED**, and the amplifier path is still
+unproven.
+
 ## Windows Deployment Specification
 
 Status: **not started**. `RECEIVER_HOSTING_KEY_STORAGE_ADR.md` remains
