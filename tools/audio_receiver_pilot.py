@@ -11,10 +11,17 @@ Evidence rules this file obeys:
   decode path is proven supported, and the bounded queue exists.
 - ``audio_receiving`` is sent only after real audio bytes arrive for the active
   session.
-- ``playback_confirmed`` is sent only after FFmpeg reports it has actually
-  decoded audio (``out_time_ms`` advancing past zero on its progress stream).
-- ``speaker_verified`` is **never** sent. This Receiver decodes to a null sink,
-  so it cannot know anything about output devices, amplifiers or speakers.
+- ``playback_confirmed`` is sent only after real processing evidence: in
+  ``null`` sink mode that is FFmpeg's own ``out_time_ms`` progress counter
+  advancing past zero; in ``windows`` sink mode it is PCM frames actually
+  accepted by the explicitly selected output device.
+- ``speaker_verified`` is **never** sent. Even in ``windows`` mode the Receiver
+  only knows that a device accepted frames. It cannot know whether an amplifier
+  is on, an input is selected, or any sound was audible. Only future EchoGuard
+  acoustic detection may set SPEAKER_VERIFIED.
+
+Sink modes: ``null`` (default, used by every automated test) and ``windows``
+(requires an explicitly selected device; never the Windows default).
 
 The Receiver credential is read from an environment variable, kept in memory,
 and never printed, logged, written to a report, placed in a URL or passed as a
@@ -25,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -48,10 +56,34 @@ from audio_protocol import (  # noqa: E402
 )
 from audio_streaming import StoreAudioQueue, StoreQueueClosedError  # noqa: E402
 
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from tools.windows_audio_devices import (  # noqa: E402
+    AudioDeviceError,
+    OutputDevice,
+    format_device_table,
+    list_output_devices,
+    resolve_output_device,
+)
+
 RECEIVER_TOKEN_ENV = "ECHOCAST_RECEIVER_TOKEN"
 PROTOCOL_VERSION = "1.0"
 
+# Pilot-only, process-scoped sink configuration. The default is always the
+# null sink so automated tests and CI can never open a real speaker.
+AUDIO_SINK_MODE_ENV = "ECHOCAST_AUDIO_SINK_MODE"
+AUDIO_OUTPUT_DEVICE_ENV = "ECHOCAST_AUDIO_OUTPUT_DEVICE"
+
 SINK_MODE_NULL = "null"
+SINK_MODE_WINDOWS = "windows"
+SUPPORTED_SINK_MODES = (SINK_MODE_NULL, SINK_MODE_WINDOWS)
+
+# Decoded PCM shape for hardware playback.
+OUTPUT_SAMPLE_RATE = 48_000
+OUTPUT_CHANNELS = 1
+OUTPUT_DTYPE = "int16"
+OUTPUT_BYTES_PER_FRAME = 2 * OUTPUT_CHANNELS
 
 EXIT_OK = 0
 EXIT_SAFETY = 1
@@ -63,6 +95,71 @@ FFMPEG_EXIT_TIMEOUT_SECONDS = 15
 
 class AudioReceiverError(RuntimeError):
     """Controlled, secret-free Receiver pilot failure."""
+
+
+class SinkConfigurationError(AudioReceiverError):
+    """Raised when the sink mode or the selected output device is not valid."""
+
+
+@dataclass(frozen=True, slots=True)
+class SinkConfiguration:
+    """Resolved, process-scoped playback configuration for one Receiver run."""
+
+    sink_mode: str
+    device: OutputDevice | None
+    sample_rate: int = OUTPUT_SAMPLE_RATE
+    channels: int = OUTPUT_CHANNELS
+
+    @property
+    def is_hardware(self) -> bool:
+        return self.sink_mode == SINK_MODE_WINDOWS
+
+    def as_dict(self) -> dict:
+        """Secret-free diagnostics. A device name is never an identity."""
+        return {
+            "channels": self.channels,
+            "sample_rate": self.sample_rate,
+            "selected_device_id": self.device.selector if self.device else None,
+            "selected_device_name": self.device.name if self.device else None,
+            "selected_device_host_api": self.device.host_api if self.device else None,
+            "sink_mode": self.sink_mode,
+        }
+
+
+def resolve_sink_configuration(*, backend=None) -> SinkConfiguration:
+    """Resolve the pilot sink from the process environment.
+
+    The default is always the null sink. Hardware mode requires an explicit,
+    unambiguous device selector: the pilot never picks a device, never falls
+    back to the Windows default, and never guesses from a partial name.
+    """
+    raw_mode = (os.environ.get(AUDIO_SINK_MODE_ENV) or SINK_MODE_NULL).strip().lower()
+    if raw_mode not in SUPPORTED_SINK_MODES:
+        raise SinkConfigurationError(
+            f"{AUDIO_SINK_MODE_ENV}={raw_mode!r} is not supported; "
+            f"use one of {SUPPORTED_SINK_MODES}"
+        )
+
+    if raw_mode == SINK_MODE_NULL:
+        # A configured device is deliberately ignored in null mode so a leftover
+        # variable can never cause an unexpected sound.
+        return SinkConfiguration(sink_mode=SINK_MODE_NULL, device=None)
+
+    selector = (os.environ.get(AUDIO_OUTPUT_DEVICE_ENV) or "").strip()
+    if not selector:
+        raise SinkConfigurationError(
+            f"{SINK_MODE_WINDOWS} sink mode requires {AUDIO_OUTPUT_DEVICE_ENV} to name "
+            "exactly one output device. List devices first and copy a stable "
+            "'index:N' selector. The pilot will not choose one for you and will "
+            "never use the Windows default device."
+        )
+
+    try:
+        device = resolve_output_device(selector, backend=backend)
+    except AudioDeviceError as error:
+        raise SinkConfigurationError(str(error)) from None
+
+    return SinkConfiguration(sink_mode=SINK_MODE_WINDOWS, device=device)
 
 
 def _utc_now() -> str:
@@ -106,11 +203,113 @@ def opus_webm_decode_supported() -> bool:
     return bool(has_opus and has_webm)
 
 
-class FfmpegDecoder:
-    """One FFmpeg process per active session, decoding WebM/Opus to a null sink."""
+class WindowsPcmSink:
+    """Writes decoded PCM to exactly one explicitly selected output device.
 
-    def __init__(self, *, sink_mode: str = SINK_MODE_NULL) -> None:
+    It opens only the device the operator named. It never enumerates-and-tries,
+    never falls back to the Windows default, never changes the system default
+    device and never touches the system volume.
+    """
+
+    def __init__(self, configuration: SinkConfiguration, *, backend=None) -> None:
+        if not configuration.is_hardware or configuration.device is None:
+            raise SinkConfigurationError("a Windows PCM sink needs a selected device")
+        self._configuration = configuration
+        self._backend = backend
+        self._stream = None
+        self._frames_written = 0
+        self._failed = False
+        self._lock = threading.Lock()
+
+    @property
+    def frames_written(self) -> int:
+        with self._lock:
+            return self._frames_written
+
+    @property
+    def failed(self) -> bool:
+        return self._failed
+
+    @property
+    def is_open(self) -> bool:
+        return self._stream is not None
+
+    def open(self) -> None:
+        """Open the selected device. Raises if it cannot be opened."""
+        backend = self._backend
+        if backend is None:
+            try:
+                import sounddevice
+
+                backend = sounddevice
+            except Exception as error:
+                raise SinkConfigurationError(
+                    "the sounddevice/PortAudio backend is unavailable, so the "
+                    "selected Windows output device cannot be opened"
+                ) from error
+        device = self._configuration.device
+        try:
+            self._stream = backend.RawOutputStream(
+                samplerate=self._configuration.sample_rate,
+                channels=self._configuration.channels,
+                dtype=OUTPUT_DTYPE,
+                device=device.index,
+            )
+            self._stream.start()
+        except Exception as error:
+            self._stream = None
+            raise SinkConfigurationError(
+                f"the selected output device {device.selector} "
+                f"({device.name}) could not be opened"
+            ) from error
+
+    def write(self, pcm: bytes) -> bool:
+        stream = self._stream
+        if stream is None or self._failed:
+            return False
+        try:
+            stream.write(pcm)
+        except Exception:
+            # Never log the audio payload; record the failure for PLAYBACK_ERROR.
+            self._failed = True
+            return False
+        with self._lock:
+            self._frames_written += len(pcm) // OUTPUT_BYTES_PER_FRAME
+        return True
+
+    def close(self) -> None:
+        stream = self._stream
+        self._stream = None
+        if stream is None:
+            return
+        for step in ("stop", "close"):
+            try:
+                getattr(stream, step)()
+            except Exception:
+                pass
+
+
+class FfmpegDecoder:
+    """One FFmpeg process per active session.
+
+    In ``null`` mode it decodes to FFmpeg's null muxer and uses FFmpeg's own
+    progress counter as processing evidence. In ``windows`` mode it decodes to
+    raw PCM on stdout, which is streamed to the selected output device, and the
+    frames actually accepted by that device are the processing evidence.
+    """
+
+    def __init__(
+        self,
+        *,
+        sink_mode: str = SINK_MODE_NULL,
+        pcm_sink: "WindowsPcmSink | None" = None,
+    ) -> None:
+        if sink_mode not in SUPPORTED_SINK_MODES:
+            raise SinkConfigurationError(f"unsupported sink mode {sink_mode!r}")
+        if sink_mode == SINK_MODE_WINDOWS and pcm_sink is None:
+            raise SinkConfigurationError("windows sink mode requires an open PCM sink")
         self.sink_mode = sink_mode
+        self._pcm_sink = pcm_sink
         self._process: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
         self._decoded_us = 0
@@ -131,18 +330,32 @@ class FfmpegDecoder:
         return None if self._process is None else self._process.poll()
 
     def command(self) -> list[str]:
-        return [
+        base = [
             "ffmpeg",
             "-hide_banner",
             "-nostdin",
             "-loglevel", "error",
             "-f", "webm",
             "-i", "pipe:0",
-            "-ac", "1",
-            "-progress", "pipe:1",
-            "-f", "null",
-            "-",
+            "-ac", str(OUTPUT_CHANNELS),
         ]
+        if self.sink_mode == SINK_MODE_WINDOWS:
+            # Raw PCM on stdout. FFmpeg still never opens an audio device: the
+            # explicitly selected Windows endpoint is opened by WindowsPcmSink.
+            return base + [
+                "-ar", str(OUTPUT_SAMPLE_RATE),
+                "-f", "s16le",
+                "pipe:1",
+            ]
+        return base + ["-progress", "pipe:1", "-f", "null", "-"]
+
+    @property
+    def frames_written(self) -> int:
+        return self._pcm_sink.frames_written if self._pcm_sink is not None else 0
+
+    @property
+    def sink_failed(self) -> bool:
+        return bool(self._pcm_sink is not None and self._pcm_sink.failed)
 
     def start(self) -> None:
         if self._process is not None:
@@ -153,8 +366,28 @@ class FfmpegDecoder:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
-        self._reader = threading.Thread(target=self._read_progress, daemon=True)
+        target = self._pump_pcm if self.sink_mode == SINK_MODE_WINDOWS else self._read_progress
+        self._reader = threading.Thread(target=target, daemon=True)
         self._reader.start()
+
+    def _pump_pcm(self) -> None:
+        """Stream decoded PCM to the selected device. Never logs the payload."""
+        process = self._process
+        if process is None or process.stdout is None or self._pcm_sink is None:
+            return
+        # ~20 ms of 48 kHz mono 16-bit audio per write keeps latency low.
+        block = OUTPUT_SAMPLE_RATE // 50 * OUTPUT_BYTES_PER_FRAME
+        while True:
+            chunk = process.stdout.read(block)
+            if not chunk:
+                return
+            if not self._pcm_sink.write(chunk):
+                return
+            frames = self._pcm_sink.frames_written
+            if frames > 0:
+                with self._lock:
+                    self._decoded_us = int(frames * 1_000_000 / OUTPUT_SAMPLE_RATE)
+                self._progress_seen.set()
 
     def _read_progress(self) -> None:
         process = self._process
@@ -209,6 +442,9 @@ class FfmpegDecoder:
                 pass
         if self._reader is not None:
             self._reader.join(timeout=3)
+        # Always release the output device, even if FFmpeg had to be killed.
+        if self._pcm_sink is not None:
+            self._pcm_sink.close()
         return process.poll()
 
 
@@ -222,14 +458,19 @@ class AudioReceiverPilot:
         queue_capacity: int = 24,
         playback_timeout: float = 20.0,
         report_path: Path | None = None,
+        sink: SinkConfiguration | None = None,
+        audio_backend=None,
     ) -> None:
         self.ws_url = ws_url
         self.queue_capacity = queue_capacity
         self.playback_timeout = playback_timeout
         self.report_path = report_path
+        self.sink = sink or SinkConfiguration(sink_mode=SINK_MODE_NULL, device=None)
+        self._audio_backend = audio_backend
 
         self.session_id: int | None = None
         self.decoder: FfmpegDecoder | None = None
+        self.pcm_sink: WindowsPcmSink | None = None
         self.queue: StoreAudioQueue | None = None
         self._sequence = 0
         self._states: list[str] = []
@@ -239,13 +480,16 @@ class AudioReceiverPilot:
             "protocol_version": PROTOCOL_VERSION,
             "ffmpeg_available": False,
             "codec_supported": False,
-            "sink_mode": SINK_MODE_NULL,
+            **self.sink.as_dict(),
+            "output_stream_open": "not_applicable",
+            "output_frames_written": 0,
             "bounded_queue_capacity": queue_capacity,
             "connected": False,
             "ready": False,
             "audio_receiving": False,
             "playback_confirmed": False,
             "stopped": False,
+            "playback_error": False,
             "speaker_verified": False,
             "total_chunks": 0,
             "total_bytes": 0,
@@ -372,10 +616,30 @@ class AudioReceiverPilot:
             self._record_state("DEVICE_ERROR")
             return
 
+        # In hardware mode the selected device must actually open before READY
+        # can be claimed. A device that cannot be opened is a DEVICE_ERROR.
+        pcm_sink = None
+        if self.sink.is_hardware:
+            try:
+                pcm_sink = WindowsPcmSink(self.sink, backend=self._audio_backend)
+                pcm_sink.open()
+            except SinkConfigurationError:
+                await self._send(connection, {
+                    **self._envelope("device_error"),
+                    "error_code": "OUTPUT_DEVICE_UNAVAILABLE",
+                    "details": "the selected Windows output device could not be opened",
+                    "recoverable": False,
+                })
+                self.report["output_stream_open"] = "failed"
+                self._record_state("DEVICE_ERROR")
+                return
+            self.report["output_stream_open"] = "ok"
+
         self.session_id = prepare.broadcast_session_id
         self.queue = StoreAudioQueue(store_id=prepare.target_store_id,
                                      capacity=self.queue_capacity)
-        self.decoder = FfmpegDecoder(sink_mode=SINK_MODE_NULL)
+        self.pcm_sink = pcm_sink
+        self.decoder = FfmpegDecoder(sink_mode=self.sink.sink_mode, pcm_sink=pcm_sink)
         self.decoder.start()
 
         await self._send(connection, {
@@ -420,6 +684,19 @@ class AudioReceiverPilot:
         # Feeding FFmpeg can block briefly; keep it off the event loop.
         await asyncio.to_thread(self.decoder.feed, queued)
 
+        # A hardware output stream that fails mid-session is a PLAYBACK_ERROR,
+        # never a silent downgrade.
+        if self.decoder.sink_failed and not self.report["playback_error"]:
+            await self._send(connection, {
+                **self._envelope("playback_error"),
+                "error_code": "OUTPUT_STREAM_FAILED",
+                "details": "the selected output device stopped accepting audio",
+                "recoverable": False,
+            })
+            self.report["playback_error"] = True
+            self._record_state("PLAYBACK_ERROR")
+            return
+
         if not self.report["playback_confirmed"]:
             decoded = await asyncio.to_thread(self.decoder.wait_for_decode, 0.05)
             if decoded:
@@ -429,6 +706,7 @@ class AudioReceiverPilot:
                 })
                 self.report["playback_confirmed"] = True
                 self.report["ffmpeg_decoded_microseconds"] = self.decoder.decoded_microseconds
+                self.report["output_frames_written"] = self.decoder.frames_written
                 self._record_state("PLAYBACK_CONFIRMED")
 
     async def _on_stop(self, connection, payload: dict) -> None:
@@ -437,6 +715,9 @@ class AudioReceiverPilot:
             returncode = await asyncio.to_thread(self.decoder.close)
             self.report["ffmpeg_returncode"] = returncode
             self.report["ffmpeg_decoded_microseconds"] = self.decoder.decoded_microseconds
+        if self.pcm_sink is not None:
+            self.pcm_sink.close()
+            self.report["output_frames_written"] = self.pcm_sink.frames_written
         if self.queue is not None:
             self.queue.close()
 
@@ -452,6 +733,8 @@ class AudioReceiverPilot:
     async def _shutdown(self, connection) -> None:
         if self.decoder is not None and self.decoder.running:
             self.report["ffmpeg_returncode"] = await asyncio.to_thread(self.decoder.close)
+        if self.pcm_sink is not None:
+            self.pcm_sink.close()
         if self.queue is not None and not self.queue.closed:
             self.queue.close()
         try:
@@ -461,16 +744,91 @@ class AudioReceiverPilot:
             pass
 
 
+CHIME_SECONDS = 1.5
+CHIME_FREQUENCY_HZ = 440
+CHIME_GAIN = 0.08  # deliberately quiet; the operator raises the amplifier, not us
+
+
+def play_test_chime(
+    configuration: SinkConfiguration,
+    *,
+    backend=None,
+    confirm=input,
+    seconds: float = CHIME_SECONDS,
+) -> dict:
+    """Play a short, quiet chime to the explicitly selected device.
+
+    Manual only. It prints the exact device first and requires interactive
+    confirmation. It never changes the system volume or the default device, and
+    it never sets SPEAKER_VERIFIED - hearing it is operator observation, not
+    acoustic verification.
+    """
+    if not configuration.is_hardware or configuration.device is None:
+        raise SinkConfigurationError(
+            "the test chime requires windows sink mode and an explicitly "
+            "selected output device"
+        )
+    device = configuration.device
+    print("About to play a short, quiet test chime on EXACTLY this device:")
+    print(f"  selector : {device.selector}")
+    print(f"  name     : {device.name}")
+    print(f"  host API : {device.host_api}")
+    print(f"  rate     : {configuration.sample_rate} Hz, {configuration.channels} channel(s)")
+    if device.looks_like_bluetooth:
+        print("  WARNING  : this looks like a Bluetooth endpoint. A wired USB or")
+        print("             3.5 mm output is strongly preferred for a Store pilot.")
+    print("Keep the amplifier volume LOW. Nothing here changes Windows volume.")
+
+    answer = confirm("Type 'yes' to play the chime, anything else to cancel: ")
+    if str(answer).strip().lower() != "yes":
+        return {"played": False, "cancelled": True, "frames_written": 0,
+                "speaker_verified": False}
+
+    import math
+    import struct
+
+    total_frames = int(configuration.sample_rate * seconds)
+    samples = bytearray()
+    for frame in range(total_frames):
+        # Simple fade in/out so the chime cannot click or thump.
+        envelope = min(1.0, frame / 2000, (total_frames - frame) / 2000)
+        value = CHIME_GAIN * envelope * math.sin(
+            2 * math.pi * CHIME_FREQUENCY_HZ * frame / configuration.sample_rate
+        )
+        samples += struct.pack("<h", int(max(-1.0, min(1.0, value)) * 32767))
+
+    sink = WindowsPcmSink(configuration, backend=backend)
+    sink.open()
+    try:
+        written = sink.write(bytes(samples))
+    finally:
+        sink.close()
+
+    return {
+        "played": bool(written),
+        "cancelled": False,
+        "frames_written": sink.frames_written,
+        "device": device.as_dict(),
+        # Hearing this is useful operator evidence. It is NOT verification.
+        "speaker_verified": False,
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="audio_receiver_pilot",
         description=(
-            "Local one-Store audio Receiver pilot. Decodes WebM/Opus with FFmpeg "
-            "to a null sink and reports honest acknowledgements. It never claims "
-            "speaker output."
+            "Local one-Store audio Receiver pilot. Decodes WebM/Opus with FFmpeg. "
+            "The default sink is null; a Windows output device is used only when "
+            "explicitly selected. It never claims speaker verification."
         ),
     )
-    parser.add_argument("--url", required=True, help="Receiver WebSocket URL (loopback).")
+    parser.add_argument(
+        "action", nargs="?", default="run",
+        choices=("run", "list-output-devices", "test-output"),
+        help="run (default), list-output-devices, or test-output (manual chime).",
+    )
+    parser.add_argument("--url", help="Receiver WebSocket URL (loopback). Required for 'run'.")
     parser.add_argument("--queue-capacity", type=int, default=24)
     parser.add_argument("--report", default=None, help="Optional secret-free JSON report path.")
     return parser
@@ -478,11 +836,41 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = _build_parser().parse_args(argv)
+
+    if arguments.action == "list-output-devices":
+        try:
+            print(format_device_table(list_output_devices()))
+        except AudioDeviceError as error:
+            print(f"Device enumeration refused: {error}", file=sys.stderr)
+            return EXIT_SAFETY
+        return EXIT_OK
+
+    if arguments.action == "test-output":
+        try:
+            configuration = resolve_sink_configuration()
+            outcome = play_test_chime(configuration)
+        except AudioReceiverError as error:
+            print(f"Test chime refused: {error}", file=sys.stderr)
+            return EXIT_SAFETY
+        if outcome["cancelled"]:
+            print("Cancelled. Nothing was played.")
+            return EXIT_OK
+        print(f"  played: {outcome['played']}")
+        print(f"  frames_written: {outcome['frames_written']}")
+        print("  speaker_verified: False  (hearing it is operator observation only)")
+        return EXIT_OK if outcome["played"] else EXIT_AUDIO_FAILED
+
+    if not arguments.url:
+        print("--url is required for the 'run' action.", file=sys.stderr)
+        return EXIT_SAFETY
+
     try:
+        sink = resolve_sink_configuration()
         pilot = AudioReceiverPilot(
             ws_url=arguments.url,
             queue_capacity=arguments.queue_capacity,
             report_path=Path(arguments.report) if arguments.report else None,
+            sink=sink,
         )
         report = asyncio.run(pilot.run())
     except AudioReceiverError as error:

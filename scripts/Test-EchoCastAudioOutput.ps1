@@ -1,0 +1,57 @@
+<#
+.SYNOPSIS
+    Play a short, quiet test chime on ONE explicitly selected Windows output
+    device.
+
+.DESCRIPTION
+    Manual only. It prints the exact device first and asks you to type 'yes'
+    before anything is played.
+
+    It does not change the Windows default device, does not change system
+    volume, does not touch Bluetooth, and does not loop.
+
+    Hearing the chime is useful operator evidence. It is NOT SPEAKER_VERIFIED:
+    that requires EchoGuard acoustic detection, which does not exist yet.
+
+.EXAMPLE
+    $env:ECHOCAST_AUDIO_SINK_MODE     = 'windows'
+    $env:ECHOCAST_AUDIO_OUTPUT_DEVICE = 'index:3'
+    .\scripts\Test-EchoCastAudioOutput.ps1
+#>
+[CmdletBinding()]
+param()
+
+$ErrorActionPreference = 'Stop'
+
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+$venvPython = Join-Path $repositoryRoot 'backend\.venv\Scripts\python.exe'
+$tool = Join-Path $repositoryRoot 'tools\audio_receiver_pilot.py'
+
+if (-not (Test-Path $venvPython)) {
+    throw "Python virtual environment not found at $venvPython."
+}
+if ($env:ECHOCAST_AUDIO_SINK_MODE -ne 'windows') {
+    throw "ECHOCAST_AUDIO_SINK_MODE must be set to 'windows' for a hardware chime. It is currently '$($env:ECHOCAST_AUDIO_SINK_MODE)'."
+}
+if ([string]::IsNullOrWhiteSpace($env:ECHOCAST_AUDIO_OUTPUT_DEVICE)) {
+    throw 'ECHOCAST_AUDIO_OUTPUT_DEVICE is not set. Run .\scripts\List-EchoCastAudioDevices.ps1 and copy an exact selector such as index:3.'
+}
+
+Write-Output '=== EchoCast output-device test chime ==='
+Write-Output 'Turn the amplifier volume DOWN before continuing.'
+Write-Output 'This script never changes Windows volume or the default device.'
+Write-Output ''
+
+Push-Location $repositoryRoot
+try {
+    & $venvPython $tool test-output
+    $code = $LASTEXITCODE
+}
+finally {
+    Pop-Location
+}
+
+Write-Output ''
+Write-Output 'Reminder: hearing this chime is operator observation only.'
+Write-Output 'It is NOT SPEAKER_VERIFIED and NOT AMPLIFIER_VERIFIED.'
+exit $code
