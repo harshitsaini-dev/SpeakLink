@@ -114,6 +114,10 @@ class SinkConfiguration:
     def is_hardware(self) -> bool:
         return self.sink_mode == SINK_MODE_WINDOWS
 
+    @property
+    def bytes_per_frame(self) -> int:
+        return 2 * self.channels
+
     def as_dict(self) -> dict:
         """Secret-free diagnostics. A device name is never an identity."""
         return {
@@ -159,7 +163,18 @@ def resolve_sink_configuration(*, backend=None) -> SinkConfiguration:
     except AudioDeviceError as error:
         raise SinkConfigurationError(str(error)) from None
 
-    return SinkConfiguration(sink_mode=SINK_MODE_WINDOWS, device=device)
+    # Adopt the device's own advertised format. Hardcoding 48 kHz mono made
+    # the open fail or the audio wrong on strict host APIs such as WDM-KS,
+    # where a device may advertise 44.1 kHz stereo. FFmpeg resamples and
+    # re-channels to whatever the device wants.
+    sample_rate = device.default_samplerate or OUTPUT_SAMPLE_RATE
+    channels = min(max(device.max_output_channels, 1), 2)
+    return SinkConfiguration(
+        sink_mode=SINK_MODE_WINDOWS,
+        device=device,
+        sample_rate=sample_rate,
+        channels=channels,
+    )
 
 
 def _utc_now() -> str:
@@ -222,6 +237,10 @@ class WindowsPcmSink:
         self._lock = threading.Lock()
 
     @property
+    def configuration(self) -> SinkConfiguration:
+        return self._configuration
+
+    @property
     def frames_written(self) -> int:
         with self._lock:
             return self._frames_written
@@ -274,7 +293,7 @@ class WindowsPcmSink:
             self._failed = True
             return False
         with self._lock:
-            self._frames_written += len(pcm) // OUTPUT_BYTES_PER_FRAME
+            self._frames_written += len(pcm) // self._configuration.bytes_per_frame
         return True
 
     def close(self) -> None:
@@ -337,17 +356,22 @@ class FfmpegDecoder:
             "-loglevel", "error",
             "-f", "webm",
             "-i", "pipe:0",
-            "-ac", str(OUTPUT_CHANNELS),
         ]
         if self.sink_mode == SINK_MODE_WINDOWS:
-            # Raw PCM on stdout. FFmpeg still never opens an audio device: the
-            # explicitly selected Windows endpoint is opened by WindowsPcmSink.
+            # Raw PCM on stdout, resampled and re-channelled to exactly what
+            # the selected device advertised. FFmpeg still never opens an audio
+            # device: the endpoint is opened by WindowsPcmSink.
+            configuration = self._pcm_sink.configuration
             return base + [
-                "-ar", str(OUTPUT_SAMPLE_RATE),
+                "-ac", str(configuration.channels),
+                "-ar", str(configuration.sample_rate),
                 "-f", "s16le",
                 "pipe:1",
             ]
-        return base + ["-progress", "pipe:1", "-f", "null", "-"]
+        return base + [
+            "-ac", str(OUTPUT_CHANNELS),
+            "-progress", "pipe:1", "-f", "null", "-",
+        ]
 
     @property
     def frames_written(self) -> int:
@@ -376,7 +400,8 @@ class FfmpegDecoder:
         if process is None or process.stdout is None or self._pcm_sink is None:
             return
         # ~20 ms of 48 kHz mono 16-bit audio per write keeps latency low.
-        block = OUTPUT_SAMPLE_RATE // 50 * OUTPUT_BYTES_PER_FRAME
+        configuration = self._pcm_sink.configuration
+        block = configuration.sample_rate // 50 * configuration.bytes_per_frame
         while True:
             chunk = process.stdout.read(block)
             if not chunk:
@@ -386,7 +411,7 @@ class FfmpegDecoder:
             frames = self._pcm_sink.frames_written
             if frames > 0:
                 with self._lock:
-                    self._decoded_us = int(frames * 1_000_000 / OUTPUT_SAMPLE_RATE)
+                    self._decoded_us = int(frames * 1_000_000 / configuration.sample_rate)
                 self._progress_seen.set()
 
     def _read_progress(self) -> None:
@@ -779,7 +804,14 @@ def play_test_chime(
         print("             3.5 mm output is strongly preferred for a Store pilot.")
     print("Keep the amplifier volume LOW. Nothing here changes Windows volume.")
 
-    answer = confirm("Type 'yes' to play the chime, anything else to cancel: ")
+    try:
+        answer = confirm("Type 'yes' to play the chime, anything else to cancel: ")
+    except EOFError:
+        raise SinkConfigurationError(
+            "the test chime needs an interactive terminal to confirm before it "
+            "plays. Run it yourself in a PowerShell window; it is never played "
+            "automatically."
+        ) from None
     if str(answer).strip().lower() != "yes":
         return {"played": False, "cancelled": True, "frames_written": 0,
                 "speaker_verified": False}

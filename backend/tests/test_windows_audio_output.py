@@ -304,8 +304,10 @@ def test_sink_configuration_diagnostics_are_secret_free(monkeypatch, backend):
     assert facts["sink_mode"] == SINK_MODE_WINDOWS
     assert facts["selected_device_id"] == "index:3"
     assert facts["selected_device_name"] == "USB Audio Device"
-    assert facts["channels"] == 1
-    assert facts["sample_rate"] > 0
+    # The format is negotiated from the device, not hardcoded: index:3 in the
+    # fake advertises 2 channels at 48000 Hz.
+    assert facts["channels"] == 2
+    assert facts["sample_rate"] == 48000
     lowered = repr(facts).lower()
     for marker in ("token", "password", "authorization", "bearer", "jwt", "secret"):
         assert marker not in lowered
@@ -471,3 +473,192 @@ def test_chime_never_reports_speaker_verified(backend):
 def test_chime_uses_a_conservative_gain():
     # A loud chime into an amplifier is a real hazard.
     assert 0 < CHIME_GAIN <= 0.15
+
+
+def test_chime_in_a_non_interactive_shell_is_a_controlled_error(backend):
+    """Found during hardware validation: a non-interactive shell raised a raw
+    EOFError traceback instead of a controlled refusal."""
+    def eof_confirm(_prompt):
+        raise EOFError("EOF when reading a line")
+
+    with pytest.raises(Exception) as error:
+        play_test_chime(_hardware_config(backend), backend=backend, confirm=eof_confirm)
+    assert "interactive" in str(error.value).lower()
+    # Nothing may be opened when confirmation is impossible.
+    assert backend.opened == []
+
+
+# ---------------------------------------------------------------------------
+# Device format negotiation
+#
+# Found during hardware validation: the sink hardcoded 48000 Hz / 1 channel
+# and ignored what the device actually advertised. On this machine index:7
+# reports 44100 Hz / 2 channels under WDM-KS, which is strict about formats,
+# so the open could fail or the audio could be wrong.
+# ---------------------------------------------------------------------------
+def test_hardware_sink_adopts_the_device_sample_rate(monkeypatch, backend):
+    monkeypatch.setenv(AUDIO_SINK_MODE_ENV, SINK_MODE_WINDOWS)
+    monkeypatch.setenv(AUDIO_OUTPUT_DEVICE_ENV, "index:2")  # 44100 Hz in the fake
+    configuration = resolve_sink_configuration(backend=backend)
+    assert configuration.device.default_samplerate == 44100
+    assert configuration.sample_rate == 44100
+
+
+def test_hardware_sink_adopts_the_device_channel_count(monkeypatch, backend):
+    monkeypatch.setenv(AUDIO_SINK_MODE_ENV, SINK_MODE_WINDOWS)
+    monkeypatch.setenv(AUDIO_OUTPUT_DEVICE_ENV, "index:2")  # 2 output channels
+    configuration = resolve_sink_configuration(backend=backend)
+    assert configuration.channels == 2
+
+
+def test_hardware_sink_keeps_mono_for_a_mono_device(monkeypatch, backend):
+    monkeypatch.setenv(AUDIO_SINK_MODE_ENV, SINK_MODE_WINDOWS)
+    monkeypatch.setenv(AUDIO_OUTPUT_DEVICE_ENV, "index:4")  # 1 output channel
+    configuration = resolve_sink_configuration(backend=backend)
+    assert configuration.channels == 1
+
+
+def test_null_sink_keeps_the_documented_defaults(monkeypatch):
+    monkeypatch.delenv(AUDIO_SINK_MODE_ENV, raising=False)
+    configuration = resolve_sink_configuration(backend=FakeAudioBackend())
+    assert configuration.sample_rate == 48000
+    assert configuration.channels == 1
+
+
+def test_pcm_sink_opens_the_device_with_its_own_format(monkeypatch, backend):
+    monkeypatch.setenv(AUDIO_SINK_MODE_ENV, SINK_MODE_WINDOWS)
+    monkeypatch.setenv(AUDIO_OUTPUT_DEVICE_ENV, "index:2")
+    configuration = resolve_sink_configuration(backend=backend)
+    sink = WindowsPcmSink(configuration, backend=backend)
+    sink.open()
+    try:
+        opened = backend.opened[0]
+        assert opened["samplerate"] == 44100
+        assert opened["channels"] == 2
+    finally:
+        sink.close()
+
+
+def test_ffmpeg_windows_command_matches_the_device_format(monkeypatch, backend):
+    monkeypatch.setenv(AUDIO_SINK_MODE_ENV, SINK_MODE_WINDOWS)
+    monkeypatch.setenv(AUDIO_OUTPUT_DEVICE_ENV, "index:2")
+    configuration = resolve_sink_configuration(backend=backend)
+    sink = WindowsPcmSink(configuration, backend=backend)
+    command = FfmpegDecoder(sink_mode=SINK_MODE_WINDOWS, pcm_sink=sink).command()
+    joined = " ".join(command)
+    # FFmpeg must resample and re-channel to whatever the device wants.
+    assert "-ar 44100" in joined
+    assert "-ac 2" in joined
+    assert "-f s16le" in joined
+
+
+def test_frame_accounting_uses_the_configured_channel_count(monkeypatch, backend):
+    monkeypatch.setenv(AUDIO_SINK_MODE_ENV, SINK_MODE_WINDOWS)
+    monkeypatch.setenv(AUDIO_OUTPUT_DEVICE_ENV, "index:2")  # stereo
+    configuration = resolve_sink_configuration(backend=backend)
+    sink = WindowsPcmSink(configuration, backend=backend)
+    sink.open()
+    try:
+        # 400 bytes of 16-bit stereo is 100 frames, not 200.
+        sink.write(b"\x00\x01" * 200)
+        assert sink.frames_written == 100
+    finally:
+        sink.close()
+
+
+def test_sink_diagnostics_report_the_negotiated_format(monkeypatch, backend):
+    monkeypatch.setenv(AUDIO_SINK_MODE_ENV, SINK_MODE_WINDOWS)
+    monkeypatch.setenv(AUDIO_OUTPUT_DEVICE_ENV, "index:2")
+    facts = resolve_sink_configuration(backend=backend).as_dict()
+    assert facts["sample_rate"] == 44100
+    assert facts["channels"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Index stability
+#
+# Found during hardware validation: connecting a Bluetooth earbud set
+# renumbered EVERY device index, and the previously chosen wired endpoint
+# disappeared. A bare index saved in a runbook can therefore silently point at
+# a completely different device later.
+# ---------------------------------------------------------------------------
+def test_a_verified_selector_pins_the_index_to_an_exact_name(backend):
+    device = resolve_output_device("index:3@USB Audio Device", backend=backend)
+    assert device.index == 3
+    assert device.name == "USB Audio Device"
+
+
+def test_a_verified_selector_fails_closed_after_a_renumber(backend):
+    """The index still exists but now belongs to a different device."""
+    with pytest.raises(DeviceNotFoundError) as error:
+        resolve_output_device("index:1@USB Audio Device", backend=backend)
+    message = str(error.value).lower()
+    assert "renumber" in message or "no longer" in message
+
+
+def test_a_verified_selector_reports_what_it_actually_found(backend):
+    with pytest.raises(DeviceNotFoundError) as error:
+        resolve_output_device("index:1@USB Audio Device", backend=backend)
+    # The operator needs to see what is really at that index now.
+    assert "LG IPS QHD-1 (NVIDIA)" in str(error.value)
+
+
+def test_verified_selector_is_offered_for_every_listed_device(backend):
+    table = format_device_table(list_output_devices(backend=backend))
+    assert "index:3@USB Audio Device" in table
+
+
+def test_bare_index_still_works_but_is_documented_as_unstable(backend):
+    # Bare indices remain supported for convenience.
+    assert resolve_output_device("index:3", backend=backend).index == 3
+    table = format_device_table(list_output_devices(backend=backend))
+    assert "not stable" in table.lower()
+
+
+# ---------------------------------------------------------------------------
+# Wireless detection
+#
+# Found during hardware validation: "Headphones (Nirvana X TWS Stereo)" is a
+# Bluetooth A2DP endpoint but was not flagged, because only the hands-free
+# variants contained an obvious marker.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Headset (Bluetooth Hands-Free)",
+        "Headphones (Nirvana X TWS Stereo)",
+        "Headset (@System32\\drivers\\bthhfenum.sys,#2;%1 Hands-Free)",
+        "Some A2DP Sink",
+        "Wireless Earbuds",
+        "AirPods Pro",
+    ],
+)
+def test_wireless_endpoints_are_flagged(name):
+    device = OutputDevice(
+        index=1, name=name, host_api="Windows WASAPI",
+        max_output_channels=2, default_samplerate=44100, is_default=False,
+    )
+    assert device.looks_wireless is True
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Speakers (Realtek High Definition Audio)",
+        "USB Audio Device",
+        "LG IPS QHD-1 (NVIDIA High Definition Audio)",
+        "Headphones ()",
+    ],
+)
+def test_wired_endpoints_are_not_flagged(name):
+    device = OutputDevice(
+        index=1, name=name, host_api="Windows WDM-KS",
+        max_output_channels=2, default_samplerate=44100, is_default=False,
+    )
+    assert device.looks_wireless is False
+
+
+def test_wireless_flag_is_presented_as_a_heuristic(backend):
+    table = format_device_table(list_output_devices(backend=backend))
+    # It must not be presented as a certainty; the operator still confirms.
+    assert "wireless?" in table

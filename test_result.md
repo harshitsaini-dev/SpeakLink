@@ -563,11 +563,28 @@ backend:
       - working: true
         agent: "main"
         comment: "Real device enumeration on this machine listed 8 output endpoints read-only, opening nothing and changing nothing: index:1 is the current default (an HDMI monitor), index:5 is a Bluetooth headset (flagged), and index:3 and index:4 share the identical name 'LG IPS QHD-1 (NVIDIA High Definition Audio)' under DirectSound and WASAPI, which is exactly why name-only selection is refused as ambiguous and a stable index:N selector is preferred. Focused results: 40 device/sink tests passed, every one against an injected fake backend so no automated test opens a real device or plays a sound. Audio protocol, queue and one-Store audio pilot: 92 passed combined. Local pilot, catalog and Receiver WebSocket regressions: 89 passed with 25 existing warnings. compileall backend tools succeeded. Null-sink audio smoke re-ran green with sink_mode null, ffmpeg_returncode 0, 0 dropped chunks and speaker_verified false, proving the default sink is unchanged. Frontend yarn build compiled and yarn test reported no test files, which is not behavioural coverage. Complete backend suite: 556 passed, 1 skipped, 32 existing warnings, green across 5 consecutive runs (516 baseline plus 40 new). NO real hardware test was performed and NO operator audible observation was recorded: the chime and browser checklists are left for the operator. Protected database 507904 bytes / 2026-07-26 08:43:13 with no sidecars before and after; never opened, copied or modified. No leftover python, node, ffmpeg or ffplay process; secret scan of all pilot logs and JSON reports clean. SPEAKER_VERIFIED remains unavailable and unclaimed."
+  - task: "One-Store Windows output hardware validation"
+    implemented: true
+    working: true
+    file: "ONE_STORE_WINDOWS_OUTPUT_VALIDATION_RESULT.md"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Preflight (2026-07-26 UTC). Starting branch feat/one-store-windows-output-pilot at 6d922b2dbc309bbb899221a0a016df77036cbaec, upstream matching, tree clean, no pilot process running, protected database 507904 bytes / 2026-07-26 08:43:13 with no WAL or SHM. Baseline complete suite 556 passed / 1 skipped / 32 warnings; compileall OK; frontend yarn build compiled and yarn test reported no test files; null-sink smoke returned ONE_STORE_AUDIO_SOFTWARE_PILOT_PASSED with sink_mode null. Versions: Python 3.12.10, FFmpeg/ffprobe 8.1.2, sounddevice 0.5.2, PortAudio V19.7.0, CFFI 2.1.0. New branch test/one-store-windows-output-hardware-validation."
+      - working: false
+        agent: "main"
+        comment: "Outcome HARDWARE_PILOT_BLOCKED. The operator confirmed no amplifier and no wired path to one, so HARDWARE_PILOT_PASSED was impossible: it requires hearing audio through the intended amplifier/speaker path. The operator offered to test over Bluetooth TWS earbuds; that was recorded as an explicit scope deviation and NOT executed, because the task forbids using a Bluetooth endpoint and it could not have produced a pass. No sound was played, no audio device was ever opened, and no operator audible observation was obtained."
+      - working: true
+        agent: "main"
+        comment: "Validation found four real defects before any sound was played, all fixed test-first with 25 new tests that use an injected fake audio backend so none can open a real device. (1) The sink hardcoded 48000 Hz / 1 channel and ignored the device; the real endpoint advertised 44100 Hz / 2 channels under WDM-KS, which is strict about formats, so the open could have failed or the audio been wrong. The sink now adopts the device sample rate and channel count capped at 2, and the FFmpeg command resamples and re-channels to match. (2) The test chime raised a raw EOFError traceback in a non-interactive shell; the confirmation gate correctly blocked playback but the failure is now a controlled refusal. (3) index:N was documented as a stable selector but is not: connecting a Bluetooth earbud set renumbered every device and moved the wired endpoint from index:7 to index:18, proven by two enumerations minutes apart. A verified selector index:N@ExactName was added that pins the index to the name, fails closed after a renumber and reports what is actually at that index. (4) Bluetooth detection missed A2DP endpoints: Headphones (Nirvana X TWS Stereo) was unflagged; the heuristic now also matches tws, a2dp, airpods, wireless, earbud and handsfree and prints wireless? so it reads as a hint. Results: focused Windows-output 65 passed; audio protocol and one-Store audio pilot 52 passed; compileall OK; frontend build compiled; null-sink smoke still ONE_STORE_AUDIO_SOFTWARE_PILOT_PASSED; complete backend suite 581 passed, 1 skipped, 32 existing warnings, green across 5 consecutive runs (556 baseline plus 25 new). Protected database 507904 bytes / 2026-07-26 08:43:13 with no sidecars before and after; never opened, copied or modified. No leftover python, node, ffmpeg or ffplay process and no listening pilot port. SPEAKER_VERIFIED remains NOT_IMPLEMENTED and the amplifier path remains unproven."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 25
+  test_sequence: 26
   run_ui: false
 test_plan:
   current_focus: []
@@ -659,3 +676,5 @@ agent_communication:
     message: "The one-Store Windows output-device pilot is ready for regression validation. The default sink stays null and every automated test uses an injected fake audio backend, so no test can open a real device or play a sound. Hardware mode needs an explicit unambiguous device selector and fails closed otherwise; the Windows default device is never used or changed."
   - agent: "main"
     message: "Windows output-device pilot validation is complete. Focused 40 passed; complete backend 556 passed, 1 skipped, 32 warnings across 5 consecutive runs; compileall succeeded; frontend build compiled; null-sink audio smoke still returns ONE_STORE_AUDIO_SOFTWARE_PILOT_PASSED with sink_mode null. sounddevice==0.5.2 was added with operator approval because the installed FFmpeg has no audio output muxer and ffplay cannot target a chosen device. Status is READY_FOR_ONE_STORE_WINDOWS_OUTPUT_TEST only. No hardware test was performed, no operator audible observation was recorded, and SPEAKER_VERIFIED remains unavailable and unclaimed. The protected database was never opened, copied or modified."
+  - agent: "main"
+    message: "One-Store Windows output hardware validation is complete with outcome HARDWARE_PILOT_BLOCKED: no amplifier and no wired path were available, so no sound was played and no operator audible observation exists. Four real defects were found before any sound and fixed test-first: hardcoded output format, an uncontrolled chime traceback, unstable bare index selectors, and incomplete Bluetooth A2DP detection. Complete backend 581 passed, 1 skipped, 32 warnings across 5 consecutive runs. The protected database was never opened, copied or modified. SPEAKER_VERIFIED remains NOT_IMPLEMENTED."

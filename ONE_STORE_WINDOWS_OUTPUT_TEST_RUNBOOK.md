@@ -71,8 +71,23 @@ index:5      Headset (@System32\drivers\bthhfenum.sys...    Windows WDM-KS      
 ```
 
 Note that `index:3` and `index:4` share an **identical name**. That is exactly
-why a name is not a safe selector and why the pilot refuses ambiguous names.
-**Always copy the `SELECTOR`.**
+why a bare name is not a safe selector and why the pilot refuses ambiguous
+names.
+
+**Bare indices are not stable either.** Hardware validation proved this:
+connecting a Bluetooth earbud set renumbered every device and moved the wired
+endpoint from `index:7` to `index:18`. Always copy the **verified selector**
+the list prints, which pins the index to the exact name:
+
+```text
+index:18@Headphones ()
+```
+
+If the device is renumbered later, that selector fails closed and tells you
+what is actually at that index now, instead of opening the wrong endpoint.
+
+The `wireless?` flag is a **name heuristic only**. It can miss a wireless
+endpoint, so confirm yourself that the device is the wired one.
 
 Pick the selector of your **USB audio adapter or 3.5 mm output** — not the
 monitor, not the Bluetooth headset.
@@ -81,7 +96,7 @@ monitor, not the Bluetooth headset.
 
 ```powershell
 $env:ECHOCAST_AUDIO_SINK_MODE     = 'windows'
-$env:ECHOCAST_AUDIO_OUTPUT_DEVICE = 'index:3'   # your adapter's selector
+$env:ECHOCAST_AUDIO_OUTPUT_DEVICE = 'index:18@Headphones ()'   # your verified selector
 ```
 
 These live only in this PowerShell window. Nothing is written to Git, to a
@@ -123,7 +138,7 @@ Copy the Store's receiver credential from **Store Management**, then in a
 ```powershell
 Set-Location 'C:\Users\admin\Desktop\EchoCast-AI\HQ-Broadcast-Full (1)'
 $env:ECHOCAST_AUDIO_SINK_MODE     = 'windows'
-$env:ECHOCAST_AUDIO_OUTPUT_DEVICE = 'index:3'
+$env:ECHOCAST_AUDIO_OUTPUT_DEVICE = 'index:18@Headphones ()'
 $env:ECHOCAST_RECEIVER_TOKEN      = '<paste-the-store-credential>'
 .\scripts\Start-EchoCastWindowsAudioReceiverPilot.ps1
 ```
@@ -201,7 +216,8 @@ Nothing should be listed, and the protected database must be unchanged.
 | `ECHOCAST_AUDIO_OUTPUT_DEVICE is not set` | Hardware mode needs an explicit selector. There is no default. |
 | `matches N output devices, so it is ambiguous` | You used a name that appears under several host APIs. Use the `index:N` selector. |
 | `no output device is named exactly ...` | Partial or differently-cased names are refused on purpose. |
-| `no output device has index N` | The device list changed (adapter unplugged). List again. |
+| `no output device has index N` | The device list was renumbered (a device was added or removed). List again. |
+| `index N is no longer ...` | A verified selector caught a renumber and refused rather than opening the wrong endpoint. List again and copy the new verified selector. |
 | `could not be opened` / device busy | Another application holds it exclusively, or it was removed. |
 | Receiver reports `DEVICE_ERROR` | The selected device did not open. READY is correctly withheld. |
 | Receiver reports `PLAYBACK_ERROR` | The device stopped accepting frames mid-session. |
