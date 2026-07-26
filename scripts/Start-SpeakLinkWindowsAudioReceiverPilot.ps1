@@ -72,7 +72,7 @@ $outLog = Join-Path $pilotLogs 'windows-audio-receiver.out.log'
 $errLog = Join-Path $pilotLogs 'windows-audio-receiver.err.log'
 
 $receiver = Start-Process -FilePath $venvPython `
-    -ArgumentList @($tool, 'run', '--url', $receiverUrl, '--report', $reportPath) `
+    -ArgumentList @("`"$tool`"", 'run', '--url', "`"$receiverUrl`"", '--report', "`"$reportPath`"") `
     -WorkingDirectory $repositoryRoot `
     -RedirectStandardOutput $outLog `
     -RedirectStandardError $errLog `
