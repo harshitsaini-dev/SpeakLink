@@ -9,8 +9,11 @@ const BG_IMAGE =
 export default function Login() {
   const nav = useNavigate();
   const { user, login } = useAuth();
-  const [u, setU] = React.useState("admin");
-  const [p, setP] = React.useState("admin123");
+  // Both fields start empty on purpose. A pre-filled credential is a credential
+  // the operator never has to know, so it never gets changed from the default -
+  // and anyone who reaches this page can read it straight off the form.
+  const [u, setU] = React.useState("");
+  const [p, setP] = React.useState("");
   const [err, setErr] = React.useState("");
   const [busy, setBusy] = React.useState(false);
 
@@ -51,18 +54,24 @@ export default function Login() {
           </div>
 
           <div>
-            <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Username</label>
+            <label htmlFor="login-username" className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Username</label>
             <input
+              id="login-username"
+              name="username"
               data-testid="login-username-input"
+              autoComplete="username"
               className="w-full px-3 py-2.5 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               value={u} onChange={(e) => setU(e.target.value)} required autoFocus
             />
           </div>
           <div>
-            <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Password</label>
+            <label htmlFor="login-password" className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Password</label>
             <input
+              id="login-password"
+              name="password"
               data-testid="login-password-input"
               type="password"
+              autoComplete="current-password"
               className="w-full px-3 py-2.5 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               value={p} onChange={(e) => setP(e.target.value)} required
             />
@@ -78,9 +87,10 @@ export default function Login() {
             <LogIn size={16} /> {busy ? "Signing in…" : "Sign In"}
           </button>
 
-          <div className="text-[11px] text-slate-500 text-center pt-2 border-t border-slate-100">
-            Default: <span className="font-mono">admin / admin123</span>
-          </div>
+          <p className="text-[11px] text-slate-500 text-center pt-2 border-t border-slate-100">
+            Use the HQ credentials issued to you. If you do not have them, ask
+            your SpeakLink administrator — they are never shown on this page.
+          </p>
         </form>
       </div>
     </div>
