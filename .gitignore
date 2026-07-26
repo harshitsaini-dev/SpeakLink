@@ -265,3 +265,9 @@ memory/test_credentials.md
 *credentials*.json
 *token*.json
 
+# Playwright run artefacts. Browser binaries live in
+# %LOCALAPPDATA%\ms-playwright, outside the repository.
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/.playwright/
