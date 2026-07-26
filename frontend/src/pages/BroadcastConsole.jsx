@@ -12,6 +12,15 @@ const TARGET_MODES = [
   { value: "online_only", label: "Online Stores Only" },
 ];
 
+// The only play_status values the backend ever writes (_persist_receiver_ack in
+// backend/server.py): pending, audio_receiving, playback_confirmed,
+// playback_error, device_error, stopped. There is no "playing" and no "failed",
+// so the summary must not invent one - a Store is never shown as playing just
+// because a command was sent to it.
+const RECEIVING_STATUSES = ["audio_receiving"];
+const CONFIRMED_STATUSES = ["playback_confirmed"];
+const ERROR_STATUSES = ["playback_error", "device_error"];
+
 function useTimer(startTs) {
   const [elapsed, setElapsed] = React.useState(0);
   React.useEffect(() => {
@@ -230,6 +239,17 @@ export default function BroadcastConsole() {
     return map;
   }, [current]);
 
+  const targetCounts = React.useMemo(() => {
+    const targets = current?.targets || [];
+    const count = (statuses) => targets.filter((t) => statuses.includes(t.play_status)).length;
+    return {
+      total: targets.length,
+      receiving: count(RECEIVING_STATUSES),
+      confirmed: count(CONFIRMED_STATUSES),
+      errors: count(ERROR_STATUSES),
+    };
+  }, [current]);
+
   return (
     <div className="space-y-6" data-testid="broadcast-console">
       {/* HEADER: live status + emergency stop */}
@@ -386,17 +406,23 @@ export default function BroadcastConsole() {
             <StatCard label="Offline" value={offlineCount} testid="stat-offline" icon={<WifiOff size={14} className="text-slate-400"/>} />
           </div>
           {isLive && (
-            <div className="pt-2 border-t border-slate-100">
-              <div className="text-[11px] uppercase tracking-widest text-slate-500 mb-1">Currently Playing</div>
-              <div className="text-2xl font-bold text-blue-700 font-mono">
-                {(current?.targets || []).filter((t) => t.play_status === "playing").length}
-                <span className="text-slate-400 text-base"> / {current?.targets?.length || 0}</span>
+            <div className="pt-2 border-t border-slate-100 space-y-2">
+              <div className="text-[11px] uppercase tracking-widest text-slate-500">
+                Receiver Acknowledgements
+                <span className="text-slate-400 normal-case tracking-normal"> · of {targetCounts.total}</span>
               </div>
-              {(current?.targets || []).some((t) => t.play_status === "failed") && (
-                <div className="text-[11px] text-red-700 mt-1">
-                  Failed: {(current?.targets || []).filter((t) => t.play_status === "failed").length}
-                </div>
-              )}
+              <div className="grid grid-cols-3 gap-2">
+                <StatCard label="Receiving" value={targetCounts.receiving} testid="stat-audio-receiving"
+                          icon={<Radio size={14} className="text-amber-600"/>} />
+                <StatCard label="Confirmed" value={targetCounts.confirmed} testid="stat-playback-confirmed"
+                          icon={<Wifi size={14} className="text-blue-600"/>} />
+                <StatCard label="Errors" value={targetCounts.errors} testid="stat-target-errors"
+                          icon={<AlertOctagon size={14} className="text-red-600"/>} />
+              </div>
+              <p className="text-[10px] leading-snug text-slate-500">
+                Confirmed means the Receiver's output device accepted decoded PCM frames.
+                It does not mean sound was audible at a Store speaker.
+              </p>
             </div>
           )}
         </div>
