@@ -13,13 +13,24 @@
     Hearing the chime is useful operator evidence. It is NOT SPEAKER_VERIFIED:
     that requires LinkGuard acoustic detection, which does not exist yet.
 
+.PARAMETER Seconds
+    Chime duration. The default is the documented 1.5 s. A Bluetooth endpoint
+    can take a second or more to wake its DAC once a stream starts, so a longer
+    tone tells a sleeping link apart from no audio path at all. Loudness is
+    never selectable.
+
 .EXAMPLE
     $env:SPEAKLINK_AUDIO_SINK_MODE     = 'windows'
     $env:SPEAKLINK_AUDIO_OUTPUT_DEVICE = 'index:3'
     .\scripts\Test-SpeakLinkAudioOutput.ps1
+
+.EXAMPLE
+    .\scripts\Test-SpeakLinkAudioOutput.ps1 -Seconds 5
 #>
 [CmdletBinding()]
-param()
+param(
+    [double] $Seconds = 1.5
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -44,7 +55,7 @@ Write-Output ''
 
 Push-Location $repositoryRoot
 try {
-    & $venvPython $tool test-output
+    & $venvPython $tool test-output --seconds $Seconds
     $code = $LASTEXITCODE
 }
 finally {

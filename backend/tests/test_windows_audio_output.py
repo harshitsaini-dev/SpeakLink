@@ -49,6 +49,7 @@ class FakeAudioBackend:
     def __init__(self, devices=None, hostapis=None, default_output=1, fail=False):
         self.fail = fail
         self.opened: list[dict] = []
+        self.streams: list["FakeOutputStream"] = []
         self._hostapis = hostapis or [
             {"name": "MME"},
             {"name": "Windows DirectSound"},
@@ -89,7 +90,9 @@ class FakeAudioBackend:
     # Only the Receiver's output stream uses this; enumeration must not.
     def RawOutputStream(self, **kwargs):  # noqa: N802 - mirrors sounddevice
         self.opened.append(kwargs)
-        return FakeOutputStream(kwargs)
+        stream = FakeOutputStream(kwargs)
+        self.streams.append(stream)
+        return stream
 
 
 class FakeOutputStream:
@@ -99,6 +102,8 @@ class FakeOutputStream:
         self.closed = False
         self.written_frames = 0
         self.fail_on_write = fail_on_write
+        # Captured so a test can inspect the interleaving without a real device.
+        self.data = bytearray()
 
     def start(self):
         self.started = True
@@ -106,6 +111,7 @@ class FakeOutputStream:
     def write(self, data):
         if self.fail_on_write:
             raise OSError("output stream failed mid-session")
+        self.data += bytes(data)
         self.written_frames += len(data) // 2  # 16-bit mono
 
     def stop(self):
@@ -486,6 +492,131 @@ def test_chime_in_a_non_interactive_shell_is_a_controlled_error(backend):
     assert "interactive" in str(error.value).lower()
     # Nothing may be opened when confirmation is impossible.
     assert backend.opened == []
+
+
+# ---------------------------------------------------------------------------
+# Chime channel interleaving
+#
+# Found during Bluetooth amplifier validation, when the operator heard nothing
+# at all. The chime generated ONE int16 sample per frame - mono - but the sink
+# opens the stream with the device's own channel count, which is 2 on every
+# real endpoint here. PortAudio therefore read that mono buffer as interleaved
+# stereo pairs, so the chime played for half its duration at double its pitch.
+# A 0.75 s quiet tone is easily lost inside a Bluetooth A2DP link's wake-up
+# delay, which is why nothing was audible.
+# ---------------------------------------------------------------------------
+def _stereo_config(backend, selector="index:2") -> SinkConfiguration:
+    """A hardware config shaped like the real amplifier: 44100 Hz, 2 channels."""
+    device = resolve_output_device(selector, backend=backend)
+    return SinkConfiguration(
+        sink_mode=SINK_MODE_WINDOWS,
+        device=device,
+        sample_rate=device.default_samplerate,
+        channels=min(max(device.max_output_channels, 1), 2),
+    )
+
+
+def test_chime_fills_every_channel_of_a_stereo_device(backend):
+    configuration = _stereo_config(backend)
+    assert configuration.channels == 2, "fixture must be a stereo device"
+    seconds = 0.2
+    play_test_chime(
+        configuration, backend=backend, confirm=lambda _p: "yes", seconds=seconds,
+    )
+    expected_frames = int(configuration.sample_rate * seconds)
+    written = backend.streams[0].data
+    # One frame carries one sample per channel, so the buffer must be
+    # frames * channels * 2 bytes. Half of that means a mono buffer leaked in.
+    assert len(written) == expected_frames * configuration.channels * 2
+
+
+def test_chime_reports_the_full_frame_count_on_a_stereo_device(backend):
+    configuration = _stereo_config(backend)
+    seconds = 0.2
+    outcome = play_test_chime(
+        configuration, backend=backend, confirm=lambda _p: "yes", seconds=seconds,
+    )
+    assert outcome["frames_written"] == int(configuration.sample_rate * seconds)
+
+
+def test_chime_sends_the_same_waveform_to_both_channels(backend):
+    """A stereo frame must hold the same sample twice, not two consecutive
+    samples of a mono wave - that is what doubled the pitch."""
+    import struct
+
+    configuration = _stereo_config(backend)
+    play_test_chime(
+        configuration, backend=backend, confirm=lambda _p: "yes", seconds=0.05,
+    )
+    written = bytes(backend.streams[0].data)
+    samples = struct.unpack(f"<{len(written) // 2}h", written)
+    left, right = samples[0::2], samples[1::2]
+    assert left == right
+
+
+def test_chime_still_correct_on_a_mono_device(backend):
+    """Regression guard: the mono path must keep working after the fix."""
+    device = resolve_output_device("index:4", backend=backend)  # 1 channel
+    configuration = SinkConfiguration(
+        sink_mode=SINK_MODE_WINDOWS, device=device,
+        sample_rate=device.default_samplerate, channels=1,
+    )
+    seconds = 0.2
+    outcome = play_test_chime(
+        configuration, backend=backend, confirm=lambda _p: "yes", seconds=seconds,
+    )
+    expected_frames = int(configuration.sample_rate * seconds)
+    assert outcome["frames_written"] == expected_frames
+    assert len(backend.streams[0].data) == expected_frames * 2
+
+
+# ---------------------------------------------------------------------------
+# Chime duration is operator-selectable, because a Bluetooth amplifier can
+# take a second or more to wake its DAC after a stream starts. The default
+# stays the documented 1.5 s, and the range is bounded so nobody can hold an
+# amplifier open indefinitely.
+# ---------------------------------------------------------------------------
+def test_chime_duration_defaults_to_the_documented_value():
+    from tools.audio_receiver_pilot import CHIME_SECONDS, _build_parser
+
+    assert CHIME_SECONDS == 1.5
+    assert _build_parser().parse_args(["test-output"]).seconds == CHIME_SECONDS
+
+
+def test_chime_duration_can_be_extended_for_a_slow_bluetooth_endpoint():
+    from tools.audio_receiver_pilot import _build_parser
+
+    assert _build_parser().parse_args(["test-output", "--seconds", "5"]).seconds == 5.0
+
+
+def test_chime_duration_refuses_a_non_positive_value(backend):
+    configuration = _stereo_config(backend)
+    with pytest.raises(SinkConfigurationError):
+        play_test_chime(
+            configuration, backend=backend, confirm=lambda _p: "yes", seconds=0,
+        )
+    assert backend.opened == []
+
+
+def test_chime_duration_refuses_an_unbounded_value(backend):
+    from tools.audio_receiver_pilot import CHIME_MAX_SECONDS
+
+    configuration = _stereo_config(backend)
+    with pytest.raises(SinkConfigurationError):
+        play_test_chime(
+            configuration, backend=backend, confirm=lambda _p: "yes",
+            seconds=CHIME_MAX_SECONDS + 1,
+        )
+    assert backend.opened == []
+
+
+def test_chime_gain_is_not_operator_selectable():
+    """Duration is safe to extend; loudness is not. There must be no CLI knob
+    that can drive an amplifier harder than the conservative fixed gain."""
+    from tools.audio_receiver_pilot import _build_parser
+
+    options = {action.dest for action in _build_parser()._actions}
+    assert "gain" not in options
 
 
 # ---------------------------------------------------------------------------
