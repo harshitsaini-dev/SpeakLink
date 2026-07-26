@@ -765,6 +765,100 @@ Tests: 41 focused reconciliation tests passed; complete backend suite 429
 passed, 1 skipped, 32 existing warnings. `compileall` succeeded. No frontend,
 runtime, authentication, WebSocket, seed or migration behaviour changed.
 
+## Local one-Store pilot readiness harness
+
+Status: **READY_FOR_LOCAL_SOFTWARE_PILOT_TEST**. This is a local software
+readiness statement only. It is explicitly **not** READY_FOR_PRODUCTION, not
+READY_FOR_LIVE_AUDIO, not READY_FOR_STORE_SPEAKERS, not SPEAKER_VERIFIED and
+not ALL_40_STORES_READY.
+
+`tools/local_pilot.py` prepares an isolated, disposable pilot database outside
+the repository and runs a loopback-only software smoke test against it.
+`LOCAL_PILOT_TEST_RUNBOOK.md` is the beginner-facing Windows runbook, and
+`scripts/Start-SpeakLinkLocalPilot.ps1` / `scripts/Stop-SpeakLinkLocalPilot.ps1`
+wrap manual browser testing.
+
+Isolated pilot design, all outside Git:
+
+```text
+%LOCALAPPDATA%\SpeakLink\local-pilot\
+    data\speaklink_local_pilot.db      disposable pilot database
+    logs\backend.log, smoke-report.json
+    runtime\pilot-state.json, PILOT_ONLY, backend.pid, frontend.pid
+```
+
+Safety boundary, all covered by tests:
+
+- The protected `backend/speaklink_live.db` is refused by exact path, by a
+  relative or `..` path that resolves to it, and by same-file identity via
+  `os.path.samefile`.
+- A pilot root inside the repository or inside `.git` is refused.
+- Reset removes nothing without an explicit `--reset-pilot-db`, requires the
+  `PILOT_ONLY` marker, refuses a path outside the validated pilot data
+  directory, refuses a symlink, and treats the database plus its `-wal`/`-shm`
+  sidecars as one scoped set. It is never a wildcard delete.
+- The pilot password is read from the process-scoped `ADMIN_PASSWORD`
+  environment variable, is required, and is never printed, logged, persisted or
+  placed in a command argument.
+- The selected Store's credential is read from the isolated pilot database into
+  memory only. It never reaches a log, report, exception, URL or argument. The
+  query-string negative test deliberately uses a fixed dummy value because
+  Uvicorn logs request URLs.
+
+Verified pilot facts, reused from actual application code rather than
+duplicated: `SPEAKLINK_DB_PATH` (backend/db.py), `ADMIN_USERNAME`/
+`ADMIN_PASSWORD` (backend/seed.py), `JWT_SECRET` (backend/auth.py),
+`CORS_ORIGINS` (backend/server.py), liveness `/docs`, login
+`POST /api/auth/login`, Stores `GET /api/stores`, Zones
+`GET /api/stores/meta/regions-cities`, Receiver `WS /api/ws/receiver` with an
+`Authorization: Bearer` header. The pilot database is initialised by running
+the application's own `server.startup_event()` in a child process, so no schema
+SQL, catalog data or model definition is duplicated.
+
+Actual recorded run at commit `b8f2292`:
+
+- Pilot database `%LOCALAPPDATA%\SpeakLink\local-pilot\data\speaklink_local_pilot.db`
+- SHA-256 `4e0710f859f08ec3cfef947d6797c01f5d52bd4922173cbbb951bf170e766dd4`
+- 44 Stores, 9 Zones, `demo_codes_present: []`, reconciliation
+  `EXACT_CANONICAL_MATCH`
+- Backend `127.0.0.1:61266`, **exactly one Uvicorn worker**, loopback only
+- Liveness ok, login ok, Receiver Bearer authentication ok for Store `UN`
+- Query-string credential refused
+- `observed_connection: CONNECTED`; readiness, playback and acoustic all
+  `NOT_REPORTED`; `speaker_verified: false`
+- Receiver cleanup ok, graceful shutdown ok, no process left running, port
+  released
+- Secret scan: `backend.log`, `smoke-report.json`, `pilot-state.json` and
+  `PILOT_ONLY` are all clean
+
+Frontend: `yarn test --watchAll=false --passWithNoTests` reports no test files
+exist, and `yarn build` compiled successfully. The dashboard still reads the
+catalog only from the Store API — a test asserts no frontend file duplicates
+canonical Store data. "By Zone" labels are present, play status comes from the
+API rather than being assumed, and no frontend file claims SPEAKER_VERIFIED.
+**No visual browser test was performed by this task**; the browser checklist in
+the runbook is for the operator to run.
+
+Tests: 35 focused local-pilot tests passed; complete backend suite 464 passed,
+1 skipped, 32 existing warnings, green across 5 consecutive runs (429 baseline
+plus 35 new). `python -m compileall -q backend tools` succeeded.
+
+Protected database impact: **not opened, not copied, not modified** by this
+task. A blocker was found and reported during preflight: two Uvicorn processes
+and the React dev server were running, and the protected database had a live
+910 KB `-wal` file, meaning a live backend was writing to it. The operator
+stopped those processes; SQLite then checkpointed the WAL into the main file on
+clean shutdown, so the accepted baseline moved from 487,424 bytes /
+2026-07-25 11:12:47 to **507,904 bytes / 2026-07-26 07:42:09** with no `-wal`
+or `-shm` remaining. That change came from the operator's own running
+application, not from any task command, and the baseline was unchanged across
+all pilot work afterwards.
+
+What remains before any live audio testing: a Receiver Agent that actually
+decodes and plays audio, FFmpeg output control, a verified Windows audio output
+device, amplifier routing, LinkGuard, and acoustic verification. None of these
+exist yet.
+
 ## Windows Deployment Specification
 
 Status: **not started**. `RECEIVER_HOSTING_KEY_STORAGE_ADR.md` remains
@@ -782,8 +876,16 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Run the reconciliation report **once**, against an operator-produced isolated
-snapshot of the real database, and review the output together. That means the
+Run a **one-Store live-audio software pipeline test** inside the isolated pilot
+environment: HQ microphone capture to the broadcaster WebSocket, fan-out to one
+connected simulated Receiver, and observation of the AUDIO_RECEIVING and
+PLAYBACK_CONFIRMED acknowledgements the Receiver actually sends. It must claim
+nothing about FFmpeg output devices, amplifiers or audible speakers, and must
+keep using the isolated pilot database.
+
+A separate still-open task: run the reconciliation report **once** against an
+operator-produced isolated snapshot of the real database, and review the output
+together. That means the
 operator stops the backend, takes a quiesced copy of
 `backend/speaklink_live.db` plus any WAL/SHM files to a path outside the
 repository, and supplies that path. The tool then reports what the live fleet
