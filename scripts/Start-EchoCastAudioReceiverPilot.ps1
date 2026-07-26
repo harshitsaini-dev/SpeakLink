@@ -36,6 +36,10 @@ $pilotRuntime = Join-Path $PilotRoot 'runtime'
 $pilotLogs = Join-Path $PilotRoot 'logs'
 $pidFile = Join-Path $pilotRuntime 'audio-receiver.pid'
 
+# Write-EchoCastPidFile records the process creation time next to the PID, so
+# the stop script can refuse a PID that Windows has since recycled.
+. (Join-Path $PSScriptRoot 'EchoCastProcessTree.ps1')
+
 Write-Output '=== EchoCast local audio Receiver pilot (NULL sink) ==='
 
 if (-not (Test-Path $venvPython)) {
@@ -63,7 +67,7 @@ $receiver = Start-Process -FilePath $venvPython `
     -RedirectStandardOutput $outLog `
     -RedirectStandardError $errLog `
     -PassThru
-$receiver.Id | Out-File -FilePath $pidFile -Encoding utf8 -NoNewline
+Write-EchoCastPidFile -PidFile $pidFile -ProcessId $receiver.Id
 
 Write-Output ''
 Write-Output 'Audio Receiver pilot started.'

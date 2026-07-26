@@ -41,6 +41,10 @@ $pilotLogs = Join-Path $PilotRoot 'logs'
 $backendPidFile = Join-Path $pilotRuntime 'backend.pid'
 $frontendPidFile = Join-Path $pilotRuntime 'frontend.pid'
 
+# Write-EchoCastPidFile records the process creation time next to the PID, so
+# the stop script can refuse a PID that Windows has since recycled.
+. (Join-Path $PSScriptRoot 'EchoCastProcessTree.ps1')
+
 Write-Output '=== EchoCast LOCAL PILOT MODE ==='
 
 # --- Preconditions -------------------------------------------------------
@@ -87,14 +91,14 @@ $backend = Start-Process -FilePath $venvPython `
     -RedirectStandardOutput $backendOut `
     -RedirectStandardError $backendErr `
     -PassThru
-$backend.Id | Out-File -FilePath $backendPidFile -Encoding utf8 -NoNewline
+Write-EchoCastPidFile -PidFile $backendPidFile -ProcessId $backend.Id
 
 # --- Frontend: existing Yarn script --------------------------------------
 $frontend = Start-Process -FilePath 'cmd.exe' `
     -ArgumentList @('/c', 'yarn', 'start') `
     -WorkingDirectory $frontendDir `
     -PassThru
-$frontend.Id | Out-File -FilePath $frontendPidFile -Encoding utf8 -NoNewline
+Write-EchoCastPidFile -PidFile $frontendPidFile -ProcessId $frontend.Id
 
 Write-Output ''
 Write-Output 'Started in LOCAL PILOT MODE (isolated database, loopback only).'
