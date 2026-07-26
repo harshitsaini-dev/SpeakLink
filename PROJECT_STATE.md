@@ -1286,8 +1286,8 @@ seed behaviour, no API contract and no database was changed.
 ### What the login page did
 
 `frontend/src/pages/Login.jsx` shipped with the sign-in form already filled in
-(`useState("admin")`, `useState("admin123")`) and printed
-`Default: admin / admin123` under the Sign In button. Anyone who could reach the
+(both `useState` initial values populated - [REMOVED INSECURE HISTORICAL DEFAULT]) and printed
+a `Default:` line naming both [REMOVED INSECURE HISTORICAL DEFAULT] under the Sign In button. Anyone who could reach the
 page could read a working credential and sign in without knowing anything.
 
 Pre-filling is the same problem wearing a convenience costume: the operator
@@ -1298,12 +1298,12 @@ never has to know their own password, so it never gets changed.
 | | Before | After |
 | --- | --- | --- |
 | Username field | pre-filled `admin` | empty |
-| Password field | pre-filled `admin123` | empty |
-| Hint under the button | `Default: admin / admin123` | "Use the HQ credentials issued to you… they are never shown on this page." |
+| Password field | pre-filled [REMOVED INSECURE HISTORICAL DEFAULT] | empty |
+| Hint under the button | a `Default:` line naming both [REMOVED INSECURE HISTORICAL DEFAULT] | "Use the HQ credentials issued to you… they are never shown on this page." |
 | `autocomplete` | absent | `username` / `current-password` |
 | Label association | none | `htmlFor` / `id` on both fields |
 
-The shipped production bundle no longer contains the string `admin123` at all.
+The shipped production bundle no longer contains that default password string at all.
 Loading state, the honest error message and the existing login API contract are
 unchanged.
 
@@ -1318,7 +1318,7 @@ seed behaviour was out of scope for this task:
 
 ```
 backend/seed.py:16   username = os.environ.get("ADMIN_USERNAME", "admin")
-backend/seed.py:17   password = os.environ.get("ADMIN_PASSWORD", "admin123")
+backend/seed.py:17   password = os.environ.get("ADMIN_PASSWORD", [REMOVED INSECURE HISTORICAL DEFAULT])
 ```
 
 Worse than a one-time seed: `seed_admin` also re-aligns the stored hash on every
@@ -1340,7 +1340,7 @@ separately: `memory/PRD.md` and `test_reports/iteration_1.json`.
 | Focused backend auth tests | 59 passed (`test_smoke`, `test_websocket_ticket_auth`, `test_receiver_ws_auth`, `test_receiver_auth_service`) |
 | Complete backend suite | 666 passed, 1 skipped, 32 warnings |
 | `compileall backend tools` | exit 0 |
-| `admin123` in the production bundle | not present |
+| historical default password in the production bundle | not present |
 | Protected database | 507 904 bytes, `2026-07-26 08:43:13`, WAL and SHM absent — unchanged |
 
 No hardware was opened and no broadcast was run. Playwright proves nothing about
@@ -1360,3 +1360,149 @@ amplifier sound.
 10. LinkGuard pause/resume.
 11. Acoustic speaker verification — `SPEAKER_VERIFIED` remains `NOT_IMPLEMENTED`.
 12. Two-Store real hardware evidence (only Store UN has been tested).
+
+
+---
+
+## Administrator bootstrap is now fail-closed (2026-07-26)
+
+Branch `security/fail-closed-admin-bootstrap`. This closes the blocker the
+previous task could only document.
+
+### What startup used to do
+
+```python
+username = os.environ.get("ADMIN_USERNAME", <a known value>)
+password = os.environ.get("ADMIN_PASSWORD", <a known value>)
+existing = db.query(HQUser).filter(HQUser.username == username).first()
+if existing is None:
+    db.add(HQUser(...))
+else:
+    if not verify_password(password, existing.password_hash):
+        existing.password_hash = hash_password(password)   # every restart
+```
+
+Three separate faults:
+
+1. An unconfigured machine got an administrator with a password everybody
+   already knew.
+2. If `ADMIN_PASSWORD` was merely **unset**, the fallback disagreed with the
+   stored hash, so the administrator's password was silently reset back to that
+   known value **on every restart**. A credential rotation nobody asked for,
+   performed by a routine boot.
+3. Because the lookup was by username, changing `ADMIN_USERNAME` added a
+   *second* row. The operator then signed in as an account that had just been
+   created — which is exactly what produced the confusing 401 during the
+   amplifier pilot.
+
+### What startup does now
+
+`backend/admin_bootstrap.py`:
+
+- reads `ADMIN_USERNAME` and `ADMIN_PASSWORD` with **no fallback of any kind**;
+- refuses missing or blank values with `AdminBootstrapError`, raised **before**
+  anything is read from or written to the database;
+- names the variable in the message and never the value;
+- creates an administrator **only when the `hq_users` table is empty**;
+- when any administrator already exists, does nothing at all — no username
+  change, no hash change, no second row.
+
+`BootstrapCredentials` defines its own `__repr__`, because the default dataclass
+one would print the password into any traceback that happened to include it.
+
+Password rotation is deliberately **not** part of startup and remains a separate
+explicit administrative action.
+
+### Live verification
+
+Run against a private temporary database:
+
+| Scenario | Result |
+| --- | --- |
+| No credentials at all | exit 1, refused, **zero rows created**, no secret in the message |
+| Blank password | exit 1, refused, zero rows |
+| Explicit credentials, empty database | `created`, exactly one administrator, bcrypt `$2b$12$` |
+| Restart with a **different** password | `already_present`, stored hash **unchanged** |
+| Restart with a **different** username | still one row, no second administrator |
+| Original password after those restarts | still valid |
+| The different password | **not** valid — startup granted it nothing |
+
+### Tests
+
+31 focused tests in `backend/tests/test_startup_admin_bootstrap.py`, written
+first and captured RED before implementation.
+
+| Suite | Result |
+| --- | --- |
+| Focused bootstrap tests | 31 passed |
+| Complete backend suite | **697 passed, 1 skipped, 32 warnings** (was 666) |
+| Complete backend suite, serial `-n 0` | 697 passed, 1 skipped |
+| Playwright Chromium | 39 passed |
+| Frontend production build | compiled successfully |
+| Null-sink one-Store smoke | `ONE_STORE_AUDIO_SOFTWARE_PILOT_PASSED` |
+| `compileall backend tools` | exit 0 |
+
+A latent test fragility surfaced and was handled rather than worked around:
+`test_smoke.py` asserts that **it** is the module which imported `db` under an
+isolated `SPEAKLINK_DB_PATH`. That assertion is a real safety guard — if another
+module imports `db` first with no path configured, `db.engine` points at the
+**protected** database. The new test module is therefore named to sort after
+`test_smoke.py`, and additionally sets a disposable `SPEAKLINK_DB_PATH` before
+importing, so no collection order can ever aim the default engine at the
+protected file. The default suite runs `-n 2 --dist loadscope`, which had been
+hiding this by distributing modules across workers.
+
+A second, unrelated flake was found by the same full run and fixed rather than
+re-run: two Playwright helpers in `broadcast-console.spec.js` mutated the mocked
+backend state and then waited for the console's 3 s poll, which occasionally
+raced the 7 s expect timeout under full-suite load. They now click the console's
+own Refresh button, which is deterministic. The suite passed twice consecutively
+afterwards and got faster (2.7 min → 1.6 min).
+
+### Historical default credential removed from the repository
+
+The security finding stays on the record; the usable pair does not. Replaced
+with `[REMOVED INSECURE HISTORICAL DEFAULT]` in `memory/PRD.md`,
+`test_reports/iteration_1.json`, `PROJECT_STATE.md` and `test_result.md`. The
+Playwright regression guard now assembles the historical value from parts, so
+the assertion still protects against its return without the repository holding
+a copy-pasteable credential. `README.md` now states that `ADMIN_USERNAME` and
+`ADMIN_PASSWORD` are required and what they do and do not affect.
+
+`git grep` for the historical password across all tracked files returns nothing.
+
+### Security review
+
+| Check | Result |
+| --- | --- |
+| Password hashing | bcrypt, `auth.py` unchanged |
+| Plaintext password stored | none — only `password_hash` |
+| Credential fallback in backend | none |
+| Automatic hash change | none |
+| Credentials logged | none — no logging in the bootstrap path |
+| Startup failure message | names the variable, never the value |
+| Secret in a URL | none |
+
+### Status
+
+`NOT_READY_FOR_PRODUCTION`. Remaining blockers:
+
+1. Rate limiting and account lockout.
+2. Complete authentication and security review.
+3. Receiver device enrolment.
+4. Unique per-Receiver credentials.
+5. Receiver token hashing and rotation.
+6. Production HTTPS/WSS.
+7. Restricted production CORS.
+8. Audit logs.
+9. Windows Receiver auto-start and recovery.
+10. LinkGuard pause/resume.
+11. Acoustic speaker verification — `SPEAKER_VERIFIED` remains `NOT_IMPLEMENTED`.
+12. Two-Store real hardware evidence.
+13. Staging deployment validation.
+
+Noted while reading the code, not changed here: `backend/auth.py:54-57`
+(`_extract_token`) still accepts a `?token=` query parameter as a fallback for
+HTTP requests. The WebSocket sockets no longer use it, so it is now dead weight
+that would put a reusable token in a URL — and therefore in an access log. It
+belongs in the authentication review above.

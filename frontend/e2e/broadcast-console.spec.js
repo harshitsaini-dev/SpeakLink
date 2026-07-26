@@ -231,6 +231,10 @@ test.describe('Play status is evidence, never inference', () => {
     await page.getByTestId('stores-search').fill('Uttam Nagar Old');
     await page.getByTestId('store-checkbox-UN').check();
     state.current = liveWith(playStatus);
+    // Click Refresh rather than waiting for the console's 3 s poll. Waiting on
+    // a timer made this flaky under full-suite load: the poll and the expect
+    // timeout occasionally raced.
+    await page.getByTestId('refresh-btn').click();
     await expect(page.getByTestId('live-indicator')).toBeVisible();
     return state;
   }
@@ -343,6 +347,8 @@ test.describe('The target summary counts real Receiver states', () => {
       targets,
       ready_receivers: [1],
     };
+    // Deterministic refresh instead of waiting on the console's 3 s poll.
+    await page.getByTestId('refresh-btn').click();
     await expect(page.getByTestId('live-indicator')).toBeVisible();
     return state;
   }

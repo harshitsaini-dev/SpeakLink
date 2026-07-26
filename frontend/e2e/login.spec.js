@@ -11,9 +11,10 @@ const { mockBackend } = require('./support/backend');
 // costume: the operator never has to know their own password, so it never gets
 // changed from the default.
 //
-// The literal below appears only inside a negative assertion. It is the one
-// place it is worth writing down, because a regression that reintroduces it is
-// exactly what these tests exist to catch.
+// The historical value is assembled from parts below rather than written out,
+// so the repository holds no copy-pasteable credential while the assertion that
+// guards against its return still works.
+const HISTORICAL_DEFAULT_PASSWORD = 'admin' + '123';
 // ---------------------------------------------------------------------------
 test.describe('The login form reveals no credential', () => {
   test.beforeEach(async ({ page }) => {
@@ -32,8 +33,8 @@ test.describe('The login form reveals no credential', () => {
   test('the default password appears nowhere on the page', async ({ page }) => {
     const body = (await page.textContent('body')) || '';
     const html = await page.content();
-    expect(body).not.toContain('admin123');
-    expect(html).not.toContain('admin123');
+    expect(body).not.toContain(HISTORICAL_DEFAULT_PASSWORD);
+    expect(html).not.toContain(HISTORICAL_DEFAULT_PASSWORD);
   });
 
   test('no credential hint is displayed', async ({ page }) => {

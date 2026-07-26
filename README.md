@@ -43,6 +43,16 @@ Create `backend/.env` locally with the configuration required by the server.
 Do not paste credentials into documentation, shell history, commits, or issue
 reports. The application loads this file at startup, and Git ignores it.
 
+`ADMIN_USERNAME` and `ADMIN_PASSWORD` are **required**. The backend refuses to
+start without them, and there is no default: an unconfigured machine used to get
+a password everybody already knew. Choose your own values.
+
+They bootstrap the **first** administrator only. Once one exists, startup never
+touches it again — not the username, not the password. Changing `ADMIN_PASSWORD`
+later does not rotate anything, and a different `ADMIN_USERNAME` does not create
+a second account. Rotating a password is a deliberate administrative action, not
+something a restart does on your behalf.
+
 Start exactly one backend worker:
 
 ```powershell
