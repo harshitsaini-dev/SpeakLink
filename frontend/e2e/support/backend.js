@@ -75,6 +75,16 @@ async function mockBackend(page, options = {}) {
     const method = request.method();
 
     if (method === 'POST' && path === '/auth/login') {
+      if (state.loginStatus === 429) {
+        // What the backend actually sends when a burst is throttled or an
+        // account is temporarily locked - the same response for both.
+        return route.fulfill({
+          status: 429,
+          contentType: 'application/json',
+          headers: { 'Retry-After': '900' },
+          body: JSON.stringify({ detail: 'Too many sign-in attempts. Please try again later.' }),
+        });
+      }
       if (state.loginStatus !== 200) {
         return route.fulfill(json({ detail: 'Invalid username or password' }, state.loginStatus));
       }

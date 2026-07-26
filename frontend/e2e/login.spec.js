@@ -91,6 +91,51 @@ test.describe('HQ sign in', () => {
     await expect(page.getByTestId('broadcast-console')).toHaveCount(0);
   });
 
+  test('a throttled or locked sign in shows a neutral retry message', async ({ page }) => {
+    // The backend answers 429 identically for "too fast" and "this account is
+    // temporarily locked", because distinguishing them would reveal whether
+    // the account exists.
+    await mockBackend(page, { loginStatus: 429 });
+    await page.goto('/login');
+    await page.getByTestId('login-username-input').fill('pilot-operator');
+    await page.getByTestId('login-password-input').fill('not-a-real-password');
+    await page.getByTestId('login-submit-btn').click();
+
+    const error = page.getByTestId('login-error');
+    await expect(error).toBeVisible();
+    await expect(error).toContainText(/try again/i);
+
+    const message = (await error.textContent()) || '';
+    expect(message).not.toMatch(/\d/);            // no count, threshold or unlock time
+    expect(message.toLowerCase()).not.toContain('lock');
+    expect(message.toLowerCase()).not.toContain('exist');
+  });
+
+  test('a throttled sign in stores no token and stays on the login page', async ({ page }) => {
+    await mockBackend(page, { loginStatus: 429 });
+    await page.goto('/login');
+    await page.getByTestId('login-username-input').fill('pilot-operator');
+    await page.getByTestId('login-password-input').fill('not-a-real-password');
+    await page.getByTestId('login-submit-btn').click();
+    await expect(page.getByTestId('login-error')).toBeVisible();
+
+    expect(await page.evaluate(() => window.localStorage.getItem('speaklink_token'))).toBeNull();
+    await expect(page).toHaveURL(/\/login$/);
+  });
+
+  test('the Sign In button leaves its loading state after a refusal', async ({ page }) => {
+    await mockBackend(page, { loginStatus: 429 });
+    await page.goto('/login');
+    await page.getByTestId('login-username-input').fill('pilot-operator');
+    await page.getByTestId('login-password-input').fill('not-a-real-password');
+    await page.getByTestId('login-submit-btn').click();
+    await expect(page.getByTestId('login-error')).toBeVisible();
+
+    const button = page.getByTestId('login-submit-btn');
+    await expect(button).toBeEnabled();
+    await expect(button).toContainText(/sign in/i);
+  });
+
   test('a rejected sign in stores no token', async ({ page }) => {
     await mockBackend(page, { loginStatus: 401 });
     await page.goto('/login');

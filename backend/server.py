@@ -8,6 +8,7 @@ from pathlib import Path
 load_dotenv(Path(__file__).parent / ".env")
 
 import os
+import time
 import uuid
 import logging
 import asyncio
@@ -15,7 +16,7 @@ import json
 from datetime import datetime, timezone
 from typing import List, Optional, Set
 
-from fastapi import FastAPI, APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from starlette.middleware.cors import CORSMiddleware
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -55,6 +56,23 @@ from receiver_contract import (
     WrongSessionError,
 )
 from ws_tickets import TICKET_TTL_SECONDS, TicketRejected, WebSocketTicketStore
+from login_guard import (
+    LoginRateLimiter,
+    burn_password_comparison,
+    clear_failed_logins,
+    client_identifier,
+    config_from_environment,
+    lockout_retry_after,
+    normalise_username,
+    proxy_headers_trusted,
+    register_failed_login,
+)
+
+# Validated at import, so an unusable value stops the process rather than
+# quietly disabling the login defences.
+LOGIN_GUARD = config_from_environment()
+TRUST_PROXY_HEADERS = proxy_headers_trusted()
+login_limiter = LoginRateLimiter(LOGIN_GUARD)
 
 # Browser WebSockets cannot send an Authorization header, so the HQ sockets
 # authenticate with a single-use ticket instead of a reusable JWT in the URL.
@@ -128,14 +146,76 @@ def root():
 
 
 # ================ AUTH ================
+INVALID_CREDENTIALS = "Invalid username or password"
+TOO_MANY_ATTEMPTS = "Too many sign-in attempts. Please try again later."
+
+
+def _too_many_attempts(retry_after: int) -> HTTPException:
+    """One response for throttled and for locked.
+
+    Telling them apart would say whether the account exists, which is exactly
+    what the generic 401 already refuses to reveal. The body carries no counter,
+    no threshold and no timestamp - only the header an honest client needs.
+    """
+    return HTTPException(
+        status_code=429,
+        detail=TOO_MANY_ATTEMPTS,
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
 @api.post("/auth/login", response_model=LoginResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    client_key = client_identifier(
+        request.client.host if request.client else None,
+        request.headers.get("x-forwarded-for"),
+        trust_proxy=TRUST_PROXY_HEADERS,
+    )
+    username_key = f"user:{normalise_username(payload.username)}"
+
+    # Burst defence first: refuse before spending a bcrypt comparison, so a
+    # flood cannot be used to exhaust CPU either.
+    for key in (client_key, username_key):
+        retry_after = login_limiter.retry_after(key)
+        if retry_after is not None:
+            _write_log(db, "warn", f"login_rate_limited key_kind={key.split(':', 1)[0]}")
+            raise _too_many_attempts(retry_after)
+
+    # A locked account gets no token, whatever password is presented.
+    locked_for = lockout_retry_after(db, payload.username, LOGIN_GUARD, now=time.time())
+    if locked_for is not None:
+        # Safe to name the account here: a lock exists only for one that really
+        # exists, so this cannot be turned into arbitrary attacker-written log
+        # content. The operator needs to know which account is locked.
+        _write_log(
+            db, "warn", f"account_temporarily_locked user={normalise_username(payload.username)}"
+        )
+        raise _too_many_attempts(locked_for)
+
     user = db.query(HQUser).filter(HQUser.username == payload.username).first()
-    if not user or not user.is_active or not verify_password(payload.password, user.password_hash):
-        _write_log(db, "warn", f"Failed login attempt: {payload.username}")
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+    if not user or not user.is_active:
+        # Spend the same time as a real comparison so the clock does not answer
+        # a question the message refuses to.
+        burn_password_comparison(payload.password)
+        authenticated = False
+    else:
+        authenticated = verify_password(payload.password, user.password_hash)
+
+    if not authenticated:
+        for key in (client_key, username_key):
+            login_limiter.record_attempt(key)
+        register_failed_login(db, payload.username, LOGIN_GUARD, now=time.time())
+        # Deliberately no username: it is attacker-supplied on this path, so
+        # recording it would let anyone write arbitrary text into system_logs
+        # and would publish every account name they guessed at.
+        _write_log(db, "warn", "login_failed")
+        raise HTTPException(status_code=401, detail=INVALID_CREDENTIALS)
+
+    for key in (client_key, username_key):
+        login_limiter.forget(key)
+    clear_failed_logins(db, user.username)
     token = create_access_token(user.id, user.username)
-    _write_log(db, "info", f"User logged in: {user.username}")
+    _write_log(db, "info", f"login_succeeded user={user.username}")
     return LoginResponse(access_token=token, user=UserOut.model_validate(user))
 
 

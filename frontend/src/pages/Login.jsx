@@ -26,7 +26,16 @@ export default function Login() {
       await login(u.trim(), p);
       nav("/console");
     } catch (e2) {
-      setErr(e2?.response?.data?.detail || "Login failed");
+      // 429 covers both "too fast" and "this account is temporarily locked".
+      // The backend deliberately answers the same way for both, because saying
+      // which one applied would say whether the account exists. The wording is
+      // fixed here rather than echoed, so no future server detail can leak a
+      // count, a threshold or an unlock time into the page.
+      if (e2?.response?.status === 429) {
+        setErr("Too many sign-in attempts. Please wait a while and try again.");
+      } else {
+        setErr(e2?.response?.data?.detail || "Login failed");
+      }
     } finally { setBusy(false); }
   };
 

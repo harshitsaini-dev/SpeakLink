@@ -1,7 +1,7 @@
 """SpeakLink database models."""
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, Integer, String, Boolean, DateTime, ForeignKey, Text, Index
+    Column, Integer, String, Boolean, DateTime, Float, ForeignKey, Text, Index
 )
 from sqlalchemy.orm import relationship
 from db import Base
@@ -35,6 +35,34 @@ class HQUser(Base):
     role = Column(String(50), default="admin", nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=utcnow, nullable=False)
+
+
+class LoginSecurityState(Base):
+    """Consecutive failed sign-ins for one real account.
+
+    Deliberately a separate table rather than columns on ``hq_users``. Adding
+    columns would need an ALTER TABLE against the table that holds every
+    password hash; a new table is created by ``create_all`` on an existing
+    database without touching a single existing row.
+
+    A row exists only for a username that really exists. An unknown name is
+    handled by the in-process limiter and never reaches this table, so an
+    attacker cannot turn invented usernames into unbounded rows - and a lock can
+    never be reported for an account that does not exist, which would confirm
+    that it does.
+
+    Times are epoch seconds rather than DateTime so a lock survives a restart
+    and compares without any timezone ambiguity. Nothing here holds a
+    credential.
+    """
+
+    __tablename__ = "login_security_state"
+    id = Column(Integer, primary_key=True)
+    username = Column(String(100), unique=True, nullable=False, index=True)
+    failed_count = Column(Integer, default=0, nullable=False)
+    locked_until_epoch = Column(Float, nullable=True)
+    last_failed_epoch = Column(Float, nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class BroadcastSession(Base):

@@ -31,7 +31,19 @@ def isolated_backend(tmp_path_factory):
     try:
         db = importlib.import_module("db")
         server = importlib.import_module("server")
-        assert Path(db.DB_PATH) == database_path.resolve()
+
+        # The server under test runs in the subprocess below and reads
+        # SPEAKLINK_DB_PATH from the environment, so the environment is what
+        # actually decides isolation - assert that directly.
+        #
+        # db.DB_PATH is resolved once, at first import, anywhere in the pytest
+        # session. Asserting it equals *this* module's path silently required
+        # this file to be the first to import db, which made unrelated new test
+        # modules break it and said nothing about the subprocess. What matters
+        # for the parent is only that it never points at the protected database.
+        protected_database = backend_dir / "speaklink_live.db"
+        assert os.environ["SPEAKLINK_DB_PATH"] == str(database_path)
+        assert Path(db.DB_PATH).resolve() != protected_database.resolve()
         with socket.socket() as port_socket:
             port_socket.bind(("127.0.0.1", 0))
             port = port_socket.getsockname()[1]
@@ -99,11 +111,20 @@ def test_backend_app_import(isolated_backend):
 
 
 def test_sqlite_test_database_connection(isolated_backend):
+    """db.py resolves its configured path and enables foreign keys.
+
+    This exercises the parent process engine, which is not what serves the
+    requests in these tests - the subprocess is, and the fixture asserts its
+    isolation through SPEAKLINK_DB_PATH. So the file this connection opens is
+    compared against the path db.py actually resolved, which is true whatever
+    order pytest happened to import the modules in. The fixture has already
+    established that it is never the protected database.
+    """
     db = isolated_backend["db"]
     with db.engine.connect() as connection:
         assert connection.scalar(text("SELECT 1")) == 1
         database_file = connection.exec_driver_sql("PRAGMA database_list").one()[2]
-        assert Path(database_file) == isolated_backend["database_path"].resolve()
+        assert Path(database_file) == Path(db.DB_PATH).resolve()
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
 
 

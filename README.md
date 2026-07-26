@@ -53,6 +53,33 @@ later does not rotate anything, and a different `ADMIN_USERNAME` does not create
 a second account. Rotating a password is a deliberate administrative action, not
 something a restart does on your behalf.
 
+### Login protection (optional, with safe defaults)
+
+The login is rate-limited and locks an account after repeated failures. You do
+not have to configure anything; these are the defaults.
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `LOGIN_MAX_ATTEMPTS` | 10 | attempts allowed per client and per username inside the window |
+| `LOGIN_WINDOW_SECONDS` | 60 | length of that window |
+| `LOGIN_MAX_FAILURES` | 5 | consecutive failures before an existing account is locked |
+| `LOGIN_LOCKOUT_SECONDS` | 900 | how long that lock lasts |
+| `LOGIN_LIMITER_MAX_ENTRIES` | 4096 | upper bound on tracked clients/usernames |
+| `TRUST_PROXY_HEADERS` | off | see below |
+
+Unusable values stop the backend at startup rather than quietly disabling the
+protection.
+
+`X-Forwarded-For` is **ignored** unless `TRUST_PROXY_HEADERS` is switched on.
+Only enable it when a proxy you control sets that header; otherwise any caller
+can invent a new identity per request and walk past the rate limit.
+
+The rate limiter lives in one process. That is correct for this deployment,
+which runs exactly one Uvicorn worker. Running several workers would give each
+its own limiter and multiply the effective allowance — that needs shared
+rate-limit storage, which is not implemented. The **account lock** is stored in
+the database, so it is not affected by this and survives a restart.
+
 Start exactly one backend worker:
 
 ```powershell
