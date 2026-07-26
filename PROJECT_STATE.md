@@ -1274,3 +1274,89 @@ because this passed.**
 12. Only 1 of 44 Stores has been tested on real hardware.
 
 The test-first Windows deployment specification remains **not started**.
+
+
+---
+
+## Default login credentials removed from the HQ UI (2026-07-26)
+
+Branch `security/remove-default-login-credentials`. Frontend only — no backend
+seed behaviour, no API contract and no database was changed.
+
+### What the login page did
+
+`frontend/src/pages/Login.jsx` shipped with the sign-in form already filled in
+(`useState("admin")`, `useState("admin123")`) and printed
+`Default: admin / admin123` under the Sign In button. Anyone who could reach the
+page could read a working credential and sign in without knowing anything.
+
+Pre-filling is the same problem wearing a convenience costume: the operator
+never has to know their own password, so it never gets changed.
+
+### What it does now
+
+| | Before | After |
+| --- | --- | --- |
+| Username field | pre-filled `admin` | empty |
+| Password field | pre-filled `admin123` | empty |
+| Hint under the button | `Default: admin / admin123` | "Use the HQ credentials issued to you… they are never shown on this page." |
+| `autocomplete` | absent | `username` / `current-password` |
+| Label association | none | `htmlFor` / `id` on both fields |
+
+The shipped production bundle no longer contains the string `admin123` at all.
+Loading state, the honest error message and the existing login API contract are
+unchanged.
+
+Seven Playwright tests were written first and captured the failure (6 failed,
+4 passed) before any edit.
+
+### This blocker is only partly closed
+
+The **UI** no longer reveals or pre-fills a credential. The **default itself
+still exists in the backend**, and was deliberately left alone because changing
+seed behaviour was out of scope for this task:
+
+```
+backend/seed.py:16   username = os.environ.get("ADMIN_USERNAME", "admin")
+backend/seed.py:17   password = os.environ.get("ADMIN_PASSWORD", "admin123")
+```
+
+Worse than a one-time seed: `seed_admin` also re-aligns the stored hash on every
+startup (`seed.py:24-26`). If `ADMIN_PASSWORD` is unset, an existing
+administrator's password is silently reset back to the default **on every
+boot**. That must be fixed before any deployment — a start-up that refuses to
+run without an explicit `ADMIN_PASSWORD` is the obvious shape.
+
+Two tracked documents still contain the default pair and should be reviewed
+separately: `memory/PRD.md` and `test_reports/iteration_1.json`.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| Focused login Playwright | 10 passed (7 new) |
+| Complete Playwright suite | 39 passed |
+| Frontend production build | compiled successfully |
+| Focused backend auth tests | 59 passed (`test_smoke`, `test_websocket_ticket_auth`, `test_receiver_ws_auth`, `test_receiver_auth_service`) |
+| Complete backend suite | 666 passed, 1 skipped, 32 warnings |
+| `compileall backend tools` | exit 0 |
+| `admin123` in the production bundle | not present |
+| Protected database | 507 904 bytes, `2026-07-26 08:43:13`, WAL and SHM absent — unchanged |
+
+No hardware was opened and no broadcast was run. Playwright proves nothing about
+amplifier sound.
+
+`NOT_READY_FOR_PRODUCTION` still stands. Remaining blockers:
+
+1. `backend/seed.py` defaults to a known password and re-applies it on every startup.
+2. Password hashing and security review.
+3. Rate limiting and account lockout.
+4. Receiver enrolment and unique per-Receiver credentials.
+5. Receiver token hashing and rotation.
+6. HTTPS/WSS.
+7. Production CORS policy.
+8. Audit logging.
+9. Windows auto-start and restart recovery.
+10. EchoGuard pause/resume.
+11. Acoustic speaker verification — `SPEAKER_VERIFIED` remains `NOT_IMPLEMENTED`.
+12. Two-Store real hardware evidence (only Store UN has been tested).
