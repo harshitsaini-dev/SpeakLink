@@ -75,13 +75,20 @@ why a bare name is not a safe selector and why the pilot refuses ambiguous
 names.
 
 **Bare indices are not stable either.** Hardware validation proved this:
-connecting a Bluetooth earbud set renumbered every device and moved the wired
+connecting a Bluetooth earbud set renumbered every device and moved the
 endpoint from `index:7` to `index:18`. Always copy the **verified selector**
 the list prints, which pins the index to the exact name:
 
 ```text
 index:18@Headphones ()
 ```
+
+> **CORRECTION (2026-07-26).** The selector shown above is only an example of
+> the *format*. Do **not** use `Headphones ()` as an output device: it is a
+> WDM-KS view of the Bluetooth stack, not a wired analog jack. It vanishes when
+> the Bluetooth adapter is unplugged. Identify your endpoint by differential
+> enumeration as described in
+> [`ONE_STORE_BLUETOOTH_AMPLIFIER_TEST_RUNBOOK.md`](ONE_STORE_BLUETOOTH_AMPLIFIER_TEST_RUNBOOK.md).
 
 If the device is renumbered later, that selector fails closed and tells you
 what is actually at that index now, instead of opening the wrong endpoint.
