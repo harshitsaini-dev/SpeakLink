@@ -75,14 +75,36 @@ export default function BroadcastConsole() {
     return () => clearInterval(id);
   }, [load]);
 
-  // HQ Dashboard status WS
+  // HQ Dashboard status WS.
+  //
+  // The handshake carries a single-use ticket, never the access token. A
+  // browser cannot set an Authorization header on a WebSocket, and Uvicorn
+  // writes the whole URL to its access log - so what travels here must be
+  // worthless once used. The ticket is fetched over the normal authenticated
+  // HTTP API, where the JWT stays in a header.
   React.useEffect(() => {
-    const t = getToken(); if (!t) return;
-    const ws = new WebSocket(`${wsUrl("/ws/hq")}?token=${encodeURIComponent(t)}`);
-    hqWsRef.current = ws;
-    ws.onmessage = () => { load(); };
-    ws.onclose = () => { hqWsRef.current = null; };
-    return () => { try { ws.close(); } catch { /* */ } };
+    if (!getToken()) return undefined;
+    let socket = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { data } = await api.post("/auth/ws-ticket");
+        if (cancelled) return;
+        socket = new WebSocket(`${wsUrl("/ws/hq")}?ticket=${encodeURIComponent(data.ticket)}`);
+        hqWsRef.current = socket;
+        socket.onmessage = () => { load(); };
+        socket.onclose = () => { hqWsRef.current = null; };
+      } catch {
+        // This socket only speeds up refreshes; the 3 s poll above still keeps
+        // the console honest without it.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      try { if (socket) socket.close(); } catch { /* */ }
+    };
   }, [load]);
 
   const filteredStores = React.useMemo(() => {
@@ -191,8 +213,11 @@ export default function BroadcastConsole() {
         );
       }
 
+      // A fresh single-use ticket, so the audio uplink URL in the access log
+      // cannot be replayed either.
+      const { data: uplink } = await api.post("/auth/ws-ticket");
       const bc = new HQBroadcaster({
-        wsUrl: `${wsUrl("/ws/broadcaster")}?token=${encodeURIComponent(getToken())}`,
+        wsUrl: `${wsUrl("/ws/broadcaster")}?ticket=${encodeURIComponent(uplink.ticket)}`,
         onMeter: (l) => setMeter(l),
         onStatus: (s) => setBroadcasterStatus(s),
         onError: (m) => setError(m),

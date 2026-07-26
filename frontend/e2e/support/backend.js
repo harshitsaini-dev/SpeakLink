@@ -65,6 +65,7 @@ async function mockBackend(page, options = {}) {
     sessionId: 8,
     startCalls: [],
     stopCalls: [],
+    ticketsIssued: 0,
   };
 
   await page.route('**/api/**', async (route) => {
@@ -82,6 +83,12 @@ async function mockBackend(page, options = {}) {
 
     if (method === 'GET' && path === '/auth/me') {
       return route.fulfill(json(OPERATOR));
+    }
+
+    if (method === 'POST' && path === '/auth/ws-ticket') {
+      // A fresh opaque value each time, as the real endpoint does. Never a JWT.
+      state.ticketsIssued += 1;
+      return route.fulfill(json({ ticket: `test-ticket-${state.ticketsIssued}`, expires_in: 20 }));
     }
 
     if (method === 'GET' && path === '/stores') {
