@@ -4,26 +4,28 @@ The Store catalog is defined once in ``store_catalog`` and is the single
 source of truth. The React dashboard reads it through the existing Store API
 instead of keeping its own copy.
 """
-import os
 import uuid
 from sqlalchemy.orm import Session
-from models import HQUser, Store
-from auth import hash_password, verify_password
+from models import Store
+from admin_bootstrap import bootstrap_administrator, resolve_bootstrap_credentials
 from store_catalog import CANONICAL_STORES, validate_catalog
 
 
 def seed_admin(db: Session):
-    username = os.environ.get("ADMIN_USERNAME", "admin")
-    password = os.environ.get("ADMIN_PASSWORD", "admin123")
-    existing = db.query(HQUser).filter(HQUser.username == username).first()
-    if existing is None:
-        db.add(HQUser(username=username, password_hash=hash_password(password), role="admin"))
-        db.commit()
-    else:
-        # idempotent: keep hash aligned with env password
-        if not verify_password(password, existing.password_hash):
-            existing.password_hash = hash_password(password)
-            db.commit()
+    """Bootstrap the first administrator, fail-closed.
+
+    This used to fall back to a known username and password when the
+    environment was unset, and to re-align the stored hash whenever the
+    environment disagreed with the database - so an unset ADMIN_PASSWORD reset
+    the administrator's password back to a known value on every restart.
+
+    Both behaviours are gone. See ``admin_bootstrap``: missing or blank
+    credentials raise before anything is written, and an administrator that
+    already exists is never modified by startup. Rotating a password is a
+    deliberate administrative action, not a side effect of booting.
+    """
+    credentials = resolve_bootstrap_credentials()
+    return bootstrap_administrator(db, credentials)
 
 
 def seed_stores(db: Session):
