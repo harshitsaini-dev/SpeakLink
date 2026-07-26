@@ -506,11 +506,31 @@ backend:
       - working: true
         agent: "main"
         comment: "Focused reconciliation result: 41 passed. Catalog/race/cutover regressions: 33 passed with 21 existing warnings. Smoke, migration, device, WebSocket auth/contract, inventory and dual-auth regressions: 111 passed with 11 existing warnings. python -m compileall -q backend succeeded. Complete backend suite: 429 passed, 1 skipped, 32 existing warnings, green across 5 consecutive runs (baseline 388 plus 41 new tests). git diff --check clean. Protected database backend/echocast_live.db metadata was identical before and after: 487424 bytes, LastWriteTimeUtc 2026-07-25 11:12:47. It was never opened, queried, copied, migrated, seeded or modified, and NO reconciliation was executed against real data. Every database test used a pytest temporary file-backed SQLite snapshot. Read-only enforcement is proven directly: a dedicated test asserts PRAGMA query_only is 1 and that UPDATE, DELETE and CREATE TABLE all raise sqlite3.OperationalError on the report connection, and separate tests assert the snapshot SHA-256, size, mtime, Store rows and dependent rows are unchanged. Protected-path refusal is proven for the exact path, a '..' path, a path relative to another working directory, and a same-file hard link (via an isolated stand-in, never the real database). Text and JSON output are asserted free of any credential marker. No frontend, runtime, authentication, WebSocket, seed or migration behaviour changed."
+  - task: "Local one-Store pilot readiness harness"
+    implemented: true
+    working: true
+    file: "backend/tests/test_local_pilot.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Preflight blocker (2026-07-26 UTC). Starting branch feat/store-catalog-reconciliation-report at b8f2292b2b9a7c21cdb3366f3f5de3b0aa719228, upstream matching, tree clean, baseline 429 passed / 1 skipped / 32 warnings. Two Uvicorn processes were running, both configured for port 8000: PID 6632 (system Python) held the listener and PID 11980 (repo venv) did not, so ownership was ambiguous. The React dev server was also running on 0.0.0.0:3000. Critically, the protected database had a live 910,552-byte -wal plus a -shm file dated 26/07 06:59, proving a live backend was writing to it. Work stopped before creating a branch and nothing was terminated. An honest completeness correction was recorded: earlier tasks verified only the .db file's size and mtime, not the WAL sidecar, so 'metadata unchanged' was true but incomplete evidence while WAL absorbed the writes."
+      - working: false
+        agent: "main"
+        comment: "The operator stopped the processes. SQLite checkpointed the WAL into the main file on clean shutdown, so the protected database moved from 487424 bytes / 2026-07-25 11:12:47 to 507904 bytes / 2026-07-26 07:42:09 with both sidecars removed. That was the operator's own application shutting down, not a task command. New accepted baseline recorded, baseline suite re-verified at 429 passed / 1 skipped / 32 warnings, then branch test/local-one-store-pilot-readiness created. Test-first red phase: ModuleNotFoundError: No module named 'tools.local_pilot'."
+      - working: false
+        agent: "main"
+        comment: "First implementation run reached 12 passed / 14 failed / 9 errors because the reconciliation tool correctly refused the freshly created pilot database: backend/db.py enables PRAGMA journal_mode=WAL, so a -wal sidecar sat beside the snapshot. This was the safety feature working, not a false positive. A checkpoint helper was added that runs PRAGMA wal_checkpoint(TRUNCATE) followed by PRAGMA journal_mode=DELETE, because TRUNCATE empties the WAL but leaves the file present. It runs only against the pilot database, after initialisation and after smoke shutdown, since Windows terminate() is an abrupt kill that cannot let SQLite clean up."
+      - working: true
+        agent: "main"
+        comment: "Focused local-pilot result: 35 passed. Catalog and reconciliation regressions: 98 passed combined with the pilot suite. Receiver WebSocket auth/contract/inventory/replacement-race/cutover plus smoke: 54 passed with 29 existing warnings. python -m compileall -q backend tools succeeded. Complete backend suite: 464 passed, 1 skipped, 32 existing warnings, green across 5 consecutive runs (429 baseline plus 35 new). Frontend: yarn test --watchAll=false --passWithNoTests reported no test files exist; CI=false yarn build compiled successfully. Actual CLI prepare at commit b8f2292 produced an isolated database at %LOCALAPPDATA%/EchoCast-AI/local-pilot/data/echocast_local_pilot.db, SHA-256 4e0710f859f08ec3cfef947d6797c01f5d52bd4922173cbbb951bf170e766dd4, 44 Stores, 9 Zones, demo_codes_present empty, reconciliation EXACT_CANONICAL_MATCH. Actual CLI smoke returned LOCAL_PILOT_SMOKE_PASSED on 127.0.0.1:61266 with exactly one Uvicorn worker: liveness ok, login ok, 44 Stores, 9 Zones, Store UN authenticated over the Bearer header, query-string credential refused, observed_connection CONNECTED, readiness/playback/acoustic all NOT_REPORTED, speaker_verified false, receiver cleanup ok, shutdown ok, no process left running and port 61266 released. Secret scan of backend.log, smoke-report.json, pilot-state.json and PILOT_ONLY: all clean; the pilot database itself contains the strings 'password' and 'receiver_token' only as SQLite column names, and it lives outside Git. Protected database metadata was 507904 bytes / 2026-07-26 07:42:09 before and after, with no sidecars; it was never opened, copied or modified. All pilot artifacts stayed outside the repository and none were staged."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 22
+  test_sequence: 23
   run_ui: false
 test_plan:
   current_focus: []
@@ -590,3 +610,7 @@ agent_communication:
     message: "The read-only Store catalog reconciliation report is ready for regression validation. It requires an explicitly supplied isolated snapshot, refuses backend/echocast_live.db before opening any connection, and opens the snapshot with a SQLite mode=ro URI plus PRAGMA query_only. Do not run it against real data: that needs an operator-produced quiesced snapshot, and any cleanup remains a separate approved task."
   - agent: "main"
     message: "Reconciliation report validation is complete. Focused 41 passed; catalog/race/cutover 33 passed; smoke/migration/device/WebSocket regressions 111 passed; complete backend 429 passed, 1 skipped, 32 warnings, green across 5 consecutive runs; compileall succeeded. The protected database was never opened or modified, no reconciliation ran against real data, and no cleanup was executed. Documentation wording was corrected: commit d29e18e changed 14 catalog entries comprising 13 short names and 4 full names."
+  - agent: "main"
+    message: "The local one-Store pilot readiness harness is ready for regression validation. It prepares a disposable pilot database under %LOCALAPPDATA% outside Git, refuses the protected database and any repository-contained pilot root, and runs a loopback-only smoke test with exactly one Uvicorn worker. Do not treat a passing run as live-audio or speaker evidence."
+  - agent: "main"
+    message: "Local pilot validation is complete. Focused 35 passed; complete backend 464 passed, 1 skipped, 32 warnings across 5 consecutive runs; compileall succeeded; frontend build compiled and no frontend test files exist. The recorded smoke run reported CONNECTED with readiness, playback and acoustic all NOT_REPORTED and speaker_verified false. Status is READY_FOR_LOCAL_SOFTWARE_PILOT_TEST only: NOT ready for live audio, speakers or production. The protected database was never opened, copied or modified."
