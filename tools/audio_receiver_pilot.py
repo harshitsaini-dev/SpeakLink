@@ -85,6 +85,14 @@ OUTPUT_CHANNELS = 1
 OUTPUT_DTYPE = "int16"
 OUTPUT_BYTES_PER_FRAME = 2 * OUTPUT_CHANNELS
 
+# The backend waits HEARTBEAT_INTERVAL_SECONDS for a message and closes an idle
+# Receiver socket with code 4408 once its snapshot ages past
+# OFFLINE_AFTER_SECONDS (5 s and 30 s in backend/receiver_contract.py). This
+# value is kept here rather than imported so tools/ stays independent of
+# backend/; backend/tests/test_receiver_heartbeat.py pins the relationship.
+# It must stay small enough that one dropped beat is still not fatal.
+HEARTBEAT_SECONDS = 5.0
+
 EXIT_OK = 0
 EXIT_SAFETY = 1
 EXIT_AUDIO_FAILED = 2
@@ -562,9 +570,18 @@ class AudioReceiverPilot:
         self.report["connected"] = True
         self._record_state("CONNECTED")
 
+        # Keep the socket fresh while nothing is happening. Without this a
+        # Receiver waiting for an operator-driven browser broadcast is closed
+        # by the backend after OFFLINE_AFTER_SECONDS and simply disappears.
+        heartbeat = asyncio.create_task(self._heartbeat_loop(connection))
         try:
             await self._session_loop(connection)
         finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
             await self._shutdown(connection)
 
         self.report["ended_at_utc"] = _utc_now()
@@ -583,6 +600,23 @@ class AudioReceiverPilot:
                 json.dumps(self.report, indent=2, sort_keys=True), encoding="utf-8"
             )
         return self.report
+
+    async def _heartbeat_loop(
+        self, connection, interval: float = HEARTBEAT_SECONDS
+    ) -> None:
+        """Prove liveness while idle. It never claims readiness or playback.
+
+        The session loop owns connection failures, so a send error here just
+        ends this task quietly rather than racing it with a second exception.
+        """
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self._send(connection, self._envelope("heartbeat"))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return
 
     async def _session_loop(self, connection) -> None:
         import websockets
