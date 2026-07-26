@@ -158,6 +158,21 @@ index:18@Headphones ()
 It is not flagged wireless. Whether anything is physically plugged into that
 3.5 mm jack was **not** verified, because no sound was played.
 
+> **CORRECTION (2026-07-26).** The paragraph above is wrong and must not be
+> followed. `Headphones ()` is **not a wired analog endpoint**. It is a
+> Windows WDM-KS view of the *Bluetooth* stack.
+>
+> This was proven by differential enumeration during the amplifier validation:
+> with the Makook / BARROT USB adapter connected the machine listed 12 output
+> devices; with it unplugged, 6. `Headphones ()` disappeared along with every
+> other Bluetooth endpoint. The heuristic that misled this document is that the
+> name carries no peer, and the `wireless?` flag is a name match only — it
+> cannot see an endpoint whose name happens to be empty.
+>
+> The real amplifier endpoint is
+> `index:4@Headphones (Bluetooth Stereo)` on **Windows DirectSound**. See
+> [`ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md`](ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md).
+
 ## What was and was not observed
 
 | Item | Result |

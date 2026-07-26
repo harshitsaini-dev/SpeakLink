@@ -1,7 +1,14 @@
 # SpeakLink Project State
 
-Last updated: 2026-07-25
-Current branch: `feat/canonical-store-zone-catalog`
+Last updated: 2026-07-26
+Current branch: `test/one-store-bluetooth-amplifier-live`
+
+> **Live audio now reaches a real amplifier on one Store.** A spoken
+> announcement was heard clearly through the speakers connected to a Bluetooth
+> amplifier — see
+> [`ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md`](ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md)
+> and the summary at the end of this document. `SPEAKER_VERIFIED` remains
+> `NOT_IMPLEMENTED` and the project is `NOT_READY_FOR_PRODUCTION`.
 
 ## Current architecture
 
@@ -1159,3 +1166,111 @@ service-identity permissions, secret-file interface contract, DPAPI
 protection/unprotection boundary, log rotation, one-worker startup command,
 graceful shutdown, health checks, Windows auto-start choice) remains **not
 started**.
+
+
+---
+
+## One-Store Bluetooth amplifier live test (2026-07-26)
+
+**Outcome: `BLUETOOTH_AMPLIFIER_LIVE_TEST_PASSED`.** Full record:
+[`ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md`](ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md).
+Procedure to repeat it:
+[`ONE_STORE_BLUETOOTH_AMPLIFIER_TEST_RUNBOOK.md`](ONE_STORE_BLUETOOTH_AMPLIFIER_TEST_RUNBOOK.md).
+
+```
+OPERATOR_CHIME_OBSERVATION      = HEARD_CLEARLY
+OPERATOR_LIVE_AUDIO_OBSERVATION = Haan, clear   (heard clearly)
+SPEAKER_VERIFIED                = NOT_IMPLEMENTED
+NOT_READY_FOR_PRODUCTION
+```
+
+A live announcement spoken into the HQ browser microphone was heard clearly on
+the speakers connected to a Bluetooth amplifier, for Store `UN` (Uttam Nagar
+Old). The path proven end to end:
+
+```
+HQ browser mic -> React console -> FastAPI broadcaster WebSocket
+  -> bounded 24-chunk Store queue -> local Receiver -> FFmpeg WebM/Opus decode
+  -> index:4@Headphones (Bluetooth Stereo)  [Windows DirectSound, 44100 Hz, 2 ch]
+  -> Makook/BARROT USB adapter -> Bluetooth -> amplifier -> speakers
+```
+
+Measured: `CONNECTED 12:56:03.702 -> READY 13:34:27.464 ->
+AUDIO_RECEIVING 13:34:28.226 -> PLAYBACK_CONFIRMED 13:34:28.235 ->
+STOPPED 13:37:07.467`. 533 chunks, 606 393 bytes, 0 dropped, FFmpeg decoded
+159.42 s with return code 0, 7 030 422 PCM frames written (which divides by
+44 100 Hz to exactly the decoded duration — nothing was lost). Each state came
+from an explicit Receiver acknowledgement; none was inferred from another.
+
+`backend/speaklink_live.db` was never opened, copied or modified: 507 904 bytes,
+`2026-07-26 08:43:13` UTC, WAL and SHM absent, before and after.
+
+### Corrected earlier claim
+
+`ONE_STORE_WINDOWS_OUTPUT_VALIDATION_RESULT.md` called
+`index:18@Headphones ()` "the only candidate wired analog endpoint". That is
+wrong: `Headphones ()` is a WDM-KS view of the **Bluetooth** stack and vanishes
+when the adapter is unplugged. Both that document and
+`ONE_STORE_WINDOWS_OUTPUT_TEST_RUNBOOK.md` now carry a correction notice.
+
+### Defects found and fixed, each test-first
+
+| # | Defect | Why it mattered |
+| --- | --- | --- |
+| 1 | Chime wrote mono PCM into a stereo stream (`c77a4fb`) | 0.75 s at 880 Hz instead of 1.5 s at 440 Hz — swallowed by Bluetooth DAC wake-up, so the operator heard nothing |
+| 2 | `Start-Process -ArgumentList` did not quote paths (`bd8e419`) | The repository path contains a space, so the Receiver never launched and never reported an error either |
+| 3 | Receiver sent no idle heartbeat (`3ffd638`) | Backend closed the socket with 4408 after exactly 30 s, before the operator could open the console |
+| 4 | Stop script left the whole process tree alive (`4aa9b2a`) | Six processes survived every "successful" stop and port 3000 stayed bound |
+| 5 | Console counted `playing`/`failed`, states the backend never writes (`f533c06`) | Both counters were permanently zero; the header read `Currently Playing 0 / 1` during confirmed playback |
+| 6 | A reusable JWT travelled in the WebSocket URL and was logged (`f27bd08`) | Anyone who could read one uvicorn access-log line could replay the session |
+
+Defect 3 also settled a disputed observation: the Receiver Status page had shown
+Store UN as OFFLINE and was accused of a mismatch. **The frontend was right** —
+the Receiver really had died.
+
+### Test position
+
+| Suite | Result |
+| --- | --- |
+| Complete backend suite | 666 passed, 1 skipped, 32 warnings (was 581) |
+| Five consecutive runs | all identical, 22.7-23.2 s, no flakiness |
+| Playwright Chromium | 32 passed (the frontend had no tests at all before) |
+| Frontend production build | compiled successfully |
+| Null-sink audio smoke | `ONE_STORE_AUDIO_SOFTWARE_PILOT_PASSED`, 0 dropped |
+| `compileall backend tools` | exit 0 |
+
+### Synthetic multi-Store load
+
+`tools/load_test_receivers.py` with null-sink Receivers only:
+
+| Stores | connect p95 | READY p95 | first chunk p95 | dropped | delivered |
+| ---: | ---: | ---: | ---: | ---: | :---: |
+| 5 | 26.9 ms | 33.6 ms | 3.4 ms | 0 | 5/5 |
+| 10 | 37.5 ms | 27.5 ms | 4.4 ms | 0 | 10/10 |
+| 20 | 68.2 ms | 35.2 ms | 6.8 ms | 0 | 20/20 |
+| 40 | 125.6 ms | 55.4 ms | 11.4 ms | 0 | 40/40 |
+
+Fan-out reached 1 058 kbps at 40 Stores; backend RSS grew about 0.27 MB per
+Store. Every Receiver here is synthetic — none opens an audio device or reaches
+a speaker. **A one-Store hardware test does not become a 44-Store rollout
+because this passed.**
+
+### Still blocking production
+
+1. `frontend/src/pages/Login.jsx` pre-fills a default username and password into
+   the sign-in form and prints both on screen to every visitor.
+2. Password hashing, rate limiting and account lockout unreviewed.
+3. Device enrolment and unique per-Receiver credentials incomplete.
+4. Receiver token hashing and rotation not implemented.
+5. No HTTPS/WSS — everything ran on loopback HTTP.
+6. CORS restricted by pilot configuration, not by policy.
+7. No audit logging of broadcast actions beyond `system_logs`.
+8. No restart recovery or Windows auto-start for Receivers.
+9. LinkGuard pause/resume integration does not exist.
+10. **Acoustic speaker verification does not exist.** No code path can produce
+    `SPEAKER_VERIFIED`, and no report claims it.
+11. The in-browser Receiver page targets `/ws/receiver/{token}`, a route the
+    backend does not have, and would put a Store credential in a URL path.
+12. Only 1 of 44 Stores has been tested on real hardware.
+
+The test-first Windows deployment specification remains **not started**.
