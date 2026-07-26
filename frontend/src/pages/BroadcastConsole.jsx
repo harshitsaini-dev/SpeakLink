@@ -130,6 +130,21 @@ export default function BroadcastConsole() {
     setMicTest({ on: false, level: 0 });
   };
 
+  // Poll the backend for an explicit receiver_ready acknowledgement. READY is
+  // never inferred from CONNECTED, and never from a command having been sent.
+  const waitForReceiverReady = React.useCallback(async (targetIdList, timeoutMs = 20000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const { data } = await api.get("/broadcast/current");
+        const ready = (data?.ready_receivers || []).filter((id) => targetIdList.includes(id));
+        if (ready.length > 0) return ready;
+      } catch { /* keep polling until the deadline */ }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    return [];
+  }, []);
+
   const startBroadcast = async () => {
     setError(""); setBusy(true);
     try {
@@ -144,7 +159,29 @@ export default function BroadcastConsole() {
         region: targetMode === "region" ? region : undefined,
         city: targetMode === "city" ? city : undefined,
       });
-      // Open mic + broadcaster WS BEFORE starting so audio flows immediately
+      // Fail early and honestly if this browser cannot produce WebM/Opus.
+      if (!HQBroadcaster.supportedMime()) {
+        throw new Error(
+          "This browser cannot record WebM/Opus audio. SpeakLink will not send a " +
+          "different format silently. Try a current Chrome or Edge browser."
+        );
+      }
+
+      // Start the session first: the backend sends PREPARE to each targeted
+      // Receiver, which runs its own FFmpeg/codec checks before reporting READY.
+      await api.post(`/broadcast/sessions/${session.id}/start`);
+
+      // Do not send a single audio byte until a Receiver has actually
+      // acknowledged READY. A command being sent is not readiness.
+      setBroadcasterStatus("waiting for receiver readiness");
+      const readyIds = await waitForReceiverReady(ids);
+      if (readyIds.length === 0) {
+        throw new Error(
+          "No Receiver reported READY, so no audio was sent. Check that the " +
+          "Receiver is running and that FFmpeg is available on it."
+        );
+      }
+
       const bc = new HQBroadcaster({
         wsUrl: `${wsUrl("/ws/broadcaster")}?token=${encodeURIComponent(getToken())}`,
         onMeter: (l) => setMeter(l),
@@ -153,8 +190,6 @@ export default function BroadcastConsole() {
       });
       await bc.start();
       setBroadcaster(bc);
-      // Start session
-      await api.post(`/broadcast/sessions/${session.id}/start`);
       await load();
     } catch (e) {
       setError(e?.response?.data?.detail || e.message || "Failed to start broadcast");

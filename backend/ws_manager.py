@@ -14,6 +14,7 @@ from typing import Dict, Optional, Set
 
 from fastapi import WebSocket
 
+from audio_streaming import DEFAULT_STORE_QUEUE_CAPACITY, AudioFanout
 from receiver_connection_inventory import (
     ActiveReceiverConnectionInventory,
     AuthenticatedReceiverConnection,
@@ -23,6 +24,7 @@ from receiver_contract import (
     OFFLINE_AFTER_SECONDS,
     STALE_AFTER_SECONDS,
     ConnectionState,
+    ReadinessState,
     ReceiverAcknowledgement,
     ReceiverSnapshot,
     activate_session,
@@ -63,6 +65,10 @@ class WSManager:
         # In-memory live session state
         self.live_session_id: Optional[int] = None
         self.live_target_store_ids: Set[int] = set()
+        # One bounded audio queue and one sender task per targeted Store, so a
+        # slow Receiver can never stall the broadcaster read loop or the other
+        # Stores, and no backlog can grow without limit.
+        self.audio_fanout = AudioFanout(capacity=DEFAULT_STORE_QUEUE_CAPACITY)
         self._lock = asyncio.Lock()
         self._receiver_lock = asyncio.Lock()
 
@@ -247,6 +253,20 @@ class WSManager:
             and snapshot.connection is ConnectionState.CONNECTED
         )
 
+    def ready_store_ids(self) -> Set[int]:
+        """Stores whose Receiver has explicitly acknowledged READY.
+
+        READY is never inferred from being connected: it comes only from a
+        ``receiver_ready`` acknowledgement recorded on the live snapshot.
+        """
+        return {
+            store_id
+            for store_id, snapshot in self.receiver_snapshots.items()
+            if store_id in self.receivers
+            and snapshot is not None
+            and snapshot.readiness is ReadinessState.READY
+        }
+
     def online_store_ids(self) -> Set[int]:
         return {
             store_id
@@ -336,11 +356,42 @@ class WSManager:
     def is_live(self) -> bool:
         return self.live_session_id is not None
 
-    async def fanout_audio(self, data: bytes):
+    def _audio_sender(self, store_id: int):
+        async def send(chunk: bytes) -> None:
+            delivered = await self.send_binary_to_receiver(store_id, chunk)
+            if not delivered:
+                # Raising ends this Store's sender task; the fanout logs the
+                # failure type only, never the audio payload.
+                raise ConnectionError(f"receiver send failed for store {store_id}")
+
+        return send
+
+    async def fanout_audio(self, data: bytes) -> int:
+        """Enqueue one audio chunk for every live, connected target Store.
+
+        This never awaits a Receiver socket, so one slow Store cannot block the
+        broadcaster read loop or any other Store. Returns how many Store queues
+        accepted the chunk without dropping.
+        """
         if not self.is_live():
-            return
-        for sid in list(self.live_target_store_ids):
-            await self.send_binary_to_receiver(sid, data)
+            return 0
+        targets = set(self.live_target_store_ids) & set(self.receivers)
+        if not targets:
+            return 0
+
+        active = set(self.audio_fanout.active_store_ids())
+        for store_id in targets - active:
+            await self.audio_fanout.start_store(store_id, self._audio_sender(store_id))
+
+        return self.audio_fanout.broadcast(targets, data)
+
+    async def stop_audio_fanout(self) -> dict:
+        """Close every Store audio queue and cancel its sender task."""
+        return await self.audio_fanout.stop_all()
+
+    def audio_metrics(self) -> dict:
+        """Non-secret per-Store queue metrics. Contains no audio payload."""
+        return self.audio_fanout.all_metrics()
 
 
 manager = WSManager()

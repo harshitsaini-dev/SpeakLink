@@ -32,6 +32,7 @@ from schemas import (
     ReceiverEventIn, ReceiverVerifyOut,
     SystemLogOut,
 )
+from audio_protocol import build_prepare_message
 from auth import verify_password, create_access_token, get_current_user
 from seed import seed_admin, seed_stores
 from ws_manager import manager
@@ -310,9 +311,15 @@ async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = 
     db.refresh(session)
 
     manager.start_live_session(session.id, target_store_ids)
-    # send PLAY to online targets
+    # Send PREPARE then PLAY to online targets. PREPARE carries the negotiated
+    # audio format so the Receiver can run its real FFmpeg/codec checks before
+    # reporting READY. Audio is only meaningful after that acknowledgement.
     for sid_ in target_store_ids:
         if sid_ in online_ids:
+            await manager.send_to_receiver(
+                sid_,
+                build_prepare_message(session_id=session.id, store_id=sid_),
+            )
             await manager.send_to_receiver(sid_, {"type": "play", "session_id": session.id, "campaign": session.campaign_name})
     await manager.notify_dashboards({"type": "session_started", "session_id": session.id})
     _write_log(db, "info", f"Session #{session.id} started; {session.online_store_count}/{session.selected_store_count} online")
@@ -337,6 +344,9 @@ async def _end_session(db: Session, session: BroadcastSession, final_status: str
         stop_ids = set(manager.live_target_store_ids)
     for sid_ in stop_ids:
         await manager.send_to_receiver(sid_, {"type": "stop", "session_id": session.id, "reason": reason})
+    # Close every bounded Store audio queue and cancel its sender task before
+    # clearing live state, so no orphan queue or task survives the session.
+    await manager.stop_audio_fanout()
     manager.stop_live_session()
     # Force-close the active broadcaster WS so its slot is freed immediately
     if manager.active_broadcaster_ws is not None:
@@ -389,6 +399,9 @@ def current_broadcast(db: Session = Depends(get_db), user: HQUser = Depends(get_
         "session": SessionOut.model_validate(session).model_dump(mode="json"),
         "targets": [TargetOut.model_validate(t).model_dump(mode="json") for t in targets],
         "online_receivers": list(manager.online_store_ids()),
+        # READY comes only from an explicit receiver_ready acknowledgement.
+        # Being connected is never enough, so these two lists are separate.
+        "ready_receivers": list(manager.ready_store_ids()),
     }
 
 
