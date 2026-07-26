@@ -1506,3 +1506,162 @@ Noted while reading the code, not changed here: `backend/auth.py:54-57`
 HTTP requests. The WebSocket sockets no longer use it, so it is now dead weight
 that would put a reusable token in a URL — and therefore in an access log. It
 belongs in the authentication review above.
+
+
+---
+
+## Login rate limiting and account lockout (2026-07-26)
+
+Branch `security/auth-rate-limit-and-lockout`.
+
+### The abuse it stops
+
+The login route looked the username up, ran bcrypt, and returned 401. Nothing
+counted failures, so an attacker could try passwords as fast as the network
+allowed, indefinitely, and nothing anywhere would notice.
+
+It also leaked which usernames exist — not through the message, which was
+already generic, but through **time**. An unknown username skipped
+`verify_password` entirely and answered in microseconds; a real one paid for a
+full bcrypt comparison first. That gap is trivially measurable, so accounts
+could be enumerated before a single password was guessed.
+
+### Two defences, deliberately different
+
+**Short-window rate limiter** (`LoginRateLimiter`, in process): a sliding window
+keyed separately by client address and by normalised username, so a burst from
+one client and a slow grind against one account are both throttled. Bounded by
+`max_entries`, evicting the least recently active key, with an injectable clock
+and a lock for concurrent access.
+
+**Persistent account lock** (`login_security_state` table): consecutive failures
+counted against a username that really exists. Survives a restart.
+
+The split is the point, and the limitation is stated rather than hidden: a
+bounded in-process limiter **can** be flushed by an attacker who floods it with
+distinct keys, and that is proven by a test. Sustained guessing against a real
+account is stopped by the persistent lock, which cannot be flushed and is not
+lost on restart.
+
+### Defaults
+
+| Setting | Default | Bounds enforced at startup |
+| --- | ---: | --- |
+| `LOGIN_MAX_ATTEMPTS` | 10 | 1–1000 |
+| `LOGIN_WINDOW_SECONDS` | 60 | 1–3600 |
+| `LOGIN_MAX_FAILURES` | 5 | 1–100 |
+| `LOGIN_LOCKOUT_SECONDS` | 900 | 1–86400 |
+| `LOGIN_LIMITER_MAX_ENTRIES` | 4096 | 1–1000000 |
+| `TRUST_PROXY_HEADERS` | off | — |
+
+An unusable value raises at import, so the process stops instead of silently
+serving an unguarded login. An unbounded lockout is refused too: a lock that
+never expires turns a guessing attempt into a denial of service against the
+operator.
+
+### Responses
+
+| Situation | Response |
+| --- | --- |
+| Unknown username | `401` `Invalid username or password` |
+| Wrong password | `401` — byte-identical to the above |
+| Throttled | `429`, `Retry-After` header |
+| Account temporarily locked | `429` — identical to throttled |
+
+Throttled and locked answer the same way on purpose: telling them apart would
+say whether the account exists, which is exactly what the generic 401 refuses to
+reveal. The body carries no number at all — no count, no threshold, no unlock
+time. `Retry-After` is the one number an honest client needs and it lives in the
+header.
+
+The unknown-username path now performs a bcrypt comparison against a throwaway
+hash, so the clock no longer answers a question the message declines to.
+
+### Storage
+
+A **new table**, not columns on `hq_users`. Adding columns would need an
+`ALTER TABLE` against the table holding every password hash; a new table is
+created by `create_all` on an existing database without touching a single
+existing row, so no migration was required and no hash was ever rewritten.
+
+A row exists only for a username that really exists. Invented usernames are
+handled by the in-memory limiter and never reach the table, so they cannot
+become unbounded rows — and a lock is never reported for an account that does
+not exist, which would confirm that it does. Times are epoch seconds; the row
+holds no credential.
+
+### Logging
+
+Structured events only: `login_failed`, `login_rate_limited`,
+`account_temporarily_locked`, `login_succeeded`. No password, hash, token,
+Authorization value or request body.
+
+`login_failed` deliberately records **no** username: it is attacker-supplied on
+that path, so logging it would let anyone write arbitrary text into
+`system_logs` and would publish every account name they guessed at.
+`account_temporarily_locked` does record it, because a lock exists only for a
+real account and the operator needs to know which one.
+
+### Tests
+
+52 focused tests in `backend/tests/test_login_rate_limit_and_lockout.py`,
+written first and captured RED. They drive pure functions and a temporary
+database through an injected clock — no test sleeps for a real lockout, and none
+binds a port.
+
+Starlette's `TestClient` needs `httpx`, which this project does not depend on,
+and a subprocess would put the limiter out of reach of a per-test reset. The
+route-level tests therefore call the route directly with a small fake request
+and assert on the `HTTPException` it raises — the same status, detail and
+headers FastAPI would serialise.
+
+| Suite | Result |
+| --- | --- |
+| Focused login guard | 52 passed |
+| Complete backend | **749 passed, 1 skipped** (was 697) |
+| Complete backend, serial `-n 0` | 749 passed, 1 skipped |
+| Playwright Chromium | 42 passed (was 39) |
+| Frontend production build | compiled |
+| Null-sink one-Store smoke | `ONE_STORE_AUDIO_SOFTWARE_PILOT_PASSED` |
+| `compileall backend tools` | exit 0 |
+
+### Frontend
+
+`Login.jsx` maps 429 to a fixed neutral message rather than echoing the server
+detail, so no future server wording can leak a count or an unlock time into the
+page. Fields stay empty, no token is stored on any refusal, and the Sign In
+button returns from its loading state.
+
+### The HTTP query-token fallback is now pinned, not just noted
+
+`backend/auth.py` `_extract_token` still accepts `?token=` on ordinary HTTP
+requests. Two tests record the current facts: the fallback exists, and no
+WebSocket route depends on it any more. Removing it is a separate change with
+its own blast radius — see the next branch below.
+
+### Status
+
+`NOT_READY_FOR_PRODUCTION`. Remaining blockers:
+
+1. Remove the HTTP query-token fallback (`security/remove-http-token-query-fallback`).
+2. Shared rate-limit storage before running more than one worker.
+3. Receiver device enrolment.
+4. Unique per-Receiver credentials.
+5. Receiver token hashing and rotation.
+6. HTTPS/WSS.
+7. Production CORS policy.
+8. Broader audit logging.
+9. Windows Receiver auto-start and recovery.
+10. EchoGuard pause/resume.
+11. Acoustic speaker verification — `SPEAKER_VERIFIED` remains `NOT_IMPLEMENTED`.
+12. Two-Store real hardware evidence.
+13. Staging deployment validation.
+
+### A test fragility removed along the way
+
+`test_smoke.py` asserted that **it** was the module which imported `db` under an
+isolated `ECHOCAST_DB_PATH`. That silently required it to be collected first,
+which is what two new test modules kept breaking. It now asserts the two things
+that actually matter — that the environment the subprocess inherits carries the
+isolated path, and that the parent's engine never points at the protected
+database — and passes in any collection order.

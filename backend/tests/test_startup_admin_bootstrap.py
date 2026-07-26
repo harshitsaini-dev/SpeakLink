@@ -37,14 +37,12 @@ for candidate in (REPOSITORY_ROOT, BACKEND_ROOT):
         sys.path.insert(0, str(candidate))
 
 # Importing models pulls in db, which resolves DB_PATH once at import time and
-# defaults to backend/echocast_live.db. This module never uses that engine - it
-# builds its own per-test SQLite file - but pointing the default somewhere
-# disposable first means no import order can ever aim it at the protected
-# database. This file is also named to sort after test_smoke.py, which asserts
-# that it is the module that imported db under its own isolated path.
+# defaults to backend/echocast_live.db. This module builds its own per-test
+# SQLite file, but pointing the default somewhere disposable first means no
+# import order can ever aim the shared engine at the protected database.
 os.environ.setdefault(
     "ECHOCAST_DB_PATH",
-    str(Path(tempfile.gettempdir()) / "echocast-bootstrap-tests-never-used.db"),
+    str(Path(tempfile.gettempdir()) / "echocast-tests-default-engine.db"),
 )
 
 from admin_bootstrap import (  # noqa: E402
