@@ -273,6 +273,58 @@ test.describe('Play status is evidence, never inference', () => {
   });
 });
 
+test.describe('WebSocket handshakes carry no reusable credential', () => {
+  // Uvicorn logged the complete access token on every HQ connection:
+  //   "WebSocket /api/ws/hq?token=<a real JWT>" [accepted]
+  // A URL is the least private part of a request. What travels there must be
+  // worthless once used, so both HQ sockets now use a single-use ticket.
+  test('neither HQ socket puts a token in its URL', async ({ page }) => {
+    await signIn(page);
+    await instrumentMicrophone(page);
+    await stubWebSocket(page);
+    await mockBackend(page, {
+      current: { live: false, session: null, targets: [], ready_receivers: [1] },
+    });
+
+    await page.goto('/console');
+    await selectOnlyStoreUN(page);
+    await goLive(page);
+    await expect.poll(() => page.evaluate(() => window.__micCalls)).toBe(1);
+
+    // The CRA dev server opens its own hot-reload socket; only ours are ours.
+    const urls = (await page.evaluate(() => window.__wsUrls)).filter((u) => u.includes('/api/ws/'));
+    expect(urls.length).toBeGreaterThan(0);
+    for (const url of urls) {
+      expect(url).not.toContain('token=');
+      expect(url).not.toContain('eyJ');
+      expect(url).toContain('ticket=');
+    }
+  });
+
+  test('the HQ status socket and the audio uplink use different tickets', async ({ page }) => {
+    // A ticket is spent by the handshake it was minted for, so reusing one
+    // would close the second socket with 4401.
+    await signIn(page);
+    await instrumentMicrophone(page);
+    await stubWebSocket(page);
+    await mockBackend(page, {
+      current: { live: false, session: null, targets: [], ready_receivers: [1] },
+    });
+
+    await page.goto('/console');
+    await selectOnlyStoreUN(page);
+    await goLive(page);
+    await expect
+      .poll(() => page.evaluate(() => window.__wsUrls.filter((u) => u.includes('/api/ws/')).length))
+      .toBeGreaterThan(1);
+
+    const urls = (await page.evaluate(() => window.__wsUrls)).filter((u) => u.includes('/api/ws/'));
+    const tickets = urls.map((url) => new URL(url).searchParams.get('ticket'));
+    expect(tickets.every(Boolean)).toBe(true);
+    expect(new Set(tickets).size).toBe(tickets.length);
+  });
+});
+
 test.describe('The target summary counts real Receiver states', () => {
   // The console counted play_status === "playing" and play_status === "failed".
   // The backend writes neither: it writes pending, audio_receiving,

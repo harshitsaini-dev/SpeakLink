@@ -54,6 +54,13 @@ from receiver_contract import (
     StoppedAcknowledgement,
     WrongSessionError,
 )
+from ws_tickets import TICKET_TTL_SECONDS, TicketRejected, WebSocketTicketStore
+
+# Browser WebSockets cannot send an Authorization header, so the HQ sockets
+# authenticate with a single-use ticket instead of a reusable JWT in the URL.
+# In memory is correct here: SpeakLink runs exactly one Uvicorn worker because
+# Receiver connection state is already process-local.
+ws_ticket_store = WebSocketTicketStore()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -141,6 +148,20 @@ def logout(user: HQUser = Depends(get_current_user)):
 @api.get("/auth/me", response_model=UserOut)
 def me(user: HQUser = Depends(get_current_user)):
     return UserOut.model_validate(user)
+
+
+@api.post("/auth/ws-ticket")
+def issue_websocket_ticket(user: HQUser = Depends(get_current_user)):
+    """Mint a single-use handshake ticket for an HQ WebSocket.
+
+    A browser cannot set an Authorization header on a WebSocket handshake, so
+    something has to travel in the URL - and Uvicorn logs the URL in full. This
+    endpoint is reached over the normal authenticated HTTP API, where the JWT
+    stays in a header, and returns a credential that is worthless seconds later
+    and after a single use.
+    """
+    ticket = ws_ticket_store.issue(user_id=str(user.id))
+    return {"ticket": ticket, "expires_in": TICKET_TTL_SECONDS}
 
 
 # ================ STORES ================
@@ -730,16 +751,11 @@ async def ws_receiver(websocket: WebSocket):
 
 
 @app.websocket("/api/ws/hq")
-async def ws_hq(websocket: WebSocket, token: str = Query(...)):
-    # Verify JWT
-    from auth import decode_token
+async def ws_hq(websocket: WebSocket, ticket: str = Query(...)):
+    # A single-use ticket, not a reusable JWT: Uvicorn logs this URL in full.
     try:
-        payload = decode_token(token)
-        if payload.get("type") != "access":
-            await websocket.close(code=4401)
-            return
-        user_id = payload["sub"]
-    except HTTPException:
+        user_id = ws_ticket_store.redeem(ticket)
+    except TicketRejected:
         await websocket.close(code=4401)
         return
 
@@ -759,15 +775,12 @@ async def ws_hq(websocket: WebSocket, token: str = Query(...)):
 
 
 @app.websocket("/api/ws/broadcaster")
-async def ws_broadcaster(websocket: WebSocket, token: str = Query(...)):
+async def ws_broadcaster(websocket: WebSocket, ticket: str = Query(...)):
     """HQ mic audio uplink. Only one active broadcaster allowed."""
-    from auth import decode_token
+    # A single-use ticket, not a reusable JWT: Uvicorn logs this URL in full.
     try:
-        payload = decode_token(token)
-        if payload.get("type") != "access":
-            await websocket.close(code=4401)
-            return
-    except HTTPException:
+        ws_ticket_store.redeem(ticket)
+    except TicketRejected:
         await websocket.close(code=4401)
         return
 
