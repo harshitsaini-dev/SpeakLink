@@ -486,11 +486,31 @@ backend:
       - working: true
         agent: "main"
         comment: "Final implementation: WSManager tracks _superseded_connection_ids, marking a connection before its close is awaited and clearing it once the inventory record is removed; disconnect_receiver returns False for a marked ID. Existing capacity-rejection semantics and the no-gap current-connection-ID behaviour are preserved. backend/tests/test_receiver_replacement_race.py forces the interleaving deterministically (4 tests, no SQLite, no socket, no credentials) and imports ws_manager lazily so it cannot break other suites' sys.modules purity assertions under --dist loadscope. The cutover test's wait now also requires the offline health write to land. Results: focused race tests 4 passed; focused catalog 22 passed; WebSocket/inventory/cutover/auth regressions 78 passed; complete backend suite 388 passed, 1 skipped, 32 existing warnings, green across 8 consecutive runs (previously approximately 50% flaky). python -m compileall -q backend succeeded and git diff --check was clean. No frontend file changed. Protected database backend/speaklink_live.db was never opened, queried, migrated, seeded or modified; all database tests used pytest temporary files."
+  - task: "Read-only Store catalog reconciliation report"
+    implemented: true
+    working: true
+    file: "backend/tests/test_store_catalog_reconciliation.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "main"
+        comment: "Test-first red phase (2026-07-25 UTC). Starting branch feat/canonical-store-zone-catalog at commit d025f886f72f80671f338b05fbf68449ae56a30f, upstream matching, working tree clean, baseline suite 388 passed / 1 skipped / 32 warnings. New branch feat/store-catalog-reconciliation-report. Focused collection failed with ModuleNotFoundError: No module named 'store_catalog_reconciliation'. No application, protected database, migration, key, socket or network operation ran."
+      - working: false
+        agent: "main"
+        comment: "Two genuine test-harness defects were found and fixed rather than worked around. First, the helper called Base.metadata.create_all without importing models, so no tables were created and 26 tests failed with a misleading 'no stores table' schema error. Second, the duplicate-code test could not insert duplicates because the live schema declares UNIQUE(store_code); that is a real schema fact, so the test was split into a duplicate-full-name case against the real schema (store_name has no unique constraint) and a duplicate-code case against a deliberately relaxed hand-built schema, documenting why."
+      - working: false
+        agent: "main"
+        comment: "The full suite reported 1 failed / 428 passed because test_report_does_not_import_or_execute_runtime_startup asserted global sys.modules purity. Under pytest-xdist --dist loadscope the worker is shared with suites that legitimately import FastAPI, so the assertion measured the worker rather than the module. It was rewritten to run reconcile() in a clean subprocess and assert that server, fastapi, uvicorn, starlette and ws_manager are all absent from that interpreter, which actually proves the module's own import graph."
+      - working: true
+        agent: "main"
+        comment: "Focused reconciliation result: 41 passed. Catalog/race/cutover regressions: 33 passed with 21 existing warnings. Smoke, migration, device, WebSocket auth/contract, inventory and dual-auth regressions: 111 passed with 11 existing warnings. python -m compileall -q backend succeeded. Complete backend suite: 429 passed, 1 skipped, 32 existing warnings, green across 5 consecutive runs (baseline 388 plus 41 new tests). git diff --check clean. Protected database backend/speaklink_live.db metadata was identical before and after: 487424 bytes, LastWriteTimeUtc 2026-07-25 11:12:47. It was never opened, queried, copied, migrated, seeded or modified, and NO reconciliation was executed against real data. Every database test used a pytest temporary file-backed SQLite snapshot. Read-only enforcement is proven directly: a dedicated test asserts PRAGMA query_only is 1 and that UPDATE, DELETE and CREATE TABLE all raise sqlite3.OperationalError on the report connection, and separate tests assert the snapshot SHA-256, size, mtime, Store rows and dependent rows are unchanged. Protected-path refusal is proven for the exact path, a '..' path, a path relative to another working directory, and a same-file hard link (via an isolated stand-in, never the real database). Text and JSON output are asserted free of any credential marker. No frontend, runtime, authentication, WebSocket, seed or migration behaviour changed."
 frontend: []
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 21
+  test_sequence: 22
   run_ui: false
 test_plan:
   current_focus: []
@@ -566,3 +586,7 @@ agent_communication:
     message: "The Store Catalog Reconciliation Report was NOT started. Preflight found HEAD at d29e18e with 14 operator-corrected Store codes and 3 red catalog contract tests, which is a documented stop condition, so no reconciliation code exists yet. That task should be restarted from a clean, green baseline."
   - agent: "main"
     message: "Catalog contract realigned to the operator's corrected Store codes, and two latent defects that this unmasked are fixed: the Receiver replacement handover race in ws_manager, and a wait-condition gap in the cutover rehearsal test. The full backend suite is 388 passed, 1 skipped, 32 warnings and green across 8 consecutive runs. No frontend file changed and the protected database was never opened."
+  - agent: "main"
+    message: "The read-only Store catalog reconciliation report is ready for regression validation. It requires an explicitly supplied isolated snapshot, refuses backend/speaklink_live.db before opening any connection, and opens the snapshot with a SQLite mode=ro URI plus PRAGMA query_only. Do not run it against real data: that needs an operator-produced quiesced snapshot, and any cleanup remains a separate approved task."
+  - agent: "main"
+    message: "Reconciliation report validation is complete. Focused 41 passed; catalog/race/cutover 33 passed; smoke/migration/device/WebSocket regressions 111 passed; complete backend 429 passed, 1 skipped, 32 warnings, green across 5 consecutive runs; compileall succeeded. The protected database was never opened or modified, no reconciliation ran against real data, and no cleanup was executed. Documentation wording was corrected: commit d29e18e changed 14 catalog entries comprising 13 short names and 4 full names."

@@ -613,9 +613,13 @@ Short names are preserved verbatim, including the irregular ones
 Taimoor Nagar -> `TNS`, Noida Sector 104 -> `NS104`, Devli -> `DEVLI`,
 Krishna Nagar 2 -> `KN2`, NIT Faridabad -> `NIT`, RRPL -> `RRPL`).
 These are the operator's real store codes and must never be "corrected"
-by code. Commit `d29e18e` corrected 14 of them after the initial import;
-the contract test in `backend/tests/test_store_catalog.py` is what caught
-that change, and it was realigned to the corrected values.
+by code. Commit `d29e18e` corrected **14 catalog entries** after the initial
+import, comprising **13 short names and 4 full names** (Vikaspuri New Store ->
+Vikaspuri New, RRPL New Rajapuri -> RRPL, Vishnu Garden 2 -> Vishnu Garden New,
+NIT 1 Faridabad -> NIT Faridabad; Vishnu Garden's short name `VG2` was
+unchanged, which is why the short-name count is 13 rather than 14). The
+contract test in `backend/tests/test_store_catalog.py` is what caught that
+change, and it was realigned to the corrected values.
 
 Backend demo seed data was removed: the previous 13-entry `SAMPLE_STORES`
 list in `backend/seed.py` (Mumbai/Pune/Delhi/Gurgaon/Bangalore/Hyderabad/
@@ -695,6 +699,72 @@ from failing fast to passing, which shifted xdist worker timing. The full
 backend suite was approximately 50% flaky at that point and is now green
 across 8 consecutive runs.
 
+## Store catalog reconciliation report
+
+`backend/store_catalog_reconciliation.py` compares an explicitly supplied,
+operator-isolated SQLite snapshot against the canonical catalog and reports the
+difference. It is **implemented and strictly read-only**; it performs no
+cleanup and authorizes none. `STORE_CATALOG_RECONCILIATION_RUNBOOK.md`
+documents it in full.
+
+Usage (from `backend`, with the project virtual environment):
+
+```text
+python -m store_catalog_reconciliation --database <ISOLATED_SNAPSHOT_PATH>
+python -m store_catalog_reconciliation --database <ISOLATED_SNAPSHOT_PATH> --format json
+```
+
+Exit codes: `0` exact canonical match, `2` report completed and differences
+found, `1` input/schema/safety failure including protected-path refusal.
+
+Read-only guarantees, all covered by tests:
+
+- `backend/speaklink_live.db` is refused **before any connection is opened**,
+  by exact path, by a relative or `..` path that resolves to it, by a path
+  supplied from another working directory, and by same-file identity via
+  `os.path.samefile`. Filename comparison alone is never used.
+- The snapshot is opened through a SQLite `mode=ro` URI with
+  `PRAGMA query_only = ON`. A dedicated test proves `UPDATE`, `DELETE` and
+  `CREATE TABLE` all raise on that connection.
+- No `INSERT`/`UPDATE`/`DELETE`/`ATTACH`/`VACUUM`, temporary table,
+  journal-mode change, migration or seed call exists in the module.
+- Columns are always listed explicitly; `SELECT *` is never used and the Store
+  credential column is never selected, so credential material cannot reach a
+  report, log or terminal.
+- A snapshot with an adjacent `-wal`/`-shm` file fails closed rather than being
+  read, merged or repaired.
+- Tests assert the snapshot's SHA-256, size and mtime are unchanged, and that
+  Store rows and dependent rows are unchanged.
+
+Classifications: `EXACT_CANONICAL_MATCH`, `CANONICAL_FIELD_MISMATCH`,
+`KNOWN_LEGACY_DEMO_EXACT_MATCH`, `CUSTOM_OR_UNKNOWN_NON_CANONICAL`,
+`AMBIGUOUS_IDENTITY_CONFLICT`. The legacy-demo fingerprint requires all five of
+`(store_code, store_name, city, region, is_online_store)` to match exactly,
+recovered read-only from `git show af168aa:backend/seed.py`; no approximate,
+prefix, positional or case-insensitive matching is used, so a custom Store is
+never misclassified as demo data.
+
+Dependency counts cover every relationship proven from source:
+`broadcast_targets.store_id` and `receiver_events.store_id` (always present,
+from `models.py`), plus `receiver_devices.store_id`,
+`receiver_credential_events.store_id` and `receiver_credentials` via
+`receiver_devices` (Phase 1 migration only, from `migrations.py`). A table
+absent from the snapshot reports `n/a`, never a proven `0`.
+
+Recommendations are advisory only and are never executed. A proven demo row
+that still has dependencies is recommended for `REVIEW_ARCHIVAL`, not deletion,
+because `receiver_devices.store_id` is `ON DELETE RESTRICT` and history would
+otherwise break.
+
+The protected real database was **not opened, copied, queried or modified** by
+this work, and **no reconciliation was run against real data**. Its metadata
+was identical before and after: 487,424 bytes, LastWriteTimeUtc
+2026-07-25 11:12:47. No cleanup of any kind was executed.
+
+Tests: 41 focused reconciliation tests passed; complete backend suite 429
+passed, 1 skipped, 32 existing warnings. `compileall` succeeded. No frontend,
+runtime, authentication, WebSocket, seed or migration behaviour changed.
+
 ## Windows Deployment Specification
 
 Status: **not started**. `RECEIVER_HOSTING_KEY_STORAGE_ADR.md` remains
@@ -712,21 +782,20 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Build a test-first, **dry-run-only** catalog reconciliation report for an
-already-populated database. It should compare a supplied SQLite database
-against `backend/store_catalog.py` and report, without writing anything:
-canonical Stores missing, existing Stores matching canonically, and
-non-canonical Stores together with their dependent Receiver Device,
-Broadcast Target and Receiver Event counts, so a human can decide what may
-safely be retired. It must refuse the protected `backend/speaklink_live.db`
-path exactly like the existing migration/backfill services do, use only
-pytest temporary SQLite databases, and perform no insert, update or delete.
+Run the reconciliation report **once**, against an operator-produced isolated
+snapshot of the real database, and review the output together. That means the
+operator stops the backend, takes a quiesced copy of
+`backend/speaklink_live.db` plus any WAL/SHM files to a path outside the
+repository, and supplies that path. The tool then reports what the live fleet
+actually contains. Nothing is changed, and the result decides whether a
+cleanup task is even needed.
 
-Applying any reconciliation to real data stays a separate, explicitly
-approved task requiring a verified backup and a reviewed execution record.
+Only after that review should a cleanup task be considered, and it would still
+require a verified backup, a reviewed change record, a dry run and an explicit
+human decision per row.
 
 The test-first Windows deployment specification (directory layout, dedicated
 service-identity permissions, secret-file interface contract, DPAPI
 protection/unprotection boundary, log rotation, one-worker startup command,
 graceful shutdown, health checks, Windows auto-start choice) remains **not
-started** and can be resumed after the catalog work settles.
+started**.
