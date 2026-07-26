@@ -772,6 +772,11 @@ class AudioReceiverPilot:
 CHIME_SECONDS = 1.5
 CHIME_FREQUENCY_HZ = 440
 CHIME_GAIN = 0.08  # deliberately quiet; the operator raises the amplifier, not us
+# A Bluetooth A2DP endpoint can take a second or more to wake its DAC once a
+# stream starts, so the operator may need a longer diagnostic tone. Loudness
+# stays fixed - only the duration is selectable, and it is bounded so nobody
+# can hold an amplifier open indefinitely.
+CHIME_MAX_SECONDS = 10.0
 
 
 def play_test_chime(
@@ -793,12 +798,19 @@ def play_test_chime(
             "the test chime requires windows sink mode and an explicitly "
             "selected output device"
         )
+    if not 0 < seconds <= CHIME_MAX_SECONDS:
+        raise SinkConfigurationError(
+            f"the chime duration must be greater than 0 and at most "
+            f"{CHIME_MAX_SECONDS} seconds; {seconds!r} was refused so an "
+            "amplifier is never held open by a bad value"
+        )
     device = configuration.device
     print("About to play a short, quiet test chime on EXACTLY this device:")
     print(f"  selector : {device.selector}")
     print(f"  name     : {device.name}")
     print(f"  host API : {device.host_api}")
     print(f"  rate     : {configuration.sample_rate} Hz, {configuration.channels} channel(s)")
+    print(f"  duration : {seconds} s")
     if device.looks_like_bluetooth:
         print("  WARNING  : this looks like a Bluetooth endpoint. A wired USB or")
         print("             3.5 mm output is strongly preferred for a Store pilot.")
@@ -827,7 +839,10 @@ def play_test_chime(
         value = CHIME_GAIN * envelope * math.sin(
             2 * math.pi * CHIME_FREQUENCY_HZ * frame / configuration.sample_rate
         )
-        samples += struct.pack("<h", int(max(-1.0, min(1.0, value)) * 32767))
+        sample = struct.pack("<h", int(max(-1.0, min(1.0, value)) * 32767))
+        # One sample per channel, or PortAudio reads a mono buffer as
+        # interleaved stereo: half the duration at double the pitch.
+        samples += sample * configuration.channels
 
     sink = WindowsPcmSink(configuration, backend=backend)
     sink.open()
@@ -863,6 +878,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--url", help="Receiver WebSocket URL (loopback). Required for 'run'.")
     parser.add_argument("--queue-capacity", type=int, default=24)
     parser.add_argument("--report", default=None, help="Optional secret-free JSON report path.")
+    parser.add_argument(
+        "--seconds", type=float, default=CHIME_SECONDS,
+        help=(
+            f"test-output only: chime duration in seconds (default {CHIME_SECONDS}, "
+            f"maximum {CHIME_MAX_SECONDS}). A Bluetooth endpoint can take a second "
+            "or more to wake, so a longer tone is sometimes needed to tell a sleeping "
+            "link apart from no audio path at all. Loudness is never selectable."
+        ),
+    )
     return parser
 
 
@@ -880,7 +904,7 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.action == "test-output":
         try:
             configuration = resolve_sink_configuration()
-            outcome = play_test_chime(configuration)
+            outcome = play_test_chime(configuration, seconds=arguments.seconds)
         except AudioReceiverError as error:
             print(f"Test chime refused: {error}", file=sys.stderr)
             return EXIT_SAFETY
