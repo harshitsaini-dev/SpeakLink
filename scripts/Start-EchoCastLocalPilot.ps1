@@ -82,7 +82,7 @@ $env:REACT_APP_BACKEND_URL = $backendUrl
 $backendOut = Join-Path $pilotLogs 'backend.out.log'
 $backendErr = Join-Path $pilotLogs 'backend.err.log'
 $backend = Start-Process -FilePath $venvPython `
-    -ArgumentList @('-m', 'uvicorn', 'server:app', '--host', '127.0.0.1', '--port', "$BackendPort", '--workers', '1') `
+    -ArgumentList @('-m', 'uvicorn', 'server:app', '--host', '127.0.0.1', '--port', "`"$BackendPort`"", '--workers', '1') `
     -WorkingDirectory $backendDir `
     -RedirectStandardOutput $backendOut `
     -RedirectStandardError $backendErr `
