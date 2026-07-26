@@ -975,6 +975,102 @@ No production Windows Receiver Agent, no Windows output-device selection, no
 amplifier or Bluetooth control, no LinkGuard, no acoustic verification, no
 TLS/WSS, no security approval, and no multi-Store load evidence.
 
+## One-Store Windows output-device pilot
+
+Status: **READY_FOR_ONE_STORE_WINDOWS_OUTPUT_TEST**. This is explicitly **not**
+SPEAKER_VERIFIED, not AMPLIFIER_VERIFIED, not BLUETOOTH_VERIFIED, not
+ECHO_GUARD_VERIFIED, not READY_FOR_PRODUCTION and not ALL_STORES_READY.
+
+`ONE_STORE_WINDOWS_OUTPUT_TEST_RUNBOOK.md` is the operator-facing runbook.
+
+### Why a new dependency was required
+
+The installed FFmpeg 8.1.2 build has **no audio output muxer at all** — its
+full `-devices` list contains exactly one muxer, `caca` (ASCII-art video).
+`ffplay` exists but its `-audio_device_*` options are DirectShow **capture**
+options; it plays only to whatever SDL treats as the default. No Python audio
+library was installed. So nothing on this machine could send audio to one
+**explicitly chosen** Windows endpoint, and Hard Safety Rule 4 forbids silently
+using the default device.
+
+`sounddevice==0.5.2` (MIT, PortAudio V19.7.0, Python 3.12 + Windows) was added
+after operator approval. Its only requirement, `cffi`, was already present;
+installing it moved `cffi` 2.0.0 -> 2.1.0 and added `pycparser==3.0`, and
+`backend/requirements.txt` records all three truthfully.
+
+### Selected playback architecture
+
+FFmpeg decodes WebM/Opus to raw PCM on stdout; `WindowsPcmSink` writes that PCM
+to exactly one operator-selected device through PortAudio. **FFmpeg itself is
+never pointed at an audio device**, so it cannot open an unknown default.
+
+| Sink mode | Command tail | Playback evidence |
+| --- | --- | --- |
+| `null` (default) | `-progress pipe:1 -f null -` | FFmpeg `out_time_ms` advancing |
+| `windows` | `-ar 48000 -f s16le pipe:1` | PCM frames the selected device accepted |
+
+Decoded PCM is 48 kHz, mono, `int16`.
+
+### Device selection safety
+
+`tools/windows_audio_devices.py` enumerates playback endpoints read-only: it
+opens no stream, plays no sound and never changes the Windows default.
+Configuration is process-scoped via `SPEAKLINK_AUDIO_SINK_MODE`
+(`null` default | `windows`) and `SPEAKLINK_AUDIO_OUTPUT_DEVICE`.
+
+- Hardware mode **fails closed** with no selector, an unknown selector, or a
+  name matching more than one device.
+- Partial names and different casing are refused.
+- A stable `index:N` selector is preferred over a display name.
+- A configured device is deliberately **ignored** in `null` mode, so a leftover
+  variable can never cause an unexpected sound.
+- A Bluetooth endpoint is listed and flagged but never chosen automatically.
+- A device name is never treated as a Store or Receiver identity.
+
+This is not theoretical: on this machine `index:3` and `index:4` have the
+**identical** name "LG IPS QHD-1 (NVIDIA High Definition Audio)" under
+DirectSound and WASAPI, so name-only selection really is ambiguous.
+
+### Receiver behaviour
+
+READY now additionally requires, in hardware mode, that the selected device
+actually **opened**. A device that cannot be opened yields `DEVICE_ERROR` and
+READY is withheld. An output stream that fails mid-session yields
+`PLAYBACK_ERROR`. STOP and disconnect both close the output stream and the
+FFmpeg child. `speaker_verified` is still never sent.
+
+An opt-in manual chime (`audio_receiver_pilot.py test-output`) prints the exact
+device, requires the operator to type `yes`, plays one quiet ~1.5 s tone at
+gain 0.08, and never changes system volume or the default device.
+
+### Actual device enumeration on this machine
+
+8 output endpoints were listed read-only, including the current default
+(`index:1`, an HDMI monitor) and a Bluetooth headset (`index:5`, flagged).
+Nothing was opened and nothing was changed.
+
+### Results
+
+- 40 new device/sink tests, **all using an injected fake backend** — no
+  automated test opens a real device or plays a sound.
+- Null-sink audio smoke re-ran green: `ONE_STORE_AUDIO_SOFTWARE_PILOT_PASSED`,
+  `sink_mode: null`, ffmpeg return code 0, 0 dropped, `speaker_verified: false`.
+- Complete backend suite **556 passed, 1 skipped, 32 existing warnings, green
+  across 5 consecutive runs** (516 baseline plus 40 new).
+- `compileall backend tools` succeeded; `yarn build` compiled; `yarn test`
+  still reports no frontend test files, which is not behavioural coverage.
+
+**No real hardware test was performed by this task.** The chime and the browser
+microphone hardware checklist are for the operator to run, and no operator
+audible observation has been recorded yet.
+
+### Protected database
+
+**Not opened, not copied, not modified.** The accepted baseline moved to
+507,904 bytes / 2026-07-26 08:43:13 with no `-wal` or `-shm`, after the
+operator confirmed they had run the application; it was byte-identical before
+and after all pilot work.
+
 ## Windows Deployment Specification
 
 Status: **not started**. `RECEIVER_HOSTING_KEY_STORAGE_ADR.md` remains
@@ -992,16 +1088,18 @@ indexes, and existing data.
 
 ## Next recommended engineering task
 
-Run a **one-Store wired-amplifier output-device pilot** on the local Receiver
-Agent foundation: let the Receiver select a specific, explicitly named Windows
-audio output device instead of the null sink, and record what the operator
-actually hears. Software playback (`PLAYBACK_CONFIRMED`) and acoustic
-verification (`SPEAKER_VERIFIED`) must stay separate: an operator confirming
-they heard sound is still not `SPEAKER_VERIFIED`, which requires LinkGuard.
+Implement **LinkGuard acoustic verification for one wired Store pilot**: an
+independent microphone path that listens in the Store and confirms that a
+broadcast was actually audible, feeding the existing trusted-verifier
+`speaker_verified` path in `receiver_contract`. Only that can set
+`SPEAKER_VERIFIED`. Until it exists, an operator saying "I heard it" stays
+operator observation and nothing more.
 
-Two separate still-open tasks: perform the manual browser microphone checklist
-in `ONE_STORE_LIVE_AUDIO_TEST_RUNBOOK.md`, and run the reconciliation report
-once against an operator-produced isolated snapshot of the real database. That means the
+Three separate still-open tasks: run the hardware checklist in
+`ONE_STORE_WINDOWS_OUTPUT_TEST_RUNBOOK.md` with a real USB/3.5 mm adapter and
+record the observation form; perform the browser microphone checklist in
+`ONE_STORE_LIVE_AUDIO_TEST_RUNBOOK.md`; and run the reconciliation report once
+against an operator-produced isolated snapshot of the real database. That means the
 operator stops the backend, takes a quiesced copy of
 `backend/speaklink_live.db` plus any WAL/SHM files to a path outside the
 repository, and supplies that path. The tool then reports what the live fleet
