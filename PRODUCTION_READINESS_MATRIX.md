@@ -135,3 +135,18 @@ Phases 1 and 2 were delivered because they are the keystone: nothing in phases
 3, 4 or 5 can exist without a key to sign credentials with and a schema to store
 them in. Both were built test-first, verified, committed and pushed
 individually rather than accumulated as one large uncommitted change.
+
+---
+
+## Commit record note
+
+Commit `e7670ee` carries three files but a message describing only the matrix.
+A shell here-string containing quotes was mangled, the intended EchoGuard commit
+failed, and the next commit swept all three files up. The content is correct; the
+message under-describes it. It was already pushed, so the record is corrected
+here rather than by rewriting shared history.
+
+- `backend/echoguard.py` — the pause/resume contract
+- `backend/tests/test_echoguard_contract.py` — 19 contract tests
+- `PRODUCTION_READINESS_MATRIX.md` — this table
+
