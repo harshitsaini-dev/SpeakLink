@@ -18,7 +18,14 @@ from typing import Mapping
 
 TOKEN_SECRET_BYTES = 32
 MIN_HASH_KEY_BYTES = 32
-MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE = 2
+#: One legacy backfilled Device, one primary, one standby.
+#:
+#: This was two, which made primary-plus-standby arithmetically impossible on any
+#: Store that had been backfilled: the backfill creates a Device of its own and
+#: took one of the two slots. Three is a migration-period number - it exists to
+#: hold exactly that trio - and it is still a bound, so a stuck script cannot turn
+#: a Store into a pile of live credentials nobody can account for.
+MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE = 3
 MAX_ROTATION_GRACE = timedelta(minutes=15)
 MAX_AUDIT_REASON_LENGTH = 256
 
