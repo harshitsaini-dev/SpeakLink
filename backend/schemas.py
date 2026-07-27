@@ -23,6 +23,55 @@ class LoginResponse(BaseModel):
     user: UserOut
 
 
+class EnrollmentCodeRequest(BaseModel):
+    store_id: int = Field(..., gt=0)
+
+
+class EnrollmentCodeResponse(BaseModel):
+    """The one and only time the raw code leaves the server."""
+
+    code: str
+    store_id: int
+    expires_in_seconds: int
+
+
+class DeviceEnrollmentRequest(BaseModel):
+    """Sent by a Receiver computer. The code is in the body, never a URL."""
+
+    code: str = Field(..., min_length=1, max_length=200)
+    device_name: str = Field(..., min_length=1, max_length=200)
+    hostname: str = Field("", max_length=253)
+    software_version: str = Field("", max_length=64)
+
+
+class DeviceEnrollmentResponse(BaseModel):
+    """The one and only time the raw credential leaves the server.
+
+    No later read returns it: the database holds a verifier, not the value.
+    """
+
+    device_public_id: str
+    credential: str
+    credential_version: int
+    store_id: int
+
+
+class ReceiverDeviceOut(BaseModel):
+    """Everything the dashboard may know about a Device - and nothing else.
+
+    Deliberately carries no credential, no verifier and no key version.
+    """
+
+    public_id: str
+    store_id: int
+    display_name: str
+    status: str
+    enrolled_at: str
+    disabled_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
 class StoreBase(BaseModel):
     store_code: str = Field(..., min_length=1, max_length=50)
     store_name: str = Field(..., min_length=1, max_length=200)

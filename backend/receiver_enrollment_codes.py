@@ -83,10 +83,17 @@ class IssuedEnrollmentCode:
 
 @dataclass(frozen=True)
 class RedeemedEnrollmentCode:
-    """What redemption proves: this caller may enrol one Device for this Store."""
+    """What redemption proves: this caller may enrol one Device for this Store.
+
+    ``created_by`` travels with it because the Receiver computer that redeems a
+    code is unauthenticated - it has no credential yet, that is the point. The
+    administrator who *issued* the code is the one who authorised the Device,
+    so they are who it should be attributed to.
+    """
 
     store_id: int
     code_id: int
+    created_by: int
 
 
 def _verifier(code: str) -> str:
@@ -181,7 +188,9 @@ def redeem_enrollment_code(
     if claimed != 1:
         raise EnrollmentCodeUsed("that enrolment code has already been used")
 
-    return RedeemedEnrollmentCode(store_id=row.store_id, code_id=row.id)
+    return RedeemedEnrollmentCode(
+        store_id=row.store_id, code_id=row.id, created_by=row.created_by
+    )
 
 
 def _as_epoch(value) -> float:
