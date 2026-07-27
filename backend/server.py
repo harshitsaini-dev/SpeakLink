@@ -43,7 +43,9 @@ from seed import seed_admin, seed_stores
 from ws_manager import manager
 from receiver_connection_inventory import ReceiverConnectionInventoryError
 from receiver_runtime_auth import (
+    DualRuntimeAuthenticator,
     LegacyStoreTokenRuntimeAuthenticator,
+    MigrationAwareReceiverRuntimeAuthenticator,
 )
 from receiver_contract import (
     HEARTBEAT_INTERVAL_SECONDS,
@@ -167,6 +169,45 @@ def configure_receiver_runtime(
 default_receiver_runtime_authenticator = LegacyStoreTokenRuntimeAuthenticator(
     SessionLocal
 )
+
+
+def build_receiver_runtime_authenticator():
+    """Prefer Device credentials; keep legacy Store tokens working meanwhile.
+
+    Both are accepted during an explicit, temporary migration period. A Device
+    credential is tried first, so a Store stops depending on its shared token
+    the moment one of its computers presents a real credential - no flag, no
+    restart.
+
+    If the phase-one schema or the key container is not available, this returns
+    the legacy authenticator alone rather than failing: a host that has not
+    migrated yet must keep its Receivers connected. The dashboard can still tell
+    the two apart, because the identity records which transport proved it.
+
+    Removing this - and the legacy path with it - is the documented cutover.
+    """
+    key_ring = receiver_key_ring()
+    if key_ring is None:
+        return default_receiver_runtime_authenticator
+    try:
+        with engine.connect() as connection:
+            present = {
+                row[0]
+                for row in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        if not {"receiver_devices", "receiver_credentials"} <= present:
+            return default_receiver_runtime_authenticator
+        return DualRuntimeAuthenticator(
+            device=MigrationAwareReceiverRuntimeAuthenticator(
+                engine, hash_keys=key_ring.as_mapping()
+            ),
+            legacy=default_receiver_runtime_authenticator,
+        )
+    except Exception:
+        # Never let a probe failure take the Receivers offline.
+        return default_receiver_runtime_authenticator
 configure_receiver_runtime(
     app,
     authenticator=default_receiver_runtime_authenticator,
@@ -185,6 +226,19 @@ def _write_log(db: Session, level: str, message: str):
 @app.on_event("startup")
 def startup_event():
     Base.metadata.create_all(bind=engine)
+
+    # Decided here rather than at import: whether Device credentials can be
+    # verified depends on the database and the key container, and neither is
+    # guaranteed to exist when this module is first imported.
+    authenticator = build_receiver_runtime_authenticator()
+    configure_receiver_runtime(app, authenticator=authenticator, connection_manager=manager)
+    logger.info(
+        "Receiver authentication: %s",
+        "device credentials + legacy store tokens"
+        if isinstance(authenticator, DualRuntimeAuthenticator)
+        else "legacy store tokens only",
+    )
+
     with SessionLocal() as db:
         seed_admin(db)
         seed_stores(db)

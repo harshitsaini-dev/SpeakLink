@@ -330,6 +330,36 @@ def test_enrolment_fails_closed_without_a_key_ring(runtime: Runtime):
 
 
 # ---------------------------------------------------------------------------
+# Enrolling must not create more shared secrets
+# ---------------------------------------------------------------------------
+def test_enrolling_never_issues_a_new_legacy_store_token(runtime: Runtime):
+    """The shared per-Store token is what Devices exist to replace. Minting or
+    rotating one during enrolment would quietly extend the thing being retired."""
+    with runtime.Session() as db:
+        before = {
+            store.id: store.receiver_token
+            for store in db.query(Store).all()
+        }
+
+    runtime.enrol(runtime.new_code())
+    runtime.enrol(runtime.new_code(), name="second device")
+
+    with runtime.Session() as db:
+        after = {store.id: store.receiver_token for store in db.query(Store).all()}
+
+    assert after == before, "enrolment changed a Store's legacy receiver_token"
+    assert len(after) == 2, "enrolment created or removed a Store"
+
+
+def test_a_device_credential_is_not_the_stores_legacy_token(runtime: Runtime):
+    credential = runtime.enrol(runtime.new_code()).take_raw_credential()
+    with runtime.Session() as db:
+        tokens = {store.receiver_token for store in db.query(Store).all()}
+    assert credential not in tokens
+    assert credential.startswith("speaklink_rcv_v"), "the two formats must stay distinguishable"
+
+
+# ---------------------------------------------------------------------------
 # Device administration
 # ---------------------------------------------------------------------------
 def test_devices_are_listed_per_store_without_any_secret(runtime: Runtime):
