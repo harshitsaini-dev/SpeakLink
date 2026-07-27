@@ -3,17 +3,35 @@
 These tests use only pytest temporary SQLite databases. They never open,
 copy, migrate or modify ``backend/echocast_live.db``, and they never create
 Receiver Devices or production credentials.
+
+That was true of every *test* here and still not enough. Importing ``db`` binds
+a process-wide engine to whatever ``ECHOCAST_DB_PATH`` said at import time, and
+``db`` installs a ``connect`` listener that runs ``PRAGMA journal_mode=WAL`` -
+itself a write. With the variable unset, that engine points at the protected
+database, and the first connection anything opens on it creates ``-wal`` and
+``-shm`` beside the real file. ``conftest.py`` now guarantees the variable, but
+this file sets it too, so it is safe when imported or run on its own.
 """
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
-import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+_PROTECTED = Path(__file__).resolve().parents[1] / "echocast_live.db"
+_configured = os.environ.get("ECHOCAST_DB_PATH")
+if not _configured or Path(_configured).resolve() == _PROTECTED.resolve():
+    os.environ["ECHOCAST_DB_PATH"] = str(
+        Path(tempfile.gettempdir())
+        / f"echocast-catalog-{os.environ.get('PYTEST_XDIST_WORKER', 'serial')}.db"
+    )
 
-from db import Base
+import pytest  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
+
+from db import Base  # noqa: E402
 from models import Store
 from seed import seed_stores
 from store_catalog import (

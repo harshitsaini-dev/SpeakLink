@@ -7,6 +7,13 @@ FastAPI/Uvicorn, or touch the network.
 The canonical expectations are always read from ``store_catalog`` rather than
 duplicated as literals here, so this suite cannot drift from the approved
 catalog the way a hand-copied list can.
+
+That was true of every *test* here and still not enough. Importing ``models``
+pulls in ``db``, which binds a process-wide engine to whatever
+``ECHOCAST_DB_PATH`` said at import time and installs a ``connect`` listener
+running ``PRAGMA journal_mode=WAL`` - itself a write. With the variable unset,
+that engine points at the protected database. ``conftest.py`` now guarantees
+the variable; this file sets it too, so it is safe when imported or run alone.
 """
 
 from __future__ import annotations
@@ -16,12 +23,21 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import tempfile
 
-import pytest
-from sqlalchemy import create_engine
+_PROTECTED = Path(__file__).resolve().parents[1] / "echocast_live.db"
+_configured = os.environ.get("ECHOCAST_DB_PATH")
+if not _configured or Path(_configured).resolve() == _PROTECTED.resolve():
+    os.environ["ECHOCAST_DB_PATH"] = str(
+        Path(tempfile.gettempdir())
+        / f"echocast-reconciliation-{os.environ.get('PYTEST_XDIST_WORKER', 'serial')}.db"
+    )
 
-import models  # noqa: F401  - registers the tables on Base.metadata
-from db import Base
+import pytest  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
+
+import models  # noqa: F401,E402  - registers the tables on Base.metadata
+from db import Base  # noqa: E402
 from migrations import PROTECTED_DATABASE_PATH, run_receiver_credential_phase_one
 from store_catalog import CANONICAL_STORES, CANONICAL_ZONES
 from store_catalog_reconciliation import (
