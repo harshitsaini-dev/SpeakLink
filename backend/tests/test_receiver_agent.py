@@ -1,4 +1,4 @@
-﻿"""The production Windows Receiver Agent: enrol once, then run for months.
+"""The production Windows Receiver Agent: enrol once, then run for months.
 
 ``audio_receiver_pilot.py`` proved a Store can receive and play audio. It is a
 pilot: the operator exports a shared Store token and starts it by hand. This is

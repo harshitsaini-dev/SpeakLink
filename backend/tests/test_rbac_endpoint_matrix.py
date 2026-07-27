@@ -1,4 +1,4 @@
-﻿"""Every authenticated route names a permission, and names the right one.
+"""Every authenticated route names a permission, and names the right one.
 
 The matrix in ``rbac.py`` is only a policy if the routes actually consult it.
 This file reads the running app's own routing table and asserts, endpoint by
