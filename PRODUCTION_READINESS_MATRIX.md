@@ -70,7 +70,7 @@ Last updated: 2026-07-27, branch `release/production-readiness-candidate`.
 | --- | --- | --- |
 | Acoustic verification **message contract** | `COMPLETE` | `receiver_contract.py` — `TrustedSpeakerVerifiedEvent` with `source: Literal["linkguard"]`, parsed by a separate adapter |
 | A Receiver cannot claim `speaker_verified` | `COMPLETE` | The trusted event is excluded from the ordinary acknowledgement union; a Receiver presenting one is rejected |
-| Pause / resume **contract** | `COMPLETE` | `linkguard.py`; 18 contract tests against a fake adapter |
+| Pause / resume **contract** | `COMPLETE` | `linkguard.py`; 19 contract tests against a fake adapter |
 | Pause / resume **implementation** | `BLOCKED` | No LinkGuard executable, service or IPC surface exists to call. `NullLinkGuard` reports `UNAVAILABLE`, never `PAUSED` |
 | Acoustic speaker verification in practice | `NOT_IMPLEMENTED` | The contract exists; nothing produces such an event. `SPEAKER_VERIFIED` is claimed by no report |
 
