@@ -573,7 +573,13 @@ def test_legacy_mode_still_refuses_a_token_on_the_command_line():
 # ===========================================================================
 # The four commands exist and removal is deliberate
 # ===========================================================================
-def test_the_agent_has_exactly_the_four_intended_commands():
+def test_the_agent_has_exactly_the_intended_commands():
+    """A closed set, so a future command has to be a decision rather than a drift.
+
+    ``rotate-local-credential`` is the operator's half of a rotation: an
+    administrator rotates at HQ, and this is how the new credential reaches the
+    till without ever passing through a command argument.
+    """
     parser = build_parser()
     commands = {
         name
@@ -581,7 +587,41 @@ def test_the_agent_has_exactly_the_four_intended_commands():
         if hasattr(action, "choices") and isinstance(action.choices, dict)
         for name in action.choices
     }
-    assert commands == {"enrol", "run", "status", "remove-local-credential"}
+    assert commands == {
+        "enrol", "run", "status", "rotate-local-credential", "remove-local-credential"
+    }
+
+
+def test_the_rotated_credential_is_never_a_command_argument():
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["rotate-local-credential", "--credential", CREDENTIAL])
+    # It is read the same way an enrolment code is: hidden prompt, or stdin.
+    assert parser.parse_args(["rotate-local-credential", "--from-stdin"]).from_stdin is True
+
+
+def test_rotating_the_local_credential_keeps_the_device_identity(credential_path, protector):
+    from tools.receiver_agent import rotate_local_credential
+
+    _enrol(credential_path, protector)
+    rotated = "speaklink_rcv_v2.11111111-2222-4333-8444-555555555555." + "n" * 43
+    rotate_local_credential(
+        credential_path, protector=protector, stream=io.StringIO(f"{rotated}\n")
+    )
+    record = load_credential(credential_path, protector=protector)
+    assert record.credential() == rotated
+    assert record.device_public_id == DEVICE_PUBLIC_ID, "rotation changed which Device this is"
+
+
+def test_rotating_to_something_that_is_not_a_credential_is_refused(credential_path, protector):
+    from tools.receiver_agent import rotate_local_credential
+
+    _enrol(credential_path, protector)
+    with pytest.raises(CredentialStoreError):
+        rotate_local_credential(
+            credential_path, protector=protector, stream=io.StringIO("not-a-credential\n")
+        )
+    assert load_credential(credential_path, protector=protector).credential() == CREDENTIAL
 
 
 def test_removing_the_local_credential_needs_typed_confirmation(credential_path, protector):

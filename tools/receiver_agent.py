@@ -702,6 +702,16 @@ def build_parser() -> argparse.ArgumentParser:
     status_command = add_command("status", help="Show what this computer is enrolled as.")
     common(status_command, needs_url=False)
 
+    rotate_command = add_command(
+        "rotate-local-credential",
+        help="Store a credential an administrator has just rotated at HQ.",
+    )
+    common(rotate_command, needs_url=False)
+    rotate_command.add_argument(
+        "--from-stdin", action="store_true",
+        help="Read the new credential from stdin instead of a hidden prompt.",
+    )
+
     remove_command = add_command(
         "remove-local-credential",
         help="Delete this computer's credential after typed confirmation.",
@@ -810,6 +820,15 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "status":
             for key, value in describe_status(path, protector=protector).items():
                 print(f"  {key}: {value}")
+            return EXIT_OK
+
+        if arguments.command == "rotate-local-credential":
+            rotate_local_credential(
+                path,
+                protector=protector,
+                stream=sys.stdin if arguments.from_stdin else None,
+            )
+            print("The rotated credential is stored. The previous one no longer works.")
             return EXIT_OK
 
         if arguments.command == "remove-local-credential":
