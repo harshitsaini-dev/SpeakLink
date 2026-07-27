@@ -30,7 +30,9 @@ Last updated: 2026-07-27, branch `release/production-readiness-candidate`.
 | HTTP auth is header-only | `COMPLETE` | `6c27833`; 31 tests; no route accepts a credential from a URL |
 | WebSocket single-use tickets | `COMPLETE` | `f27bd08`; 19 tests |
 | **Receiver HMAC key custody** | `COMPLETE` | `key_custody.py`; 30 tests; **real DPAPI round trip passed on this host** |
-| DPAPI under a dedicated service identity | `BLOCKED` | No service identity exists. ADR §10 lists it as an open prerequisite. CurrentUser scope is tested; LocalMachine is implemented but **not** claimed tested |
+| Key container ACL policy and verification | `COMPLETE` | `key_custody_acl.py`; 22 tests; inheritance from `C:\ProgramData` rejected, service Full Control rejected, Administrators recovery required |
+| Service-identity install and integration scripts | `COMPLETE` | `Install-SpeakLinkServiceIdentity.ps1` refuses without elevation; `Test-SpeakLinkKeyCustody.ps1` refuses under any other identity — both verified |
+| DPAPI **under `SpeakLinkService`** | `BLOCKED` | The account does not exist on this machine, this session is not elevated, and nothing has run as it. Scope decided (`CURRENT_USER`), path decided (`C:\ProgramData\SpeakLink\keys\receiver-hmac-keys.bin`). **Operator gate** — run `Test-SpeakLinkKeyCustody.ps1` as the service account, then again after a service restart, then again after a reboot |
 | Production HMAC key generation ceremony | `NOT_IMPLEMENTED` | Needs an approved host and named owners |
 | Key backup and recovery rehearsal | `NOT_IMPLEMENTED` | ADR requires a backup separate from the database backup |
 
@@ -41,7 +43,8 @@ Last updated: 2026-07-27, branch `release/production-readiness-candidate`.
 | One-time enrolment codes | `COMPLETE` | `6281aa3`; 25 tests including a threaded race with exactly one winner |
 | Receiver Device schema | `TESTED_AUTOMATICALLY` | Written in `migrations.py`; **never applied to any live database** |
 | Migration status / preflight / apply tooling | `COMPLETE` | `6c42102`; 21 tests; backup verified by size, SHA-256 and reopen |
-| Migration applied to a real database | `BLOCKED` | Needs an approved maintenance window. Tool refuses the protected database with no override |
+| Migration maintenance runbook | `COMPLETE` | `RECEIVER_MIGRATION_RUNBOOK.md`; every command executed against a copy of the pilot database while writing it |
+| Migration applied to a real database | `BLOCKED` | Needs an approved maintenance window. Tool refuses the protected database with no override. Neither the protected nor the pilot database is migrated |
 | Enrolment HTTP API | `NOT_IMPLEMENTED` | Now unblocked by key custody; not built in this campaign |
 | Device credential issuance | `NOT_IMPLEMENTED` | Service exists (`enroll_receiver_device`); no route calls it |
 | Device credential rotation / revocation | `NOT_IMPLEMENTED` | Primitives exist in `receiver_credentials.py` |
