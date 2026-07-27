@@ -44,8 +44,8 @@ from receiver_credentials import (
     plan_rotation,
     sanitize_audit_payload,
 )
-from migrations import PHASE_ONE_NAME, PHASE_ONE_VERSION
 from receiver_device_service import (
+    ENROLLABLE_STATES,
     CredentialAlreadyDeliveredError,
     InactiveActorError,
     InactiveStoreError,
@@ -63,18 +63,12 @@ ROTATION_REASON = "credential_rotation"
 
 #: The states in which a rotated credential can actually be used.
 #:
-#: ``receiver_device_service._validate_phase_one`` pins enrolment to
-#: ``legacy_only`` because it was written for the migration rehearsal. Rotation
-#: cannot inherit that rule: ``receiver_auth_service`` only verifies hashed Device
-#: credentials in ``dual_verify``, ``hash_only`` and ``raw_neutralized``, so a
-#: service that rotated only in ``legacy_only`` would issue credentials in exactly
-#: the state where they do not work, and refuse in every state where they do.
-#:
-#: ``legacy_only`` is kept so a rotation performed during the rehearsal window is
-#: still valid once the state advances. ``backfilled`` is excluded deliberately:
-#: hashed credentials are not verified there either, so rotating into it would
-#: hand an operator a credential that silently cannot authenticate.
-ROTATABLE_STATES = frozenset({"legacy_only", "dual_verify", "hash_only", "raw_neutralized"})
+#: Identical to ``ENROLLABLE_STATES``, and deliberately the same object rather
+#: than a copy that agrees today. Issuing a credential is issuing a credential:
+#: if a state is unsafe to enrol into - because ``receiver_auth_service`` will not
+#: verify what comes out - it is equally unsafe to rotate into. A test asserts
+#: they are the same set, so a future change to one cannot quietly diverge.
+ROTATABLE_STATES = ENROLLABLE_STATES
 
 #: Zero, and not configurable. See the module docstring: an overlap window during
 #: a rotation is a window in which a suspected-compromised credential still works.
@@ -156,35 +150,14 @@ def _notify(step_hook: Callable[[str], None] | None, step: str) -> None:
         step_hook(step)
 
 
-def _require_rotatable_state(connection) -> str:
-    """Same schema checks as enrolment, but its own state rule.
+def _require_rotatable_state(connection) -> None:
+    """Exactly enrolment's gate.
 
-    ``_validate_phase_one`` is reused for everything structural - tables, columns,
-    indexes, constraints, the migration ledger - so the two services cannot drift
-    on what "phase one is applied" means. Only the *state* rule differs, and it
-    differs for the reason set out at ROTATABLE_STATES.
+    Every structural check - tables, columns, indexes, constraints, the migration
+    ledger - and the state rule too, so the two services cannot drift on what
+    "safe to issue a credential" means.
     """
-    try:
-        _validate_phase_one(connection)
-    except MigrationNotReadyError:
-        # Either the schema is genuinely missing, or the state is simply not
-        # legacy_only - which is fine for a rotation. Tell them apart.
-        ledger = connection.execute(
-            text("SELECT name FROM schema_migrations WHERE version = :version"),
-            {"version": PHASE_ONE_VERSION},
-        ).scalar_one_or_none()
-        if ledger != PHASE_ONE_NAME:
-            raise
-        state = connection.execute(
-            text("SELECT state FROM receiver_credential_migration_state WHERE id = 1")
-        ).scalar_one_or_none()
-        if state not in ROTATABLE_STATES:
-            raise MigrationNotReadyError(
-                f"Receiver credentials cannot be rotated while the migration state "
-                f"is {state!r}; a credential issued now could not be verified"
-            ) from None
-        return str(state)
-    return "legacy_only"
+    _validate_phase_one(connection)
 
 
 def _audit_metadata(

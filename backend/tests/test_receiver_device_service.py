@@ -13,7 +13,11 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
 from migrations import MIGRATION_STATE_LEGACY_ONLY, run_receiver_credential_phase_one
-from receiver_credentials import parse_receiver_token, verify_receiver_token
+from receiver_credentials import (
+    MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE,
+    parse_receiver_token,
+    verify_receiver_token,
+)
 from receiver_device_service import (
     ActorNotFoundError,
     CredentialAlreadyDeliveredError,
@@ -304,12 +308,15 @@ def test_missing_or_inactive_actor_is_rejected_without_writes(
         engine.dispose()
 
 
-def test_third_active_device_is_rejected(isolated_engine: Engine):
+def test_the_device_beyond_the_per_store_limit_is_rejected(isolated_engine: Engine):
+    """The limit is three - legacy backfill, primary, standby - so the fourth is
+    the one that must be refused."""
     enroll(isolated_engine)
     enroll(isolated_engine, display_name="Secondary Receiver")
+    enroll(isolated_engine, display_name="Third Receiver")
     with pytest.raises(DeviceLimitExceededError):
-        enroll(isolated_engine, display_name="Third Receiver")
-    assert enrollment_counts(isolated_engine) == (2, 2, 4)
+        enroll(isolated_engine, display_name="Fourth Receiver")
+    assert enrollment_counts(isolated_engine) == (3, 3, 6)
 
 
 def test_disabled_device_does_not_count_toward_active_limit(isolated_engine: Engine):
@@ -481,8 +488,11 @@ def test_enrollment_does_not_change_store_runtime_status(isolated_engine: Engine
     assert after == before
 
 
-def test_concurrent_enrollment_never_exceeds_two_active_devices(isolated_engine: Engine):
-    start_barrier = threading.Barrier(3)
+def test_concurrent_enrollment_never_exceeds_the_per_store_limit(isolated_engine: Engine):
+    """Four computers enrolling at the same instant. The limit is a real bound,
+    not a check that a race can walk straight past."""
+    attempts = MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE + 1
+    start_barrier = threading.Barrier(attempts)
 
     def attempt(index: int):
         start_barrier.wait(timeout=5)
@@ -491,16 +501,20 @@ def test_concurrent_enrollment_never_exceeds_two_active_devices(isolated_engine:
         except DeviceLimitExceededError as error:
             return error
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        outcomes = list(executor.map(attempt, range(3)))
+    with ThreadPoolExecutor(max_workers=attempts) as executor:
+        outcomes = list(executor.map(attempt, range(attempts)))
 
     successes = [outcome for outcome in outcomes if not isinstance(outcome, Exception)]
     rejections = [outcome for outcome in outcomes if isinstance(outcome, DeviceLimitExceededError)]
-    assert len(successes) == 2
+    assert len(successes) == MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE
     assert len(rejections) == 1
     with isolated_engine.connect() as connection:
         active_count = connection.execute(
             text("SELECT COUNT(*) FROM receiver_devices WHERE store_id = 41 AND status = 'active'")
         ).scalar_one()
-    assert active_count == 2
-    assert enrollment_counts(isolated_engine) == (2, 2, 4)
+    assert active_count == MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE
+    assert enrollment_counts(isolated_engine) == (
+        MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE,
+        MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE,
+        MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE * 2,
+    )

@@ -130,12 +130,19 @@ def test_rotation_plan_versions_and_bounds_grace_period():
 
 
 def test_approved_device_and_rotation_limits_are_enforced():
-    assert MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE == 2
+    """Three per Store: one legacy backfilled Device, one primary, one standby.
+
+    It was two, which made primary-plus-standby impossible on a backfilled Store -
+    the backfill creates a Device of its own and took one of the slots. Raising it
+    was an explicit architecture decision; it is still a bound, and the test that
+    matters is that one more than the limit is still refused.
+    """
+    assert MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE == 3
     assert MAX_ROTATION_GRACE == timedelta(minutes=15)
     validate_active_receiver_device_count(0)
-    validate_active_receiver_device_count(2)
+    validate_active_receiver_device_count(MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE)
     with pytest.raises(ValueError):
-        validate_active_receiver_device_count(3)
+        validate_active_receiver_device_count(MAX_ACTIVE_RECEIVER_DEVICES_PER_STORE + 1)
 
 
 def test_naive_or_non_utc_lifecycle_timestamps_are_rejected():

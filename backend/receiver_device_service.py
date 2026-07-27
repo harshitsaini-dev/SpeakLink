@@ -24,6 +24,28 @@ from receiver_credentials import (
 
 
 DEVICE_DISPLAY_NAME_MAX_LENGTH = 200
+
+#: The migration states in which enrolling a Device is safe.
+#:
+#: This used to be ``legacy_only`` alone, which was right for a rehearsal and
+#: wrong for production. ``receiver_auth_service`` verifies hashed Device
+#: credentials only in ``dual_verify``, ``hash_only`` and ``raw_neutralized``, so
+#: the two sets were disjoint: a server that had cut over could never enrol a new
+#: till, because the Device would be created and could never connect.
+#:
+#: ``legacy_only`` is kept so a Device enrolled during the rehearsal window is
+#: still usable after cutover rather than being born dead.
+#:
+#: ``backfilled`` is excluded deliberately. Hashed credentials are not verified
+#: there either, so enrolling into it would hand an operator a credential that
+#: silently cannot authenticate - the same trap, one state along.
+#:
+#: Kept in sync with ``receiver_auth_service._HASH_STATES`` by a test rather than
+#: by hand, so a new state cannot be added without a decision about this one.
+ENROLLABLE_STATES = frozenset(
+    {MIGRATION_STATE_LEGACY_ONLY, "dual_verify", "hash_only", "raw_neutralized"}
+)
+
 INITIAL_CREDENTIAL_VERSION = 1
 INITIAL_TOKEN_FORMAT = "speaklink_rcv"
 INITIAL_ENROLLMENT_REASON = "initial_enrollment"
@@ -284,8 +306,16 @@ def _validate_phase_one(connection: Connection) -> None:
             "WHERE id = 1"
         )
     ).one_or_none()
-    if migration != PHASE_ONE_NAME or state != (PHASE_ONE_VERSION, MIGRATION_STATE_LEGACY_ONLY):
-        raise MigrationNotReadyError("receiver credential migration state is not legacy_only")
+    if migration != PHASE_ONE_NAME or state is None:
+        raise MigrationNotReadyError("receiver credential Phase 1 migration is not recorded")
+    schema_version, migration_state = state
+    if schema_version != PHASE_ONE_VERSION:
+        raise MigrationNotReadyError("receiver credential Phase 1 schema version is unexpected")
+    if migration_state not in ENROLLABLE_STATES:
+        raise MigrationNotReadyError(
+            f"Receiver Devices cannot be enrolled while the migration state is "
+            f"{migration_state!r}; a credential issued now could not be verified"
+        )
 
 
 def _audit_metadata(

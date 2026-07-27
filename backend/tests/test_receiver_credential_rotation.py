@@ -109,14 +109,12 @@ class Runtime:
     def set_state(self, state: str, legacy_enabled: int) -> None:
         """Move the migration state.
 
-        This is not decoration. Enrolment is pinned to ``legacy_only``, but
-        ``receiver_auth_service`` verifies hashed Device credentials only in
-        ``dual_verify``, ``hash_only`` and ``raw_neutralized``. So a Device is
-        enrolled in one state and authenticates in another, and a fixture that
-        stayed in ``legacy_only`` would prove nothing about whether a rotated
-        credential actually works. ``hash_only`` is the post-cutover state these
-        credentials exist for, and unlike ``dual_verify`` it does not require a
-        backfilled legacy Device occupying one of the two per-Store slots.
+        This is not decoration. ``receiver_auth_service`` verifies hashed Device
+        credentials only in ``dual_verify``, ``hash_only`` and
+        ``raw_neutralized``, so a fixture that stayed in ``legacy_only`` would
+        prove nothing about whether a rotated credential actually works.
+        ``hash_only`` is the post-cutover state these credentials exist for, and
+        unlike ``dual_verify`` it needs no backfilled legacy Device.
         """
         with self.engine.begin() as connection:
             connection.execute(
@@ -158,8 +156,7 @@ class Runtime:
     def authenticate(self, credential: str, *, now: datetime = LATER):
         # Every authentication in this file means "would this credential work on a
         # server that has cut over?", so the cutover happens here rather than being
-        # repeated in twenty tests. Enrolment already happened in legacy_only,
-        # which is the only state it is allowed in.
+        # repeated in twenty tests.
         self.cut_over()
         return authenticate_receiver_credential(
             self.engine,
@@ -536,12 +533,13 @@ def test_rotating_twice_leaves_only_the_newest_credential_alive(runtime: Runtime
 # The migration state, which is where the sharp edge is
 # ---------------------------------------------------------------------------
 def test_rotation_is_allowed_exactly_where_the_credential_would_work(runtime: Runtime):
-    """The reason this service does not reuse enrolment's state gate.
+    """Rotation issues a credential, so it follows the same rule as enrolment.
 
-    Enrolment is pinned to ``legacy_only``. Device credentials are only verified
-    in ``dual_verify``, ``hash_only`` and ``raw_neutralized``. Inheriting that gate
-    would mean rotating only in the one state where the result cannot be used, and
-    refusing in every state where it can.
+    Both are allowed exactly where ``receiver_auth_service`` can verify the
+    result, plus ``legacy_only`` so a credential issued during the rehearsal
+    window survives cutover. ``backfilled`` is refused in both: hashed
+    credentials are not verified there, so a credential issued into it could not
+    authenticate.
     """
     from receiver_device_service import MigrationNotReadyError
 
