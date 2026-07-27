@@ -70,7 +70,7 @@ Last updated: 2026-07-27, branch `release/production-readiness-candidate`.
 | --- | --- | --- |
 | Acoustic verification **message contract** | `COMPLETE` | `receiver_contract.py` — `TrustedSpeakerVerifiedEvent` with `source: Literal["echoguard"]`, parsed by a separate adapter |
 | A Receiver cannot claim `speaker_verified` | `COMPLETE` | The trusted event is excluded from the ordinary acknowledgement union; a Receiver presenting one is rejected |
-| Pause / resume **contract** | `COMPLETE` | `echoguard.py`; 18 contract tests against a fake adapter |
+| Pause / resume **contract** | `COMPLETE` | `echoguard.py`; 19 contract tests against a fake adapter |
 | Pause / resume **implementation** | `BLOCKED` | No EchoGuard executable, service or IPC surface exists to call. `NullEchoGuard` reports `UNAVAILABLE`, never `PAUSED` |
 | Acoustic speaker verification in practice | `NOT_IMPLEMENTED` | The contract exists; nothing produces such an event. `SPEAKER_VERIFIED` is claimed by no report |
 
