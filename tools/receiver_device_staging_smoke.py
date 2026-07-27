@@ -214,6 +214,45 @@ def _receiver_event_types(database_path: Path, store_id: int) -> list[str]:
         connection.close()
 
 
+def websocket_url_from(base_url: str, path: str, *, query: dict | None = None) -> str:
+    """Derive a WebSocket URL from the HTTP base URL the caller was given.
+
+    This exists because the helper it replaces took a base URL *and* a port, and
+    used the port to rebuild the URL against a hardcoded ``127.0.0.1`` - throwing
+    away the host it had already been handed. On a loopback backend the two
+    agreed and nothing showed. On the LAN pilot, where Uvicorn binds
+    ``192.168.4.134`` and therefore does not listen on loopback at all, it
+    produced WinError 1225 after the Receiver had already enrolled, sealed its
+    credential and reached CONNECTED. The failure looked like a Receiver problem
+    and was a URL problem.
+
+    Deriving the socket URL from the HTTP one means they cannot disagree about
+    which machine they mean. A wildcard bind address is refused rather than
+    quietly turned into loopback: 0.0.0.0 is what a server binds, never what a
+    client connects to, and guessing is what caused the original defect.
+    """
+    from urllib.parse import urlencode, urlsplit
+
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise ValueError("a backend base URL is required")
+    parts = urlsplit(base_url.strip().rstrip("/"))
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(f"cannot derive a WebSocket URL from scheme {parts.scheme!r}")
+    if not parts.hostname:
+        raise ValueError(f"no host in base URL {base_url!r}")
+    if parts.hostname in ("0.0.0.0", "::", ""):
+        raise ValueError(
+            f"{parts.hostname!r} is a bind address, not somewhere a client can "
+            "connect. Pass the address the backend is actually reachable on."
+        )
+
+    scheme = "wss" if parts.scheme == "https" else "ws"
+    url = f"{scheme}://{parts.netloc}{path}"
+    if query:
+        url = f"{url}?{urlencode(query)}"
+    return url
+
+
 def _free_loopback_port() -> int:
     import socket
 
@@ -460,7 +499,7 @@ def smoke(staging_root: Path) -> dict:
         record("device_authenticated")
         record("connected")
 
-        audio = _drive_one_broadcast(base_url, access_token, store_id, database_path, port)
+        audio = _drive_one_broadcast(base_url, access_token, store_id, database_path)
         report["broadcast"] = audio
         for name in ("ready", "audio_receiving", "playback_confirmed", "stopped"):
             record(name, audio[name])
@@ -498,7 +537,7 @@ def smoke(staging_root: Path) -> dict:
             raise StagingSmokeError("rotation returned the same credential")
         record("credential_rotated")
 
-        if _credential_is_accepted(base_url, port, device_credential):
+        if _credential_is_accepted(base_url, device_credential):
             raise StagingSmokeError("the old credential still authenticates after rotation")
         record("old_credential_rejected")
 
@@ -517,7 +556,7 @@ def smoke(staging_root: Path) -> dict:
             raise StagingSmokeError("rotation changed which Device this computer is")
         record("new_credential_stored_atomically")
 
-        if not _credential_is_accepted(base_url, port, new_credential):
+        if not _credential_is_accepted(base_url, new_credential):
             raise StagingSmokeError("the rotated credential does not authenticate")
         record("new_credential_reconnects")
 
@@ -550,7 +589,7 @@ def smoke(staging_root: Path) -> dict:
         ]
 
         standby_facts = _standby_receives_nothing(
-            base_url, access_token, store_id, database_path, port,
+            base_url, access_token, store_id, database_path,
             credential_path, standby_credential_path, logs_dir,
         )
         report["standby"] = standby_facts
@@ -568,12 +607,12 @@ def smoke(staging_root: Path) -> dict:
         ).credential()
 
         _api(base_url, "POST", f"/api/receiver-devices/{standby_public_id}/disable", access_token)
-        if _credential_is_accepted(base_url, port, standby_credential):
+        if _credential_is_accepted(base_url, standby_credential):
             raise StagingSmokeError("a disabled Device still authenticates")
         record("disabled_device_rejected")
 
         _api(base_url, "POST", f"/api/receiver-devices/{standby_public_id}/revoke", access_token)
-        if _credential_is_accepted(base_url, port, standby_credential):
+        if _credential_is_accepted(base_url, standby_credential):
             raise StagingSmokeError("a revoked Device still authenticates")
         record("revoked_device_rejected")
 
@@ -625,7 +664,7 @@ def smoke(staging_root: Path) -> dict:
     return report
 
 
-def _credential_is_accepted(base_url: str, port: int, credential: str) -> bool:
+def _credential_is_accepted(base_url: str, credential: str) -> bool:
     """Open a Receiver socket with this credential and see whether it survives.
 
     A refusal is a close, not an exception at connect time, so this waits briefly
@@ -634,7 +673,7 @@ def _credential_is_accepted(base_url: str, port: int, credential: str) -> bool:
     import websockets
 
     async def attempt() -> bool:
-        url = f"ws://127.0.0.1:{port}/api/ws/receiver"
+        url = websocket_url_from(base_url, "/api/ws/receiver")
         try:
             connection = await websockets.connect(
                 url, additional_headers={"Authorization": f"Bearer {credential}"},
@@ -660,7 +699,7 @@ def _credential_is_accepted(base_url: str, port: int, credential: str) -> bool:
     return asyncio.run(attempt())
 
 
-def _drive_one_broadcast(base_url, access_token, store_id, database_path, port) -> dict:
+def _drive_one_broadcast(base_url, access_token, store_id, database_path) -> dict:
     """Run one real broadcast and watch the Device walk the status ladder."""
     from tools.generate_audio_fixture import generate_fixture
     from tools.local_audio_pilot import _audio_phase
@@ -695,7 +734,7 @@ def _drive_one_broadcast(base_url, access_token, store_id, database_path, port) 
         _api(base_url, "POST", f"/api/broadcast/sessions/{session_id}/stop", access_token)
 
     phase = asyncio.run(_audio_phase(
-        f"ws://127.0.0.1:{port}/api/ws/broadcaster?ticket={ticket}",
+        websocket_url_from(base_url, "/api/ws/broadcaster", query={"ticket": ticket}),
         Path(fixture["path"]),
         await_acknowledgements=_await_acknowledgements,
         request_stop=_request_stop,
@@ -716,7 +755,7 @@ def _drive_one_broadcast(base_url, access_token, store_id, database_path, port) 
     }
 
 
-def _standby_receives_nothing(base_url, access_token, store_id, database_path, port,
+def _standby_receives_nothing(base_url, access_token, store_id, database_path,
                               primary_path, standby_path, logs_dir) -> dict:
     """Both Devices connected, one broadcast, and only one of them hears it."""
     primary_report = logs_dir / "primary-session.json"
@@ -738,7 +777,7 @@ def _standby_receives_nothing(base_url, access_token, store_id, database_path, p
     standby = _start(standby_path, standby_report, standby_log)
     try:
         time.sleep(4.0)  # both sockets up and authenticated
-        facts = _drive_one_broadcast(base_url, access_token, store_id, database_path, port)
+        facts = _drive_one_broadcast(base_url, access_token, store_id, database_path)
         for process in (primary, standby):
             try:
                 process.wait(timeout=25)
