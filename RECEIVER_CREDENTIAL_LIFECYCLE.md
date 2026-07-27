@@ -46,12 +46,23 @@ Current backend exposure and use:
 | Location | Current behavior |
 | --- | --- |
 | `seed.py` | Generates one raw token for each seeded Store. |
-| `POST /api/stores` | Generates a raw token and returns it in `StoreOut`. |
-| `GET /api/stores` and Store responses | Return every raw token to authenticated HQ callers. |
-| `POST /api/stores/{id}/regenerate-token` | Immediately replaces and returns the raw token. |
-| `GET /api/receiver/verify?token=...` | Development-only query-token verification. |
-| `POST /api/receiver/event` | Accepts a raw token in the JSON body. |
-| `WS /api/ws/receiver` | Compares the Bearer value with active Store raw tokens. |
+| `POST /api/stores` | ~~Generates a raw token and returns it in `StoreOut`.~~ **Fixed `532f226`** — `StoreOut` no longer carries it. |
+| `GET /api/stores` and Store responses | ~~Return every raw token to authenticated HQ callers.~~ **Fixed `532f226`** — proved live first: every authenticated caller, and once roles exist every read-only VIEWER, could read all 44 Stores' credentials out of the response body. |
+| `POST /api/stores/{id}/regenerate-token` | ~~Immediately replaces and returns the raw token.~~ **Fixed `532f226`** — still rotates, answers through the same secret-free schema. |
+| `GET /api/receiver/verify?token=...` | ~~Development-only query-token verification.~~ **Removed** — a raw Store credential in a URL reaches access logs, proxy logs, browser history, copied links and `Referer` headers. |
+| `POST /api/receiver/event` | ~~Accepts a raw token in the JSON body.~~ **Removed** — unauthenticated, and it wrote a row against whichever Store the body named. |
+| `WS /api/ws/receiver` | Compares the Bearer value with active Store raw tokens **and Device credentials**, Device first. This is now the only way a Receiver authenticates. |
+
+Both endpoints were deleted rather than moved to `Authorization: Bearer`, because
+nothing that ships called either. `tools/receiver_agent.py` and
+`tools/audio_receiver_pilot.py` both authenticate over the Receiver WebSocket
+with a header; the only caller was `frontend/src/pages/Receiver.jsx`, unrouted
+since the query-token work and therefore never bundled. Re-plumbing an endpoint
+no client uses would have preserved the attack surface and delivered nothing.
+
+The legacy `stores.receiver_token` **column remains**: Receivers on the shared
+token still authenticate with it during the migration period. Only the API
+stopped saying it out loud.
 
 Current frontend exposure:
 

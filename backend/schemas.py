@@ -184,15 +184,13 @@ class SessionDetailOut(SessionOut):
     targets: List[TargetOut] = []
 
 
-class ReceiverEventIn(BaseModel):
-    token: str
-    event_type: str
-    details: Optional[str] = None
-
-
-class ReceiverVerifyOut(BaseModel):
-    ok: bool
-    store: Optional[StoreOut] = None
+# ReceiverEventIn and ReceiverVerifyOut are deliberately gone.
+#
+# They served GET /api/receiver/verify?token=... and POST /api/receiver/event,
+# both of which accepted a raw Store credential from an unauthenticated caller -
+# one of them through a URL. A schema with a bare ``token`` field is an
+# invitation to add such a route back, so it goes with the routes. See the note
+# in server.py under RECEIVER.
 
 
 class SystemLogOut(BaseModel):
