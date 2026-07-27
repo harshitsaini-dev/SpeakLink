@@ -151,31 +151,42 @@ class TestStores:
         assert r.status_code == 201, r.text
         created = r.json()
         assert created["store_code"] == code
-        assert created["receiver_token"] and len(created["receiver_token"]) >= 16
+
+        # No Store response carries the shared Receiver credential any more.
+        #
+        # This test used to read it straight out of the create response and use
+        # it to prove that regeneration invalidated the old value. That worked,
+        # and it worked because every authenticated caller could read the
+        # Receiver credential of every Store out of ordinary Store responses -
+        # a read-only VIEWER included, once roles exist. The page never rendered
+        # it; it sat in the body, so in browser memory, devtools, any HAR file
+        # and any proxy log.
+        #
+        # This is a black-box test against a remote server, so it now asserts
+        # the black-box contract: the secret is not there. Rotation semantics -
+        # old value stops working, new value starts - need the value itself, so
+        # they are proven where the database is reachable, in
+        # test_receiver_simulator.py.
+        assert "receiver_token" not in created, "the Store API returned a Receiver credential"
 
         # duplicate
         r2 = api.post(f"{BASE_URL}/api/stores", headers=auth, json=payload)
         assert r2.status_code == 409
 
-        # verify persisted via list
+        # verify persisted via list, and that the list is secret-free too
         r3 = api.get(f"{BASE_URL}/api/stores?q={code}", headers=auth)
-        assert any(s["store_code"] == code for s in r3.json())
+        listed = r3.json()
+        assert any(s["store_code"] == code for s in listed)
+        for entry in listed:
+            assert "receiver_token" not in entry
 
-        # regenerate token
-        old_tok = created["receiver_token"]
+        # regeneration still works and still says nothing
         r4 = api.post(f"{BASE_URL}/api/stores/{created['id']}/regenerate-token", headers=auth)
         assert r4.status_code == 200
-        new_tok = r4.json()["receiver_token"]
-        assert new_tok != old_tok
-
-        # verify old token no longer valid
-        r5 = api.get(f"{BASE_URL}/api/receiver/verify", params={"token": old_tok})
-        assert r5.status_code == 200
-        assert r5.json()["ok"] is False
-
-        # new token works
-        r6 = api.get(f"{BASE_URL}/api/receiver/verify", params={"token": new_tok})
-        assert r6.status_code == 200 and r6.json()["ok"] is True
+        assert "receiver_token" not in r4.json(), (
+            "regenerate-token handed the new credential back through an ordinary "
+            "Store response"
+        )
 
         # soft delete (disable)
         r7 = api.delete(f"{BASE_URL}/api/stores/{created['id']}", headers=auth)

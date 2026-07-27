@@ -100,14 +100,31 @@ class StoreCreate(StoreBase):
 
 
 class StoreUpdate(BaseModel):
+    """Editable Store fields.
+
+    ``is_active`` is deliberately absent. Turning a Store on and off is a
+    lifecycle transition with its own rules - an archived Store must not become
+    active because somebody PUT a boolean - so it has its own endpoints.
+    """
+
+    store_code: Optional[str] = None
     store_name: Optional[str] = None
     city: Optional[str] = None
     region: Optional[str] = None
     is_online_store: Optional[bool] = None
-    is_active: Optional[bool] = None
 
 
 class StoreOut(BaseModel):
+    """Everything the dashboard may know about a Store.
+
+    ``receiver_token`` used to be here, which meant every authenticated caller -
+    including, once roles exist, a read-only VIEWER - could read the shared
+    Receiver credential of all 44 Stores straight out of ``GET /api/stores``.
+    The page never rendered it, but it sat in the response body: browser memory,
+    devtools, any HAR file, any proxy log. It is gone, and a test asserts it
+    stays gone.
+    """
+
     model_config = ConfigDict(from_attributes=True)
     id: int
     store_code: str
@@ -115,8 +132,8 @@ class StoreOut(BaseModel):
     city: str
     region: str
     is_online_store: bool
-    receiver_token: str
     is_active: bool
+    lifecycle_state: Optional[str] = None
     status: str
     last_seen: Optional[datetime] = None
     created_at: datetime
