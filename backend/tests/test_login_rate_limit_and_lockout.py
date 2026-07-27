@@ -729,26 +729,13 @@ def test_no_credential_reaches_the_system_log(fresh_guard):
 
 
 # ---------------------------------------------------------------------------
-# The HTTP query-token fallback, documented rather than silently ignored
+# The HTTP query-token fallback
+#
+# This file used to pin the fact that _extract_token still accepted ?token= on
+# ordinary HTTP requests, so its removal would start from a captured fact rather
+# than a memory. It has since been removed; the guards that keep it removed live
+# in backend/tests/test_http_token_transport.py.
 # ---------------------------------------------------------------------------
-def test_the_http_query_token_fallback_still_exists_and_is_recorded():
-    """backend/auth.py _extract_token accepts ?token= on ordinary HTTP requests.
-
-    The WebSocket sockets moved to single-use tickets, so nothing in this
-    repository depends on it any more - but removing it is a separate change
-    with its own blast radius. This test pins the current behaviour so the
-    removal branch starts from a captured fact rather than a memory.
-    """
-    import re
-
-    source = (BACKEND_ROOT / "auth.py").read_text(encoding="utf-8")
-    fallback = re.search(r"query_params\.get\(\s*[\"']token[\"']\s*\)", source)
-    assert fallback, (
-        "the query-token fallback appears to be gone; delete this test and the "
-        "matching production blocker"
-    )
-
-
 def test_no_websocket_route_depends_on_the_query_token_fallback():
     source = (BACKEND_ROOT / "server.py").read_text(encoding="utf-8")
     for route in ("/api/ws/hq", "/api/ws/broadcaster"):
