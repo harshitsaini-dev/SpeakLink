@@ -32,7 +32,11 @@ from schemas import (
     SessionCreate, SessionOut, SessionDetailOut, TargetOut,
     ReceiverEventIn, ReceiverVerifyOut,
     SystemLogOut,
+    EnrollmentCodeRequest, EnrollmentCodeResponse,
+    DeviceEnrollmentRequest, DeviceEnrollmentResponse,
+    ReceiverDeviceOut,
 )
+from receiver_enrollment_codes import CODE_TTL_SECONDS
 from audio_protocol import build_prepare_message
 from auth import verify_password, create_access_token, get_current_user
 from seed import seed_admin, seed_stores
@@ -56,7 +60,30 @@ from receiver_contract import (
     WrongSessionError,
 )
 from ws_tickets import TICKET_TTL_SECONDS, TicketRejected, WebSocketTicketStore
+from pathlib import Path
+
+from key_custody import (
+    DpapiProtector,
+    FakeProtector,
+    KeyCustodyError,
+    ProtectionScope,
+    load_key_ring,
+)
+from key_custody_acl import SERVICE_CONTAINER_PATH
+from receiver_enrollment_api import (
+    DeviceNotFound,
+    EnrollmentRefused,
+    EnrollmentUnavailable,
+    TooManyOutstandingCodes,
+    create_enrollment_code,
+    disable_device,
+    list_devices,
+    read_device,
+    redeem_and_enroll,
+    revoke_device,
+)
 from login_guard import (
+    LoginGuardConfig,
     LoginRateLimiter,
     burn_password_comparison,
     clear_failed_logins,
@@ -73,6 +100,34 @@ from login_guard import (
 LOGIN_GUARD = config_from_environment()
 TRUST_PROXY_HEADERS = proxy_headers_trusted()
 login_limiter = LoginRateLimiter(LOGIN_GUARD)
+
+# The enrolment endpoint is unauthenticated by design - the code IS the
+# credential - so it gets its own budget rather than sharing the login one.
+ENROLLMENT_GUARD = LoginGuardConfig(max_attempts=10, window_seconds=300, max_failures=5,
+                                    lockout_seconds=900, max_entries=1024)
+enrollment_limiter = LoginRateLimiter(ENROLLMENT_GUARD)
+
+
+def receiver_key_ring():
+    """Open the Receiver HMAC key container, or return None.
+
+    None rather than an exception so the caller can answer 503 with a message
+    about the server rather than one that looks like a bad enrolment code. The
+    container is never created here: DPAPI CURRENT_USER binds it to the identity
+    that sealed it, so it must be minted by this process under the service
+    account, deliberately, not as a side effect of the first request.
+    """
+    configured = os.environ.get("ECHOCAST_KEY_CONTAINER")
+    path = Path(configured) if configured else SERVICE_CONTAINER_PATH
+    try:
+        if os.environ.get("ECHOCAST_KEY_PROTECTOR") == "fake":
+            # Local staging only. Never reachable unless explicitly configured.
+            protector = FakeProtector()
+        else:
+            protector = DpapiProtector(scope=ProtectionScope.CURRENT_USER)
+        return load_key_ring(path, protector=protector)
+    except KeyCustodyError:
+        return None
 
 # Browser WebSockets cannot send an Authorization header, so the HQ sockets
 # authenticate with a single-use ticket instead of a reusable JWT in the URL.
@@ -242,6 +297,152 @@ def issue_websocket_ticket(user: HQUser = Depends(get_current_user)):
     """
     ticket = ws_ticket_store.issue(user_id=str(user.id))
     return {"ticket": ticket, "expires_in": TICKET_TTL_SECONDS}
+
+
+# ================ RECEIVER DEVICE ENROLMENT ================
+ENROLMENT_REFUSED = "That enrolment code cannot be used."
+
+
+@api.post("/receiver-devices/enrollment-codes", response_model=EnrollmentCodeResponse)
+def create_receiver_enrollment_code(
+    payload: EnrollmentCodeRequest,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(get_current_user),
+):
+    """Mint a one-time code for one Store. Shown once, never stored raw."""
+    try:
+        issued = create_enrollment_code(db, store_id=payload.store_id, actor_user_id=user.id)
+    except TooManyOutstandingCodes as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    except EnrollmentRefused as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+
+    # The code itself is never logged - only that one was created, and for whom.
+    _write_log(db, "info", f"enrollment_code_created store_id={payload.store_id} by={user.username}")
+    return EnrollmentCodeResponse(
+        code=issued.code,
+        store_id=issued.store_id,
+        expires_in_seconds=CODE_TTL_SECONDS,
+    )
+
+
+@api.post("/receiver-devices/enroll", response_model=DeviceEnrollmentResponse)
+def enroll_receiver(
+    payload: DeviceEnrollmentRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Redeem a code and receive one Device credential, exactly once.
+
+    Unauthenticated on purpose: a Receiver computer has no credential yet, and
+    the code is what proves an administrator sent it. Rate-limited because that
+    makes it the one endpoint worth guessing at.
+    """
+    client_key = f"enrol:{client_identifier(request.client.host if request.client else None, request.headers.get('x-forwarded-for'), trust_proxy=TRUST_PROXY_HEADERS)}"
+    retry_after = enrollment_limiter.retry_after(client_key)
+    if retry_after is not None:
+        _write_log(db, "warn", "enrollment_rate_limited")
+        raise HTTPException(
+            status_code=429,
+            detail="Too many enrolment attempts. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    key_ring = receiver_key_ring()
+    try:
+        result = redeem_and_enroll(
+            db,
+            engine,
+            code=payload.code,
+            device_name=payload.device_name,
+            hostname=payload.hostname,
+            software_version=payload.software_version,
+            key_ring=key_ring,
+        )
+    except EnrollmentUnavailable as unavailable:
+        # The operator's problem, not the caller's, and it must never look like
+        # a bad code.
+        _write_log(db, "warn", "enrollment_unavailable")
+        raise HTTPException(status_code=503, detail=str(unavailable))
+    except EnrollmentRefused:
+        enrollment_limiter.record_attempt(client_key)
+        # One generic refusal: saying which of unknown, expired or already-used
+        # applied would let a caller map out valid codes.
+        _write_log(db, "warn", "enrollment_code_rejected")
+        raise HTTPException(status_code=400, detail=ENROLMENT_REFUSED)
+
+    enrollment_limiter.forget(client_key)
+    device = read_device(engine, public_id=result.device_public_id)
+    _write_log(
+        db, "info",
+        f"receiver_device_enrolled device={result.device_public_id} store_id={device['store_id']}",
+    )
+    return DeviceEnrollmentResponse(
+        device_public_id=result.device_public_id,
+        credential=result.take_raw_credential(),
+        credential_version=result.credential_version,
+        store_id=device["store_id"],
+    )
+
+
+@api.get("/stores/{store_id}/receiver-devices", response_model=List[ReceiverDeviceOut])
+def list_receiver_devices(
+    store_id: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(get_current_user),
+):
+    try:
+        return [ReceiverDeviceOut(**row) for row in list_devices(engine, store_id=store_id)]
+    except EnrollmentUnavailable as unavailable:
+        raise HTTPException(status_code=503, detail=str(unavailable))
+
+
+@api.get("/receiver-devices/{public_id}", response_model=ReceiverDeviceOut)
+def read_receiver_device(
+    public_id: str,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(get_current_user),
+):
+    try:
+        return ReceiverDeviceOut(**read_device(engine, public_id=public_id))
+    except DeviceNotFound:
+        raise HTTPException(status_code=404, detail="Receiver Device not found")
+    except EnrollmentUnavailable as unavailable:
+        raise HTTPException(status_code=503, detail=str(unavailable))
+
+
+@api.post("/receiver-devices/{public_id}/disable", response_model=ReceiverDeviceOut)
+def disable_receiver_device(
+    public_id: str,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(get_current_user),
+):
+    """Stop this one computer. Its Store and every other Device keep working."""
+    try:
+        device = disable_device(engine, public_id=public_id)
+    except DeviceNotFound:
+        raise HTTPException(status_code=404, detail="Receiver Device not found")
+    except EnrollmentUnavailable as unavailable:
+        raise HTTPException(status_code=503, detail=str(unavailable))
+    _write_log(db, "warn", f"receiver_device_disabled device={public_id} by={user.username}")
+    return ReceiverDeviceOut(**device)
+
+
+@api.post("/receiver-devices/{public_id}/revoke", response_model=ReceiverDeviceOut)
+def revoke_receiver_device(
+    public_id: str,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(get_current_user),
+):
+    """Retire this one computer permanently."""
+    try:
+        device = revoke_device(engine, public_id=public_id)
+    except DeviceNotFound:
+        raise HTTPException(status_code=404, detail="Receiver Device not found")
+    except EnrollmentUnavailable as unavailable:
+        raise HTTPException(status_code=503, detail=str(unavailable))
+    _write_log(db, "warn", f"receiver_device_revoked device={public_id} by={user.username}")
+    return ReceiverDeviceOut(**device)
 
 
 # ================ STORES ================
