@@ -122,13 +122,37 @@ def isolated_server(tmp_path_factory):
         )
         assert store_response.status_code == 201
         store = store_response.json()
+
+        # The legacy Store token is read straight out of this fixture's own
+        # isolated database, not from the API.
+        #
+        # It used to come from the create-Store response, which meant every
+        # authenticated caller - a read-only VIEWER included, once roles exist -
+        # could read the shared Receiver credential of every Store out of
+        # ordinary Store responses. The page never rendered it; it sat in the
+        # body, and therefore in browser memory, devtools, any HAR file and any
+        # proxy log. Store APIs no longer return it, and a test asserts they
+        # never start again. This simulator still needs one to impersonate a
+        # legacy Receiver, so it takes it from the database it owns.
+        assert "receiver_token" not in store, (
+            "the Store API returned a Receiver credential; that is the leak this "
+            "fixture stopped depending on"
+        )
+        connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+        try:
+            legacy_token = connection.execute(
+                "SELECT receiver_token FROM stores WHERE id = ?", (store["id"],)
+            ).fetchone()[0]
+        finally:
+            connection.close()
+
         yield SecretSafeServer({
             "database_path": database_path,
             "http_url": http_url,
             "ws_url": f"ws://127.0.0.1:{port}/api/ws/receiver",
             "admin_headers": {"Authorization": f"Bearer {admin_token}"},
             "store_id": store["id"],
-            "receiver_token": store["receiver_token"],
+            "receiver_token": legacy_token,
         })
     finally:
         if process.poll() is None:
