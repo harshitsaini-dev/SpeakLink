@@ -152,14 +152,36 @@ def test_the_ttl_is_short_enough_to_be_worth_little_if_logged():
 
 
 def test_a_ticket_carries_no_readable_claims():
-    """Unlike a JWT, a logged ticket must reveal nothing about the user."""
+    """Unlike a JWT, a logged ticket must reveal nothing about the user.
+
+    The identifier is deliberately long and distinctive. An earlier version of
+    this test used ``user_id="pilot-operator-42"`` and asserted ``"42" not in
+    ticket`` - but a ticket is ~43 random URL-safe characters, so a two-character
+    substring turns up by chance in roughly one run in sixteen. It failed once in
+    a full-suite run here and passed five times in a row afterwards, which is the
+    worst way for a test to behave: it looks like a real regression and is not.
+
+    A substring that cannot plausibly occur by accident tests the property the
+    name claims; a short one tests the random number generator's mood.
+    """
     store = WebSocketTicketStore()
-    ticket = store.issue(user_id="pilot-operator-42", now=BASE)
-    assert "pilot-operator" not in ticket
-    assert "42" not in ticket
+    identifier = "pilot-operator-distinctive-user-identifier-9f3a7c"
+    ticket = store.issue(user_id=identifier, now=BASE)
+
+    assert identifier not in ticket
+    for fragment in ("pilot-operator", "distinctive", "9f3a7c"):
+        assert fragment not in ticket
     # A JWT is three base64 segments separated by dots.
     assert ticket.count(".") == 0
     assert not ticket.startswith("eyJ")
+
+
+def test_no_ticket_in_a_large_batch_embeds_the_user_identifier():
+    """The same property, asserted often enough that a one-off pass is not luck."""
+    store = WebSocketTicketStore()
+    identifier = "operator-b7d2e4a1"
+    for _ in range(200):
+        assert identifier not in store.issue(user_id=identifier, now=BASE)
 
 
 def test_tickets_are_unique_and_unguessable_in_length():

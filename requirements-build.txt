@@ -1,0 +1,21 @@
+# Build-only dependencies for the standalone Receiver package.
+#
+# Separate from the runtime requirements on purpose: a Store desktop needs none
+# of this, and the HQ server needs none of it either. It exists so that two
+# people building the package a month apart produce the same thing.
+#
+# Pinned exactly. A range here would mean the executable shipped to 44 Store
+# computers depends on whichever PyInstaller happened to be current that day,
+# and a bootloader difference is not something anybody would think to look for.
+#
+# Install with:
+#     backend\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+
+pyinstaller==6.18.0
+
+# Pulled in by PyInstaller and pinned so the graph is fully determined.
+pyinstaller-hooks-contrib==2026.6
+altgraph==0.17.5
+pefile==2024.8.26
+pywin32-ctypes==0.2.3
+setuptools==83.0.0
