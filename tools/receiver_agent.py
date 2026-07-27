@@ -222,13 +222,31 @@ def _read_json(raw: bytes) -> dict:
 # ===========================================================================
 # Reading the code
 # ===========================================================================
+#: A UTF-8 byte-order mark, as a character.
+#:
+#: Windows PowerShell prepends one when piping a string to a native command:
+#:
+#:     "ECHO-XXXX-XXXX" | SpeakLinkReceiver.exe enrol --from-stdin
+#:
+#: arrives as "﻿ECHO-XXXX-XXXX". ``str.strip()`` does not remove it - a BOM
+#: is not whitespace - so the code silently fails to match and the operator is
+#: told their code cannot be used, with nothing pointing at the real cause.
+#: Measured, not guessed: a round trip through this exact pipeline produced a
+#: 34-character value from a 33-character password.
+BYTE_ORDER_MARK = "\ufeff"
+
+
+def _clean_secret_line(raw: object) -> str:
+    return (raw or "").lstrip(BYTE_ORDER_MARK).strip()
+
+
 def read_enrolment_code(*, stream=None, prompt=getpass.getpass) -> str:
     """From a hidden prompt, or from stdin. Never from a command argument."""
     if stream is not None:
         raw = stream.readline()
     else:
         raw = prompt("Enrolment code (it will not be shown): ")
-    code = (raw or "").strip()
+    code = _clean_secret_line(raw)
     if not code:
         raise AgentError("no enrolment code was provided")
     if len(code) > MAX_CODE_LENGTH:
@@ -634,7 +652,7 @@ def rotate_local_credential(credential_path, *, protector, stream=None, prompt=g
     raw = (stream.readline() if stream is not None else prompt(
         "New Device credential (it will not be shown): "
     ))
-    candidate = (raw or "").strip()
+    candidate = _clean_secret_line(raw)
     if not candidate:
         raise AgentError("no credential was provided")
     replace_credential(Path(credential_path), credential=candidate, protector=protector)

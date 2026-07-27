@@ -1478,11 +1478,37 @@ async def ws_broadcaster(websocket: WebSocket, ticket: str = Query(...)):
 app.include_router(api)
 
 
-# CORS - permissive for MVP (LAN deployment)
+def allowed_cors_origins() -> list[str]:
+    """Exact origins only. Never a wildcard.
+
+    This used to default to ``"*"`` with ``allow_credentials=True``. Browsers
+    refuse that combination outright, so it was not doing what it looked like it
+    was doing - but a deployment that set one real origin and kept the default
+    elsewhere would have been genuinely open, and a misconfiguration that opens
+    a credentialed API to every origin is not the kind that announces itself.
+
+    The default is loopback, which is what a developer on this machine actually
+    needs. A LAN pilot passes its own address explicitly; production passes its
+    real origin. A ``*`` in the variable is refused rather than honoured.
+    """
+    LOOPBACK_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    configured = os.environ.get("CORS_ORIGINS", "").strip()
+    if not configured:
+        return LOOPBACK_ORIGINS
+
+    origins = [origin.strip() for origin in configured.split(",") if origin.strip()]
+    if any(origin == "*" for origin in origins):
+        raise RuntimeError(
+            "CORS_ORIGINS contains '*'. This API sends credentials, so every "
+            "allowed origin must be named exactly."
+        )
+    return origins
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_origins=allowed_cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
