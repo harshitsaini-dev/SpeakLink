@@ -237,6 +237,148 @@ def test_a_url_that_is_not_one_is_refused():
 
 
 # ===========================================================================
+# The private LAN pilot mode
+# ===========================================================================
+LAN_HQ = "http://192.168.4.134:8000"
+LAN_HOST = "192.168.4.134"
+
+
+def _lan(url=LAN_HQ, *, private_lan=True, expected=LAN_HOST, loopback=False):
+    return normalise_backend_url(
+        url,
+        allow_insecure_loopback=loopback,
+        allow_insecure_private_lan=private_lan,
+        expected_hq_host=expected,
+    )
+
+
+def test_the_hq_private_address_is_accepted_with_the_explicit_flag():
+    assert _lan() == LAN_HQ
+
+
+def test_the_same_address_is_refused_without_the_flag():
+    """The flag is the decision. Without it this is an ordinary plain-HTTP URL
+    to a host that is not loopback, and it is refused like any other."""
+    with pytest.raises(InsecureBackendError):
+        _lan(private_lan=False)
+
+
+def test_the_private_lan_flag_requires_an_expected_host():
+    """"Any private address" is not the same as "the address the operator
+    assigned and firewalled". A typo pointing at another machine on the same
+    subnet would otherwise be accepted silently."""
+    with pytest.raises(AgentError):
+        _lan(expected=None)
+
+
+def test_a_different_private_address_is_refused_even_with_the_flag():
+    with pytest.raises(InsecureBackendError):
+        _lan("http://192.168.4.200:8000")
+    with pytest.raises(InsecureBackendError):
+        _lan("http://10.0.0.5:8000")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://8.8.8.8:8000",
+        "http://1.1.1.1:8000",
+        "http://203.0.113.10:8000",
+    ],
+)
+def test_a_public_http_address_is_refused_even_with_the_flag(url: str):
+    """The flag says "private LAN", and this is the half that makes that true."""
+    with pytest.raises(InsecureBackendError):
+        _lan(url, expected=url.split("//")[1].split(":")[0])
+
+
+def test_a_hostname_is_refused_even_when_it_looks_internal():
+    """A name resolves wherever its owner points it, and can be repointed
+    tomorrow. Only a literal private address is checkable at the moment it is
+    used."""
+    for url in ("http://hq.example.internal:8000", "http://hq:8000",
+                "http://192-168-4-134.example.com:8000"):
+        with pytest.raises(InsecureBackendError):
+            _lan(url, expected="hq.example.internal")
+
+
+def test_link_local_and_multicast_are_refused():
+    for url in ("http://169.254.4.134:8000", "http://224.0.0.1:8000"):
+        with pytest.raises(InsecureBackendError):
+            _lan(url, expected=url.split("//")[1].split(":")[0])
+
+
+def test_the_private_lan_flag_does_not_authorise_loopback():
+    """The two flags are separate decisions and neither implies the other."""
+    with pytest.raises(InsecureBackendError):
+        normalise_backend_url(
+            "http://127.0.0.1:8000",
+            allow_insecure_loopback=False,
+            allow_insecure_private_lan=True,
+            expected_hq_host="127.0.0.1",
+        )
+
+
+def test_the_loopback_flag_does_not_authorise_the_private_lan():
+    with pytest.raises(InsecureBackendError):
+        normalise_backend_url(
+            LAN_HQ, allow_insecure_loopback=True, allow_insecure_private_lan=False
+        )
+
+
+def test_https_needs_neither_flag_and_is_unaffected():
+    assert normalise_backend_url(HQ, allow_insecure_loopback=False) == HQ
+    assert normalise_backend_url(
+        "https://192.168.4.134:8000",
+        allow_insecure_loopback=False, allow_insecure_private_lan=False,
+    ) == "https://192.168.4.134:8000"
+
+
+def test_the_websocket_url_for_the_lan_pilot_is_plain_ws_and_carries_no_credential():
+    url = receiver_websocket_url(LAN_HQ)
+    assert url == f"ws://{LAN_HOST}:8000/api/ws/receiver"
+    assert "?" not in url and "token" not in url
+
+
+def test_the_parser_exposes_both_flags_separately_and_neither_by_default():
+    parser = build_parser()
+    arguments = parser.parse_args(["enrol", "--backend-url", LAN_HQ, "--device-name", "x"])
+    assert arguments.allow_insecure_loopback is False
+    assert arguments.allow_insecure_private_lan is False
+    assert arguments.expected_hq_host is None
+
+    asked = parser.parse_args([
+        "enrol", "--backend-url", LAN_HQ, "--device-name", "x",
+        "--allow-insecure-private-lan", "--expected-hq-host", LAN_HOST,
+    ])
+    assert asked.allow_insecure_private_lan is True
+    assert asked.expected_hq_host == LAN_HOST
+    assert asked.allow_insecure_loopback is False
+
+
+def test_neither_new_option_is_secret_shaped():
+    """The same rule as every other option: nothing that could carry a secret."""
+    parser = build_parser()
+    for option in ("--allow-insecure-private-lan", "--expected-hq-host"):
+        assert not any(word in option for word in ("code", "credential", "token", "password"))
+
+
+def test_enrolling_over_the_private_lan_still_keeps_the_code_out_of_the_url(
+    credential_path, protector
+):
+    transport = FakeTransport()
+    _enrol(
+        credential_path, protector, transport,
+        backend_url=LAN_HQ, allow_insecure_loopback=False,
+        allow_insecure_private_lan=True, expected_hq_host=LAN_HOST,
+    )
+    url, payload = transport.calls[0]
+    assert CODE not in url
+    assert url == f"{LAN_HQ}/api/receiver-devices/enroll"
+    assert payload["code"] == CODE
+
+
+# ===========================================================================
 # 17. The credential is not in the WebSocket URL
 # ===========================================================================
 def test_the_websocket_url_carries_no_credential():
