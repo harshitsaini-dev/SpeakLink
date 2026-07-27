@@ -40,9 +40,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import hashlib
 import ipaddress
 import json
+import logging
+import logging.handlers
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -90,6 +94,16 @@ EXIT_OK = 0
 EXIT_REFUSED = 1
 EXIT_AUTHENTICATION = 2
 EXIT_NETWORK = 3
+#: Distinct on purpose. Task Scheduler restarts a task that fails; if a duplicate
+#: launch reported an ordinary failure, the restart policy would keep relaunching
+#: something that is already working perfectly.
+EXIT_ALREADY_RUNNING = 4
+
+#: Ten files of one megabyte. Enough history to explain a Store that went quiet
+#: overnight, small enough that a Store desktop cannot fill its disk with logs.
+LOG_MAX_BYTES = 1_000_000
+LOG_BACKUP_COUNT = 9
+LOGGER_NAME = "speaklink.receiver"
 
 
 def packaged_ffmpeg_directory() -> Path | None:
@@ -163,6 +177,209 @@ class AlreadyEnrolled(AgentError):
 
 class TerminalAuthentication(AgentError):
     """The server refused this credential. Retrying will not change that."""
+
+
+class AlreadyRunning(AgentError):
+    """Another Agent already holds this credential. Not a failure."""
+
+
+# ===========================================================================
+# One Agent per credential
+# ===========================================================================
+class InstanceLock:
+    """A single-instance guard scoped to one credential file.
+
+    Two Agents on one credential is not a theoretical concern once Task
+    Scheduler is involved: a task that starts at logon, plus an operator who
+    double-clicks the executable to check it works, is two Receivers for one
+    Store. They compete for the same socket, the backend keeps replacing one
+    connection with the other, and the Store flickers between them.
+
+    Scoped to the credential path rather than to the machine. A global mutex
+    would stop a second Windows account on the same computer from running its
+    own Receiver - a restriction invented by the lock, not asked for by anyone.
+
+    Staleness is handled by the operating system rather than by us. A PID file
+    has to answer "is process 4812 still the Agent, or is it a text editor that
+    was given the same number after a reboot?", and answers it wrong eventually.
+    An advisory byte-range lock on an open handle is released by Windows when
+    the holding process dies, however it dies - crash, power cut, or Task
+    Scheduler ending the task - so a Store can always start again.
+    """
+
+    def __init__(self, credential_path) -> None:
+        resolved = Path(credential_path).expanduser()
+        try:
+            resolved = resolved.resolve()
+        except OSError:  # pragma: no cover - a path we cannot resolve still locks
+            resolved = resolved.absolute()
+        # The path itself never appears in the lock file name. It can contain a
+        # Windows username, and lock files are world-readable.
+        digest = hashlib.sha256(str(resolved).casefold().encode("utf-8")).hexdigest()[:32]
+        self.credential_path = resolved
+        self.lock_path = _agent_state_directory() / "locks" / f"receiver-{digest}.lock"
+        self._handle = None
+
+    def acquire(self) -> "InstanceLock":
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        # Opened r+ where possible so an existing lock file is not truncated
+        # while another Agent holds a lock on it.
+        handle = open(self.lock_path, "a+", encoding="utf-8")
+        try:
+            _lock_exclusive(handle)
+        except OSError:
+            handle.close()
+            raise AlreadyRunning(
+                "Another SpeakLink Receiver is already running for this Device on "
+                "this computer. Only one may run at a time. Nothing was changed."
+            ) from None
+        self._handle = handle
+        return self
+
+    def release(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        try:
+            _unlock(handle)
+        except OSError:  # pragma: no cover - closing releases it regardless
+            pass
+        finally:
+            handle.close()
+
+    def __enter__(self) -> "InstanceLock":
+        return self.acquire()
+
+    def __exit__(self, *_exception) -> None:
+        self.release()
+
+
+def _lock_exclusive(handle) -> None:
+    """Take a non-blocking exclusive lock on the first byte of ``handle``."""
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:  # pragma: no cover - the Receiver ships for Windows
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(handle) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:  # pragma: no cover
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _agent_state_directory() -> Path:
+    """Per-user, never shared. ``%LOCALAPPDATA%`` is not roamed, which is right
+    for a lock that describes one physical computer."""
+    local = os.environ.get("LOCALAPPDATA")
+    base = Path(local) if local else Path.home() / "AppData" / "Local"
+    return base / "SpeakLink" / "receiver"
+
+
+# ===========================================================================
+# Logging, with nothing secret in it
+# ===========================================================================
+#: A sealed Device credential, whole. This is the one string that must never be
+#: written down, so it is matched first and matched greedily.
+_CREDENTIAL_PATTERN = re.compile(r"speaklink_rcv_v1\.[A-Za-z0-9._\-]+")
+#: An enrolment code. Single-use, but still a credential until it is used.
+_ENROLMENT_CODE_PATTERN = re.compile(r"\bECHO(?:-[A-Z0-9]{4}){2,}\b")
+#: Whatever follows a bearer scheme, whatever shape it happens to be.
+_AUTHORIZATION_PATTERN = re.compile(r"(?i)\b(Bearer|Basic)\s+\S+")
+#: Every query string on a URL. Tickets are single-use and JWTs are not, and a
+#: log line is the wrong place to be deciding which one this is.
+_URL_QUERY_PATTERN = re.compile(r"(?i)\b(wss?|https?)://\S*?\?\S+")
+#: A long unbroken run of credential-shaped characters that none of the above
+#: recognised. Deliberately long: short identifiers like a Device public id or a
+#: Store code are operational detail worth keeping, and a redactor that eats
+#: those is a redactor an operator turns off.
+_LONG_TOKEN_PATTERN = re.compile(r"\b[A-Za-z0-9+/_\-]{40,}={0,2}\b")
+
+_REDACTIONS = (
+    (_CREDENTIAL_PATTERN, "<REDACTED credential>"),
+    (_AUTHORIZATION_PATTERN, r"\1 <REDACTED>"),
+    (_URL_QUERY_PATTERN, lambda match: match.group(0).split("?", 1)[0] + "?<REDACTED>"),
+    (_ENROLMENT_CODE_PATTERN, "<REDACTED enrolment code>"),
+    (_LONG_TOKEN_PATTERN, "<REDACTED>"),
+)
+
+
+def redact(message: str) -> str:
+    """Remove anything credential-shaped from a line about to be written down.
+
+    Applied to the formatted record rather than trusted to each call site. Every
+    logging call in this file is careful; the one that will not be is the one
+    somebody adds in a hurry while a Store is down at 6am.
+    """
+    text = str(message)
+    for pattern, replacement in _REDACTIONS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+class _RedactingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact(record.getMessage())
+        record.args = ()
+        if record.exc_info:
+            # A traceback can carry an argument value into the log.
+            record.exc_text = redact(logging.Formatter().formatException(record.exc_info))
+            record.exc_info = None
+        return True
+
+
+def default_log_directory() -> Path:
+    return _agent_state_directory() / "logs"
+
+
+def configure_logging(
+    directory=None,
+    *,
+    max_bytes: int = LOG_MAX_BYTES,
+    backup_count: int = LOG_BACKUP_COUNT,
+) -> logging.Logger:
+    """Rotating, bounded, UTC, and redacted.
+
+    Bounded because a Store desktop that fills its own disk with Receiver logs
+    stops working for a reason nobody will guess. UTC because 44 Stores that
+    disagree about what time it is cannot be read side by side.
+    """
+    target = Path(directory) if directory is not None else default_log_directory()
+    target.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger(LOGGER_NAME)
+    for existing in list(logger.handlers):
+        logger.removeHandler(existing)
+        existing.close()
+
+    handler = logging.handlers.RotatingFileHandler(
+        target / "receiver.log",
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+    )
+    formatter = logging.Formatter(
+        "%(asctime)s UTC %(levelname)-7s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    formatter.converter = time.gmtime
+    handler.setFormatter(formatter)
+    handler.addFilter(_RedactingFilter())
+
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    return logger
 
 
 # ===========================================================================
@@ -863,6 +1080,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_command.add_argument("--exit-after-stop", action="store_true",
                              help="Exit once a broadcast stops, instead of waiting for the next.")
     run_command.add_argument(
+        "--log-directory", default=None,
+        help=(
+            "Write rotating, bounded, secret-free logs here. Required in practice "
+            "when Task Scheduler runs this hidden, because there is then no "
+            "console for anything printed to reach. Defaults to "
+            r"%LOCALAPPDATA%\SpeakLink\receiver\logs."
+        ),
+    )
+    run_command.add_argument(
         "--legacy-pilot-mode", action="store_true",
         help=(
             "MIGRATION ONLY. Authenticate with the shared per-Store token from "
@@ -902,6 +1128,11 @@ def _credential_path(arguments) -> Path:
 
 
 def _run_command(arguments) -> int:
+    # Logging first, so a refusal during start-up is still written down. Under
+    # Task Scheduler this is the only place anything is recorded at all.
+    log = configure_logging(arguments.log_directory)
+    log.info("SpeakLink Receiver %s starting", AGENT_VERSION)
+
     base = normalise_backend_url(
         arguments.backend_url,
         allow_insecure_loopback=arguments.allow_insecure_loopback,
@@ -918,6 +1149,11 @@ def _run_command(arguments) -> int:
     ws_url = receiver_websocket_url(base)
     path = _credential_path(arguments)
 
+    with InstanceLock(path):
+        return _run_locked(arguments, ws_url=ws_url, path=path, log=log)
+
+
+def _run_locked(arguments, *, ws_url: str, path: Path, log: logging.Logger) -> int:
     if arguments.legacy_pilot_mode:
         print("WARNING: legacy pilot mode. This computer is authenticating with the")
         print("         shared per-Store token, which every computer in that Store")
@@ -937,6 +1173,10 @@ def _run_command(arguments) -> int:
     print(f"Device  : {record.device_public_id}")
     print(f"Store   : {record.store_id}")
     print(f"Backend : {record.backend_origin}")
+    log.info(
+        "device=%s store=%s backend=%s",
+        record.device_public_id, record.store_id, record.backend_origin,
+    )
 
     sink = resolve_sink_configuration()
     report_path = Path(arguments.report) if arguments.report else None
@@ -966,8 +1206,10 @@ def _run_command(arguments) -> int:
     )
     print(f"  state: {outcome.state}")
     print(f"  attempts: {outcome.attempts}")
+    log.info("finished state=%s attempts=%s", outcome.state, outcome.attempts)
     if outcome.state == "AUTHENTICATION_REFUSED":
         print(f"  {outcome.detail}")
+        log.error("authentication refused: %s", outcome.detail)
         return EXIT_AUTHENTICATION
     return EXIT_OK if outcome.state == "STOPPED" else EXIT_NETWORK
 
@@ -1021,6 +1263,11 @@ def main(argv: list[str] | None = None) -> int:
 
         return _run_command(arguments)
 
+    # Before AgentError: a duplicate launch is a clean, ordinary outcome, and a
+    # restart policy that treated it as a failure would relaunch forever.
+    except AlreadyRunning as duplicate:
+        print(str(duplicate), file=sys.stderr)
+        return EXIT_ALREADY_RUNNING
     except TerminalAuthentication as refusal:
         print(f"Refused: {refusal}", file=sys.stderr)
         return EXIT_AUTHENTICATION
