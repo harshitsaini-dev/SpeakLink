@@ -1,12 +1,11 @@
 import React from "react";
 import { api } from "@/lib/api";
-import { Plus, RefreshCw, KeyRound, Trash2, Copy, Check } from "lucide-react";
+import { Plus, RefreshCw, KeyRound, Trash2 } from "lucide-react";
 import StatusBadge from "@/components/StatusBadge";
 
 export default function StoreManagement() {
   const [stores, setStores] = React.useState([]);
   const [showAdd, setShowAdd] = React.useState(false);
-  const [copiedId, setCopiedId] = React.useState(null);
   const [error, setError] = React.useState("");
 
   const load = async () => {
@@ -24,19 +23,18 @@ export default function StoreManagement() {
     try { await api.delete(`/stores/${id}`); load(); } catch (e) { setError(e.message); }
   };
 
-  const receiverUrl = (token) => `${window.location.origin}/receiver?token=${token}`;
-  const copy = (id, url) => {
-    navigator.clipboard.writeText(url).then(() => {
-      setCopiedId(id); setTimeout(() => setCopiedId(null), 1500);
-    });
-  };
-
+  // There is deliberately no "copy the Receiver URL" helper any more. It built
+  // ${origin}/receiver?token=${receiver_token}, which put a long-lived Store
+  // credential into a URL - and therefore into clipboards, chat messages,
+  // browser history and any log that saw the link. A Receiver computer will
+  // earn its own credential through one-time enrolment instead; see
+  // RECEIVER_ENROLMENT.md.
   return (
     <div className="space-y-4" data-testid="stores-page">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Store Management</h1>
-          <p className="text-sm text-slate-500">Manage store receivers, regenerate tokens, and copy kiosk URLs.</p>
+          <p className="text-sm text-slate-500">Manage stores and rotate Receiver credentials. Credentials are never displayed or copied from this page.</p>
         </div>
         <div className="flex gap-2">
           <button data-testid="stores-refresh-btn" onClick={load} className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50"><RefreshCw size={14}/> Refresh</button>
@@ -56,13 +54,11 @@ export default function StoreManagement() {
               <th className="px-3 py-2">Zone</th>
               <th className="px-3 py-2">Type</th>
               <th className="px-3 py-2">Status</th>
-              <th className="px-3 py-2">Receiver URL</th>
               <th className="px-3 py-2 text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {stores.map((s) => {
-              const url = receiverUrl(s.receiver_token);
               return (
                 <tr key={s.id} data-testid={`store-mgmt-row-${s.store_code}`} className="border-b border-slate-100 even:bg-slate-50/50">
                   <td className="px-3 py-2 font-mono text-xs">{s.store_code}</td>
@@ -71,11 +67,6 @@ export default function StoreManagement() {
                   <td className="px-3 py-2">{s.region}</td>
                   <td className="px-3 py-2 text-xs text-slate-600">{s.is_online_store ? "Online" : "Physical"}</td>
                   <td className="px-3 py-2"><StatusBadge status={s.status}/></td>
-                  <td className="px-3 py-2">
-                    <button data-testid={`copy-url-${s.store_code}`} onClick={() => copy(s.id, url)} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-slate-50">
-                      {copiedId === s.id ? <><Check size={12} className="text-emerald-600"/> Copied</> : <><Copy size={12}/> Copy</>}
-                    </button>
-                  </td>
                   <td className="px-3 py-2 text-right space-x-1">
                     <button data-testid={`regen-token-${s.store_code}`} onClick={() => regen(s.id)} title="Regenerate token" className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-amber-50"><KeyRound size={12}/></button>
                     {s.is_active && (

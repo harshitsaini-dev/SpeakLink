@@ -10,7 +10,7 @@ import StoreManagement from "@/pages/StoreManagement";
 import BroadcastHistory from "@/pages/BroadcastHistory";
 import ReceiverStatus from "@/pages/ReceiverStatus";
 import SystemLogs from "@/pages/SystemLogs";
-import Receiver from "@/pages/Receiver";
+// Receiver is intentionally not imported or routed - see the note below.
 
 export default function App() {
   return (
@@ -18,7 +18,12 @@ export default function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
-          <Route path="/receiver" element={<Receiver />} />
+          {/* /receiver is deliberately not routed. The page connected to
+              /ws/receiver/{token}, a backend route that does not exist, and
+              reaching it required a Store credential in the URL. A Receiver
+              computer will earn its own credential through one-time enrolment
+              instead; see RECEIVER_ENROLMENT.md. The component is kept for that
+              rework rather than deleted. */}
           <Route
             element={
               <ProtectedRoute>

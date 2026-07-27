@@ -1,3 +1,17 @@
+/*
+ * NOT ROUTED, AND CURRENTLY NOT WORKING.
+ *
+ * This page connects to `/ws/receiver/{token}`, a backend route that does not
+ * exist - the real Receiver socket is `/api/ws/receiver` and authenticates with
+ * an Authorization header. Reaching this page also required a long-lived Store
+ * credential in the URL, which is exactly the transport the rest of the system
+ * has moved away from.
+ *
+ * It is kept rather than deleted because a browser-based Receiver harness is
+ * still worth having. It needs rebuilding on top of one-time device enrolment
+ * first, so that it holds a credential belonging to one computer instead of a
+ * secret shared by every Receiver in a Store. See RECEIVER_ENROLMENT.md.
+ */
 import React from "react";
 import { useSearchParams } from "react-router-dom";
 import { Radio, Volume2, VolumeX, Wifi, WifiOff, Play, AlertTriangle } from "lucide-react";
