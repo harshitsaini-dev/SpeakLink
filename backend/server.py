@@ -30,7 +30,6 @@ from schemas import (
     LoginRequest, LoginResponse, UserOut,
     StoreCreate, StoreUpdate, StoreOut, StoresMetaOut,
     SessionCreate, SessionOut, SessionDetailOut, TargetOut,
-    ReceiverEventIn, ReceiverVerifyOut,
     SystemLogOut,
     EnrollmentCodeRequest, EnrollmentCodeResponse,
     DeviceEnrollmentRequest, DeviceEnrollmentResponse,
@@ -1002,22 +1001,26 @@ def session_detail(sid: int, db: Session = Depends(get_db), user: HQUser = Depen
 
 
 # ================ RECEIVER ================
-@api.get("/receiver/verify", response_model=ReceiverVerifyOut)
-def receiver_verify(token: str, db: Session = Depends(get_db)):
-    s = db.query(Store).filter(Store.receiver_token == token, Store.is_active.is_(True)).first()
-    if not s:
-        return ReceiverVerifyOut(ok=False)
-    return ReceiverVerifyOut(ok=True, store=StoreOut.model_validate(s))
-
-
-@api.post("/receiver/event")
-def receiver_event(payload: ReceiverEventIn, db: Session = Depends(get_db)):
-    s = db.query(Store).filter(Store.receiver_token == payload.token, Store.is_active.is_(True)).first()
-    if not s:
-        raise HTTPException(status_code=401, detail="Invalid receiver token")
-    db.add(ReceiverEvent(store_id=s.id, event_type=payload.event_type, details=payload.details))
-    db.commit()
-    return {"ok": True}
+# GET /api/receiver/verify and POST /api/receiver/event are deliberately gone.
+#
+# The first took a raw Store credential in a query string - the least private
+# part of a request, reaching access logs, reverse-proxy logs, browser history,
+# copied links, monitoring tools, screenshots and Referer headers. Anybody who
+# could read one log line could connect a Receiver as that Store. The second
+# took the same credential in a JSON body: better than a URL, and still an
+# unauthenticated route that accepted a long-lived shared secret and wrote a row
+# against whichever Store it named.
+#
+# They were removed rather than moved to Authorization: Bearer, because nothing
+# that ships called either one. receiver_agent.py and audio_receiver_pilot.py
+# both authenticate over /api/ws/receiver with a header; the only caller was
+# frontend/src/pages/Receiver.jsx, which has been unrouted since the
+# query-token work and is not even bundled. Re-plumbing an endpoint no client
+# uses would have kept the attack surface and delivered nothing.
+#
+# A Receiver reports its state over its authenticated WebSocket, where the
+# server already knows which Store and which Device is speaking - so a caller
+# cannot name a Store it does not hold a credential for.
 
 
 # ================ LOGS ================

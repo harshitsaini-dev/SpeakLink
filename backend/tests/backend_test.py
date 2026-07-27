@@ -188,28 +188,42 @@ class TestStores:
             "Store response"
         )
 
-        # soft delete (disable)
+        # DELETE means archive: the row, its Devices, its sessions and its
+        # events all stay readable. Nothing is removed.
         r7 = api.delete(f"{BASE_URL}/api/stores/{created['id']}", headers=auth)
         assert r7.status_code == 200
 
-        # new token now invalid because store inactive
-        r8 = api.get(f"{BASE_URL}/api/receiver/verify", params={"token": new_tok})
-        assert r8.json()["ok"] is False
+        # It leaves the ordinary Store list, and its history is still there.
+        listed = api.get(f"{BASE_URL}/api/stores", headers=auth).json()
+        assert not any(s["store_code"] == code for s in listed)
+        archived = api.get(f"{BASE_URL}/api/stores?include_archived=true", headers=auth).json()
+        assert any(s["store_code"] == code for s in archived)
 
 
-# ------------- receiver verify -------------
-class TestReceiverVerify:
-    def test_invalid_token(self, api):
+# ------------- the removed query-token endpoints -------------
+class TestNoCredentialTravelsInAUrl:
+    """GET /api/receiver/verify?token=... and POST /api/receiver/event are gone.
+
+    The first put a raw Store credential in a query string, which reaches access
+    logs, proxy logs, browser history, copied links and Referer headers - anyone
+    who could read one log line could connect a Receiver as that Store. The
+    second took the same credential in a body from an unauthenticated caller.
+
+    Nothing that ships called either: the Agent and the hardware pilot both
+    authenticate over the Receiver WebSocket with a header. So they were deleted
+    rather than moved to one, and these tests keep them deleted.
+    """
+
+    def test_the_verify_endpoint_is_gone(self, api):
         r = api.get(f"{BASE_URL}/api/receiver/verify", params={"token": "not-a-real-token"})
-        assert r.status_code == 200
-        assert r.json()["ok"] is False
+        assert r.status_code == 404
 
-    def test_valid_token(self, api, stores):
-        s = stores[0]
-        r = api.get(f"{BASE_URL}/api/receiver/verify", params={"token": s["receiver_token"]})
-        assert r.status_code == 200
-        assert r.json()["ok"] is True
-        assert r.json()["store"]["id"] == s["id"]
+    def test_the_event_endpoint_is_gone(self, api):
+        r = api.post(
+            f"{BASE_URL}/api/receiver/event",
+            json={"token": "not-a-real-token", "event_type": "connected"},
+        )
+        assert r.status_code == 404
 
 
 # ------------- broadcast flow -------------
