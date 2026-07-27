@@ -1,4 +1,4 @@
-"""The production Windows Receiver Agent: enrol once, then run for months.
+﻿"""The production Windows Receiver Agent: enrol once, then run for months.
 
 ``audio_receiver_pilot.py`` proved a Store can receive and play audio. It is a
 pilot: the operator exports a shared Store token and starts it by hand. This is
@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import io
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -399,6 +400,40 @@ def test_a_hidden_prompt_is_used_when_there_is_a_terminal():
 def test_an_empty_code_is_refused():
     with pytest.raises(AgentError):
         read_enrolment_code(stream=io.StringIO("\n"))
+
+
+def test_a_byte_order_mark_from_powershell_is_stripped():
+    """Windows PowerShell prepends a UTF-8 BOM when piping to a native command.
+
+        "ECHO-XXXX-XXXX" | EchoCastReceiver.exe enrol --from-stdin
+
+    arrives with one extra leading character, and ``str.strip()`` does not
+    remove it because a BOM is not whitespace. Without this the operator is told
+    their enrolment code cannot be used, and nothing points at the real cause.
+
+    Measured rather than assumed: this exact pipeline turned a 33-character
+    value into a 34-character one.
+    """
+    assert read_enrolment_code(stream=io.StringIO(f"\ufeff{CODE}\n")) == CODE
+    assert read_enrolment_code(stream=io.StringIO(f"\ufeff  {CODE}  \n")) == CODE
+
+
+def test_a_byte_order_mark_is_stripped_from_a_rotated_credential_too():
+    """The same pipeline, the same trap, the same operator."""
+    from tools.receiver_agent import rotate_local_credential
+
+    protector = FakeCredentialProtector("this-computer")
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "device-credential.bin"
+        save_credential(
+            path, credential=CREDENTIAL, device_public_id=DEVICE_PUBLIC_ID,
+            store_id=7, backend_origin=HQ, protector=protector, now=NOW,
+        )
+        rotated = "echocast_rcv_v2.11111111-2222-4333-8444-555555555555." + "z" * 43
+        rotate_local_credential(
+            path, protector=protector, stream=io.StringIO(f"\ufeff{rotated}\n")
+        )
+        assert load_credential(path, protector=protector).credential() == rotated
 
 
 # ===========================================================================
