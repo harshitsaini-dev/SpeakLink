@@ -25,11 +25,52 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 
 SERVICE_ACCOUNT = "SpeakLinkService"
-SERVICE_CONTAINER_PATH = Path(r"C:\ProgramData\SpeakLink\keys\receiver-hmac-keys.bin")
+
+#: The production layout, outside any personal profile. The pilot ran from a
+#: Desktop path; a host that several people can reach must not.
+SPEAKLINK_ROOT = Path(r"C:\ProgramData\SpeakLink")
+APPLICATION_DIRECTORY = SPEAKLINK_ROOT / "app"
+KEY_DIRECTORY = SPEAKLINK_ROOT / "keys"
+DATA_DIRECTORY = SPEAKLINK_ROOT / "data"
+LOG_DIRECTORY = SPEAKLINK_ROOT / "logs"
+
+SERVICE_CONTAINER_PATH = KEY_DIRECTORY / "receiver-hmac-keys.bin"
+
+
+class DirectoryRole(Enum):
+    """What the service is allowed to do in each directory.
+
+    The application directory is read-and-execute only on purpose: a service
+    that can rewrite its own code turns any code-execution bug into
+    persistence. Everywhere else it needs to write, so it gets exactly that and
+    never Full Control, which would let it edit its own ACL.
+    """
+
+    APPLICATION = "application"
+    KEYS = "keys"
+    DATA = "data"
+    LOGS = "logs"
+
+
+DIRECTORY_PATHS = {
+    DirectoryRole.APPLICATION: APPLICATION_DIRECTORY,
+    DirectoryRole.KEYS: KEY_DIRECTORY,
+    DirectoryRole.DATA: DATA_DIRECTORY,
+    DirectoryRole.LOGS: LOG_DIRECTORY,
+}
+
+#: icacls right sets per role, and the human wording used in refusals.
+ROLE_RIGHTS = {
+    DirectoryRole.APPLICATION: ("RX", {"RX"}),
+    DirectoryRole.KEYS: ("R,W", {"R", "W"}),
+    DirectoryRole.DATA: ("R,W", {"R", "W"}),
+    DirectoryRole.LOGS: ("R,W", {"R", "W"}),
+}
 
 #: Principals that may appear on the container, and the rights they may hold.
 #: Anything else is a finding, not a preference.
@@ -157,6 +198,70 @@ def icacls_grant_plan(path, *, service_account: str) -> list[str]:
         f'icacls {target} /grant "{ALLOWED_SYSTEM}:(F)"',
         f'icacls {target} /grant "{ALLOWED_ADMINS}:(F)"',
         f'icacls {target} /grant "{service_account}:(R,W)"',
+    ]
+
+
+def verify_directory_acl(
+    entries: dict[str, AclEntry], *, role: DirectoryRole, service_account: str
+) -> AclVerdict:
+    """Judge one directory's ACL against what that role actually needs."""
+    wording, required = ROLE_RIGHTS[role]
+    problems: list[str] = []
+
+    service = entries.get(service_account)
+    if service is None:
+        problems.append(f"{service_account} has no access to the {role.value} directory")
+    elif "F" in service.rights:
+        problems.append(
+            f"{service_account} has full control of the {role.value} directory, which "
+            "lets the running service rewrite this ACL; grant only "
+            f"({wording})"
+        )
+    elif role is DirectoryRole.APPLICATION and "W" in service.rights:
+        problems.append(
+            f"{service_account} can write to the application directory; a service "
+            "able to rewrite its own code turns any code-execution bug into "
+            "persistence. Grant (RX)"
+        )
+    elif not required <= service.rights:
+        missing = sorted(required - service.rights)
+        problems.append(f"{service_account} is missing {missing} on the {role.value} directory")
+
+    admins = entries.get(ALLOWED_ADMINS)
+    if admins is None or "F" not in admins.rights:
+        problems.append(
+            f"{ALLOWED_ADMINS} has no full-control recovery access to the "
+            f"{role.value} directory"
+        )
+
+    allowed = {ALLOWED_SYSTEM, ALLOWED_ADMINS, service_account}
+    for principal, entry in entries.items():
+        if principal in allowed:
+            continue
+        how = "inherited" if entry.inherited else "granted"
+        problems.append(
+            f"{principal} has {how} access to the {role.value} directory and must "
+            "not appear at all"
+        )
+
+    if any(entry.inherited for entry in entries.values()):
+        problems.append(
+            f"inherited permissions are still enabled on the {role.value} directory; "
+            "C:\\ProgramData grants BUILTIN\\Users by default"
+        )
+
+    return AclVerdict(acceptable=not problems, problems=problems)
+
+
+def directory_grant_plan(role: DirectoryRole, *, service_account: str) -> list[str]:
+    """The elevated commands for one directory, inheritance broken first."""
+    target = f'"{DIRECTORY_PATHS[role]}"'
+    wording, _ = ROLE_RIGHTS[role]
+    return [
+        f"icacls {target} /inheritance:r",
+        f'icacls {target} /grant "{ALLOWED_SYSTEM}:(OI)(CI)(F)"',
+        f'icacls {target} /grant "{ALLOWED_ADMINS}:(OI)(CI)(F)"',
+        f'icacls {target} /grant "{service_account}:(OI)(CI)({wording})"',
     ]
 
 
