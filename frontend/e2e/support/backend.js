@@ -39,6 +39,31 @@ const DM = {
 
 const STORES = [UN, ASR, DM];
 
+// What GET /stores/{id}/receiver-devices/roles actually returns: no credential,
+// no verifier, no key version. Three Devices, which is the approved per-Store
+// limit - one legacy backfilled Device, one primary, one standby.
+const PRIMARY_DEVICE = {
+  public_id: '482f9e9b-3371-4c06-845f-202c34e661d0',
+  display_name: 'UN till 1 (primary)',
+  status: 'active',
+  role: 'PRIMARY',
+  enrolled_at: '2026-07-27T09:12:00+00:00',
+  disabled_at: null,
+  promoted_at: '2026-07-27T09:13:00+00:00',
+};
+
+const STANDBY_DEVICE = {
+  public_id: '00875774-d573-4486-8fbf-473ea4d972fd',
+  display_name: 'UN till 2 (standby)',
+  status: 'active',
+  role: 'STANDBY',
+  enrolled_at: '2026-07-27T09:20:00+00:00',
+  disabled_at: null,
+  promoted_at: null,
+};
+
+const DEVICES = [PRIMARY_DEVICE, STANDBY_DEVICE];
+
 // Never a real credential: an obviously fake, structureless string.
 const FAKE_TOKEN = 'test-token-not-a-real-jwt';
 const OPERATOR = { id: 1, username: 'pilot-operator', role: 'admin' };
@@ -66,6 +91,13 @@ async function mockBackend(page, options = {}) {
     startCalls: [],
     stopCalls: [],
     ticketsIssued: 0,
+    devices: options.devices || DEVICES.map((device) => ({ ...device })),
+    deviceRolesStatus: options.deviceRolesStatus || 200,
+    codesIssued: 0,
+    rotations: [],
+    promotions: [],
+    disables: [],
+    revokes: [],
   };
 
   await page.route('**/api/**', async (route) => {
@@ -127,6 +159,65 @@ async function mockBackend(page, options = {}) {
       state.stopCalls.push(path);
       state.current = { live: false, session: null, targets: [], ready_receivers: [] };
       return route.fulfill(json({ ok: true }));
+    }
+
+    // ---- Receiver Devices -------------------------------------------------
+    // Shaped exactly like receiver_primary_device.describe_store_devices and the
+    // two one-time-delivery responses. Neither the code nor the credential is
+    // ever returned by a GET here, because neither is by the real backend.
+    if (method === 'GET' && /^\/stores\/\d+\/receiver-devices\/roles$/.test(path)) {
+      if (state.deviceRolesStatus !== 200) {
+        return route.fulfill(json({ detail: 'unavailable' }, state.deviceRolesStatus));
+      }
+      return route.fulfill(json(state.devices));
+    }
+
+    if (method === 'POST' && path === '/receiver-devices/enrollment-codes') {
+      state.codesIssued += 1;
+      return route.fulfill(
+        json({ code: `ECHO-CODE-${state.codesIssued}`, store_id: 1, expires_in_seconds: 900 }),
+      );
+    }
+
+    if (method === 'POST' && /^\/receiver-devices\/[^/]+\/rotate-credential$/.test(path)) {
+      const publicId = path.split('/')[2];
+      state.rotations.push(publicId);
+      return route.fulfill(
+        json({
+          device_public_id: publicId,
+          credential: `echocast_rcv_v2.${publicId}.rotated-secret-shown-once`,
+          credential_version: 2,
+          store_id: 1,
+          previous_credential_retired: true,
+        }),
+      );
+    }
+
+    if (method === 'POST' && /^\/receiver-devices\/[^/]+\/promote$/.test(path)) {
+      const publicId = path.split('/')[2];
+      state.promotions.push(publicId);
+      state.devices = state.devices.map((device) => ({
+        ...device,
+        role: device.public_id === publicId ? 'PRIMARY' : 'STANDBY',
+      }));
+      return route.fulfill(json(state.devices));
+    }
+
+    if (method === 'POST' && /^\/receiver-devices\/[^/]+\/(disable|revoke)$/.test(path)) {
+      const [, , publicId, action] = path.split('/');
+      state[action === 'disable' ? 'disables' : 'revokes'].push(publicId);
+      state.devices = state.devices.map((device) =>
+        device.public_id === publicId
+          ? {
+              ...device,
+              status: action === 'disable' ? 'disabled' : 'retired',
+              // Losing a primary never promotes anything: the backend clears the
+              // role and leaves the Store without one until an admin chooses.
+              role: 'STANDBY',
+            }
+          : device,
+      );
+      return route.fulfill(json(state.devices));
     }
 
     // Anything unmocked is a bug in the test, not something to paper over.
@@ -233,6 +324,9 @@ module.exports = {
   UN,
   ASR,
   DM,
+  DEVICES,
+  PRIMARY_DEVICE,
+  STANDBY_DEVICE,
   FAKE_TOKEN,
   OPERATOR,
 };
