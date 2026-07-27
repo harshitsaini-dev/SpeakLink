@@ -9,6 +9,7 @@ import BroadcastConsole from "@/pages/BroadcastConsole";
 import StoreManagement from "@/pages/StoreManagement";
 import BroadcastHistory from "@/pages/BroadcastHistory";
 import ReceiverStatus from "@/pages/ReceiverStatus";
+import ReceiverDevices from "@/pages/ReceiverDevices";
 import SystemLogs from "@/pages/SystemLogs";
 // Receiver is intentionally not imported or routed - see the note below.
 
@@ -34,6 +35,10 @@ export default function App() {
             <Route index element={<Navigate to="/console" replace />} />
             <Route path="/console" element={<BroadcastConsole />} />
             <Route path="/stores" element={<StoreManagement />} />
+            {/* The Store id is in the path, never a credential. Both secrets
+                this page can show - an enrolment code and a rotated credential -
+                live in component state only, so a reload loses them. */}
+            <Route path="/stores/:storeId/devices" element={<ReceiverDevices />} />
             <Route path="/history" element={<BroadcastHistory />} />
             <Route path="/receivers" element={<ReceiverStatus />} />
             <Route path="/logs" element={<SystemLogs />} />

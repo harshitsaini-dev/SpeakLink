@@ -1,6 +1,7 @@
 import React from "react";
+import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
-import { Plus, RefreshCw, KeyRound, Trash2 } from "lucide-react";
+import { Plus, RefreshCw, KeyRound, Trash2, MonitorSmartphone } from "lucide-react";
 import StatusBadge from "@/components/StatusBadge";
 
 export default function StoreManagement() {
@@ -68,6 +69,8 @@ export default function StoreManagement() {
                   <td className="px-3 py-2 text-xs text-slate-600">{s.is_online_store ? "Online" : "Physical"}</td>
                   <td className="px-3 py-2"><StatusBadge status={s.status}/></td>
                   <td className="px-3 py-2 text-right space-x-1">
+                    {/* The Store id, not a credential. Enrolment lives on that page. */}
+                    <Link data-testid={`devices-${s.store_code}`} to={`/stores/${s.id}/devices`} title="Receiver Devices" aria-label={`Receiver Devices for ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-blue-50"><MonitorSmartphone size={12}/></Link>
                     <button data-testid={`regen-token-${s.store_code}`} onClick={() => regen(s.id)} title="Regenerate token" className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-amber-50"><KeyRound size={12}/></button>
                     {s.is_active && (
                       <button data-testid={`disable-store-${s.store_code}`} onClick={() => disable(s.id)} title="Disable" className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-200 text-red-700 rounded hover:bg-red-50"><Trash2 size={12}/></button>
