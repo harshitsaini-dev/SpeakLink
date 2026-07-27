@@ -146,6 +146,65 @@ class LegacyStoreTokenRuntimeAuthenticator:
             raise ReceiverRuntimeAuthenticationError() from None
 
 
+class DualRuntimeAuthenticator:
+    """Accept a Device credential, or fall back to the legacy Store token.
+
+    This exists for one explicit, temporary reason: Device credentials are new,
+    and the Receivers already running - including the one that produced every
+    piece of amplifier evidence - authenticate with a shared per-Store token.
+    Switching outright would disconnect them at the moment of the switch.
+
+    The Device credential is tried **first**, so a Store stops depending on its
+    shared token the moment one of its computers presents a real credential, with
+    no configuration change and no cutover flag.
+
+    Two properties matter more than the convenience:
+
+    * a revoked or disabled Device must not be rescued by the legacy path. Both
+      are consulted, and both must refuse, or revocation is theatre.
+    * the returned identity says which transport proved it, so the dashboard can
+      show honestly that a Store is still on a shared token.
+
+    A configuration failure - a missing key ring, say - is re-raised rather than
+    swallowed into "bad credential", because that is the operator's problem and
+    hiding it would look like every Receiver suddenly having a bad token.
+
+    Removing this class is the documented cutover. See RECEIVER_ENROLMENT.md.
+    """
+
+    def __init__(self, *, device: object, legacy: object) -> None:
+        if device is None or legacy is None:
+            raise ReceiverRuntimeConfigurationError()
+        self._device = device
+        self._legacy = legacy
+
+    def __repr__(self) -> str:
+        return "DualRuntimeAuthenticator(device=<device credential>, legacy=<store token>)"
+
+    __str__ = __repr__
+
+    def authenticate(
+        self,
+        *,
+        presented_token: str,
+        authenticated_at: datetime,
+    ) -> ReceiverRuntimeIdentity:
+        try:
+            return self._device.authenticate(
+                presented_token=presented_token, authenticated_at=authenticated_at
+            )
+        except ReceiverRuntimeConfigurationError:
+            raise
+        except ReceiverRuntimeAuthenticationError:
+            pass
+
+        # One refusal shape for both paths: two different errors would tell a
+        # caller whether this Store has enrolled Devices.
+        return self._legacy.authenticate(
+            presented_token=presented_token, authenticated_at=authenticated_at
+        )
+
+
 class MigrationAwareReceiverRuntimeAuthenticator:
     """Explicit read-only adapter over ``authenticate_receiver_credential``."""
 
