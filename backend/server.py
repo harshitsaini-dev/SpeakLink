@@ -34,7 +34,17 @@ from schemas import (
     SystemLogOut,
     EnrollmentCodeRequest, EnrollmentCodeResponse,
     DeviceEnrollmentRequest, DeviceEnrollmentResponse,
-    ReceiverDeviceOut,
+    ReceiverDeviceOut, CredentialRotationResponse,
+)
+from receiver_rotation_service import (
+    CredentialNotFoundError,
+    DeviceNotRotatableError,
+    RotationPersistenceError,
+    rotate_receiver_device_credential,
+)
+from receiver_device_service import (
+    MigrationNotReadyError,
+    ReceiverDeviceServiceError,
 )
 from receiver_enrollment_codes import CODE_TTL_SECONDS
 from audio_protocol import build_prepare_message
@@ -480,6 +490,59 @@ def disable_receiver_device(
         raise HTTPException(status_code=503, detail=str(unavailable))
     _write_log(db, "warn", f"receiver_device_disabled device={public_id} by={user.username}")
     return ReceiverDeviceOut(**device)
+
+
+@api.post("/receiver-devices/{public_id}/rotate-credential",
+          response_model=CredentialRotationResponse)
+def rotate_receiver_device(
+    public_id: str,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(get_current_user),
+):
+    """Issue one new credential for one Device and retire the old one at once.
+
+    There is no overlap window. You rotate because somebody may hold a copy of the
+    old credential, and a grace period is a period in which that copy still works.
+    The Device is offline until an operator carries the new credential to it.
+    """
+    key_ring = receiver_key_ring()
+    if key_ring is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Receiver credential rotation is not available on this server.",
+        )
+    signing_version, signing_key = key_ring.signing_key()
+    try:
+        rotated = rotate_receiver_device_credential(
+            engine,
+            device_public_id=public_id,
+            actor_user_id=user.id,
+            hash_key=signing_key,
+            hash_key_version=signing_version,
+        )
+    except DeviceNotRotatableError:
+        raise HTTPException(status_code=404, detail="Receiver Device not found or not active")
+    except CredentialNotFoundError:
+        raise HTTPException(status_code=409, detail="That Device has no active credential")
+    except (MigrationNotReadyError, RotationPersistenceError) as unavailable:
+        # The operator's problem, and it must never look like a missing Device.
+        _write_log(db, "warn", "receiver_credential_rotation_unavailable")
+        raise HTTPException(status_code=503, detail=str(unavailable))
+    except ReceiverDeviceServiceError:
+        raise HTTPException(status_code=409, detail="That Device cannot be rotated right now")
+
+    device = read_device(engine, public_id=public_id)
+    # The credential is never logged - only that a rotation happened, and by whom.
+    _write_log(
+        db, "warn",
+        f"receiver_credential_rotated device={public_id} store_id={device['store_id']} by={user.username}",
+    )
+    return CredentialRotationResponse(
+        device_public_id=rotated.device_public_id,
+        credential=rotated.take_raw_credential(),
+        credential_version=rotated.credential_version,
+        store_id=device["store_id"],
+    )
 
 
 @api.post("/receiver-devices/{public_id}/revoke", response_model=ReceiverDeviceOut)
