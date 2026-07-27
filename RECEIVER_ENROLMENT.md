@@ -84,7 +84,45 @@ So the enrolment code layer stops where it should: it establishes **who may
 ask**. Wiring redemption to `enroll_receiver_device` is the next branch, and it
 starts with key custody, not with an endpoint.
 
-## The intended flow, once key custody exists
+## Status: built
+
+Everything described below now exists and is proven end to end by
+`tools/receiver_device_staging_smoke.py` — 32 checks against a real backend with
+a real Agent subprocess and real Windows DPAPI. The operator-facing procedure is
+`WINDOWS_RECEIVER_AGENT_RUNBOOK.md`.
+
+## The cutover, and how to know it is safe
+
+The migration period is explicit and has exactly one exit. During it,
+`DualRuntimeAuthenticator` (`backend/receiver_runtime_auth.py`) tries the Device
+credential **first** and falls back to the legacy per-Store token, so a Store
+stops depending on its shared token the moment one of its computers presents a
+real credential — no flag, no restart.
+
+**Cutover is deleting that class**, along with `--legacy-pilot-mode` in
+`tools/receiver_agent.py`. Do it when all three are true:
+
+1. Every active Store has at least one enrolled Device, and one of them is
+   promoted to primary. `GET /api/stores/{id}/receiver-devices/roles` per Store.
+2. No connection has authenticated with `legacy_store_token` for a full trading
+   week. The runtime records which transport proved each identity precisely so
+   this question has an answer instead of an opinion.
+3. The migration state has advanced past `dual_verify` to `hash_only`.
+
+Until then, deleting it takes every Store still on a shared token off the air at
+the moment of the switch.
+
+### One constraint worth knowing before you plan the cutover
+
+Enrolment and rotation are allowed in `legacy_only`, `dual_verify`, `hash_only`
+and `raw_neutralized` — the states where the credential they issue can actually
+be verified — and **refused in `backfilled`**, where hashed credentials are not
+verified and a newly issued credential would silently fail to authenticate.
+
+This was measured, not assumed: enrolment used to be pinned to `legacy_only`
+alone, which meant a cut-over server could never enrol a new till.
+
+## The flow
 
 ```
 1. HQ administrator, authenticated          POST /api/receiver-devices/enrollment-codes

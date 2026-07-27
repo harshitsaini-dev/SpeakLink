@@ -45,13 +45,17 @@ Last updated: 2026-07-27, branch `release/production-readiness-candidate`.
 | Migration status / preflight / apply tooling | `COMPLETE` | `6c42102`; 21 tests; backup verified by size, SHA-256 and reopen |
 | Migration maintenance runbook | `COMPLETE` | `RECEIVER_MIGRATION_RUNBOOK.md`; every command executed against a copy of the pilot database while writing it |
 | Migration applied to a real database | `BLOCKED` | Needs an approved maintenance window. Tool refuses the protected database with no override. Neither the protected nor the pilot database is migrated |
-| Enrolment HTTP API | `NOT_IMPLEMENTED` | Now unblocked by key custody; not built in this campaign |
-| Device credential issuance | `NOT_IMPLEMENTED` | Service exists (`enroll_receiver_device`); no route calls it |
-| Device credential rotation / revocation | `NOT_IMPLEMENTED` | Primitives exist in `receiver_credentials.py` |
-| Windows Agent enrolment mode | `NOT_IMPLEMENTED` | Agent still reads a shared Store token from the environment |
-| Device credential secure local storage | `NOT_IMPLEMENTED` | `key_custody.py` gives the pattern; the Agent does not use it yet |
-| Per-Device revocation | `BLOCKED` | Depends on the four rows above |
-| Legacy `stores.receiver_token` retired | `NOT_IMPLEMENTED` | Still the live authentication path |
+| Enrolment HTTP API | `COMPLETE` | `1472628`; six routes; claim-first-then-release ordering proven by a threaded race and a monkeypatched failure |
+| Device credential issuance | `COMPLETE` | `1472628`; raw credential leaves the server exactly once; absent from every later read and from `system_logs` |
+| Device credential rotation | `COMPLETE` | `d4115d9`; 31 tests; **no overlap window** — the old credential dies at the instant of rotation |
+| Per-Device revocation and disable | `COMPLETE` | `d4115d9`, `1472628`; a revoked Device is not rescued by the legacy path — both authenticators must refuse |
+| Windows Agent enrolment mode | `COMPLETE` | `8ae39a2`; `tools/receiver_agent.py`, 52 tests; a test found argparse prefix-matching turning `--credential` into `--credential-path` |
+| Device credential secure local storage | `COMPLETE` | `8ae39a2`; `tools/receiver_credential_store.py`, 33 tests; **real Windows DPAPI round trip passed**; distinct DPAPI entropy makes crossing it with the HMAC key container impossible, proven both directions |
+| Device runtime authentication | `COMPLETE` | `4dc602e`; `DualRuntimeAuthenticator` prefers the Device credential, falls back to the legacy Store token, identical refusal from either path |
+| Enrolment allowed where the credential works | `COMPLETE` | `1e16359`; enrolment was pinned to `legacy_only` where credentials cannot be verified — a cut-over server could never enrol a new till. `backfilled` stays refused |
+| Device administration UI | `COMPLETE` | `48aa8f5`; 26 Playwright tests; code and credential shown once, absent from URL, both browser storages, and after reload |
+| End-to-end proof on a real server | `TESTED_AUTOMATICALLY` | `9902912`; 32-check staging smoke, real backend, real Agent subprocess, real DPAPI, `dual_verify` |
+| Legacy `stores.receiver_token` retired | `NOT_IMPLEMENTED` | Still accepted during the explicit migration period. Cutover is deleting `DualRuntimeAuthenticator`; see `RECEIVER_ENROLMENT.md` |
 
 ## Broadcast path
 
@@ -64,8 +68,10 @@ Last updated: 2026-07-27, branch `release/production-readiness-candidate`.
 | READY gates the microphone | `COMPLETE` | Playwright: no `getUserMedia` while `ready_receivers` is empty |
 | Honest play status | `COMPLETE` | `f533c06`; command-sent is never shown as Playing |
 | Two Stores on real hardware | `NOT_IMPLEMENTED` | 1 of 44 Stores tested |
-| Store vs Device status separation | `NOT_IMPLEMENTED` | Status is per-Store; a Store cannot distinguish two computers |
-| Primary / standby Device policy | `NOT_IMPLEMENTED` | Needs the Device model live first |
+| Store vs Device status separation | `COMPLETE` | `6147d6e`; two Devices in one Store are two inventory records; the Store aggregate follows the primary, not the best of its Devices |
+| Primary / standby Device policy | `COMPLETE` | `6147d6e`; one primary enforced by a PRIMARY KEY, not by check-then-write; standby receives zero chunks — measured in the staging smoke at 17 chunks to the primary and 0 to a genuinely connected standby |
+| No silent failover | `COMPLETE` | `6147d6e`; disabling or revoking the primary clears the role and promotes nothing; the dashboard warns instead |
+| Synthetic load with Device credentials | `NOT_IMPLEMENTED` | `tools/load_test_receivers.py` still drives legacy Store tokens only. The 5/10/20/40 figures below predate the Device model |
 
 ## EchoGuard
 
@@ -95,7 +101,7 @@ Last updated: 2026-07-27, branch `release/production-readiness-candidate`.
 
 | Capability | Status | Evidence |
 | --- | --- | --- |
-| Protected database never touched | `COMPLETE` | 507,904 bytes, `2026-07-26 08:43:13`, WAL and SHM absent, unchanged across the entire campaign |
+| Protected database never touched | `COMPLETE` | 507,904 bytes, SHA-256 `8C858B13…BD2EF2AB`, WAL and SHM absent. Unchanged across every run of this campaign. **Correction:** an earlier note in this file recorded `2026-07-26 08:43:13`; the file's `LastWriteTime` is `2026-07-26 14:13:13`, so something opened it read-write on 26 July between those two points. The size is identical and nothing on 27 July wrote to it. A SHA-256 baseline now exists so this cannot be ambiguous again |
 | Complete process-tree shutdown | `COMPLETE` | `4aa9b2a`; verified live — 7 frontend and 3 backend processes stopped, both ports released |
 | Secret-free repository | `COMPLETE` | `git grep` finds no historical default, JWT, bcrypt hash or key material |
 
@@ -123,10 +129,10 @@ Last updated: 2026-07-27, branch `release/production-readiness-candidate`.
 | --- | --- |
 | 1. HMAC key custody | **Delivered** — DPAPI container, 30 tests, real round trip passed |
 | 2. Migration tooling | **Delivered** — status/preflight/apply, verified backup, 21 tests |
-| 3. Enrolment HTTP API | Not built. Now unblocked by phase 1 |
-| 4. Windows Agent enrolment | Not built |
-| 5. Rotation and revocation | Not built |
-| 6. Store vs Device status | Not built |
+| 3. Enrolment HTTP API | **Delivered** — `1472628` |
+| 4. Windows Agent enrolment | **Delivered** — `8ae39a2` |
+| 5. Rotation and revocation | **Delivered** — `d4115d9` |
+| 6. Store vs Device status | **Delivered** — `6147d6e` |
 | 7. EchoGuard | **Contract delivered**, implementation blocked — no pause/resume surface exists to call. An acoustic-verification message contract already existed and was found only after an over-broad claim was caught by its own test |
 | 8. Windows auto-start | Not built |
 | 9. Backend deployment security | Partially pre-existing; not completed |
@@ -134,10 +140,41 @@ Last updated: 2026-07-27, branch `release/production-readiness-candidate`.
 | 11. Frontend production completion | Partially pre-existing; not completed |
 | 12. Vercel readiness | Not built |
 
-Phases 1 and 2 were delivered because they are the keystone: nothing in phases
-3, 4 or 5 can exist without a key to sign credentials with and a schema to store
-them in. Both were built test-first, verified, committed and pushed
-individually rather than accumulated as one large uncommitted change.
+Phases 1 and 2 were the keystone: nothing in phases 3, 4 or 5 can exist without
+a key to sign credentials with and a schema to store them in. Everything since
+was built test-first, with RED captured before the fix, and committed and pushed
+per phase rather than accumulated as one large uncommitted change.
+
+---
+
+## Two measured findings that changed the architecture
+
+Both were found by running the system rather than reading it, and both were
+approved as explicit architecture decisions before anything was changed.
+
+**Enrolment and authentication were mutually exclusive.**
+
+| operation | `legacy_only` | `backfilled` | `dual_verify` | `hash_only` |
+| --- | --- | --- | --- | --- |
+| enrol a Device | was yes | no | **was no** | **was no** |
+| rotate a credential | was yes | no | **was no** | **was no** |
+| authenticate a Device | **no** | **no** | yes | yes |
+
+`receiver_device_service` pinned enrolment to `legacy_only`; `receiver_auth_service`
+verifies hashed Device credentials only in `dual_verify`, `hash_only` and
+`raw_neutralized`. The sets were disjoint, so a server that had cut over could
+never enrol a new till — the Device would be created, an operator would type in
+the credential, and it would never connect, with no error pointing at the cause.
+Enrolment now follows the states where the credential it issues can be used.
+`backfilled` stays refused: hashed credentials are not verified there either, so
+enrolling into it is the same trap one state along.
+
+**Primary-plus-standby was arithmetically impossible.** Legacy backfill creates a
+Device of its own, and the per-Store limit was two, leaving room for exactly one
+enrolled Device on any backfilled Store. The limit is now three, holding exactly
+the migration-period trio: legacy backfilled Device, primary, standby. It is
+still a bound — the fourth is refused, including under four threads enrolling at
+the same instant.
 
 ---
 
