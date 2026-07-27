@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, dataclass
@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import logging
 import secrets
+import os
 import sys
 import uuid
 
@@ -465,7 +466,7 @@ def test_replacement_grace_and_expiry_boundaries_follow_lifecycle_helper(tmp_pat
 
 @pytest.mark.parametrize(
     "bad_token",
-    ["x" * 4096, "é" * 32, "a" * 31 + "\n"],
+    ["x" * 4096, "Ã©" * 32, "a" * 31 + "\n"],
 )
 def test_malformed_oversized_and_non_ascii_tokens_fail_safely(tmp_path: Path, bad_token: str):
     auth_fixture = _new_fixture(tmp_path, "unsafe-input.db")
@@ -490,9 +491,33 @@ def test_failure_messages_and_captured_output_never_echo_secret_material(
     assert "authorization" not in rendered.lower()
 
 
-def test_focused_service_has_no_runtime_import_or_health_side_effect_surface():
-    assert "server" not in sys.modules
-    assert "ws_manager" not in sys.modules
+def test_focused_service_has_no_runtime_import_or_health_side_effect_surface(tmp_path):
+    """Asked of a fresh interpreter, not of this one.
+
+    The property is "importing receiver_auth_service does not drag in the
+    runtime" - a fact about this module's imports. Reading the ambient
+    sys.modules turned it into a fact about whatever else happened to run first
+    in the same pytest worker, so any new test file that imports ws_manager
+    failed it from a distance. Same repair as the one in
+    test_receiver_migration_transition_service.py, for the same reason.
+    """
+    import subprocess
+
+    probe = (
+        "import sys; sys.path.insert(0, %r); "
+        "import receiver_auth_service; "
+        "print('server' in sys.modules, 'ws_manager' in sys.modules)"
+        % str(Path(__file__).resolve().parents[1])
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "SPEAKLINK_DB_PATH": str(tmp_path / "probe.db")},
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "False False", (
+        f"the focused service pulled in the runtime: {completed.stdout.strip()}"
+    )
 
 
 def test_result_is_immutable_redacted_and_authentication_is_read_only(

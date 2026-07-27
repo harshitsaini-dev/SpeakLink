@@ -41,6 +41,16 @@ from receiver_rotation_service import (
     RotationPersistenceError,
     rotate_receiver_device_credential,
 )
+from rbac import (
+    Permission,
+    PermissionDenied,
+    Role,
+    effective_permissions,
+    ensure_rbac_schema,
+    migrate_legacy_roles,
+    parse_role,
+    require_permission,
+)
 from store_lifecycle import (
     StoreLifecycleError,
     StoreNotFoundError,
@@ -246,6 +256,41 @@ configure_receiver_runtime(
 )
 
 
+def require(permission: Permission):
+    """A dependency that admits only accounts holding one permission.
+
+    Written as a factory so every route names its permission at the point of
+    definition. A route with no `require(...)` is authenticated-only, and that
+    now has to be a visible choice rather than an omission - a test walks the
+    routing table and fails on any authenticated route without one.
+    """
+
+    def guard(user: HQUser = Depends(get_current_user)) -> HQUser:
+        try:
+            require_permission(user, permission)
+        except PermissionDenied as refusal:
+            # 403, not 404: the caller is authenticated and the resource exists.
+            # The message is identical for every permission, so a refusal never
+            # maps out what the system can do.
+            raise HTTPException(status_code=403, detail=str(refusal))
+        return user
+
+    return guard
+
+
+def require_super_admin(user: HQUser = Depends(get_current_user)) -> HQUser:
+    """Reserved for the few actions an ADMIN must not reach.
+
+    Restoring an archived Store is one: archiving is how a Store is retired, and
+    un-retiring it should need the account that also owns security settings.
+    """
+    if parse_role(user.role) is not Role.SUPER_ADMIN or not user.is_active:
+        raise HTTPException(
+            status_code=403, detail="You do not have permission to perform this action."
+        )
+    return user
+
+
 def _write_log(db: Session, level: str, message: str):
     try:
         db.add(SystemLog(level=level, message=message))
@@ -272,6 +317,21 @@ def startup_event():
         ensure_store_lifecycle_schema(engine)
     except Exception:
         logger.warning("Store lifecycle column could not be prepared", exc_info=False)
+
+    # Roles and the session-version column. Both additive; the role migration is
+    # idempotent and creates nobody. A database whose only administrator used
+    # the legacy "admin" role gains exactly one SUPER_ADMIN, because a system
+    # with none can never change its own security settings again.
+    try:
+        ensure_rbac_schema(engine)
+        outcome = migrate_legacy_roles(SessionLocal)
+        if outcome.get("promoted"):
+            logger.info(
+                "Promoted the lowest-id active administrator to SUPER_ADMIN (user_id=%s)",
+                outcome["super_admin_user_id"],
+            )
+    except Exception:
+        logger.warning("Role model could not be prepared", exc_info=False)
 
     # Decided here rather than at import: whether Device credentials can be
     # verified depends on the database and the key container, and neither is
@@ -369,7 +429,9 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
     for key in (client_key, username_key):
         login_limiter.forget(key)
     clear_failed_logins(db, user.username)
-    token = create_access_token(user.id, user.username)
+    token = create_access_token(
+        user.id, user.username, getattr(user, "session_version", 1) or 1
+    )
     _write_log(db, "info", f"login_succeeded user={user.username}")
     return LoginResponse(access_token=token, user=UserOut.model_validate(user))
 
@@ -407,7 +469,7 @@ ENROLMENT_REFUSED = "That enrolment code cannot be used."
 def create_receiver_enrollment_code(
     payload: EnrollmentCodeRequest,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(get_current_user),
+    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
 ):
     """Mint a one-time code for one Store. Shown once, never stored raw."""
     try:
@@ -489,7 +551,7 @@ def enroll_receiver(
 def list_receiver_devices(
     store_id: int,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(get_current_user),
+    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
 ):
     try:
         return [ReceiverDeviceOut(**row) for row in list_devices(engine, store_id=store_id)]
@@ -501,7 +563,7 @@ def list_receiver_devices(
 def read_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(get_current_user),
+    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
 ):
     try:
         return ReceiverDeviceOut(**read_device(engine, public_id=public_id))
@@ -515,7 +577,7 @@ def read_receiver_device(
 def disable_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(get_current_user),
+    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
 ):
     """Stop this one computer. Its Store and every other Device keep working."""
     try:
@@ -532,7 +594,7 @@ def disable_receiver_device(
 def promote_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(get_current_user),
+    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
 ):
     """Make this one computer the Store's primary - the one that plays audio.
 
@@ -558,7 +620,7 @@ def promote_receiver_device(
 def read_receiver_device_roles(
     store_id: int,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(get_current_user),
+    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
 ):
     """Every Device of one Store with its primary/standby role. No credentials."""
     try:
@@ -572,7 +634,7 @@ def read_receiver_device_roles(
 def rotate_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(get_current_user),
+    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
 ):
     """Issue one new credential for one Device and retire the old one at once.
 
@@ -624,7 +686,7 @@ def rotate_receiver_device(
 def revoke_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(get_current_user),
+    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
 ):
     """Retire this one computer permanently."""
     try:
@@ -647,7 +709,7 @@ def list_stores(
     include_inactive: bool = False,
     include_archived: bool = False,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(get_current_user),
+    user: HQUser = Depends(require(Permission.VIEW_STATUS)),
 ):
     query = db.query(Store)
     if not include_inactive:
@@ -678,7 +740,7 @@ def list_stores(
 
 
 @api.post("/stores", response_model=StoreOut, status_code=201)
-def create_store(payload: StoreCreate, db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
+def create_store(payload: StoreCreate, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.MANAGE_STORES))):
     if db.query(Store).filter(Store.store_code == payload.store_code).first():
         raise HTTPException(status_code=409, detail="store_code already exists")
     s = Store(**payload.model_dump(), receiver_token=uuid.uuid4().hex)
@@ -690,7 +752,7 @@ def create_store(payload: StoreCreate, db: Session = Depends(get_db), user: HQUs
 
 
 @api.put("/stores/{store_id}", response_model=StoreOut)
-def update_store(store_id: int, payload: StoreUpdate, db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
+def update_store(store_id: int, payload: StoreUpdate, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.MANAGE_STORES))):
     """Edit a Store's details. Never its state, and never its credentials."""
     s = db.query(Store).filter(Store.id == store_id).first()
     if not s:
@@ -757,32 +819,32 @@ def _lifecycle_action(transition, store_id: int, user: HQUser, *, use_live_guard
 
 
 @api.post("/stores/{store_id}/disable", response_model=StoreOut)
-def disable_store_endpoint(store_id: int, user: HQUser = Depends(get_current_user)):
+def disable_store_endpoint(store_id: int, user: HQUser = Depends(require(Permission.MANAGE_STORES))):
     """Switch a Store off. Reversible; its history is untouched."""
     return _lifecycle_action(disable_store, store_id, user)
 
 
 @api.post("/stores/{store_id}/enable", response_model=StoreOut)
-def enable_store_endpoint(store_id: int, user: HQUser = Depends(get_current_user)):
+def enable_store_endpoint(store_id: int, user: HQUser = Depends(require(Permission.MANAGE_STORES))):
     """Switch a Store back on. An archived Store is not reachable from here."""
     return _lifecycle_action(enable_store, store_id, user, use_live_guard=False)
 
 
 @api.post("/stores/{store_id}/archive", response_model=StoreOut)
-def archive_store_endpoint(store_id: int, user: HQUser = Depends(get_current_user)):
+def archive_store_endpoint(store_id: int, user: HQUser = Depends(require(Permission.MANAGE_STORES))):
     """Retire a Store. Nothing is deleted - the row, its Devices, its sessions
     and its events all stay readable."""
     return _lifecycle_action(archive_store, store_id, user)
 
 
 @api.post("/stores/{store_id}/restore", response_model=StoreOut)
-def restore_store_endpoint(store_id: int, user: HQUser = Depends(get_current_user)):
+def restore_store_endpoint(store_id: int, user: HQUser = Depends(require_super_admin)):
     """Bring an archived Store back to DISABLED, never straight to active."""
     return _lifecycle_action(restore_store, store_id, user, use_live_guard=False)
 
 
 @api.delete("/stores/{store_id}")
-def delete_store(store_id: int, db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
+def delete_store(store_id: int, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.MANAGE_STORES))):
     """Delete means archive. A Store owns Devices, sessions, targets and events;
     removing the row would destroy the only record of what was announced where."""
     _lifecycle_action(archive_store, store_id, user)
@@ -790,7 +852,7 @@ def delete_store(store_id: int, db: Session = Depends(get_db), user: HQUser = De
 
 
 @api.post("/stores/{store_id}/regenerate-token", response_model=StoreOut)
-def regenerate_token(store_id: int, db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
+def regenerate_token(store_id: int, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.MANAGE_STORES))):
     s = db.query(Store).filter(Store.id == store_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="Store not found")
@@ -802,7 +864,7 @@ def regenerate_token(store_id: int, db: Session = Depends(get_db), user: HQUser 
 
 
 @api.get("/stores/meta/regions-cities", response_model=StoresMetaOut)
-def stores_meta(db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
+def stores_meta(db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.VIEW_STATUS))):
     regions = [r[0] for r in db.query(Store.region).distinct().order_by(Store.region).all() if r[0]]
     cities = [c[0] for c in db.query(Store.city).distinct().order_by(Store.city).all() if c[0]]
     return StoresMetaOut(regions=regions, cities=cities)
@@ -832,7 +894,7 @@ def _resolve_targets(db: Session, payload: SessionCreate) -> List[Store]:
 
 
 @api.post("/broadcast/sessions", response_model=SessionOut, status_code=201)
-def create_session(payload: SessionCreate, db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
+def create_session(payload: SessionCreate, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.START_BROADCAST))):
     targets = _resolve_targets(db, payload)
     if not targets:
         raise HTTPException(status_code=400, detail="No stores match the selection criteria")
@@ -859,7 +921,7 @@ def create_session(payload: SessionCreate, db: Session = Depends(get_db), user: 
 
 
 @api.post("/broadcast/sessions/{sid}/start", response_model=SessionOut)
-async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
+async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.START_BROADCAST))):
     if manager.is_live():
         raise HTTPException(status_code=409, detail="A broadcast is already live")
     session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
@@ -937,7 +999,7 @@ async def _end_session(db: Session, session: BroadcastSession, final_status: str
 
 
 @api.post("/broadcast/sessions/{sid}/stop", response_model=SessionOut)
-async def stop_session(sid: int, db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
+async def stop_session(sid: int, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.STOP_BROADCAST))):
     session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -950,7 +1012,7 @@ async def stop_session(sid: int, db: Session = Depends(get_db), user: HQUser = D
 
 
 @api.post("/broadcast/emergency-stop")
-async def emergency_stop(db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
+async def emergency_stop(db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.EMERGENCY_STOP))):
     session = None
     if manager.live_session_id:
         session = db.query(BroadcastSession).filter(BroadcastSession.id == manager.live_session_id).first()
@@ -966,7 +1028,7 @@ async def emergency_stop(db: Session = Depends(get_db), user: HQUser = Depends(g
 
 
 @api.get("/broadcast/current")
-def current_broadcast(db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
+def current_broadcast(db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.VIEW_STATUS))):
     if not manager.live_session_id:
         return {"live": False}
     session = db.query(BroadcastSession).filter(BroadcastSession.id == manager.live_session_id).first()
@@ -985,12 +1047,12 @@ def current_broadcast(db: Session = Depends(get_db), user: HQUser = Depends(get_
 
 
 @api.get("/broadcast/history", response_model=List[SessionOut])
-def broadcast_history(limit: int = 50, db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
+def broadcast_history(limit: int = 50, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.VIEW_HISTORY))):
     return db.query(BroadcastSession).order_by(BroadcastSession.id.desc()).limit(limit).all()
 
 
 @api.get("/broadcast/sessions/{sid}", response_model=SessionDetailOut)
-def session_detail(sid: int, db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
+def session_detail(sid: int, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.VIEW_HISTORY))):
     session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1029,7 +1091,7 @@ def list_logs(
     level: Optional[str] = None,
     limit: int = 200,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(get_current_user),
+    user: HQUser = Depends(require(Permission.VIEW_LOGS)),
 ):
     q = db.query(SystemLog)
     if level:

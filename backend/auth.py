@@ -28,10 +28,16 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(user_id: int, username: str) -> str:
+def create_access_token(user_id: int, username: str, session_version: int = 1) -> str:
     payload = {
         "sub": str(user_id),
         "username": username,
+        # The whole revocation mechanism. Anything that must end this account's
+        # sessions - a password change or reset, a role change, a disable, an
+        # archive - increments the stored value, and every request below
+        # compares the two. Without it a token stays valid for the rest of its
+        # eight hours no matter what an administrator just did.
+        "sv": int(session_version),
         "exp": datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS),
         "type": "access",
     }
@@ -80,4 +86,12 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> HQUser:
     user = db.query(HQUser).filter(HQUser.id == int(payload["sub"])).first()
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found or inactive")
+
+    # A token minted before the account changed is no longer this account's
+    # token. Tokens with no version at all are from before this existed and are
+    # refused rather than trusted - the alternative is a permanent bypass that
+    # anybody holding an older token keeps forever.
+    current_version = int(getattr(user, "session_version", 1) or 1)
+    if int(payload.get("sv", 0)) != current_version:
+        raise HTTPException(status_code=401, detail="Session is no longer valid")
     return user

@@ -40,6 +40,16 @@ class HQUser(Base):
     password_hash = Column(String(255), nullable=False)
     role = Column(String(50), default="admin", nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
+    # Bumped by anything that must end this account's sessions: a password
+    # change or reset, a role change, a disable, an archive. The JWT carries the
+    # value it was minted with and every authenticated request compares it, so
+    # existing tokens fail on their next request instead of staying valid for
+    # the rest of their eight hours. See rbac.ensure_rbac_schema.
+    # server_default as well as default: the ORM default only fires for ORM
+    # inserts, and several tools and tests write hq_users rows with raw SQL that
+    # names its columns explicitly. Without a SQL-level default those inserts
+    # fail on a NOT NULL column that did not exist when they were written.
+    session_version = Column(Integer, default=1, server_default="1", nullable=False)
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
