@@ -42,6 +42,14 @@ from receiver_rotation_service import (
     RotationPersistenceError,
     rotate_receiver_device_credential,
 )
+from receiver_primary_device import (
+    DeviceNotPromotableError,
+    clear_primary_for_device,
+    describe_store_devices,
+    ensure_primary_device_schema,
+    primary_device_id,
+    promote_device,
+)
 from receiver_device_service import (
     MigrationNotReadyError,
     ReceiverDeviceServiceError,
@@ -236,6 +244,14 @@ def _write_log(db: Session, level: str, message: str):
 @app.on_event("startup")
 def startup_event():
     Base.metadata.create_all(bind=engine)
+
+    # Additive and idempotent - a new table, no ALTER on anything that already
+    # exists - so it is safe on every boot rather than needing a maintenance
+    # window. A host without the phase-one schema simply has an empty one.
+    try:
+        ensure_primary_device_schema(engine)
+    except Exception:
+        logger.warning("Receiver primary-device table could not be prepared", exc_info=False)
 
     # Decided here rather than at import: whether Device credentials can be
     # verified depends on the database and the key container, and neither is
@@ -490,6 +506,45 @@ def disable_receiver_device(
         raise HTTPException(status_code=503, detail=str(unavailable))
     _write_log(db, "warn", f"receiver_device_disabled device={public_id} by={user.username}")
     return ReceiverDeviceOut(**device)
+
+
+@api.post("/receiver-devices/{public_id}/promote", response_model=List[ReceiverDeviceOut])
+def promote_receiver_device(
+    public_id: str,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(get_current_user),
+):
+    """Make this one computer the Store's primary - the one that plays audio.
+
+    Explicit on purpose. Nothing promotes a standby automatically, because that
+    would move the announcement onto a computer nobody has confirmed is connected
+    to the amplifier, and do it silently.
+    """
+    try:
+        promoted = promote_device(engine, device_public_id=public_id, actor_user_id=user.id)
+    except DeviceNotPromotableError:
+        raise HTTPException(status_code=404, detail="Receiver Device not found or not active")
+    except Exception:
+        raise HTTPException(status_code=503, detail="The promotion could not be recorded")
+
+    _write_log(
+        db, "warn",
+        f"receiver_primary_promoted device={public_id} store_id={promoted['store_id']} by={user.username}",
+    )
+    return [ReceiverDeviceOut(**row) for row in list_devices(engine, store_id=promoted["store_id"])]
+
+
+@api.get("/stores/{store_id}/receiver-devices/roles")
+def read_receiver_device_roles(
+    store_id: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(get_current_user),
+):
+    """Every Device of one Store with its primary/standby role. No credentials."""
+    try:
+        return describe_store_devices(engine, store_id=store_id)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Receiver Device roles are unavailable")
 
 
 @api.post("/receiver-devices/{public_id}/rotate-credential",
@@ -1012,6 +1067,32 @@ async def ws_receiver(websocket: WebSocket):
     connection_id = uuid.uuid4().hex
 
     try:
+        # Which computer in this Store actually plays the announcement.
+        #
+        # A legacy Receiver has no Device identity, so it keeps the old
+        # one-connection-per-Store behaviour unchanged. An enrolled Device is
+        # primary only if an administrator promoted it: a Store with no primary
+        # receives no audio, rather than the announcement landing on whichever
+        # computer happened to connect first.
+        # The policy engages only once an administrator has designated a primary.
+        # Until then the Store behaves exactly as it always has: one connection,
+        # and it receives audio. Any other reading would mean that enrolling a
+        # Device took its Store off the air until somebody clicked Promote, which
+        # is not an upgrade anybody would survive across 44 Stores.
+        #
+        # Nothing here writes a primary row. A Store without one stays without
+        # one; it is simply not yet under the policy.
+        is_primary = True
+        demote_superseded_device = False
+        if identity.device_id is not None:
+            primary_id = primary_device_id(engine, store_id=store_id)
+            if primary_id is not None:
+                is_primary = primary_id == identity.device_id
+                # Only a genuine promotion demotes the outgoing socket. Everything
+                # else - including a reconnect that maps to the backfilled Device -
+                # is an ordinary replacement.
+                demote_superseded_device = is_primary
+
         await connection_manager.connect_receiver(
             store_id,
             websocket,
@@ -1020,6 +1101,8 @@ async def ws_receiver(websocket: WebSocket):
             authentication_source=identity.authentication_source,
             device_id=identity.device_id,
             credential_id=identity.credential_id,
+            is_primary=is_primary,
+            demote_superseded_device=demote_superseded_device,
         )
 
         # Preserve the existing runtime health write, but only after the exact
@@ -1057,6 +1140,7 @@ async def ws_receiver(websocket: WebSocket):
                 store_id,
                 websocket,
                 connection_id,
+                device_id=identity.device_id,
             ):
                 break
             try:
@@ -1069,6 +1153,7 @@ async def ws_receiver(websocket: WebSocket):
                     store_id,
                     websocket,
                     connection_id,
+                    device_id=identity.device_id,
                 ):
                     break
                 before = connection_manager.get_receiver_snapshot(store_id)
@@ -1088,6 +1173,7 @@ async def ws_receiver(websocket: WebSocket):
                 store_id,
                 websocket,
                 connection_id,
+                device_id=identity.device_id,
             ):
                 break
             received_at = datetime.now(timezone.utc)
@@ -1130,6 +1216,7 @@ async def ws_receiver(websocket: WebSocket):
             store_id,
             websocket,
             connection_id,
+            device_id=identity.device_id if identity is not None else None,
         )
         if disconnected_current:
             db = SessionLocal()

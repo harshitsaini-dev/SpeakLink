@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import logging
+import os
 import secrets
 import sys
 import uuid
@@ -710,8 +711,29 @@ def test_isolated_authentication_observes_transitioned_temporary_state(tmp_path:
 
 
 def test_focused_service_imports_no_runtime_and_changes_no_health_state(tmp_path: Path):
-    assert "server" not in sys.modules
-    assert "ws_manager" not in sys.modules
+    # Asked in a fresh interpreter, not of this one. The property under test is
+    # "importing this service does not drag in the runtime", which is a fact
+    # about the module's imports - but reading the ambient sys.modules made it a
+    # fact about whatever else happened to run first in this pytest worker, and
+    # any test file that imports ws_manager would fail it from a distance.
+    import subprocess
+
+    probe = (
+        "import sys; sys.path.insert(0, %r); "
+        "import receiver_migration_transition_service; "
+        "print('server' in sys.modules, 'ws_manager' in sys.modules)"
+        % str(Path(__file__).resolve().parents[1])
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "SPEAKLINK_DB_PATH": str(tmp_path / "probe.db")},
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "False False", (
+        f"the focused service pulled in the runtime: {completed.stdout.strip()}"
+    )
+
     fixture = _new_fixture(tmp_path, "runtime-boundary.db")
     stores_before = _rows(fixture.engine, "stores")
     _transition(fixture, "backfilled", "dual_verify")

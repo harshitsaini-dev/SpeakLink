@@ -272,6 +272,25 @@ def _set_status(engine: Engine, *, public_id: str, status: str) -> dict:
             ),
             {"status": status, "now": now, "public_id": public_id},
         ).rowcount
+
+        # A Device that is switched off or retired must not stay its Store's
+        # primary. This lives here rather than in the two endpoints so it cannot
+        # be forgotten by a third caller. Nothing is promoted in its place: the
+        # Store is left without a primary until an administrator chooses one,
+        # because a silent failover puts the announcement on a computer nobody
+        # has confirmed is plugged into the amplifier.
+        has_primary_table = connection.exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='receiver_store_primary_device'"
+        ).first()
+        if has_primary_table:
+            connection.execute(
+                text(
+                    "DELETE FROM receiver_store_primary_device WHERE device_id = "
+                    "(SELECT id FROM receiver_devices WHERE public_id = :public_id)"
+                ),
+                {"public_id": public_id},
+            )
         connection.commit()
     if not updated:
         raise DeviceNotFound("no Receiver Device with that identifier")

@@ -44,10 +44,19 @@ class WSManager:
         *,
         receiver_connection_inventory: ActiveReceiverConnectionInventory | None = None,
     ):
-        # store_id -> WebSocket
+        # store_id -> WebSocket. This is the ONLY thing fanout_audio sends to, so
+        # membership here is exactly "receives live audio". A standby is
+        # deliberately absent rather than present-and-filtered: one place to be
+        # right about it, and no way for a future caller to iterate the wrong dict.
         self.receivers: Dict[int, WebSocket] = {}
         # store_id -> server-generated ID for the exact current Receiver socket.
         self.receiver_connection_ids: Dict[int, str] = {}
+        # device_id -> WebSocket for Devices that are connected but not primary.
+        # They authenticate, heartbeat and report health; they receive no audio.
+        self.standby_receivers: Dict[int, WebSocket] = {}
+        self.standby_connection_ids: Dict[int, str] = {}
+        # device_id -> store_id, so a standby can be found without a database.
+        self.standby_store_ids: Dict[int, int] = {}
         # Connection IDs handed over to a replacement but not yet torn down.
         # Their own cleanup must never claim to be the current connection.
         self._superseded_connection_ids: Set[str] = set()
@@ -85,6 +94,8 @@ class WSManager:
         device_id: int | None = None,
         credential_id: int | None = None,
         received_at: datetime | None = None,
+        is_primary: bool = True,
+        demote_superseded_device: bool = False,
     ) -> AuthenticatedReceiverConnection:
         await ws.accept()
         event_time = received_at or authenticated_at
@@ -97,10 +108,57 @@ class WSManager:
             authenticated_at=authenticated_at,
         )
 
+        if device_id is not None and not is_primary:
+            await self._connect_standby(record, ws, event_time)
+            return record
+
         async with self._receiver_lock:
             # Preserve the existing one-current-connection-per-Store policy.
             old = self.receivers.get(store_id)
             old_connection_id = self.receiver_connection_ids.get(store_id)
+
+            # A *different* Device taking over can be a promotion rather than a
+            # replacement: the demoted computer stays connected and keeps
+            # reporting health, and simply leaves the fanout. Closing it would
+            # look like a fault on a machine that is working perfectly well.
+            #
+            # But this is never inferred from the device ids alone, and a test
+            # found out why. Under dual_verify a legacy Store token authenticates
+            # through the *backfilled* Device, so an ordinary reconnect with an
+            # enrolled credential also presents two different device ids while
+            # plainly meaning "replace me". Only a caller that has consulted the
+            # primary policy knows which of the two this is, so only a caller can
+            # ask for it. The default is exactly the old behaviour.
+            old_device_id = None
+            if old_connection_id is not None:
+                old_record = self.receiver_connection_inventory.get(old_connection_id)
+                old_device_id = getattr(old_record, "device_id", None)
+            if (
+                demote_superseded_device
+                and old is not None
+                and old_device_id is not None
+                and device_id is not None
+                and old_device_id != device_id
+            ):
+                self.receivers.pop(store_id, None)
+                self.receiver_connection_ids.pop(store_id, None)
+                self.standby_receivers[old_device_id] = old
+                self.standby_connection_ids[old_device_id] = old_connection_id
+                self.standby_store_ids[old_device_id] = store_id
+                # The socket survives the handover; the Store's health claims must
+                # not. READY and PLAYBACK_CONFIRMED were the old Device's, proved
+                # on the old Device's sound card. The incoming primary has to earn
+                # them again on its own hardware.
+                previous_snapshot = self.receiver_snapshots.get(store_id)
+                if (
+                    previous_snapshot is not None
+                    and previous_snapshot.connection is not ConnectionState.OFFLINE
+                ):
+                    self.receiver_snapshots[store_id] = mark_disconnected(
+                        previous_snapshot, event_time
+                    )
+                old = None
+
             if old is not None:
                 # Mark the outgoing connection before yielding to close().
                 # close() yields the event loop, and the old socket's cleanup
@@ -139,13 +197,81 @@ class WSManager:
         await self._notify_dashboards({"type": "receiver_status", "store_id": store_id, "status": "online"})
         return record
 
+    async def _connect_standby(
+        self,
+        record: AuthenticatedReceiverConnection,
+        ws: WebSocket,
+        event_time: datetime,
+    ) -> None:
+        """Register a Device that is connected but must not receive audio.
+
+        It never touches ``self.receivers``, so it cannot end up in the fanout,
+        and it replaces only its own previous socket - a standby reconnecting
+        must not disturb the primary or any other Device.
+        """
+        device_id = record.device_id
+        async with self._receiver_lock:
+            previous = self.standby_receivers.get(device_id)
+            previous_connection_id = self.standby_connection_ids.get(device_id)
+            if previous is not None:
+                if previous_connection_id is not None:
+                    self._superseded_connection_ids.add(previous_connection_id)
+                try:
+                    await previous.close(code=4001)
+                except Exception:
+                    pass
+                if previous_connection_id is not None:
+                    self.receiver_connection_inventory.remove(previous_connection_id)
+                    self._superseded_connection_ids.discard(previous_connection_id)
+
+            self.receiver_connection_inventory.register(record)
+            self.standby_receivers[device_id] = ws
+            self.standby_connection_ids[device_id] = record.connection_id
+            self.standby_store_ids[device_id] = record.store_id
+
+        await self._notify_dashboards({
+            "type": "receiver_status",
+            "store_id": record.store_id,
+            "device_id": device_id,
+            "role": "standby",
+            "status": "online",
+        })
+
+    def is_standby_connection(self, device_id: int, ws: WebSocket, connection_id: str) -> bool:
+        return (
+            self.standby_receivers.get(device_id) is ws
+            and self.standby_connection_ids.get(device_id) == connection_id
+        )
+
+    def disconnect_standby(self, device_id: int, ws: WebSocket, connection_id: str) -> bool:
+        """Remove one standby. The primary and every other Device are untouched."""
+        if connection_id in self._superseded_connection_ids:
+            return False
+        if not self.is_standby_connection(device_id, ws, connection_id):
+            # An orphan from a replaced socket: drop only its own record.
+            if connection_id not in self.standby_connection_ids.values():
+                self.receiver_connection_inventory.remove(connection_id)
+            return False
+        self.standby_receivers.pop(device_id, None)
+        self.standby_connection_ids.pop(device_id, None)
+        self.standby_store_ids.pop(device_id, None)
+        self.receiver_connection_inventory.remove(connection_id)
+        return True
+
     def disconnect_receiver(
         self,
         store_id: int,
         ws: WebSocket,
         connection_id: str | None = None,
         received_at: datetime | None = None,
+        device_id: int | None = None,
     ) -> bool:
+        if (
+            device_id is not None
+            and connection_id is not None
+            and self.standby_connection_ids.get(device_id) == connection_id
+        ):
+            return self.disconnect_standby(device_id, ws, connection_id)
         cur = self.receivers.get(store_id)
         current_connection_id = self.receiver_connection_ids.get(store_id)
         exact_connection_id = connection_id or (
@@ -190,7 +316,16 @@ class WSManager:
         store_id: int,
         ws: WebSocket,
         connection_id: str,
+        device_id: int | None = None,
     ) -> bool:
+        """Is this socket the live one for its role?
+
+        A standby is current in its own right. Without this it would look stale
+        the moment it connected, and its heartbeats would be discarded - which
+        would show an operator a standby that is plainly running as OFFLINE.
+        """
+        if device_id is not None and self.standby_connection_ids.get(device_id) == connection_id:
+            return self.is_standby_connection(device_id, ws, connection_id)
         return (
             self.receivers.get(store_id) is ws
             and self.receiver_connection_ids.get(store_id) == connection_id
