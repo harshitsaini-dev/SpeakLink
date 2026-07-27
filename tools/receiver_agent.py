@@ -148,8 +148,68 @@ def _is_loopback(hostname: str | None) -> bool:
         return False
 
 
-def normalise_backend_url(url: object, *, allow_insecure_loopback: bool) -> str:
-    """Return a clean base URL, or refuse to send a credential in the clear."""
+#: The three RFC1918 ranges, named explicitly.
+#:
+#: ``ipaddress.is_private`` is a wider set than RFC1918: it also covers loopback,
+#: link-local, benchmarking and the documentation ranges. 203.0.113.10 is
+#: TEST-NET-3, and ``is_private`` calls it private - so a check written on that
+#: property would have accepted a documentation address as a LAN. A test found
+#: exactly that. These are the ranges a Store network actually uses.
+_RFC1918_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+
+
+def _is_private_lan_address(hostname: str | None) -> bool:
+    """A literal RFC1918 IPv4 address, and nothing that merely resembles one.
+
+    A hostname is refused however internal it looks. A name resolves wherever
+    its owner points it and can be repointed tomorrow, so it cannot be checked
+    at the moment it is used - which is the only moment that matters.
+    """
+    if not hostname:
+        return False
+    try:
+        parsed = ipaddress.ip_address(hostname.strip("[]"))
+    except ValueError:
+        return False
+    if parsed.version != 4:
+        return False
+    if not any(parsed in network for network in _RFC1918_NETWORKS):
+        return False
+    return not (
+        parsed.is_loopback or parsed.is_link_local
+        or parsed.is_multicast or parsed.is_unspecified
+    )
+
+
+def normalise_backend_url(
+    url: object,
+    *,
+    allow_insecure_loopback: bool,
+    allow_insecure_private_lan: bool = False,
+    expected_hq_host: str | None = None,
+) -> str:
+    """Return a clean base URL, or refuse to send a credential in the clear.
+
+    HTTPS needs nothing. Plain HTTP needs one of two explicit, separate
+    decisions, and neither implies the other:
+
+    ``--allow-insecure-loopback``
+        Loopback only, for local testing.
+
+    ``--allow-insecure-private-lan`` with ``--expected-hq-host``
+        A literal RFC1918 IPv4 address that equals the host the operator named.
+        "Any private address" is not the same as "the address the operator
+        assigned and firewalled": a typo pointing at another machine on the same
+        subnet would otherwise be accepted in silence, and a Receiver would hand
+        its credential to whatever answered.
+
+    A public address is refused under both, always. So is a hostname, however
+    internal it looks.
+    """
     if not isinstance(url, str) or not url.strip():
         raise AgentError("a backend URL is required")
     cleaned = url.strip().rstrip("/")
@@ -157,22 +217,48 @@ def normalise_backend_url(url: object, *, allow_insecure_loopback: bool) -> str:
     if parts.scheme not in ("http", "https") or not parts.netloc:
         raise AgentError(
             "the backend URL must start with https:// (or http:// for loopback "
-            "during local testing)"
+            "or an approved private LAN address during testing)"
         )
-    if parts.scheme == "http":
-        if not _is_loopback(parts.hostname):
-            raise InsecureBackendError(
-                "refusing to send a Receiver credential over plain HTTP to "
-                f"{parts.hostname!r}. Use https://, or run against loopback for "
-                "local testing."
-            )
+    if parts.scheme == "https":
+        return cleaned
+
+    hostname = parts.hostname
+
+    if _is_loopback(hostname):
         if not allow_insecure_loopback:
             raise InsecureBackendError(
                 "plain HTTP to loopback is allowed only with "
                 "--allow-insecure-loopback, so it can never happen by accident "
                 "in a Store."
             )
-    return cleaned
+        return cleaned
+
+    if allow_insecure_private_lan:
+        if not expected_hq_host:
+            raise AgentError(
+                "--allow-insecure-private-lan requires --expected-hq-host. The "
+                "flag permits one named HQ address, not any private address that "
+                "happens to answer."
+            )
+        if not _is_private_lan_address(hostname):
+            raise InsecureBackendError(
+                f"refusing plain HTTP to {hostname!r}: the private LAN pilot mode "
+                "accepts only a literal RFC1918 IPv4 address. A hostname can be "
+                "repointed, and a public address is never a LAN."
+            )
+        if hostname != expected_hq_host.strip():
+            raise InsecureBackendError(
+                f"the backend URL points at {hostname}, but this Receiver was told "
+                f"to expect {expected_hq_host}. Refusing rather than handing a "
+                "credential to whatever answered."
+            )
+        return cleaned
+
+    raise InsecureBackendError(
+        "refusing to send a Receiver credential over plain HTTP to "
+        f"{hostname!r}. Use https://, or - for a private LAN pilot only - pass "
+        "--allow-insecure-private-lan together with --expected-hq-host."
+    )
 
 
 def enrolment_endpoint(base_url: str) -> str:
@@ -277,6 +363,8 @@ def enrol(
     transport=None,
     now: datetime | None = None,
     allow_insecure_loopback: bool = False,
+    allow_insecure_private_lan: bool = False,
+    expected_hq_host: str | None = None,
     attempts: int = 1,
     retry_sleep=time.sleep,
     timeout: float = REQUEST_TIMEOUT_SECONDS,
@@ -287,7 +375,12 @@ def enrol(
     computer is already enrolled would burn a good code *and* leave the Device it
     is currently using stranded.
     """
-    base = normalise_backend_url(backend_url, allow_insecure_loopback=allow_insecure_loopback)
+    base = normalise_backend_url(
+        backend_url,
+        allow_insecure_loopback=allow_insecure_loopback,
+        allow_insecure_private_lan=allow_insecure_private_lan,
+        expected_hq_host=expected_hq_host,
+    )
     credential_path = Path(credential_path)
     if not isinstance(code, str) or not code.strip():
         raise AgentError("an enrolment code is required")
@@ -687,6 +780,21 @@ def build_parser() -> argparse.ArgumentParser:
                                    help="HQ base URL, https:// in production.")
             subparser.add_argument("--allow-insecure-loopback", action="store_true",
                                    help="Permit plain HTTP to 127.0.0.1 for local testing only.")
+            subparser.add_argument(
+                "--allow-insecure-private-lan", action="store_true",
+                help=(
+                    "PRIVATE LAN PILOT ONLY. Permit plain HTTP to one named "
+                    "RFC1918 address. Requires --expected-hq-host. Never permits "
+                    "a public address, and never a hostname."
+                ),
+            )
+            subparser.add_argument(
+                "--expected-hq-host", default=None,
+                help=(
+                    "The literal HQ IPv4 address this Receiver is allowed to talk "
+                    "to, e.g. 192.168.4.134. Not a secret."
+                ),
+            )
         subparser.add_argument("--credential-path", default=None,
                                help="Where the sealed credential FILE lives (not a secret).")
 
@@ -751,7 +859,16 @@ def _run_command(arguments) -> int:
     base = normalise_backend_url(
         arguments.backend_url,
         allow_insecure_loopback=arguments.allow_insecure_loopback,
+        allow_insecure_private_lan=arguments.allow_insecure_private_lan,
+        expected_hq_host=arguments.expected_hq_host,
     )
+    if arguments.allow_insecure_private_lan:
+        # Loud, and without any secret in it. An operator who sees this on a
+        # machine that is not part of a pilot has found a real problem.
+        print("WARNING: private LAN pilot mode. This Receiver is sending its")
+        print("         credential over plain HTTP to " + str(arguments.expected_hq_host) + ".")
+        print("         Only ever correct on a trusted private network.")
+        print("         Production requires HTTPS and WSS.")
     ws_url = receiver_websocket_url(base)
     path = _credential_path(arguments)
 
@@ -826,6 +943,8 @@ def main(argv: list[str] | None = None) -> int:
                 credential_path=path,
                 protector=protector,
                 allow_insecure_loopback=arguments.allow_insecure_loopback,
+                allow_insecure_private_lan=arguments.allow_insecure_private_lan,
+                expected_hq_host=arguments.expected_hq_host,
                 attempts=arguments.attempts,
             )
             del code
