@@ -1786,3 +1786,122 @@ Still open and unchanged by this branch: the in-browser Receiver page
 (`Receiver.jsx`) targets `/ws/receiver/{token}`, a backend route that does not
 exist, and would place a Store credential in a URL path. It belongs with
 Receiver device enrolment.
+
+
+---
+
+## Receiver device enrolment, first half (2026-07-27)
+
+Branch `security/receiver-device-enrolment`. Full detail:
+[`RECEIVER_ENROLMENT.md`](RECEIVER_ENROLMENT.md).
+
+### What the inspection found
+
+A Store is a broadcast target; a Receiver Device is one Windows computer. Today
+they are conflated: every Receiver for a Store presents the same raw 32-hex
+value from `stores.receiver_token`. Two machines in one shop are
+indistinguishable, revoking one revokes both, and the credential reached a
+machine by being copied out of the UI.
+
+A great deal of the *right* design already exists and was not rebuilt:
+`migrations.py` writes `receiver_devices`, `receiver_credentials`,
+`receiver_credential_events` and `receiver_credential_migration_state` with keys,
+CHECK constraints and indexes; `receiver_device_service.enroll_receiver_device`
+issues one device credential once; `receiver_credentials.py` defines the
+versioned `echocast_rcv_v1.<uuid>.<secret>` format with HMAC-SHA256 verifiers and
+a key ring; and there are backfill, transition and cutover rehearsals.
+
+**None of it has ever run against a live database.** The pilot database holds
+only `stores`, `hq_users`, `broadcast_sessions`, `broadcast_targets`,
+`receiver_events` and `system_logs` — no `schema_migrations`, no
+`receiver_devices`.
+
+The missing piece was the front door: nothing let a Receiver computer *obtain* a
+credential.
+
+### Delivered: one-time enrolment codes
+
+`backend/receiver_enrollment_codes.py` and the `receiver_enrollment_codes` table,
+created by `create_all` so no migration was required and no existing row was
+touched.
+
+| Property | Behaviour |
+| --- | --- |
+| Material | 24 bytes from `secrets.token_urlsafe` |
+| Stored | SHA-256 verifier only — never the code |
+| Lifetime | 900 s |
+| Uses | exactly one |
+| Concurrency | conditional `UPDATE`; a threaded race has exactly one winner |
+| Refusal | never echoes the supplied value; `IssuedEnrollmentCode.__repr__` hides it |
+| Store state | refused for unknown, inactive, or disabled-after-issue Stores |
+
+25 tests, written first, captured RED. One of them was wrong on the first run
+and was fixed rather than loosened: it asserted `"UN"` did not appear inside the
+code, but random base64url contains any two-character string often enough that
+this proved nothing. It now asserts the real property — URL-safe alphabet, and a
+length that does not vary with the Store or the administrator.
+
+### Deliberately not delivered: the credential half
+
+Redeeming a code must produce a device credential, and issuing one needs the
+HMAC key ring. `RECEIVER_HOSTING_KEY_STORAGE_ADR.md` already decided how that key
+must be held:
+
+> DPAPI-protected versioned HMAC-key container outside Git and SQLite …
+> Only non-secret key-version metadata lives in normal application
+> configuration.
+
+Supplying it through an environment variable would contradict that approved
+decision, and the ADR still lists the DPAPI protection-scope choice as an open
+prerequisite. So no enrolment endpoint was written. The code layer establishes
+**who may ask**; wiring redemption to `enroll_receiver_device` is the next
+branch, and it starts with key custody rather than with a route.
+
+### Delivered: credentials removed from the browser
+
+Store Management rendered `${origin}/receiver?token=<credential>` behind a Copy
+button for every Store — a long-lived shared secret travelling through a
+clipboard, and through any chat message, browser history entry or log that saw
+the link. That column, the button and the helper are gone. Credential rotation
+stays, because an operator must be able to revoke; what changed is that the new
+value is never displayed.
+
+`Receiver.jsx` is no longer routed or imported. It connected to
+`/ws/receiver/{token}`, a backend route that does not exist — the real socket is
+`/api/ws/receiver` with an `Authorization` header — so it could never have
+worked. The component is kept, with a header explaining why, because a
+browser-based Receiver harness is worth rebuilding on top of device enrolment.
+
+### Verification
+
+| Suite | Result |
+| --- | --- |
+| Focused enrolment code tests | 25 passed, three consecutive runs |
+| Complete backend | **804 passed, 1 skipped** (was 779) |
+| Complete backend, serial `-n 0` | 804 passed, 1 skipped |
+| Playwright Chromium | 47 passed (was 42) |
+| Frontend production build | compiled |
+| Null-sink one-Store smoke | `ONE_STORE_AUDIO_SOFTWARE_PILOT_PASSED` |
+| `compileall backend tools` | exit 0 |
+
+### Status
+
+`NOT_READY_FOR_PRODUCTION`. Remaining blockers:
+
+1. **DPAPI key custody** — the prerequisite for issuing any device credential.
+2. Applying `run_receiver_credential_phase_one` to a real database, with a
+   verified backup and a rehearsed rollback.
+3. The enrolment HTTP endpoints.
+4. Windows Receiver agent enrolment, and secure storage for the device
+   credential under `%LOCALAPPDATA%\EchoCast-AI` — **not** implemented.
+5. Retiring `stores.receiver_token` once every Store has enrolled Devices.
+6. Receiver token hashing and rotation.
+7. Shared rate-limit storage before any multi-worker deployment.
+8. HTTPS/WSS.
+9. Restricted production CORS.
+10. Broader audit logging.
+11. Windows Receiver auto-start and recovery.
+12. EchoGuard pause/resume.
+13. Acoustic speaker verification — `SPEAKER_VERIFIED` remains `NOT_IMPLEMENTED`.
+14. Two-Store real hardware evidence.
+15. Staging deployment validation.
