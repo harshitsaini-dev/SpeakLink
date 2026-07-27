@@ -21,6 +21,12 @@ class Store(Base):
     is_online_store = Column(Boolean, default=False, nullable=False)
     receiver_token = Column(String(64), unique=True, nullable=False, index=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    # active | disabled | archived. Kept in lockstep with is_active rather than
+    # replacing it: broadcast targeting, enrolment and Receiver authentication
+    # all already filter on is_active, so none of them had to learn about
+    # archiving - and none of them can accidentally miss it. See
+    # store_lifecycle.py; existing databases get the column additively.
+    lifecycle_state = Column(String(20), default="active", nullable=True, index=True)
     status = Column(String(20), default="offline", nullable=False)  # online|offline|playing|error
     last_seen = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)

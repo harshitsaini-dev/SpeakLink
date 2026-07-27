@@ -42,6 +42,20 @@ from receiver_rotation_service import (
     RotationPersistenceError,
     rotate_receiver_device_credential,
 )
+from store_lifecycle import (
+    StoreLifecycleError,
+    StoreNotFoundError,
+    StoreNotRestorableError,
+    StoreTransitionRefused,
+    archive_store,
+    disable_store,
+    enable_store,
+    ensure_store_lifecycle_schema,
+    restore_store,
+    validate_location,
+    validate_store_code,
+    validate_store_name,
+)
 from receiver_primary_device import (
     DeviceNotPromotableError,
     clear_primary_for_device,
@@ -252,6 +266,13 @@ def startup_event():
         ensure_primary_device_schema(engine)
     except Exception:
         logger.warning("Receiver primary-device table could not be prepared", exc_info=False)
+
+    # One additive column plus a backfill from is_active. Cheap on SQLite - no
+    # row rewrite, no index rebuild - so it belongs at startup, not in a window.
+    try:
+        ensure_store_lifecycle_schema(engine)
+    except Exception:
+        logger.warning("Store lifecycle column could not be prepared", exc_info=False)
 
     # Decided here rather than at import: whether Device credentials can be
     # verified depends on the database and the key container, and neither is
@@ -625,12 +646,20 @@ def list_stores(
     status_f: Optional[str] = Query(None, alias="status"),
     q: Optional[str] = None,
     include_inactive: bool = False,
+    include_archived: bool = False,
     db: Session = Depends(get_db),
     user: HQUser = Depends(get_current_user),
 ):
     query = db.query(Store)
     if not include_inactive:
         query = query.filter(Store.is_active.is_(True))
+    if not include_archived:
+        # Archived Stores are retired, not hidden: include_archived shows them so
+        # their history stays reachable, but they never appear in the ordinary
+        # list an operator picks broadcast targets from.
+        query = query.filter(
+            (Store.lifecycle_state.is_(None)) | (Store.lifecycle_state != "archived")
+        )
     if city:
         query = query.filter(Store.city == city)
     if region:
@@ -663,25 +692,102 @@ def create_store(payload: StoreCreate, db: Session = Depends(get_db), user: HQUs
 
 @api.put("/stores/{store_id}", response_model=StoreOut)
 def update_store(store_id: int, payload: StoreUpdate, db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
+    """Edit a Store's details. Never its state, and never its credentials."""
     s = db.query(Store).filter(Store.id == store_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="Store not found")
-    for k, v in payload.model_dump(exclude_unset=True).items():
-        setattr(s, k, v)
+
+    fields = payload.model_dump(exclude_unset=True)
+    validators = {
+        "store_code": validate_store_code,
+        "store_name": validate_store_name,
+        "city": lambda value: validate_location(value, field="city"),
+        "region": lambda value: validate_location(value, field="region"),
+    }
+    try:
+        for name, validate in validators.items():
+            if name in fields and fields[name] is not None:
+                fields[name] = validate(fields[name])
+    except StoreLifecycleError as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+
+    new_code = fields.get("store_code")
+    if new_code and new_code != s.store_code:
+        clash = db.query(Store).filter(Store.store_code == new_code, Store.id != store_id).first()
+        if clash:
+            raise HTTPException(status_code=409, detail="store_code already exists")
+
+    before = {"code": s.store_code, "name": s.store_name}
+    for key, value in fields.items():
+        if value is not None:
+            setattr(s, key, value)
     db.commit()
     db.refresh(s)
+    _write_log(
+        db, "info",
+        f"store_edited store_id={store_id} code={before['code']}->{s.store_code} by={user.username}",
+    )
     return s
+
+
+def _live_store_ids() -> set[int]:
+    """Stores currently receiving a live broadcast, so one cannot be pulled out
+    from under an announcement the people in it are listening to."""
+    if not manager.is_live():
+        return set()
+    return set(manager.live_target_store_ids)
+
+
+def _lifecycle_action(transition, store_id: int, user: HQUser, *, use_live_guard: bool = True):
+    try:
+        transition(
+            SessionLocal, store_id=store_id, actor_user_id=user.id,
+            **({"live_store_ids": _live_store_ids()} if use_live_guard else {}),
+        )
+    except StoreNotFoundError:
+        raise HTTPException(status_code=404, detail="Store not found")
+    except StoreNotRestorableError as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    except StoreTransitionRefused as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    except StoreLifecycleError as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+
+    store = SessionLocal().query(Store).filter(Store.id == store_id).first()
+    return StoreOut.model_validate(store)
+
+
+@api.post("/stores/{store_id}/disable", response_model=StoreOut)
+def disable_store_endpoint(store_id: int, user: HQUser = Depends(get_current_user)):
+    """Switch a Store off. Reversible; its history is untouched."""
+    return _lifecycle_action(disable_store, store_id, user)
+
+
+@api.post("/stores/{store_id}/enable", response_model=StoreOut)
+def enable_store_endpoint(store_id: int, user: HQUser = Depends(get_current_user)):
+    """Switch a Store back on. An archived Store is not reachable from here."""
+    return _lifecycle_action(enable_store, store_id, user, use_live_guard=False)
+
+
+@api.post("/stores/{store_id}/archive", response_model=StoreOut)
+def archive_store_endpoint(store_id: int, user: HQUser = Depends(get_current_user)):
+    """Retire a Store. Nothing is deleted - the row, its Devices, its sessions
+    and its events all stay readable."""
+    return _lifecycle_action(archive_store, store_id, user)
+
+
+@api.post("/stores/{store_id}/restore", response_model=StoreOut)
+def restore_store_endpoint(store_id: int, user: HQUser = Depends(get_current_user)):
+    """Bring an archived Store back to DISABLED, never straight to active."""
+    return _lifecycle_action(restore_store, store_id, user, use_live_guard=False)
 
 
 @api.delete("/stores/{store_id}")
 def delete_store(store_id: int, db: Session = Depends(get_db), user: HQUser = Depends(get_current_user)):
-    s = db.query(Store).filter(Store.id == store_id).first()
-    if not s:
-        raise HTTPException(status_code=404, detail="Store not found")
-    s.is_active = False
-    db.commit()
-    _write_log(db, "info", f"Store disabled: {s.store_code}")
-    return {"ok": True}
+    """Delete means archive. A Store owns Devices, sessions, targets and events;
+    removing the row would destroy the only record of what was announced where."""
+    _lifecycle_action(archive_store, store_id, user)
+    return {"ok": True, "archived": True}
 
 
 @api.post("/stores/{store_id}/regenerate-token", response_model=StoreOut)
