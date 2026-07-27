@@ -37,6 +37,36 @@ class HQUser(Base):
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
+class ReceiverEnrollmentCode(Base):
+    """A one-time code that lets one Windows computer earn its own credential.
+
+    Today every Receiver for a Store shares the single raw token in
+    ``stores.receiver_token``: two computers in the same shop present the same
+    secret, so the backend cannot tell them apart and revoking one revokes both.
+    A code is the first half of fixing that - something an administrator hands
+    to one computer, which is useless the moment it is used or a few minutes
+    pass.
+
+    Only a verifier is stored, never the code, so a database copy cannot enrol
+    anything. ``redeemed_at`` is what makes redemption single-use, and the
+    unique index on ``code_hash`` is what makes a concurrent race have exactly
+    one winner.
+
+    This table is created by ``create_all``. The Receiver *Device* tables come
+    from ``migrations.run_receiver_credential_phase_one`` and are deliberately
+    left alone here.
+    """
+
+    __tablename__ = "receiver_enrollment_codes"
+    id = Column(Integer, primary_key=True)
+    code_hash = Column(String(64), unique=True, nullable=False, index=True)
+    store_id = Column(Integer, ForeignKey("stores.id"), nullable=False, index=True)
+    created_by = Column(Integer, ForeignKey("hq_users.id"), nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    expires_at_epoch = Column(Float, nullable=False)
+    redeemed_at_epoch = Column(Float, nullable=True)
+
+
 class LoginSecurityState(Base):
     """Consecutive failed sign-ins for one real account.
 
