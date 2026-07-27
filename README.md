@@ -53,6 +53,20 @@ later does not rotate anything, and a different `ADMIN_USERNAME` does not create
 a second account. Rotating a password is a deliberate administrative action, not
 something a restart does on your behalf.
 
+### How credentials travel
+
+| Path | Transport |
+| --- | --- |
+| Ordinary authenticated HTTP | `Authorization: Bearer <token>` — **header only** |
+| HQ dashboard WebSocket | single-use ticket in the URL, valid ~20 s, redeemed once |
+| Broadcaster WebSocket | same single-use ticket scheme |
+| Receiver WebSocket | `Authorization: Bearer <store credential>` header |
+
+No reusable credential is ever accepted from a URL. A URL is the least private
+part of a request — it reaches access logs, proxy logs, browser history, copied
+links and Referer headers — so the only thing allowed there is a ticket that is
+worthless seconds later and after a single use.
+
 ### Login protection (optional, with safe defaults)
 
 The login is rate-limited and locks an account after repeated failures. You do

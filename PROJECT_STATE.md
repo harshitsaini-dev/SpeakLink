@@ -1665,3 +1665,124 @@ which is what two new test modules kept breaking. It now asserts the two things
 that actually matter — that the environment the subprocess inherits carries the
 isolated path, and that the parent's engine never points at the protected
 database — and passes in any collection order.
+
+---
+
+## HTTP authentication is header-only (2026-07-27)
+
+Branch `security/remove-http-token-query-fallback`.
+
+### What was there
+
+`backend/auth.py` `_extract_token` accepted an access token from `?token=` on
+ordinary HTTP requests:
+
+```python
+auth = request.headers.get("Authorization", "")
+if auth.startswith("Bearer "):
+    return auth[7:]
+# fallback: query param (used by WebSocket)
+qtoken = request.query_params.get("token")
+if qtoken:
+    return qtoken
+```
+
+The comment was accurate when it was written. Once the HQ sockets moved to
+single-use tickets it stopped protecting anything and became a second, worse way
+into all **17** routes that depend on `get_current_user`.
+
+Worse, because a URL is the least private part of a request. It reaches
+application access logs, reverse-proxy logs, browser history, copied links,
+monitoring tools, screenshots and Referer headers. A reusable JWT sitting in one
+is a session anybody who can read a log line can take over — and ordinary HTTP
+has no excuse, because every client here, browsers included, can set a header.
+
+### Every authentication path, checked rather than assumed
+
+| Path | Credential transport | Depended on the query fallback |
+| --- | --- | :---: |
+| Ordinary authenticated HTTP | `Authorization: Bearer` **or** `?token=` | **this is where it lived** |
+| HQ dashboard WebSocket | single-use ticket (`?ticket=`) | no |
+| Broadcaster WebSocket | single-use ticket (`?ticket=`) | no |
+| Receiver WebSocket | `Authorization: Bearer` header | no — query tokens were already rejected |
+| Receiver enrolment / runtime auth | dedicated service, header-based | no |
+| Frontend HTTP calls | `Authorization: Bearer` (`api.js`) | no |
+| Frontend WebSocket creation | ticket only | no |
+| `tools/*` HTTP calls | `Authorization: Bearer` | no |
+
+**No caller depended on it.** The two remaining `?token=` uses in tools and
+tests are probes that assert a query token is *rejected*, not clients that rely
+on one. `StoreManagement.jsx` builds a `/receiver?token=` link for the
+in-browser Receiver page — a separate, already-recorded finding about that page,
+not an API authentication URL.
+
+### What it does now
+
+```python
+authorization = request.headers.get("Authorization", "")
+scheme, _, credential = authorization.partition(" ")
+if scheme == "Bearer" and credential.strip():
+    return credential
+raise HTTPException(status_code=401, detail="Not authenticated")
+```
+
+Header only, with no compatibility fallback. The existing controlled 401, the
+JWT validation, the password hashing, the WebSocket ticket scheme and the
+Receiver transport are all unchanged. The refused value is never echoed into the
+response and never logged.
+
+The scheme match is now exact: `bearer`, `BearerX`, `Basic`, a bare `Bearer` and
+an empty credential are all refused, where the old `startswith("Bearer ")` would
+have accepted `Bearer ` followed by whitespace.
+
+### Tests
+
+31 focused tests in `backend/tests/test_http_token_transport.py`, written first.
+RED was 6 failed / 25 passed — exactly the six about the fallback.
+
+They cover: a query token alone refused; a genuine unexpired JWT refused purely
+because of its transport, with the same token accepted in a header in the same
+test; a query token unable to rescue a malformed header; four other query
+parameter names refused; the refusal never echoing or logging the value; no user
+context created; the header path, malformed headers and expired tokens behaving
+as before; and source-level guards that `auth.py` never reads the query string
+again and no HTTP route declares a credential query parameter. The WebSocket and
+Receiver transports are pinned so this change cannot quietly alter them, and the
+frontend is checked for building any API URL with a reusable token.
+
+| Suite | Result |
+| --- | --- |
+| Focused transport tests | 31 passed |
+| Focused auth/login/bootstrap/ticket/receiver/smoke | 226 passed |
+| Complete backend | **779 passed, 1 skipped** (was 749), twice |
+| Complete backend, serial `-n 0` | 779 passed, 1 skipped |
+| Playwright Chromium | 42 passed |
+| Frontend production build | compiled |
+| Null-sink one-Store smoke | `ONE_STORE_AUDIO_SOFTWARE_PILOT_PASSED` |
+| `compileall backend tools` | exit 0 |
+
+One of the new tests was flaky under `xdist` and was fixed rather than re-run:
+it monkeypatched `auth.datetime` to mint an expired token, which was really
+testing the clock. It now signs a token whose `exp` is simply in the past.
+
+### Status
+
+`NOT_READY_FOR_PRODUCTION`. Remaining blockers:
+
+1. Receiver device enrolment.
+2. Unique per-Receiver credentials.
+3. Receiver token hashing and rotation.
+4. Shared rate-limit storage before any multi-worker deployment.
+5. HTTPS/WSS.
+6. Restricted production CORS.
+7. Broader audit logging.
+8. Windows Receiver auto-start and recovery.
+9. EchoGuard pause/resume.
+10. Acoustic speaker verification — `SPEAKER_VERIFIED` remains `NOT_IMPLEMENTED`.
+11. Two-Store real hardware evidence.
+12. Staging deployment validation.
+
+Still open and unchanged by this branch: the in-browser Receiver page
+(`Receiver.jsx`) targets `/ws/receiver/{token}`, a backend route that does not
+exist, and would place a Store credential in a URL path. It belongs with
+Receiver device enrolment.

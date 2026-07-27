@@ -48,13 +48,27 @@ def decode_token(token: str) -> dict:
 
 
 def _extract_token(request: Request) -> str:
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        return auth[7:]
-    # fallback: query param (used by WebSocket)
-    qtoken = request.query_params.get("token")
-    if qtoken:
-        return qtoken
+    """Read the access token from the Authorization header, and nowhere else.
+
+    This used to fall back to ``?token=`` in the query string, for the benefit
+    of WebSockets. The HQ sockets now authenticate with single-use tickets, so
+    the fallback protected nothing and was simply a second, worse way into
+    every authenticated route.
+
+    Worse, because a URL is the least private part of a request: it reaches
+    application access logs, reverse-proxy logs, browser history, copied links,
+    monitoring tools, screenshots and Referer headers. A reusable token sitting
+    in one is a session anybody who can read a log line can take over. Ordinary
+    HTTP has no excuse either - every client here, browsers included, can set a
+    header perfectly well.
+
+    The token is not echoed in the refusal, so a bad value cannot be read back
+    out of an error response or a log that records it.
+    """
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, credential = authorization.partition(" ")
+    if scheme == "Bearer" and credential.strip():
+        return credential
     raise HTTPException(status_code=401, detail="Not authenticated")
 
 
