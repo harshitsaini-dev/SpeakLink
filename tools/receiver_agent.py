@@ -1085,7 +1085,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Write rotating, bounded, secret-free logs here. Required in practice "
             "when Task Scheduler runs this hidden, because there is then no "
             "console for anything printed to reach. Defaults to "
-            r"%LOCALAPPDATA%\EchoCast-AI\receiver\logs."
+            # argparse expands help through %-formatting, so a literal percent
+            # must be doubled. A single one here crashed `run --help` outright.
+            r"%%LOCALAPPDATA%%\EchoCast-AI\receiver\logs."
         ),
     )
     run_command.add_argument(
