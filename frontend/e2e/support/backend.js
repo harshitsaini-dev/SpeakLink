@@ -1,4 +1,4 @@
-// A mocked SpeakLink backend, shaped exactly like the real one.
+﻿// A mocked SpeakLink backend, shaped exactly like the real one.
 //
 // Every response here mirrors what backend/server.py actually returns, so a
 // test that passes against these mocks is testing the real contract and not a
@@ -12,6 +12,7 @@ const UN = {
   region: 'UN ZONE',
   is_online_store: true,
   is_active: true,
+  lifecycle_state: 'active',
   status: 'online',
 };
 
@@ -23,6 +24,7 @@ const ASR = {
   region: 'UN ZONE',
   is_online_store: false,
   is_active: true,
+  lifecycle_state: 'active',
   status: 'offline',
 };
 
@@ -34,6 +36,7 @@ const DM = {
   region: 'UN ZONE',
   is_online_store: false,
   is_active: true,
+  lifecycle_state: 'active',
   status: 'offline',
 };
 
@@ -98,6 +101,10 @@ async function mockBackend(page, options = {}) {
     promotions: [],
     disables: [],
     revokes: [],
+    edits: [],
+    transitions: [],
+    regenerations: [],
+    liveStoreIds: options.liveStoreIds || [],
   };
 
   await page.route('**/api/**', async (route) => {
@@ -134,7 +141,65 @@ async function mockBackend(page, options = {}) {
     }
 
     if (method === 'GET' && path === '/stores') {
-      return route.fulfill(json(state.stores));
+      // The real backend hides archived Stores unless asked. Mirror that, so a
+      // test cannot pass here and fail against the server.
+      const includeArchived = url.searchParams.get('include_archived') === 'true';
+      const visible = includeArchived
+        ? state.stores
+        : state.stores.filter((s) => (s.lifecycle_state || 'active') !== 'archived');
+      return route.fulfill(json(visible));
+    }
+
+    if (method === 'PUT' && /^\/stores\/\d+$/.test(path)) {
+      const id = Number(path.split('/')[2]);
+      const payload = request.postDataJSON();
+      if ('receiver_token' in payload || 'is_active' in payload) {
+        return route.fulfill(json({ detail: 'unexpected field' }, 422));
+      }
+      const clash = state.stores.find(
+        (s) => s.id !== id && s.store_code === payload.store_code,
+      );
+      if (clash) return route.fulfill(json({ detail: 'store_code already exists' }, 409));
+      state.edits.push({ id, payload });
+      state.stores = state.stores.map((s) => (s.id === id ? { ...s, ...payload } : s));
+      return route.fulfill(json(state.stores.find((s) => s.id === id)));
+    }
+
+    // Lifecycle. Note what each transition does to is_active: the real backend
+    // keeps the two in lockstep, and the page reads both.
+    const lifecycle = path.match(/^\/stores\/(\d+)\/(disable|enable|archive|restore)$/);
+    if (method === 'POST' && lifecycle) {
+      const id = Number(lifecycle[1]);
+      const action = lifecycle[2];
+      const store = state.stores.find((s) => s.id === id);
+      if (!store) return route.fulfill(json({ detail: 'Store not found' }, 404));
+      const current = store.lifecycle_state || (store.is_active ? 'active' : 'disabled');
+
+      if (state.liveStoreIds.includes(id) && (action === 'disable' || action === 'archive')) {
+        return route.fulfill(
+          json({ detail: 'this Store is part of a live broadcast; stop the broadcast first' }, 409),
+        );
+      }
+      if (action === 'enable' && current === 'archived') {
+        return route.fulfill(json({ detail: 'restore it first' }, 409));
+      }
+      if (action === 'restore' && current !== 'archived') {
+        return route.fulfill(json({ detail: 'only an archived Store can be restored' }, 409));
+      }
+      // restore returns a Store to DISABLED, never straight to ACTIVE.
+      const next = { disable: 'disabled', enable: 'active', archive: 'archived', restore: 'disabled' }[action];
+      state.transitions.push({ id, action, to: next });
+      state.stores = state.stores.map((s) =>
+        s.id === id ? { ...s, lifecycle_state: next, is_active: next === 'active' } : s,
+      );
+      return route.fulfill(json(state.stores.find((s) => s.id === id)));
+    }
+
+    if (method === 'POST' && /^\/stores\/\d+\/regenerate-token$/.test(path)) {
+      const id = Number(path.split('/')[2]);
+      state.regenerations.push(id);
+      // Secret-free, exactly like the real StoreOut.
+      return route.fulfill(json(state.stores.find((s) => s.id === id)));
     }
 
     if (method === 'GET' && path === '/stores/meta/regions-cities') {
