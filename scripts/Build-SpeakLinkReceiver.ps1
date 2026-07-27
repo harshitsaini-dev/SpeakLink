@@ -6,22 +6,39 @@
     Produces a one-folder package that runs on a Windows desktop with no Python,
     no pip, no virtual environment, no source checkout and no Node.
 
-    FFmpeg is NOT downloaded. The path to an existing local ffmpeg.exe must be
-    given, and its version and SHA-256 are recorded in the package manifest. A
-    build step that fetches a binary from the Internet decides, silently and
-    differently each time, what ends up on 44 Store computers.
+    THE PROBLEM THIS VERSION EXISTS TO SOLVE
 
-.PARAMETER FfmpegPath
-    An existing ffmpeg.exe to package. Defaults to whatever is on PATH, which is
-    reported before use so it is never a surprise.
+    The first build of this package was stale before it shipped. PyInstaller ran,
+    then the source changed, then the package was assembled by copying the
+    earlier PyInstaller output - so the executable in artifacts/ was nine minutes
+    older than the code it was supposed to contain, and it never carried the
+    packaged-FFmpeg resolution that had just been added. Nothing failed. The
+    package tested green, because every test it had could pass without that code.
 
-.EXAMPLE
-    .\scripts\Build-SpeakLinkReceiver.ps1 -FfmpegPath 'C:\ffmpeg\bin\ffmpeg.exe'
+    So this build:
+
+      * refuses a dirty working tree, unless -AllowDirty says otherwise;
+      * uses a fresh timestamped work and dist directory every time, so it can
+        never reuse an earlier PyInstaller output;
+      * records the exact source commit in the package manifest;
+      * checks the built executable is NEWER than every source file that went
+        into it, and fails if it is not.
+
+    That last check is the one that would have caught the original mistake.
+
+    FFmpeg is never downloaded. An explicit path is required, and its version and
+    SHA-256 are recorded. A build step that fetches a binary decides silently,
+    and differently each time, what ends up on 44 Store computers.
+
+    The distributable manifest carries no absolute build path and no Windows
+    username - a manifest that shipped "C:\Users\<someone>\..." would leak the
+    build operator's account name to every Store.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$FfmpegPath,
     [string]$Version = '1.0.0',
+    [switch]$AllowDirty,
     [switch]$DryRun
 )
 
@@ -30,17 +47,44 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $venvPython = Join-Path $repositoryRoot 'backend\.venv\Scripts\python.exe'
 $spec = Join-Path $repositoryRoot 'receiver_agent.spec'
-$outputRoot = Join-Path $repositoryRoot "artifacts\SpeakLinkReceiver-$Version"
 
 Write-Output '=== building SpeakLinkReceiver ==='
 
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
 if (-not (Test-Path $venvPython)) { throw "Python virtual environment not found at $venvPython." }
 if (-not (Test-Path $spec)) { throw "Spec file not found at $spec." }
 
+Push-Location $repositoryRoot
+try {
+    $commit = (git rev-parse HEAD 2>$null)
+    $shortCommit = (git rev-parse --short HEAD 2>$null)
+    $branch = (git rev-parse --abbrev-ref HEAD 2>$null)
+    $dirty = @(git status --porcelain 2>$null)
+} finally { Pop-Location }
+
+if (-not $commit) { throw 'Not a git working tree. The package manifest must record a source commit.' }
+
+Write-Output "  commit  : $shortCommit ($branch)"
+if ($dirty.Count -gt 0) {
+    Write-Output "  tree    : DIRTY ($($dirty.Count) changed file(s))"
+    if (-not $AllowDirty) {
+        throw ("The working tree has $($dirty.Count) uncommitted change(s). A package built now " +
+               "would record a commit it does not actually contain. Commit first, or pass " +
+               "-AllowDirty for a development build.")
+    }
+    Write-Output '  NOTE    : -AllowDirty was given. This package does NOT match its recorded commit.'
+} else {
+    Write-Output '  tree    : clean'
+}
+
 & $venvPython -m PyInstaller --version > $null 2>&1
 if ($LASTEXITCODE -ne 0) {
-    throw "PyInstaller is not installed in the build environment. Install it with: $venvPython -m pip install pyinstaller"
+    throw "PyInstaller is not installed. Install the pinned build tools with: $venvPython -m pip install -r requirements-build.txt"
 }
+$pyinstallerVersion = ((& $venvPython -m PyInstaller --version 2>&1) -join '').Trim()
+$pythonVersion = ((& $venvPython --version 2>&1) -join '').Trim()
 
 if (-not $FfmpegPath) {
     $onPath = Get-Command ffmpeg -ErrorAction SilentlyContinue
@@ -54,11 +98,16 @@ if (-not (Test-Path $FfmpegPath)) { throw "FFmpeg not found at $FfmpegPath." }
 $ffmpegVersion = ((& $FfmpegPath -version 2>&1 | Select-Object -First 1) -join '')
 $ffmpegHash = (Get-FileHash $FfmpegPath -Algorithm SHA256).Hash
 
-Write-Output "  ffmpeg source : $FfmpegPath"
-Write-Output "  ffmpeg version: $ffmpegVersion"
-Write-Output "  ffmpeg sha256 : $ffmpegHash"
-Write-Output "  ffmpeg size   : $([Math]::Round((Get-Item $FfmpegPath).Length / 1MB, 1)) MB"
-Write-Output "  output        : $outputRoot"
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$outputRoot = Join-Path $repositoryRoot "artifacts\SpeakLinkReceiver-$Version-$shortCommit-$stamp"
+$distPath = Join-Path $repositoryRoot "build\pyi-dist-$stamp"
+$workPath = Join-Path $repositoryRoot "build\pyi-work-$stamp"
+
+Write-Output "  python  : $pythonVersion"
+Write-Output "  builder : $pyinstallerVersion"
+Write-Output "  ffmpeg  : $ffmpegVersion"
+Write-Output "  ff hash : $ffmpegHash"
+Write-Output "  output  : $outputRoot"
 
 if ($DryRun -or -not $PSCmdlet.ShouldProcess($outputRoot, 'Build the Receiver package')) {
     Write-Output ''
@@ -66,26 +115,41 @@ if ($DryRun -or -not $PSCmdlet.ShouldProcess($outputRoot, 'Build the Receiver pa
     exit 0
 }
 
+# ---------------------------------------------------------------------------
+# Build. Fresh directories, so an older output cannot be picked up by mistake.
+# ---------------------------------------------------------------------------
+$sourceNewest = (Get-ChildItem (Join-Path $repositoryRoot 'tools') -Filter '*.py' -Recurse |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime
+$specTime = (Get-Item $spec).LastWriteTime
+if ($specTime -gt $sourceNewest) { $sourceNewest = $specTime }
+Write-Output "  newest source input: $sourceNewest"
+
 Write-Output ''
 Write-Output '--- PyInstaller ---'
-& $venvPython -m PyInstaller $spec --noconfirm `
-    --distpath (Join-Path $repositoryRoot 'build\pyi-dist') `
-    --workpath (Join-Path $repositoryRoot 'build\pyi-work') | Select-Object -Last 1
+& $venvPython -m PyInstaller $spec --noconfirm --distpath $distPath --workpath $workPath | Select-Object -Last 1
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE." }
 
+$builtExe = Join-Path $distPath 'SpeakLinkReceiver\SpeakLinkReceiver.exe'
+if (-not (Test-Path $builtExe)) { throw "PyInstaller reported success but $builtExe does not exist." }
+
+# The check that would have caught the original stale package.
+$builtTime = (Get-Item $builtExe).LastWriteTime
+if ($builtTime -lt $sourceNewest) {
+    throw ("The built executable ($builtTime) is older than the newest source input " +
+           "($sourceNewest). This package would not contain the current code.")
+}
+Write-Output "  built executable   : $builtTime  (newer than every source input)"
+
 New-Item -ItemType Directory -Force -Path $outputRoot, (Join-Path $outputRoot 'licenses') | Out-Null
-Copy-Item (Join-Path $repositoryRoot 'build\pyi-dist\SpeakLinkReceiver\*') $outputRoot -Recurse -Force
+Copy-Item (Join-Path $distPath 'SpeakLinkReceiver\*') $outputRoot -Recurse -Force
 Copy-Item $FfmpegPath (Join-Path $outputRoot 'ffmpeg.exe') -Force
 
-# The licence notice has to name the actual build. gyan.dev "full" builds link
-# GPL-only libraries, which is a distribution obligation, not a formality.
 @"
 FFmpeg
 ======
 
 Version : $ffmpegVersion
 SHA-256 : $ffmpegHash
-Source  : the file named at build time; see manifest.json
 
 If this is a gyan.dev "full" build it links GPL-only libraries (x264, x265 and
 others) and the whole binary is covered by GPLv3.
@@ -99,36 +163,45 @@ FFmpeg library and ships the executable unmodified.
 If this package is ever distributed outside the organisation that built it,
 either honour the GPL obligations or rebuild against an LGPL FFmpeg without
 GPL-only libraries. The decode path used here does not need them.
-"@ | Set-Content -Encoding utf8 (Join-Path $outputRoot 'licenses\FFMPEG-LICENSE.txt')
+"@ | Set-Content -Encoding ascii (Join-Path $outputRoot 'licenses\FFMPEG-LICENSE.txt')
 
 $files = Get-ChildItem $outputRoot -Recurse -File |
          Where-Object { $_.Name -notin @('SHA256SUMS.txt', 'manifest.json') }
 $files | ForEach-Object {
     "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(),
                   $_.FullName.Substring($outputRoot.Length + 1).Replace('\', '/')
-} | Set-Content -Encoding utf8 (Join-Path $outputRoot 'SHA256SUMS.txt')
+} | Set-Content -Encoding ascii (Join-Path $outputRoot 'SHA256SUMS.txt')
 
+# Deliberately no absolute build path and no username: a manifest that shipped
+# "C:\Users\<someone>\..." would tell every Store who built it and where.
 [PSCustomObject]@{
     product = 'SpeakLinkReceiver'
     version = $Version
+    source_commit = $commit
+    source_commit_short = $shortCommit
+    source_branch = $branch
+    source_tree_clean = ($dirty.Count -eq 0)
     built_utc = (Get-Date).ToUniversalTime().ToString('o')
-    format = 'PyInstaller one-folder'
+    builder = @{ pyinstaller = $pyinstallerVersion; python = $pythonVersion; format = 'one-folder' }
     requires_python_on_target = $false
     requires_node_on_target = $false
     ffmpeg = @{
+        filename = 'ffmpeg.exe'
         version = $ffmpegVersion
         sha256 = $ffmpegHash
-        source_path_at_build = $FfmpegPath
         resolved_at_runtime = 'relative to SpeakLinkReceiver.exe'
     }
+    executable_sha256 = (Get-FileHash (Join-Path $outputRoot 'SpeakLinkReceiver.exe') -Algorithm SHA256).Hash
     file_count = $files.Count
     total_bytes = ($files | Measure-Object Length -Sum).Sum
     secrets_in_package = 'none'
-} | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $outputRoot 'manifest.json')
+} | ConvertTo-Json -Depth 4 | Set-Content -Encoding ascii (Join-Path $outputRoot 'manifest.json')
 
 Write-Output ''
-Write-Output "  files  : $($files.Count)"
-Write-Output "  size   : $([Math]::Round((($files | Measure-Object Length -Sum).Sum) / 1MB, 1)) MB"
+Write-Output "  files : $($files.Count)"
+Write-Output "  size  : $([Math]::Round((($files | Measure-Object Length -Sum).Sum) / 1MB, 1)) MB"
 Write-Output ''
-Write-Output 'Built. Verify with .\scripts\Test-SpeakLinkReceiverPackage.ps1'
+Write-Output 'SPEAKLINK_RECEIVER_FRESH_BUILD_VERIFIED'
+Write-Output "Package: $outputRoot"
+Write-Output 'Verify with .\scripts\Test-SpeakLinkReceiverPackage.ps1 -PackagePath "<that path>"'
 Write-Output 'This package is git-ignored and must not be committed.'

@@ -283,3 +283,5 @@ build/pyi-dist/
 build/pyi-work/
 *.exe
 !scripts/*.exe
+build/pyi-dist-*/
+build/pyi-work-*/
