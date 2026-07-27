@@ -42,6 +42,7 @@ import asyncio
 import getpass
 import ipaddress
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -89,6 +90,41 @@ EXIT_OK = 0
 EXIT_REFUSED = 1
 EXIT_AUTHENTICATION = 2
 EXIT_NETWORK = 3
+
+
+def packaged_ffmpeg_directory() -> Path | None:
+    """The directory holding the FFmpeg shipped beside this executable.
+
+    A Store desktop has no FFmpeg on PATH and no reason to acquire one, so the
+    package carries its own. Resolved relative to the executable rather than the
+    working directory: a Task Scheduler job, a shortcut and an operator typing
+    the path all start somewhere different, and only the executable's own
+    location is the same in all three.
+
+    Returns None when running from source, where PATH is the right answer.
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    beside = Path(sys.executable).resolve().parent
+    return beside if (beside / "ffmpeg.exe").is_file() else None
+
+
+def prefer_packaged_ffmpeg() -> str | None:
+    """Put the packaged FFmpeg ahead of anything on PATH, for this process only.
+
+    ``audio_receiver_pilot`` finds FFmpeg with ``shutil.which("ffmpeg")``, and it
+    is the hardware-proven file that produced every amplifier result - not
+    something to edit for a packaging concern. Prepending to this process's PATH
+    makes ``which`` return the packaged binary and leaves that file untouched.
+
+    A Store PC that happens to have some other FFmpeg installed then still runs
+    the version this package was tested with, which is the point.
+    """
+    directory = packaged_ffmpeg_directory()
+    if directory is None:
+        return None
+    os.environ["PATH"] = f"{directory}{os.pathsep}" + os.environ.get("PATH", "")
+    return str(directory / "ffmpeg.exe")
 
 
 class AgentError(RuntimeError):
@@ -314,7 +350,7 @@ def _read_json(raw: bytes) -> dict:
 #:
 #:     "ECHO-XXXX-XXXX" | EchoCastReceiver.exe enrol --from-stdin
 #:
-#: arrives as "﻿ECHO-XXXX-XXXX". ``str.strip()`` does not remove it - a BOM
+#: arrives as "ï»¿ECHO-XXXX-XXXX". ``str.strip()`` does not remove it - a BOM
 #: is not whitespace - so the code silently fails to match and the operator is
 #: told their code cannot be used, with nothing pointing at the real cause.
 #: Measured, not guessed: a round trip through this exact pipeline produced a
@@ -756,7 +792,9 @@ def rotate_local_credential(credential_path, *, protector, stream=None, prompt=g
 # ===========================================================================
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="receiver_agent",
+        # Frozen, the operator typed EchoCastReceiver.exe, so usage text that
+        # says "receiver_agent" sends them looking for a file that is not there.
+        prog="EchoCastReceiver" if getattr(sys, "frozen", False) else "receiver_agent",
         description=(
             "EchoCast Receiver Agent. Enrols this computer once with a one-time "
             "code, then reconnects using a DPAPI-protected Device credential. "
@@ -768,6 +806,14 @@ def build_parser() -> argparse.ArgumentParser:
         # and the credential would end up in the process arguments after all.
         # A test found exactly that. Abbreviation is off everywhere below too.
         allow_abbrev=False,
+    )
+    # Before the subparsers, so `--version` answers on its own rather than being
+    # refused for a missing command. An operator checking which build is on a
+    # till should not have to guess a subcommand to find out.
+    parser.add_argument(
+        "--version", action="version",
+        version=f"EchoCastReceiver {AGENT_VERSION}",
+        help="Print the Agent version and exit.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -927,6 +973,8 @@ def _run_command(arguments) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Before anything looks for FFmpeg. Harmless when running from source.
+    prefer_packaged_ffmpeg()
     arguments = build_parser().parse_args(argv)
     protector = _protector()
     path = _credential_path(arguments)

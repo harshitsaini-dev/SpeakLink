@@ -1,4 +1,4 @@
-﻿// A mocked EchoCast backend, shaped exactly like the real one.
+// A mocked EchoCast backend, shaped exactly like the real one.
 //
 // Every response here mirrors what backend/server.py actually returns, so a
 // test that passes against these mocks is testing the real contract and not a

@@ -271,3 +271,15 @@ frontend/test-results/
 frontend/playwright-report/
 frontend/blob-report/
 frontend/.playwright/
+
+# EchoCast Receiver package output.
+#
+# A built package is ~250 MB, most of it a GPL FFmpeg binary, and it is
+# reproducible from the spec plus a named FFmpeg source. Committing it would
+# put a third-party binary into this repository's history permanently, where
+# removing it later means rewriting history.
+artifacts/
+build/pyi-dist/
+build/pyi-work/
+*.exe
+!scripts/*.exe
