@@ -279,6 +279,31 @@ def test_the_log_directory_option_defaults_to_none():
     assert arguments.log_directory is None
 
 
+@pytest.mark.parametrize(
+    "command",
+    ["enrol", "run", "status", "rotate-local-credential", "remove-local-credential"],
+)
+def test_every_command_can_render_its_own_help(command: str, capsys):
+    """argparse expands ``help=`` through %-formatting.
+
+    The first version of the --log-directory help said ``%LOCALAPPDATA%``, which
+    argparse read as a format specifier, and ``run --help`` died with
+    ``ValueError: unsupported format character 'O'``. Every other test passed,
+    because none of them asked the parser to render itself - the packaged-EXE
+    check found it. This is that check, in the unit suite where it belongs.
+    """
+    with pytest.raises(SystemExit) as exit_code:
+        build_parser().parse_args([command, "--help"])
+    assert exit_code.value.code == 0
+    assert capsys.readouterr().out.strip(), f"{command} --help printed nothing"
+
+
+def test_top_level_help_renders():
+    with pytest.raises(SystemExit) as exit_code:
+        build_parser().parse_args(["--help"])
+    assert exit_code.value.code == 0
+
+
 def test_a_credential_still_cannot_be_passed_on_the_command_line():
     """The new options must not have opened a door."""
     parser = build_parser()
