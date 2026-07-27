@@ -56,6 +56,21 @@ class DeviceEnrollmentResponse(BaseModel):
     store_id: int
 
 
+class CredentialRotationResponse(BaseModel):
+    """The one and only time a rotated credential leaves the server.
+
+    It cannot be fetched again: the database holds a verifier, not the value. The
+    previous credential stops working the instant this one is issued, so an
+    operator who loses this has to rotate again rather than fall back.
+    """
+
+    device_public_id: str
+    credential: str
+    credential_version: int
+    store_id: int
+    previous_credential_retired: bool = True
+
+
 class ReceiverDeviceOut(BaseModel):
     """Everything the dashboard may know about a Device - and nothing else.
 
