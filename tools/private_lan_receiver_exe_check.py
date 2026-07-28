@@ -450,6 +450,9 @@ try:
         "-ExpectedHqHost", HQ,
         "-CredentialPath", str(standby_credential),
         "-LogDirectory", str(agent_logs),
+        # One minute is Task Scheduler's smallest repetition, so the recovery
+        # that a Store would see in five minutes can be observed here in one.
+        "-RepetitionMinutes", "1",
         timeout=900)
     record("31_task_installs_from_the_kit",
            "ECHOCAST_RECEIVER_TASK_INSTALLED" in install.stdout)
@@ -483,9 +486,14 @@ try:
         gone = _wait_until(lambda: first_pids[0] not in task_process_ids(), timeout=60)
         record("33_real_owned_process_terminated", running and gone)
 
-        # Task Scheduler's restart interval is one minute; give it two.
+        # Recovery is the repetition schedule, NOT RestartCount. Windows applies
+        # RestartCount to a task that fails to start, not to one whose program
+        # exits non-zero: a probe running `cmd /c exit 1` with RestartCount 2
+        # and a one-minute interval never ran a second time. The installer and
+        # its runbook described a crash restart Windows does not perform, so the
+        # design changed rather than this measurement.
         restarted = _wait_until(
-            lambda: any(pid != first_pids[0] for pid in task_process_ids()), timeout=150)
+            lambda: any(pid != first_pids[0] for pid in task_process_ids()), timeout=210)
         record("34_bounded_task_restart_observed", restarted)
 
     # A revoked credential must not produce an endless restart loop. The task
@@ -495,7 +503,8 @@ try:
                "-PackagePath", str(PACKAGE), "-TaskName", TASK_NAME,
                "-BackendUrl", BASE, "-ExpectedHqHost", HQ,
                "-CredentialPath", str(credential_path),
-               "-LogDirectory", str(agent_logs), "-RestartCount", "1", timeout=900)
+               "-LogDirectory", str(agent_logs), "-RestartCount", "1",
+               "-RepetitionMinutes", "1", timeout=900)
     powershell("-Command", f"Start-ScheduledTask -TaskName '{TASK_NAME}'", timeout=120)
     time.sleep(20)
 
@@ -509,9 +518,20 @@ try:
     # the install three steps earlier had failed - the strongest-looking result
     # in the whole run was the one measuring nothing.
     task_exists = task_state() != ""
-    gave_up = task_exists and _wait_until(lambda: "Running" not in task_state(), timeout=300)
-    record("35_revoked_device_does_not_restart_forever", gave_up)
-    notes.append(f"revoked-credential task final state: {task_state() or 'NOT INSTALLED'}")
+    settled = task_exists and _wait_until(lambda: "Running" not in task_state(), timeout=300)
+
+    # "Not for ever" cannot be observed by waiting for ever. What is checkable
+    # is that the repetition which brings a crashed Receiver back is itself
+    # bounded: without a duration, a revoked Device would be relaunched every
+    # few minutes indefinitely, each launch exiting at once and none of them
+    # ever working.
+    duration = powershell(
+        "-Command",
+        f"(Get-ScheduledTask -TaskName '{TASK_NAME}').Triggers | "
+        "ForEach-Object { $_.Repetition.Duration }", timeout=120).stdout.strip()
+    record("35_revoked_device_does_not_restart_forever", settled and bool(duration))
+    notes.append(f"revoked-credential task: state={task_state() or 'NOT INSTALLED'}, "
+                 f"repetition duration={duration or 'UNBOUNDED'}")
 
     # ---- 36. logs rotate and stay bounded --------------------------------
     log_files = list(agent_logs.glob("receiver*.log*"))

@@ -52,6 +52,8 @@ param(
     [string]$LogDirectory,
     [string]$CredentialPath,
     [int]$RestartCount = 3,
+    [int]$RepetitionMinutes = 5,
+    [int]$RepetitionDurationDays = 1,
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'EchoCast-AI\receiver-app'),
     [switch]$RunInPlace,
     [switch]$DryRun
@@ -137,7 +139,8 @@ Write-Output "  executable  : $exe"
 Write-Output "  backend     : $BackendUrl"
 Write-Output "  logs        : $LogDirectory"
 Write-Output "  user        : $env:USERDOMAIN\$env:USERNAME (interactive, no stored password)"
-Write-Output "  restarts    : $RestartCount, one minute apart, then it stops"
+Write-Output "  recovery    : retried every $RepetitionMinutes min for $RepetitionDurationDays day(s); a running Receiver is left alone"
+Write-Output "  restarts    : RestartCount=$RestartCount (Windows applies this only to start failures, not to a non-zero exit)"
 Write-Output '  NOT a service: no boot-before-logon, no SYSTEM, no locked-desktop operation'
 
 # ---------------------------------------------------------------------------
@@ -232,7 +235,51 @@ if ($existing) {
 }
 
 $action = New-ScheduledTaskAction -Execute $exe -Argument $arguments -WorkingDirectory $installedRoot
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+# ---------------------------------------------------------------------------
+# HOW THE RECEIVER ACTUALLY COMES BACK AFTER A CRASH
+#
+# Not through RestartCount. That was measured, not assumed, and the measurement
+# was unambiguous: a task whose action exits with code 1 is NOT restarted by
+# Task Scheduler, however generous RestartCount and RestartInterval are. Those
+# settings apply when the task fails to START - a missing executable, a bad
+# principal - not when the program it started returns a failure code. A probe
+# running `cmd /c exit 1` with RestartCount 2 and a one-minute interval sat at
+# a single LastRunTime for three minutes and never ran again.
+#
+# So an earlier version of this installer, and the runbook beside it, described
+# a bounded crash restart that Windows does not perform. The Receiver would
+# have died at 3am and stayed dead until somebody signed in again.
+#
+# What does work is a repetition schedule plus MultipleInstances = IgnoreNew:
+# every few minutes Task Scheduler tries to start the Receiver; if one is
+# already running the new start is ignored, and if the Store is dead it comes
+# back. The Agent's own single-instance lock is the second line of defence.
+#
+# The repetition has a finite duration on purpose. A Device whose credential
+# has been revoked exits immediately every time, and an unbounded repetition
+# would relaunch it every few minutes for ever. Bounded, it stops trying, and
+# the next logon starts a fresh cycle.
+# ---------------------------------------------------------------------------
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+$triggers = @($logonTrigger)
+
+if ($RepetitionMinutes -gt 0) {
+    # A SEPARATE time-based trigger, not repetition bolted onto the logon one.
+    #
+    # Repetition attached to an At-Logon trigger only begins when that trigger
+    # fires - at a logon. Installed mid-session it schedules nothing, so a
+    # Receiver killed an hour later stays dead until the next sign-in. That was
+    # measured: with repetition on the logon trigger alone, a deliberately
+    # killed Receiver never came back in three and a half minutes of watching.
+    #
+    # A -Once trigger starting now repeats regardless of when it was installed,
+    # which is what "the Store recovers by itself" has to mean.
+    $repeating = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+        -RepetitionInterval (New-TimeSpan -Minutes $RepetitionMinutes) `
+        -RepetitionDuration (New-TimeSpan -Days $RepetitionDurationDays)
+    $logonTrigger.Repetition = $repeating.Repetition
+    $triggers += $repeating
+}
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
                                         -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet `
@@ -242,7 +289,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -MultipleInstances IgnoreNew
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers `
                        -Principal $principal -Settings $settings `
                        -Description ('EchoCast Live Receiver, private LAN pilot. Disposable. ' +
                                      'Remove with .\scripts\Uninstall-EchoCastReceiverLanPilot.ps1.') | Out-Null

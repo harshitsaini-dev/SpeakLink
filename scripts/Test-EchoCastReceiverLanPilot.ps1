@@ -75,6 +75,18 @@ Check 'restart on failure is bounded' {
     $count = $task.Settings.RestartCount
     $count -gt 0 -and $count -le 10
 }
+# RestartCount alone does not bring a crashed Receiver back: Windows applies it
+# to a task that fails to START, not to one whose program exits non-zero. That
+# was measured with `cmd /c exit 1` and RestartCount 2, which never re-ran.
+# Recovery comes from the repetition schedule below, so it is checked here.
+Check 'the Receiver is retried on a repetition schedule' {
+    [bool]($task.Triggers | Where-Object { $_.Repetition -and $_.Repetition.Interval })
+}
+Check 'the repetition is bounded in time' {
+    # Unbounded, a revoked Device would be relaunched every few minutes for
+    # ever - each launch exiting immediately, none of them ever working.
+    [bool]($task.Triggers | Where-Object { $_.Repetition -and $_.Repetition.Duration })
+}
 Check 'a second launch is ignored rather than started' {
     $task.Settings.MultipleInstances -eq 'IgnoreNew'
 }
