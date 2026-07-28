@@ -55,6 +55,28 @@ EXPECTED: dict[str, object] = {
     "logout": None,
     "me": None,
     "issue_websocket_ticket": None,
+    # Changing your own password needs no permission beyond being signed in.
+    # Read-only does not mean unable to secure your own account - and the
+    # current password is required, so knowing who you are is not enough.
+    "change_own_password": None,
+
+    # HQ Users. MANAGE_USERS covers the lifecycle; which accounts a given role
+    # may touch is a second, narrower check inside each endpoint
+    # (_require_may_manage), because ADMIN holds MANAGE_USERS but must not be
+    # able to disable a SUPER_ADMIN or promote itself into one.
+    "list_hq_users": Permission.MANAGE_USERS,
+    "read_hq_user": Permission.MANAGE_USERS,
+    "create_hq_user": Permission.MANAGE_USERS,
+    "update_hq_user": Permission.MANAGE_USERS,
+    "set_hq_user_role": Permission.MANAGE_USERS,
+    "disable_hq_user": Permission.MANAGE_USERS,
+    "enable_hq_user": Permission.MANAGE_USERS,
+    "archive_hq_user": Permission.MANAGE_USERS,
+    "restore_hq_user": Permission.MANAGE_USERS,
+    # Setting somebody else's password is reserved, like restoring an archived
+    # Store: it is the action an attacker who took an ADMIN account would use
+    # to take a SUPER_ADMIN one.
+    "reset_hq_user_password": "SUPER_ADMIN",
 
     # Receiver Devices: credentials, enrolment, promotion, revocation.
     "create_receiver_enrollment_code": Permission.MANAGE_DEVICES,

@@ -51,6 +51,18 @@ class HQUser(Base):
     # fail on a NOT NULL column that did not exist when they were written.
     session_version = Column(Integer, default=1, server_default="1", nullable=False)
     created_at = Column(DateTime, default=utcnow, nullable=False)
+    # Lifecycle, added by user_lifecycle.ensure_user_lifecycle_schema.
+    #
+    # Declared here with defaults for the same reason session_version is: the
+    # startup migration runs before seed_admin, so a freshly seeded
+    # administrator is inserted AFTER the backfill has already run and would
+    # otherwise carry NULLs in both columns - which then fail the response
+    # model on the very first request to /api/users.
+    display_name = Column(String(200), nullable=True)
+    lifecycle_state = Column(String(20), default="active", server_default="active",
+                             nullable=True)
+    disabled_at = Column(DateTime, nullable=True)
+    archived_at = Column(DateTime, nullable=True)
 
 
 class ReceiverEnrollmentCode(Base):
