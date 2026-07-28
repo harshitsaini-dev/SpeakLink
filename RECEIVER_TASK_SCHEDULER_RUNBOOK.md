@@ -66,17 +66,45 @@ What it registers, and why each choice:
 | Trigger | At logon of this user | The only session with a sound card |
 | Principal | Current user, `Interactive` | No Windows password stored anywhere |
 | Run level | `Limited` | The Receiver needs no administrator rights |
-| Restart | 3 times, 1 minute apart | Bounded — see below |
-| Multiple instances | `IgnoreNew` | Belt and braces with the Agent's own lock |
+| Triggers | At logon **and** a repeating one | See below — this is how recovery actually happens |
+| Repetition | every 5 min, for 1 day | Bounded — see below |
+| Restart | `RestartCount` 3 | Kept, but it does **not** do what it looks like |
+| Multiple instances | `IgnoreNew` | A running Receiver is left alone |
 | Execution time limit | none | A Receiver is meant to run all day |
 
-### Why the restart count is small
+### How a crashed Receiver actually comes back — and a claim that was wrong
 
-An unbounded restart policy turns a Receiver that will *never* authenticate —
-a revoked Device, a wrong backend — into a machine that reconnects for ever. It
-looks like a flaky network, it fills the HQ log, and it buries the actual
-refusal. Three attempts, then the task stops and the Receiver's own log says
-why.
+An earlier version of this runbook said the task performed a bounded crash
+restart via `RestartCount`. **That was wrong, and it was wrong in the direction
+that hides the failure:** the Receiver would have died at 3am and stayed dead
+until somebody signed in again.
+
+Windows applies `RestartCount` / `RestartInterval` when a task **fails to
+start** — a missing executable, a bad principal. It does *not* restart a task
+whose program exits with a failure code. Measured directly, with a task running
+`cmd /c exit 1`, `RestartCount 2` and a one-minute interval: three minutes
+later `LastRunTime` had not moved and it had never run again.
+
+Recovery comes from a **repetition schedule** instead. Every few minutes Task
+Scheduler tries to start the Receiver:
+
+- if one is already running, `MultipleInstances = IgnoreNew` ignores the new
+  start (and the Agent's own single-instance lock is the second line of
+  defence);
+- if the Store is dead, it comes back.
+
+The repetition lives on a **separate time-based trigger**, not bolted onto the
+At-Logon one. Repetition attached to a logon trigger only begins when that
+trigger fires — so a task installed mid-session schedules nothing, and a
+Receiver killed an hour later stays dead until the next sign-in. That was also
+measured, and it is why the task has two triggers.
+
+### Why the repetition is bounded
+
+One day, then it stops until the next logon. Unbounded, a Device whose
+credential has been revoked would be relaunched every few minutes for ever —
+each launch exiting immediately, none of them ever working, all of them filling
+the log. Bounded, it gives up.
 
 ### What the task definition contains
 
@@ -93,7 +121,10 @@ can read a task definition.
 .\scripts\Test-SpeakLinkReceiverLanPilot.ps1
 ```
 
-Ends with `SPEAKLINK_RECEIVER_TASK_SCHEDULER_VERIFIED` when all 20 checks pass.
+Ends with `SPEAKLINK_RECEIVER_TASK_SCHEDULER_VERIFIED` when all 22 checks pass,
+two of which exist only because `RestartCount` turned out not to mean what it
+appeared to: the task must have a repetition schedule, and that repetition must
+be bounded in time.
 
 A check that cannot be **read** reports `UNKNOWN`, and no verification token is
 emitted while any check is unreadable. This matters: an earlier firewall checker
@@ -150,14 +181,10 @@ Task Scheduler shows the **Last Run Result** for the task.
 | `3` | Network problem after bounded retries | Check the LAN and the HQ backend |
 | `4` | **Already running.** A Receiver for this credential is live | Nothing. This is not a failure |
 
-Code `4` is separate on purpose. If a duplicate launch reported an ordinary
-failure, the restart policy would keep relaunching something already working
-perfectly.
-
-Note that Task Scheduler treats any non-zero result as a failure for restart
-purposes, including `4`. `MultipleInstances = IgnoreNew` is what actually stops
-a duplicate from being started by the scheduler; the exit code is for the
-operator reading the history.
+Code `4` is separate on purpose: it tells an operator reading the task history
+that nothing is wrong. `MultipleInstances = IgnoreNew` is what actually stops
+the scheduler starting a duplicate, and the Agent's own lock stops one started
+by hand.
 
 ---
 
