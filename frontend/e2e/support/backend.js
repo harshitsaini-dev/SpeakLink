@@ -71,6 +71,21 @@ const DEVICES = [PRIMARY_DEVICE, STANDBY_DEVICE];
 const FAKE_TOKEN = 'test-token-not-a-real-jwt';
 const OPERATOR = { id: 1, username: 'pilot-operator', role: 'admin' };
 
+//: HQ accounts, in all three lifecycle states. Deliberately carries no
+//: password_hash and no session_version: if the real API ever started sending
+//: either, a test written against this fixture would not notice, so the fixture
+//: must not model something the API must never do.
+const HQ_USERS = [
+  { id: 1, username: 'founder', display_name: 'The Founder', role: 'SUPER_ADMIN',
+    is_active: true, lifecycle_state: 'active' },
+  { id: 2, username: 'priya', display_name: 'Priya Sharma', role: 'ADMIN',
+    is_active: true, lifecycle_state: 'active' },
+  { id: 3, username: 'rahul', display_name: 'Rahul Verma', role: 'BROADCASTER',
+    is_active: false, lifecycle_state: 'disabled' },
+  { id: 4, username: 'anita', display_name: 'Anita Rao', role: 'VIEWER',
+    is_active: false, lifecycle_state: 'archived' },
+];
+
 const json = (body, status = 200) => ({
   status,
   contentType: 'application/json',
@@ -105,6 +120,14 @@ async function mockBackend(page, options = {}) {
     transitions: [],
     regenerations: [],
     liveStoreIds: options.liveStoreIds || [],
+    // Who is signed in. Defaults to the existing operator so every spec written
+    // before User management keeps the behaviour it was written against.
+    operator: options.operator || OPERATOR,
+    users: options.users || HQ_USERS.map((row) => ({ ...row })),
+    usersStatus: options.usersStatus || 200,
+    userActions: [],
+    passwordResets: [],
+    passwordChanges: [],
   };
 
   await page.route('**/api/**', async (route) => {
@@ -127,11 +150,99 @@ async function mockBackend(page, options = {}) {
       if (state.loginStatus !== 200) {
         return route.fulfill(json({ detail: 'Invalid username or password' }, state.loginStatus));
       }
-      return route.fulfill(json({ access_token: FAKE_TOKEN, token_type: 'bearer', user: OPERATOR }));
+      return route.fulfill(json({ access_token: FAKE_TOKEN, token_type: 'bearer', user: state.operator }));
     }
 
     if (method === 'GET' && path === '/auth/me') {
-      return route.fulfill(json(OPERATOR));
+      return route.fulfill(json(state.operator));
+    }
+
+    // ---- HQ Users ---------------------------------------------------------
+    if (method === 'POST' && path === '/auth/change-password') {
+      const body = JSON.parse(request.postData() || '{}');
+      state.passwordChanges.push(body);
+      if (body.current_password !== 'correct-current-password') {
+        return route.fulfill(json({ detail: 'That is not your current password.' }, 403));
+      }
+      return route.fulfill(json({ ok: true, sessions_ended: true }));
+    }
+
+    if (path.startsWith('/users')) {
+      if (state.usersStatus !== 200) {
+        return route.fulfill(json({ detail: 'You do not have permission to perform this action.' },
+                                  state.usersStatus));
+      }
+      if (method === 'GET' && path === '/users') {
+        return route.fulfill(json(state.users));
+      }
+      if (method === 'POST' && path === '/users') {
+        const body = JSON.parse(request.postData() || '{}');
+        if (state.users.some((row) => row.username.toLowerCase() === (body.username || '').toLowerCase())) {
+          return route.fulfill(json({ detail: `The username '${body.username}' is already in use.` }, 409));
+        }
+        const created = {
+          id: state.users.length + 1, username: body.username,
+          display_name: body.display_name, role: body.role,
+          is_active: true, lifecycle_state: 'active',
+        };
+        state.users.push(created);
+        state.userActions.push({ action: 'create', body });
+        return route.fulfill(json(created, 201));
+      }
+
+      const match = path.match(/^\/users\/(\d+)(?:\/([a-z-]+))?$/);
+      if (match) {
+        const id = Number(match[1]);
+        const action = match[2];
+        const row = state.users.find((candidate) => candidate.id === id);
+        if (!row) return route.fulfill(json({ detail: 'No such HQ User' }, 404));
+
+        if (action === 'reset-password') {
+          state.passwordResets.push({ id });
+          return route.fulfill(json({
+            user_id: id, sessions_ended: true,
+            detail: 'The password was set and every existing session for that account ended.',
+          }));
+        }
+        if (action === 'role') {
+          const body = JSON.parse(request.postData() || '{}');
+          row.role = body.role;
+          state.userActions.push({ action: 'role', id, role: body.role });
+          return route.fulfill(json(row));
+        }
+        if (method === 'PATCH') {
+          const body = JSON.parse(request.postData() || '{}');
+          Object.assign(row, body);
+          state.userActions.push({ action: 'edit', id, body });
+          return route.fulfill(json(row));
+        }
+        // The refusals the real backend enforces, mirrored so a test cannot
+        // pass here and fail against the server.
+        const activeSuperAdmins = state.users.filter(
+          (candidate) => candidate.role === 'SUPER_ADMIN' && candidate.lifecycle_state === 'active');
+        if ((action === 'disable' || action === 'archive')
+            && row.role === 'SUPER_ADMIN' && activeSuperAdmins.length <= 1) {
+          return route.fulfill(json({
+            detail: 'This is the only active SUPER_ADMIN. That would leave nobody able to administer EchoCast.',
+          }, 409));
+        }
+        if ((action === 'disable' || action === 'archive') && id === state.operator.id) {
+          return route.fulfill(json({ detail: 'You cannot do that to your own account.' }, 409));
+        }
+        if (action === 'enable' && row.lifecycle_state === 'archived') {
+          return route.fulfill(json({
+            detail: 'An account that is archived cannot become active.' }, 409));
+        }
+        const next = { disable: 'disabled', enable: 'active',
+                       archive: 'archived', restore: 'disabled' }[action];
+        if (next) {
+          row.lifecycle_state = next;
+          row.is_active = next === 'active';
+          state.userActions.push({ action, id });
+          return route.fulfill(json(row));
+        }
+      }
+      return route.fulfill(json({ detail: 'Not found' }, 404));
     }
 
     if (method === 'POST' && path === '/auth/ws-ticket') {
@@ -390,6 +501,8 @@ module.exports = {
   ASR,
   DM,
   DEVICES,
+  HQ_USERS,
+  OPERATOR,
   PRIMARY_DEVICE,
   STANDBY_DEVICE,
   FAKE_TOKEN,

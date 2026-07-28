@@ -1,6 +1,6 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { Radio, LayoutDashboard, Store as StoreIcon, History, Radar, ScrollText, LogOut, Menu, X } from "lucide-react";
+import { Radio, LayoutDashboard, Store as StoreIcon, History, Radar, ScrollText, Users, KeyRound, LogOut, Menu, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 
 const NAV = [
@@ -9,6 +9,14 @@ const NAV = [
   { to: "/history", label: "Broadcast History", icon: History, testid: "nav-history" },
   { to: "/receivers", label: "Receiver Status", icon: Radar, testid: "nav-receivers" },
   { to: "/logs", label: "System Logs", icon: ScrollText, testid: "nav-logs" },
+  // Shown only to accounts that hold MANAGE_USERS. This is presentation, not
+  // protection - the backend answers 403 to the request either way, and a
+  // navigation link is not a permission check.
+  { to: "/users", label: "User Management", icon: Users, testid: "nav-users",
+    roles: ["SUPER_ADMIN", "ADMIN"] },
+  // Everybody, deliberately: read-only does not mean unable to secure your own
+  // account.
+  { to: "/account/password", label: "Change Password", icon: KeyRound, testid: "nav-password" },
 ];
 
 export default function Layout() {
@@ -30,7 +38,7 @@ export default function Layout() {
           </div>
         </div>
         <nav className="flex-1 px-3 py-4 space-y-1">
-          {NAV.map((n) => (
+          {NAV.filter((n) => !n.roles || n.roles.includes(user?.role)).map((n) => (
             <NavLink
               key={n.to}
               to={n.to}
