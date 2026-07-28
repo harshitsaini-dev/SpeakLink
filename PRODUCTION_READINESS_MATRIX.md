@@ -13,7 +13,20 @@ today, not what is intended. Statuses mean exactly this:
 | `BLOCKED` | Cannot proceed until a named dependency is resolved |
 | `NOT_IMPLEMENTED` | Does not exist |
 
-Last updated: 2026-07-27, branch `release/production-readiness-candidate`.
+Last updated: 2026-07-28, branch `release/production-readiness-candidate`.
+
+Evidence behind this revision, all re-run on 2026-07-28:
+backend 1490 passed / 1 skipped (twice in parallel, once serial),
+Playwright Chromium 128 passed (twice), `yarn build` succeeds,
+`SPEAKLINK_LAN_PILOT_FIREWALL_VERIFIED`,
+`SPEAKLINK_RECEIVER_PACKAGE_VERIFIED`,
+`SPEAKLINK_STORE_PILOT_KIT_VERIFIED`,
+`PACKAGED_FFMPEG_CONFIRMED`,
+`SPEAKLINK_RECEIVER_EXE_STAGING_SMOKE_PASSED`,
+`RECEIVER_DEVICE_ENROLMENT_STAGING_SMOKE_PASSED`,
+`LOCAL_PILOT_SMOKE_PASSED`,
+`SPEAKLINK_RECEIVER_TASK_SCHEDULER_VERIFIED`,
+`SPEAKLINK_PRIVATE_LAN_RECEIVER_EXE_CHECK_PASSED` (43/43).
 
 ---
 
@@ -22,6 +35,13 @@ Last updated: 2026-07-27, branch `release/production-readiness-candidate`.
 | Capability | Status | Evidence / blocker |
 | --- | --- | --- |
 | HQ login, JWT issuance | `TESTED_AUTOMATICALLY` | backend suite |
+| **A fresh install has a SUPER_ADMIN** | `COMPLETE` | Fixed here. The role migration ran *before* `seed_admin`, so on an empty database it found nobody to promote and the seeded account kept the legacy role `'admin'`. Measured on a fresh install: no SUPER_ADMIN existed at all, and every `require_super_admin` endpoint answered 403 to everyone — silently. Both migrations now run again after seeding |
+| User lifecycle: create, edit, disable, enable, archive, restore | `COMPLETE` | `user_lifecycle.py`; 44 tests. Never deleted — a User is the author of broadcast history |
+| Last-SUPER_ADMIN and self-action lock-out rules | `COMPLETE` | The last active SUPER_ADMIN cannot be disabled, archived or demoted; nobody may switch off their own account. A disabled or archived SUPER_ADMIN does not count as cover |
+| Password change and administrator reset | `COMPLETE` | Current password required; a reset returns nothing reusable — no echoed password, no link, no token |
+| Immediate session revocation | `COMPLETE` | `session_version` bumped by disable, archive, role change, password change and reset; existing JWTs fail on their next request. Renaming somebody deliberately does not sign them out |
+| RBAC enforced at the endpoint, not by hidden buttons | `COMPLETE` | 43 endpoint tests calling as the wrong role and expecting 403; `test_rbac_endpoint_matrix` walks the routing table and fails on any undeclared authenticated route |
+| User responses carry no hash, session counter or token | `COMPLETE` | Response models written field by field, so adding a column cannot start publishing it. Asserted in both the backend suite and Playwright |
 | No default credentials in UI | `COMPLETE` | `e18b525`; production bundle contains no default password |
 | Fail-closed administrator bootstrap | `COMPLETE` | `e062e11`; 31 tests; verified live that a missing variable creates zero rows |
 | Login rate limiting | `COMPLETE` | `007bd2f`; bounded in-process limiter, injectable clock |
@@ -89,10 +109,16 @@ Last updated: 2026-07-27, branch `release/production-readiness-candidate`.
 | --- | --- | --- |
 | Exactly one Uvicorn worker | `COMPLETE` | Required; connection state is process-local |
 | Loopback-only pilot | `TESTED_AUTOMATICALLY` | |
-| HTTPS / WSS | `NOT_IMPLEMENTED` | Needs approved reverse proxy or termination layer |
+| Private-LAN pilot on `192.168.4.134` | `TESTED_AUTOMATICALLY` | `SPEAKLINK_PRIVATE_LAN_RECEIVER_EXE_CHECK_PASSED`, 43/43 — backend and frontend both bound to the LAN address, packaged EXE enrolling, broadcasting, rotating, revoking. **Same computer only**; no second desktop has run any of it |
+| Standalone Receiver package (no Python, no FFmpeg install) | `TESTED_AUTOMATICALLY` | `SPEAKLINK_RECEIVER_PACKAGE_VERIFIED` (22/22), `SPEAKLINK_RECEIVER_FRESH_BUILD_VERIFIED`, `PACKAGED_FFMPEG_CONFIRMED` from the Agent's own process tree |
+| Self-contained Store pilot kit | `TESTED_AUTOMATICALLY` | `SPEAKLINK_STORE_PILOT_KIT_VERIFIED` (37/37). Closes a real gap: the runbook told operators to run `.\scripts\…`, which exists only in this repository |
+| HTTPS / WSS | `NOT_IMPLEMENTED` | Needs approved reverse proxy or termination layer. The LAN pilot sends the Device credential over plain HTTP and says so, loudly, at every start |
 | Production CORS policy | `NOT_IMPLEMENTED` | Pilot configuration only |
 | Shared rate-limit storage | `BLOCKED` | Required before any multi-worker deployment |
-| Windows auto-start and recovery | `NOT_IMPLEMENTED` | |
+| Receiver auto-start at logon | `TESTED_AUTOMATICALLY` | `SPEAKLINK_RECEIVER_TASK_SCHEDULER_VERIFIED` (22/22). At-Logon only — **not** a service, **not** before logon, **not** as SYSTEM, **not** on a locked desktop with nobody signed in |
+| Receiver recovery after a crash | `TESTED_AUTOMATICALLY` | A repetition schedule, bounded to one day, plus `MultipleInstances = IgnoreNew`. **Correction:** an earlier version of the runbook claimed `RestartCount` did this. It does not — Windows applies it to a task that fails to *start*, not to one whose program exits non-zero. Measured with `cmd /c exit 1`, `RestartCount 2`: never re-ran |
+| One Receiver per credential | `COMPLETE` | Byte-range lock scoped to the credential path; duplicate launch exits `4`. Proven cross-process with a real killed holder, and through the packaged EXE on the LAN |
+| Windows service / boot-before-logon | `NOT_IMPLEMENTED` | Needs a different design: the Receiver plays into a user session, and session 0 has no audio device |
 | Structured audit events | `TESTED_AUTOMATICALLY` | Login and Receiver events exist; enrolment and Device events do not |
 | Vercel frontend readiness | `NOT_IMPLEMENTED` | Build works; no rewrites, environment contract or deployment checklist |
 | Staging deployment validation | `NOT_IMPLEMENTED` | |
@@ -101,7 +127,7 @@ Last updated: 2026-07-27, branch `release/production-readiness-candidate`.
 
 | Capability | Status | Evidence |
 | --- | --- | --- |
-| Protected database never touched | `COMPLETE` | 507,904 bytes, SHA-256 `8C858B13…BD2EF2AB`, WAL and SHM absent. Unchanged across every run of this campaign. **Correction:** an earlier note in this file recorded `2026-07-26 08:43:13`; the file's `LastWriteTime` is `2026-07-26 14:13:13`, so something opened it read-write on 26 July between those two points. The size is identical and nothing on 27 July wrote to it. A SHA-256 baseline now exists so this cannot be ambiguous again |
+| Protected database never touched | `COMPLETE` | `backend/speaklink_live.db`: 507,904 bytes, SHA-256 `8C858B13…BD2EF2AB`, `LastWriteTime` `2026-07-26 14:13:13.819`, WAL and SHM absent. Verified before and after every phase on 2026-07-28. **Correction:** a cleanup on 2026-07-27 checked `backend/speaklink.db`, which is not the protected file and does not exist. The check was passing on nothing. Every verification now names the exact path and compares the full hash |
 | Complete process-tree shutdown | `COMPLETE` | `4aa9b2a`; verified live — 7 frontend and 3 backend processes stopped, both ports released |
 | Secret-free repository | `COMPLETE` | `git grep` finds no historical default, JWT, bcrypt hash or key material |
 

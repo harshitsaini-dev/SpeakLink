@@ -1886,22 +1886,53 @@ browser-based Receiver harness is worth rebuilding on top of device enrolment.
 
 ### Status
 
-`NOT_READY_FOR_PRODUCTION`. Remaining blockers:
+`NOT_READY_FOR_PRODUCTION`.
 
-1. **DPAPI key custody** — the prerequisite for issuing any device credential.
+### Delivered since this list was last written (2026-07-28)
+
+Several entries below used to be blockers and are not any more. They are named
+here rather than quietly deleted, so the history of what was blocking stays
+readable:
+
+- Enrolment HTTP endpoints, and Windows Receiver agent enrolment with the
+  credential sealed by DPAPI under `%LOCALAPPDATA%\SpeakLink\receiver`.
+- Receiver credential hashing and rotation, with no overlap window.
+- A standalone Receiver package needing no Python and carrying its own FFmpeg,
+  and a self-contained Store pilot kit that also carries the installer scripts.
+- Receiver auto-start **at logon**, one instance per credential, bounded
+  rotating logs, and recovery from a crash through a bounded repetition
+  schedule.
+- A private-LAN pilot on `192.168.4.134`, proven end to end through the
+  packaged executable (43/43).
+- HQ User lifecycle, password change and administrator reset, immediate session
+  revocation, and RBAC enforced at every endpoint.
+- A fresh install now actually has a SUPER_ADMIN. It did not: the role
+  migration ran before seeding, so every `require_super_admin` endpoint
+  answered 403 to everyone, silently.
+
+### Remaining blockers
+
+1. **DPAPI key custody under the dedicated service identity.** The prerequisite
+   for issuing any production device credential. Scope and path are decided;
+   the account does not exist on this machine.
 2. Applying `run_receiver_credential_phase_one` to a real database, with a
    verified backup and a rehearsed rollback.
-3. The enrolment HTTP endpoints.
-4. Windows Receiver agent enrolment, and secure storage for the device
-   credential under `%LOCALAPPDATA%\SpeakLink` — **not** implemented.
-5. Retiring `stores.receiver_token` once every Store has enrolled Devices.
-6. Receiver token hashing and rotation.
+3. Retiring `stores.receiver_token` once every Store has enrolled Devices.
+4. **Actual second-desktop operator execution.** Everything so far is
+   same-computer evidence. `PRIVATE_LAN_TWO_DESKTOP_TEST_RUNBOOK.md` is ready
+   and has not been run by an operator.
+5. HTTPS/WSS persistent staging. The LAN pilot sends the Device credential over
+   plain HTTP and says so at every start.
+6. Restricted production CORS.
 7. Shared rate-limit storage before any multi-worker deployment.
-8. HTTPS/WSS.
-9. Restricted production CORS.
-10. Broader audit logging.
-11. Windows Receiver auto-start and recovery.
-12. LinkGuard pause/resume.
-13. Acoustic speaker verification — `SPEAKER_VERIFIED` remains `NOT_IMPLEMENTED`.
-14. Two-Store real hardware evidence.
-15. Staging deployment validation.
+8. Broader audit logging.
+9. **Windows service / boot-before-logon operation.** Not a missing flag: the
+   Receiver plays into a user session and session 0 has no audio device. A
+   Store that must announce with nobody signed in is not covered by anything
+   built so far.
+10. LinkGuard pause/resume against actual LinkGuard.
+11. Acoustic speaker verification — `SPEAKER_VERIFIED` remains
+    `NOT_IMPLEMENTED`.
+12. Physical amplifier and speaker pilot; two-Store real hardware evidence.
+13. Device-credential load campaign at 5, 10, 20 and 40 Devices.
+14. Staged 40-Store rollout, and staging deployment validation.

@@ -116,9 +116,25 @@ Expect `SPEAKLINK_RECEIVER_PACKAGE_VERIFIED`.
 > It was built nine minutes *before* the source it was supposed to contain, and
 > every test it had passed anyway.
 
-**B3.** Copy the whole package folder to the Store desktop — for example to
-`C:\SpeakLink\Receiver`. Copy the **folder**, not just the `.exe`; the executable
-alone will not run.
+**B2a.** Wrap it into a Store pilot kit, and verify that.
+
+```powershell
+.\scripts\Build-SpeakLinkStorePilotKit.ps1 -PackagePath "artifacts\SpeakLinkReceiver-1.0.0-<commit>-<stamp>"
+.\scripts\Test-SpeakLinkStorePilotKit.ps1 -KitPath "artifacts\SpeakLink-Store-Pilot-<commit>-<stamp>"
+```
+
+Expect `SPEAKLINK_STORE_PILOT_KIT_VERIFIED`.
+
+**This step is not optional, and it is not tidiness.** The package alone
+contains the executable and FFmpeg but none of the installer scripts, so an
+operator who copied only the package would reach step F1 below and find no
+`Install-SpeakLinkReceiverLanPilot.ps1` anywhere on the machine. That was a real
+gap in an earlier version of this runbook. See
+[STORE_PILOT_KIT_RUNBOOK.md](STORE_PILOT_KIT_RUNBOOK.md).
+
+**B3.** Copy the whole **kit** folder to the Store desktop — for example to
+`C:\SpeakLink\Kit`. Copy the folder, not just the `.exe`; the executable alone
+will not run.
 
 **B4.** On the Store desktop, confirm the copy is complete.
 
