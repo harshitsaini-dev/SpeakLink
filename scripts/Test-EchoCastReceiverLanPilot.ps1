@@ -195,3 +195,7 @@ Write-Output ''
 Write-Output 'Scope of this evidence: an At-Logon task for this Windows user on this'
 Write-Output 'computer. It says nothing about behaviour before logon, as SYSTEM, on a'
 Write-Output 'locked desktop, on the second desktop, or about any loudspeaker.'
+
+# Explicit: without it PowerShell returns the exit code of whatever native
+# command ran last, so a fully passing verification can still report failure.
+exit 0

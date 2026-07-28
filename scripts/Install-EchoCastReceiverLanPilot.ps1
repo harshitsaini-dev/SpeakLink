@@ -52,6 +52,8 @@ param(
     [string]$LogDirectory,
     [string]$CredentialPath,
     [int]$RestartCount = 3,
+    [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'EchoCast-AI\receiver-app'),
+    [switch]$RunInPlace,
     [switch]$DryRun
 )
 
@@ -62,15 +64,58 @@ Write-Output '=== installing the EchoCast Receiver logon task (pilot, disposable
 # ---------------------------------------------------------------------------
 # Inputs. Everything is checked before anything is registered.
 # ---------------------------------------------------------------------------
+$PackagePath = (Resolve-Path $PackagePath).Path
 $exe = Join-Path $PackagePath 'EchoCastReceiver.exe'
 if (-not (Test-Path $exe)) {
     throw "No EchoCastReceiver.exe in $PackagePath. Build one with .\scripts\Build-EchoCastReceiver.ps1."
 }
-$exe = (Resolve-Path $exe).Path
 
 $packagedFfmpeg = Join-Path $PackagePath 'ffmpeg.exe'
 if (-not (Test-Path $packagedFfmpeg)) {
     throw "The package at $PackagePath has no ffmpeg.exe beside the executable. The Agent resolves FFmpeg relative to itself and would find nothing."
+}
+if (Test-Path (Join-Path $PackagePath 'STALE-DO-NOT-DEPLOY.txt')) {
+    throw "The package at $PackagePath is marked STALE-DO-NOT-DEPLOY. It is kept as evidence, not for deployment."
+}
+
+# ---------------------------------------------------------------------------
+# Where the task will point. Not, by default, wherever the operator happened to
+# unzip the kit.
+#
+# A scheduled task stores an absolute path and runs it at every logon, for
+# months. If that path is a USB stick, the Store stops working the moment
+# somebody takes the stick home. If it is Downloads or Temp, it stops working
+# the first time Windows Storage Sense tidies up, and the failure arrives weeks
+# after the cause with nothing connecting the two. So the package is copied to
+# a stable per-user location and the task points at the copy.
+# ---------------------------------------------------------------------------
+function Test-UnstableLocation {
+    param([string]$Path)
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $root = [System.IO.Path]::GetPathRoot($full)
+    $drive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID = '$($root.TrimEnd('\'))'" -ErrorAction SilentlyContinue
+    # DriveType 2 = removable, 4 = network.
+    if ($drive -and $drive.DriveType -in 2, 4) { return "a removable or network drive ($root)" }
+    foreach ($unstable in @($env:TEMP, (Join-Path $env:USERPROFILE 'Downloads'))) {
+        if ($unstable -and $full.StartsWith([System.IO.Path]::GetFullPath($unstable), 'OrdinalIgnoreCase')) {
+            return "a temporary or Downloads folder ($unstable)"
+        }
+    }
+    return $null
+}
+
+$unstable = Test-UnstableLocation $PackagePath
+if ($RunInPlace) {
+    if ($unstable) {
+        throw ("-RunInPlace was given, but $PackagePath is on $unstable. A logon task " +
+               'stores an absolute path and runs it for months; that one will disappear. ' +
+               'Drop -RunInPlace so the package is copied to a stable location.')
+    }
+    Write-Output "  install     : running in place from $PackagePath"
+    $installedRoot = $PackagePath
+} else {
+    $installedRoot = $InstallRoot
+    Write-Output "  install     : copying the package to $installedRoot"
 }
 
 if ($BackendUrl -match '^http://' -and $BackendUrl -notmatch '^http://(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)') {
@@ -83,6 +128,9 @@ if ($BackendUrl -match '(?i)[?&](token|credential|password|secret)=') {
 if (-not $LogDirectory) {
     $LogDirectory = Join-Path $env:LOCALAPPDATA 'EchoCast-AI\receiver\logs'
 }
+
+$sourcePackage = $PackagePath
+$exe = Join-Path $installedRoot 'EchoCastReceiver.exe'
 
 Write-Output "  task        : $TaskName"
 Write-Output "  executable  : $exe"
@@ -124,6 +172,51 @@ if ($DryRun -or -not $PSCmdlet.ShouldProcess($TaskName, 'Register the At-Logon R
 }
 
 # ---------------------------------------------------------------------------
+# Copy, then re-hash the copy.
+#
+# Copying is where files get truncated, half-written or silently skipped, and a
+# Receiver that is 99% copied does not announce that fact - it fails weeks later
+# with a DLL error nobody connects to the install. So the installed copy is
+# verified against the manifest the build produced, not assumed from the fact
+# that Copy-Item did not throw.
+# ---------------------------------------------------------------------------
+if ($installedRoot -ne $sourcePackage) {
+    if (Test-Path $installedRoot) {
+        $stillRunning = @(Get-CimInstance Win32_Process -Filter "Name = 'EchoCastReceiver.exe'" |
+                          Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($installedRoot, 'OrdinalIgnoreCase') })
+        if ($stillRunning.Count -gt 0) {
+            throw ("A Receiver is still running from $installedRoot (PID " +
+                   (($stillRunning | ForEach-Object { $_.ProcessId }) -join ', ') +
+                   '). Stop it before replacing the installed copy.')
+        }
+        Remove-Item $installedRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $installedRoot | Out-Null
+    Copy-Item (Join-Path $sourcePackage '*') $installedRoot -Recurse -Force
+    Write-Output "  copied      : $sourcePackage -> $installedRoot"
+
+    $sums = Join-Path $installedRoot 'SHA256SUMS.txt'
+    if (-not (Test-Path $sums)) { throw "The installed copy has no SHA256SUMS.txt; it cannot be verified." }
+    $mismatched = @()
+    foreach ($line in (Get-Content $sums)) {
+        if (-not $line.Trim()) { continue }
+        $parts = $line -split '  ', 2
+        $file = Join-Path $installedRoot ($parts[1] -replace '/', '\')
+        if (-not (Test-Path $file)) { $mismatched += "$($parts[1]) (missing)"; continue }
+        if ((Get-FileHash $file -Algorithm SHA256).Hash.ToLower() -ne $parts[0]) {
+            $mismatched += $parts[1]
+        }
+    }
+    if ($mismatched.Count -gt 0) {
+        throw ("The installed copy does not match the package manifest: " +
+               ($mismatched -join ', ') + '. Nothing was registered.')
+    }
+    Write-Output "  every file in the installed copy matches its build hash    PASS"
+}
+
+if (-not (Test-Path $exe)) { throw "No executable at $exe after installation." }
+
+# ---------------------------------------------------------------------------
 # Register
 # ---------------------------------------------------------------------------
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -132,7 +225,7 @@ if ($existing) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 }
 
-$action = New-ScheduledTaskAction -Execute $exe -Argument $arguments -WorkingDirectory $PackagePath
+$action = New-ScheduledTaskAction -Execute $exe -Argument $arguments -WorkingDirectory $installedRoot
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
                                         -LogonType Interactive -RunLevel Limited
