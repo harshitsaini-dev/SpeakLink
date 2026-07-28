@@ -157,8 +157,14 @@ $arguments = ($argumentList | ForEach-Object {
     if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
 }) -join ' '
 
-foreach ($forbidden in @('--code', '--credential', '--token', '--password')) {
-    if ($arguments -match [regex]::Escape($forbidden)) {
+# Whole options, not substrings. The first version matched '--credential'
+# anywhere, so the documented and entirely safe '--credential-path' - which
+# names a FILE, and is how you point a Store at its own sealed credential -
+# always tripped the guard. A guard that blocks a legitimate option is not
+# being careful; it is being wrong in the safe-looking direction, which is the
+# hardest kind to notice.
+foreach ($forbidden in @('--code', '--credential', '--token', '--password', '--secret')) {
+    if ($arguments -match ($([regex]::Escape($forbidden)) + '(?![-\w])')) {
         throw "The task command line contains $forbidden. A credential must never be stored in a task definition."
     }
 }
