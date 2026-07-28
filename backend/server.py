@@ -34,6 +34,8 @@ from schemas import (
     EnrollmentCodeRequest, EnrollmentCodeResponse,
     DeviceEnrollmentRequest, DeviceEnrollmentResponse,
     ReceiverDeviceOut, CredentialRotationResponse,
+    HQUserOut, HQUserCreate, HQUserUpdate, HQUserRoleUpdate,
+    PasswordChangeIn, PasswordResetIn, PasswordResetOut,
 )
 from receiver_rotation_service import (
     CredentialNotFoundError,
@@ -47,9 +49,31 @@ from rbac import (
     Role,
     effective_permissions,
     ensure_rbac_schema,
+    may_manage_role,
     migrate_legacy_roles,
     parse_role,
     require_permission,
+)
+from user_lifecycle import (
+    DuplicateUsernameError,
+    LastSuperAdminError,
+    RoleAssignmentRefused,
+    SelfActionRefused,
+    UserLifecycleError,
+    UserNotFoundError,
+    UserNotRestorableError,
+    UserTransitionRefused,
+    archive_user,
+    assign_role,
+    create_user,
+    disable_user,
+    enable_user,
+    ensure_user_lifecycle_schema,
+    list_users,
+    read_user,
+    restore_user,
+    set_password_hash,
+    update_user,
 )
 from store_lifecycle import (
     StoreLifecycleError,
@@ -79,7 +103,7 @@ from receiver_device_service import (
 )
 from receiver_enrollment_codes import CODE_TTL_SECONDS
 from audio_protocol import build_prepare_message
-from auth import verify_password, create_access_token, get_current_user
+from auth import verify_password, hash_password, create_access_token, get_current_user
 from seed import seed_admin, seed_stores
 from ws_manager import manager
 from receiver_connection_inventory import ReceiverConnectionInventoryError
@@ -278,6 +302,12 @@ def require(permission: Permission):
     return guard
 
 
+#: One refusal message, taken from the exception itself so the two can never
+#: drift apart. Identical for every permission and every role: a refusal that
+#: named what was missing would map out the system for whoever probed it.
+RBAC_REFUSED = str(PermissionDenied())
+
+
 def require_super_admin(user: HQUser = Depends(get_current_user)) -> HQUser:
     """Reserved for the few actions an ADMIN must not reach.
 
@@ -333,6 +363,13 @@ def startup_event():
     except Exception:
         logger.warning("Role model could not be prepared", exc_info=False)
 
+    # After the role model: the backfill reads is_active, and roles must already
+    # be normalised for the last-SUPER_ADMIN rule to count correctly.
+    try:
+        ensure_user_lifecycle_schema(engine)
+    except Exception:
+        logger.warning("User lifecycle schema could not be prepared", exc_info=False)
+
     # Decided here rather than at import: whether Device credentials can be
     # verified depends on the database and the key container, and neither is
     # guaranteed to exist when this module is first imported.
@@ -348,6 +385,28 @@ def startup_event():
     with SessionLocal() as db:
         seed_admin(db)
         seed_stores(db)
+    # Both migrations run AGAIN, after seeding, and this is not belt-and-braces.
+    #
+    # On a brand-new database the migrations above run against an empty
+    # hq_users table, and seed_admin then inserts the first administrator with
+    # the legacy role string 'admin'. Measured on a fresh install: the only
+    # account was {'username': 'founder', 'role': 'admin'} - not normalised to
+    # ADMIN, and with no SUPER_ADMIN anywhere in the system. Every
+    # require_super_admin endpoint was therefore unreachable by anybody:
+    # restoring an archived Store, and now resetting a password. The recovery
+    # would have been editing the database by hand.
+    #
+    # Both are idempotent, so on an existing install this finds nothing to do.
+    try:
+        outcome = migrate_legacy_roles(SessionLocal)
+        if outcome.get("promoted"):
+            logger.info(
+                "Promoted the seeded administrator to SUPER_ADMIN (user_id=%s)",
+                outcome.get("super_admin_user_id"),
+            )
+        ensure_user_lifecycle_schema(engine)
+    except Exception:
+        logger.warning("Role or lifecycle backfill after seeding failed", exc_info=False)
         _write_log(db, "info", "EchoCast Live server started")
     logger.info("EchoCast Live startup complete")
 
@@ -459,6 +518,208 @@ def issue_websocket_ticket(user: HQUser = Depends(get_current_user)):
     """
     ticket = ws_ticket_store.issue(user_id=str(user.id))
     return {"ticket": ticket, "expires_in": TICKET_TTL_SECONDS}
+
+
+# ================ HQ USERS ================
+#
+# Every refusal below is enforced here, on the server. The frontend hides
+# buttons an account may not use, but hiding a button is a courtesy to the
+# person looking at the screen - it is not a control. Anybody can open the
+# network tab and issue the request themselves.
+def _user_or_404(user_id: int) -> dict:
+    try:
+        return read_user(engine, user_id=user_id)
+    except UserNotFoundError:
+        raise HTTPException(status_code=404, detail="No such HQ User")
+
+
+def _require_may_manage(actor: HQUser, target_role: str) -> None:
+    """The actor's role must be allowed to manage the target's role.
+
+    ADMIN cannot manage another ADMIN - two administrators disabling each other
+    is a support call nobody wins - and cannot touch a SUPER_ADMIN at all,
+    because being able to promote yourself would make every other restriction
+    here decorative.
+    """
+    try:
+        actor_role = Role(actor.role.upper())
+        subject_role = Role(str(target_role).upper())
+    except ValueError:
+        raise HTTPException(status_code=403, detail=RBAC_REFUSED)
+    if not may_manage_role(actor_role, subject_role):
+        raise HTTPException(status_code=403, detail=RBAC_REFUSED)
+
+
+def _user_lifecycle_call(action, **kwargs) -> dict:
+    try:
+        return action(engine, **kwargs)
+    except DuplicateUsernameError as clash:
+        raise HTTPException(status_code=409, detail=str(clash))
+    except (LastSuperAdminError, SelfActionRefused) as refusal:
+        # 409, not 403: the caller has the right permission, and the request is
+        # refused because of what it would do to the system, not who asked.
+        raise HTTPException(status_code=409, detail=str(refusal))
+    except (UserTransitionRefused, UserNotRestorableError, RoleAssignmentRefused) as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    except UserNotFoundError:
+        raise HTTPException(status_code=404, detail="No such HQ User")
+    except UserLifecycleError as invalid:
+        raise HTTPException(status_code=400, detail=str(invalid))
+
+
+@api.get("/users", response_model=List[HQUserOut])
+def list_hq_users(user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+    return [HQUserOut(**record) for record in list_users(engine)]
+
+
+@api.get("/users/{user_id}", response_model=HQUserOut)
+def read_hq_user(user_id: int, user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+    return HQUserOut(**_user_or_404(user_id))
+
+
+@api.post("/users", response_model=HQUserOut, status_code=201)
+def create_hq_user(
+    payload: HQUserCreate,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require(Permission.MANAGE_USERS)),
+):
+    _require_may_manage(user, payload.role)
+    created = _user_lifecycle_call(
+        create_user,
+        username=payload.username,
+        display_name=payload.display_name,
+        role=payload.role,
+        password_hash=hash_password(payload.password),
+    )
+    # The password is never logged, and neither is its hash.
+    _write_log(db, "info", f"hq_user_created username={created['username']} "
+                           f"role={created['role']} by={user.username}")
+    return HQUserOut(**created)
+
+
+@api.patch("/users/{user_id}", response_model=HQUserOut)
+def update_hq_user(
+    user_id: int,
+    payload: HQUserUpdate,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require(Permission.MANAGE_USERS)),
+):
+    existing = _user_or_404(user_id)
+    _require_may_manage(user, existing["role"])
+    updated = _user_lifecycle_call(
+        update_user, user_id=user_id,
+        display_name=payload.display_name, username=payload.username)
+    _write_log(db, "info", f"hq_user_updated id={user_id} by={user.username}")
+    return HQUserOut(**updated)
+
+
+@api.post("/users/{user_id}/role", response_model=HQUserOut)
+def set_hq_user_role(
+    user_id: int,
+    payload: HQUserRoleUpdate,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require(Permission.MANAGE_USERS)),
+):
+    existing = _user_or_404(user_id)
+    # Both ends: you may not manage the account as it is now, and you may not
+    # hand out a role you could not manage afterwards.
+    _require_may_manage(user, existing["role"])
+    _require_may_manage(user, payload.role)
+    updated = _user_lifecycle_call(assign_role, user_id=user_id, role=payload.role,
+                                   actor_id=user.id)
+    _write_log(db, "warn", f"hq_user_role_changed id={user_id} role={updated['role']} "
+                           f"by={user.username}")
+    return HQUserOut(**updated)
+
+
+def _lifecycle_endpoint(action, verb: str, level: str = "warn"):
+    def handler(user_id: int, db: Session, user: HQUser) -> HQUserOut:
+        existing = _user_or_404(user_id)
+        _require_may_manage(user, existing["role"])
+        changed = _user_lifecycle_call(action, user_id=user_id, actor_id=user.id)
+        _write_log(db, level, f"hq_user_{verb} id={user_id} by={user.username}")
+        return HQUserOut(**changed)
+    return handler
+
+
+@api.post("/users/{user_id}/disable", response_model=HQUserOut)
+def disable_hq_user(user_id: int, db: Session = Depends(get_db),
+                    user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+    return _lifecycle_endpoint(disable_user, "disabled")(user_id, db, user)
+
+
+@api.post("/users/{user_id}/enable", response_model=HQUserOut)
+def enable_hq_user(user_id: int, db: Session = Depends(get_db),
+                   user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+    return _lifecycle_endpoint(enable_user, "enabled", level="info")(user_id, db, user)
+
+
+@api.post("/users/{user_id}/archive", response_model=HQUserOut)
+def archive_hq_user(user_id: int, db: Session = Depends(get_db),
+                    user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+    return _lifecycle_endpoint(archive_user, "archived")(user_id, db, user)
+
+
+@api.post("/users/{user_id}/restore", response_model=HQUserOut)
+def restore_hq_user(user_id: int, db: Session = Depends(get_db),
+                    user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+    return _lifecycle_endpoint(restore_user, "restored")(user_id, db, user)
+
+
+# ---- passwords ------------------------------------------------------------
+@api.post("/auth/change-password")
+def change_own_password(
+    payload: PasswordChangeIn,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(get_current_user),
+):
+    """Change your own password. The current one is required.
+
+    Requiring it is not paperwork: without it, an unattended signed-in desktop
+    is a permanent account takeover rather than a session somebody can end.
+    """
+    if not verify_password(payload.current_password, user.password_hash):
+        # Deliberately the same shape as any other refusal, and logged without
+        # either password.
+        _write_log(db, "warn", f"password_change_refused user={user.username}")
+        raise HTTPException(status_code=403, detail="That is not your current password.")
+    _user_lifecycle_call(set_password_hash, user_id=user.id,
+                         password_hash=hash_password(payload.new_password))
+    _write_log(db, "warn", f"password_changed user={user.username}")
+    # Every token minted before this moment is now invalid, including the one
+    # that made this request. The caller has to sign in again.
+    return {"ok": True, "sessions_ended": True}
+
+
+@api.post("/users/{user_id}/reset-password", response_model=PasswordResetOut)
+def reset_hq_user_password(
+    user_id: int,
+    payload: PasswordResetIn,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require_super_admin),
+):
+    """Set somebody else's password to one the administrator has chosen.
+
+    The response confirms that it worked and returns nothing reusable. It does
+    not echo the new password, and there is no reset link or token: a value in
+    a response body is a value in a browser's memory, in a proxy log and in the
+    screenshot somebody pastes into a chat.
+
+    How the new password reaches the person is deliberately outside this
+    system - see the runbook. Said out loud, or typed by them while the
+    administrator looks away. It is single-use in practice because their first
+    action is to change it.
+    """
+    existing = _user_or_404(user_id)
+    _require_may_manage(user, existing["role"])
+    _user_lifecycle_call(set_password_hash, user_id=user_id,
+                         password_hash=hash_password(payload.new_password))
+    _write_log(db, "warn", f"password_reset_for id={user_id} by={user.username}")
+    return PasswordResetOut(
+        user_id=user_id,
+        sessions_ended=True,
+        detail="The password was set and every existing session for that account ended.",
+    )
 
 
 # ================ RECEIVER DEVICE ENROLMENT ================

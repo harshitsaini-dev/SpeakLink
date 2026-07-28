@@ -17,6 +17,62 @@ class UserOut(BaseModel):
     is_active: bool
 
 
+#: What an administrator is allowed to see about another account.
+#:
+#: Written out field by field on purpose. A response model built from the ORM
+#: object with everything included would publish ``password_hash`` and
+#: ``session_version`` the moment somebody added them - and those are exactly
+#: the two fields most likely to be added. A hash in a response body is the
+#: input to an offline attack no rate limit protects against; a session counter
+#: tells an attacker how many times they need to be wrong.
+class HQUserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    username: str
+    display_name: str
+    role: str
+    is_active: bool
+    lifecycle_state: str
+    created_at: Optional[datetime] = None
+    disabled_at: Optional[datetime] = None
+    archived_at: Optional[datetime] = None
+
+
+class HQUserCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    display_name: str = Field(min_length=1, max_length=200)
+    role: str
+    # Long enough to matter, short enough to be typed accurately by somebody
+    # reading it out. Complexity rules push people towards Passw0rd! and a
+    # sticky note; length does not.
+    password: str = Field(min_length=12, max_length=200)
+
+
+class HQUserUpdate(BaseModel):
+    display_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    username: Optional[str] = Field(default=None, min_length=1, max_length=100)
+
+
+class HQUserRoleUpdate(BaseModel):
+    role: str
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=12, max_length=200)
+
+
+class PasswordResetIn(BaseModel):
+    new_password: str = Field(min_length=12, max_length=200)
+
+
+class PasswordResetOut(BaseModel):
+    """Confirmation only. Nothing here can be replayed or reused."""
+    user_id: int
+    sessions_ended: bool
+    detail: str
+
+
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
