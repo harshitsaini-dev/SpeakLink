@@ -167,6 +167,53 @@ environment variables. Non-loopback targets are rejected unless
 `ECHOCAST_ALLOW_NONLOCAL_WRITE_TESTS=1` is deliberately set. Do not point that
 suite at a normal development or production server.
 
+## Putting a Receiver on a Store computer
+
+The Store computer needs **no Python, no Node, no FFmpeg install and no copy of
+this repository** — only a kit folder.
+
+```powershell
+# 1. build the Receiver package (refuses a dirty tree; verifies the executable
+#    is newer than every source file that went into it)
+.\scripts\Build-EchoCastReceiver.ps1
+.\scripts\Test-EchoCastReceiverPackage.ps1 -PackagePath "artifacts\EchoCastReceiver-1.0.0-<commit>-<stamp>"
+
+# 2. wrap it, with the installer scripts, into a kit the operator can follow
+.\scripts\Build-EchoCastStorePilotKit.ps1 -PackagePath "artifacts\EchoCastReceiver-1.0.0-<commit>-<stamp>"
+.\scripts\Test-EchoCastStorePilotKit.ps1 -KitPath "artifacts\EchoCast-Store-Pilot-<commit>-<stamp>"
+```
+
+Copy the whole kit folder to the Store computer. The operator follows
+`README-FIRST.txt` inside it. Details and the reasoning:
+[STORE_PILOT_KIT_RUNBOOK.md](STORE_PILOT_KIT_RUNBOOK.md),
+[RECEIVER_TASK_SCHEDULER_RUNBOOK.md](RECEIVER_TASK_SCHEDULER_RUNBOOK.md),
+[PRIVATE_LAN_TWO_DESKTOP_TEST_RUNBOOK.md](PRIVATE_LAN_TWO_DESKTOP_TEST_RUNBOOK.md).
+
+Never use `artifacts\EchoCastReceiver-1.0.0` — it is marked
+`STALE-DO-NOT-DEPLOY` and kept only as evidence.
+
+**What autorun does and does not do.** The Receiver starts when a user *logs
+on*. It is not a Windows service; it does not start before logon, and it does
+not keep playing on a locked desktop with nobody signed in. That is not a flag
+left unset — the Receiver plays audio into a user session, and session 0 has no
+audio device.
+
+## Who can sign in
+
+HQ accounts are managed at `/users` by an account holding `MANAGE_USERS`, and
+anybody signed in can change their own password at `/account/password`.
+
+Accounts are **archived, never deleted** — a User is the author of broadcast
+history. Restoring an archived account returns it to *disabled*, never straight
+to active. The last active SUPER_ADMIN cannot be disabled, archived or demoted,
+and nobody can switch off their own account: there is no reset e-mail here and
+no support line, so the recovery from getting that wrong is editing the database
+by hand.
+
+Disabling, archiving, changing a role or changing a password ends that account's
+existing sessions immediately, rather than eight hours later when its JWT would
+have expired.
+
 ## Common errors
 
 - **Activation script is blocked:** set the execution policy only for the
