@@ -11,6 +11,8 @@ import BroadcastHistory from "@/pages/BroadcastHistory";
 import ReceiverStatus from "@/pages/ReceiverStatus";
 import ReceiverDevices from "@/pages/ReceiverDevices";
 import SystemLogs from "@/pages/SystemLogs";
+import UserManagement from "@/pages/UserManagement";
+import ChangePassword from "@/pages/ChangePassword";
 // Receiver is intentionally not imported or routed - see the note below.
 
 export default function App() {
@@ -42,6 +44,15 @@ export default function App() {
             <Route path="/history" element={<BroadcastHistory />} />
             <Route path="/receivers" element={<ReceiverStatus />} />
             <Route path="/logs" element={<SystemLogs />} />
+            {/* Reachable by any signed-in account, on purpose. Read-only does
+                not mean unable to secure your own account. */}
+            <Route path="/account/password" element={<ChangePassword />} />
+            {/* Deliberately routed for every signed-in account rather than
+                hidden behind a role check here. The page shows what this
+                account may do and the backend answers 403 to anything else -
+                a route that only administrators can reach in the router is a
+                lock on a door with no walls. */}
+            <Route path="/users" element={<UserManagement />} />
           </Route>
           <Route path="*" element={<Navigate to="/console" replace />} />
         </Routes>
