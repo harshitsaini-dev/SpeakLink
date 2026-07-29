@@ -128,6 +128,9 @@ async function mockBackend(page, options = {}) {
     //: How many broadcast sessions each account is recorded as having started.
     //: Anything above zero must block a permanent delete.
     userHistory: options.userHistory || { 2: 3 },
+    //: How many things still refer to each Store, by id. Store 1 (UN) has
+    //: Devices; the others are untouched and therefore deletable.
+    storeDependencies: options.storeDependencies || { 1: 2, 2: 0, 5: 0 },
     userActions: [],
     passwordResets: [],
     passwordChanges: [],
@@ -300,6 +303,48 @@ async function mockBackend(page, options = {}) {
       // A fresh opaque value each time, as the real endpoint does. Never a JWT.
       state.ticketsIssued += 1;
       return route.fulfill(json({ ticket: `test-ticket-${state.ticketsIssued}`, expires_in: 20 }));
+    }
+
+    // Store dependency summary and permanent delete. Mirrors
+    // backend/deletion_safety.py: anything with Devices, targets, events or
+    // enrolment codes is refused with 409, and the short code must be typed.
+    const storeDependencies = path.match(/^\/stores\/(\d+)\/dependencies$/);
+    if (method === 'GET' && storeDependencies) {
+      const store = state.stores.find((s) => s.id === Number(storeDependencies[1]));
+      if (!store) return route.fulfill(json({ detail: 'Store not found' }, 404));
+      const devices = state.devices.filter(() => store.id === 1).length;
+      const total = state.storeDependencies[store.id] ?? devices;
+      return route.fulfill(json({
+        counts: { receiver_devices: total, broadcast_targets: 0,
+                  receiver_events: 0, receiver_enrollment_codes: 0 },
+        unchecked: [],
+        total,
+        deletable: total === 0,
+        explanation: total === 0
+          ? 'Nothing refers to this record, so it can be removed.'
+          : `This record still has ${total} receiver devices. Deleting it would `
+            + 'destroy operational history. Archive it instead.',
+      }));
+    }
+
+    const storePermanent = path.match(/^\/stores\/(\d+)\/permanently$/);
+    if (method === 'DELETE' && storePermanent) {
+      const id = Number(storePermanent[1]);
+      const store = state.stores.find((s) => s.id === id);
+      if (!store) return route.fulfill(json({ detail: 'Store not found' }, 404));
+      const total = state.storeDependencies[id] ?? (id === 1 ? state.devices.length : 0);
+      if (url.searchParams.get('confirm') !== store.store_code) {
+        return route.fulfill(json({
+          detail: `The typed confirmation did not match. Type the Store code exactly: ${store.store_code}` }, 409));
+      }
+      if (total > 0) {
+        return route.fulfill(json({
+          detail: 'This Store contains operational history or Receiver Devices. '
+                + 'Archive it instead.' }, 409));
+      }
+      state.stores = state.stores.filter((s) => s.id !== id);
+      state.transitions.push({ action: 'delete', id });
+      return route.fulfill(json({ ok: true, deleted: { id, store_code: store.store_code } }));
     }
 
     if (method === 'GET' && path === '/stores') {
