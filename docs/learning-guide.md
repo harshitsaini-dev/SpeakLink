@@ -95,7 +95,60 @@ operator is still watching the console rather than looking at a dashboard.
 
 ---
 
-## Learning Box 5 — Test the command, not the parser
+## Learning Box 5 — "Hidden" usually hides the wrong thing
+
+Task Scheduler has a **Hidden** setting. It hides the *task* in Task
+Scheduler's own list. It does nothing whatsoever about whether the program you
+scheduled puts a window on the screen.
+
+Windows decides that from the **Subsystem** field in the executable's PE
+header — `3` is a console application and gets a console; `2` is a windowed one
+and does not. Nothing at launch time can change it.
+
+So the way to have no console is to build a second, windowed executable. Which
+then creates the real design problem: a windowed process has no stdout, so
+`list-audio-devices` prints nothing and `enrol` cannot prompt. The answer was
+to ship both from one PyInstaller analysis — console for the commands a person
+runs and reads, windowed for the one Windows starts at logon.
+
+**The general lesson.** When a setting is named after the outcome you want,
+check what it actually controls before relying on it. And when a platform
+constrains you (one binary, one console mode), the fix is usually *two
+artefacts*, not a cleverer flag.
+
+You can test this without a person watching a screen: read the PE header. That
+check is now part of package verification.
+
+---
+
+## Learning Box 6 — Ask what the platform can physically do, before designing
+
+The obvious answer to "make it start on its own" is a Windows service. It is
+what services are for. Here it would have been silently, expensively wrong.
+
+A service runs in **session 0**. Session 0 has no audio endpoint. The Receiver
+would have started at boot, authenticated, decoded audio, written PCM into
+nothing, and reported success — a more convincing silence than the bug that
+started all this.
+
+The tempting middle ground — a service that supervises a user-session agent —
+was also rejected, and rejecting it is the more useful lesson. It sounds
+rigorous. It adds a process, a failure domain and an IPC channel. And it *still*
+cannot play a sound before somebody logs in, because the audio endpoint does not
+exist until then. It would have bought complexity and no capability.
+
+**The lesson.** Before choosing an architecture, write down the physical
+constraint in one sentence — "the sound device belongs to a signed-in user's
+session" — and check each candidate design against it. A design that cannot beat
+the constraint is not a better design, however sophisticated it looks.
+
+And then say the limitation out loud in the documentation: **announcements need
+the Store user signed in.** A limitation that is written down is a requirement
+someone can plan around. One that is buried is a 3am support call.
+
+---
+
+## Learning Box 7 — Test the command, not the parser
 
 Two of my own tests in this change passed while the code was broken.
 
