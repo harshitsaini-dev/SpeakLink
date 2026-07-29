@@ -25,7 +25,9 @@ param(
     [string]$TaskName = 'EchoCast HQ Runtime',
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'EchoCast-AI\hq-app'),
     [string]$PersistentRoot = (Join-Path $env:LOCALAPPDATA 'EchoCast-AI\persistent-lan-server'),
-    [string]$StatusFile = (Join-Path $env:LOCALAPPDATA 'EchoCast-AI\hq-runtime-status.json')
+    [string]$StatusFile = (Join-Path $env:LOCALAPPDATA 'EchoCast-AI\hq-runtime-status.json'),
+    # Only used to read the database integrity, never to write anything.
+    [string]$Python = 'python'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -122,6 +124,14 @@ if ($task) {
     Check 'it has a working directory' {
         [bool]($task.Actions | Where-Object { $_.WorkingDirectory })
     }
+    # Without this, a correctly-configured task that runs a DIFFERENT
+    # installation - an older copy still sitting on disk - verifies as PASS.
+    Check 'it runs from the expected install root' {
+        $executed = ($task.Actions | ForEach-Object { $_.Execute }) -join ' '
+        $working = ($task.Actions | ForEach-Object { $_.WorkingDirectory }) -join ' '
+        $executed.Trim('"').StartsWith($InstallRoot, 'OrdinalIgnoreCase') -and
+        $working.Trim('"').TrimEnd('\') -ieq $InstallRoot.TrimEnd('\')
+    }
     Check 'it runs as the interactive user, not SYSTEM' {
         $task.Principal.UserId -notmatch '(?i)(SYSTEM|LOCALSERVICE|NETWORKSERVICE)'
     }
@@ -147,21 +157,44 @@ if ($task) {
 }
 
 # ---- the persistent profile it depends on -----------------------------------
-Check 'the persistent database is present' {
-    Test-Path (Join-Path $PersistentRoot 'data\echocast.db')
+$persistentDatabase = Join-Path $PersistentRoot 'data\echocast.db'
+Check 'the persistent database is present' { Test-Path $persistentDatabase }
+
+# A database file that EXISTS is not a database that reads. SQLite opens a
+# truncated file without complaint and fails on the first real query an hour
+# later - the same "it is there, so it works" claim this project keeps finding
+# in other clothes. Opened mode=ro so this verifier cannot write to HQ's data,
+# and an interpreter that cannot be run reports UNKNOWN rather than FAIL.
+Check 'the persistent database passes an integrity check' {
+    if (-not (Test-Path $persistentDatabase)) { throw 'no database to check' }
+    $uri = 'file:///' + ($persistentDatabase -replace '\\', '/') + '?mode=ro'
+    $probe = & $Python -c "import sqlite3,sys;c=sqlite3.connect(sys.argv[1],uri=True);print(c.execute('PRAGMA integrity_check').fetchone()[0])" $uri 2>&1
+    if ($LASTEXITCODE -ne 0) { throw 'the integrity check could not be run' }
+    ($probe -join '').Trim() -eq 'ok'
 }
 Check 'the keys folder exists' { Test-Path (Join-Path $PersistentRoot 'keys') }
+
+# "Has HQ ever actually started here?" - and the honest answer is not "is there
+# a status file". A status file recording CONFIG_ERROR exists exactly when the
+# runtime REFUSED, which is precisely when the two files below legitimately do
+# not exist yet. Keying off the file let that through and reported FAIL on a
+# correct installation. Existence is not evidence of success.
+function Test-HQHasStarted {
+    if (-not (Test-Path $StatusFile)) { return $false }
+    $recorded = (Get-Content $StatusFile -Raw | ConvertFrom-Json).state
+    return $recorded -and $recorded -ne 'CONFIG_ERROR'
+}
 # Both of these are created at the FIRST start - the backend mints the HMAC
 # container, the runtime mints the signing secret - so before HQ has ever run
 # their absence is normal and reporting FAIL would send an operator looking for
 # a backup that was never taken. Unreadable-yet is UNKNOWN, which is what a
 # throw here produces.
 Check 'the Receiver key container is present' {
-    if (-not (Test-Path $StatusFile)) { throw 'HQ has not started yet' }
+    if (-not (Test-HQHasStarted)) { throw 'HQ has not started successfully yet' }
     Test-Path (Join-Path $PersistentRoot 'keys\receiver-hmac-keys.bin')
 }
 Check 'the signing secret is present' {
-    if (-not (Test-Path $StatusFile)) { throw 'HQ has not started yet' }
+    if (-not (Test-HQHasStarted)) { throw 'HQ has not started successfully yet' }
     Test-Path (Join-Path $PersistentRoot 'keys\jwt-secret.txt')
 }
 
@@ -214,7 +247,7 @@ if ($unknown.Count -gt 0) {
 Write-Output ''
 Write-Output "  $($script:results.Count) checks passed"
 Write-Output ''
-Write-Output 'ECHOCAST_HQ_AUTO_START_VERIFIED'
+Write-Output 'ECHOCAST_HQ_AUTOSTART_VERIFIED'
 Write-Output ''
 Write-Output 'Scope: the task is registered correctly and the runtime is installed'
 Write-Output 'windowed. It says NOTHING about behaviour after a reboot, after'

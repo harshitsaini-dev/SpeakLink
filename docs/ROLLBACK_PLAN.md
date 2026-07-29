@@ -76,7 +76,7 @@ Start-ScheduledTask -TaskName "EchoCast HQ Runtime"
 .\Test-EchoCastHQAutoStart.ps1
 ```
 
-Expect `ECHOCAST_HQ_AUTO_START_VERIFIED`, and the status file to read `READY`:
+Expect `ECHOCAST_HQ_AUTOSTART_VERIFIED`, and the status file to read `READY`:
 
 ```powershell
 Get-Content "$env:LOCALAPPDATA\EchoCast-AI\hq-runtime-status.json"

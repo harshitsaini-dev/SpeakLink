@@ -111,4 +111,57 @@ again.
   verified with that pilot's own key ring, so it **cannot** be copied across.
   Plan **one** final re-enrolment into this persistent server. After that, a
   normal restart never needs another.
-* There is no HQ auto-start yet. You start it by hand for now.
+* **HQ auto-start now exists** — see [HQ_AUTO_START.md](HQ_AUTO_START.md). It is
+  built and verified but **not installed on this machine**. Installing the live
+  task is an operator decision.
+
+---
+
+## Starting HQ without a PowerShell window (new)
+
+Build once, install once, and the HQ user never opens a terminal again.
+
+```powershell
+# 1. verify the package you were given
+.\scripts\Test-EchoCastHQPackage.ps1 -PackagePath "artifacts\EchoCastHQ-<version>-<commit>-<time>"
+#    expect: ECHOCAST_HQ_PACKAGE_VERIFIED
+
+# 2. see exactly what would be registered - changes nothing
+.\scripts\Install-EchoCastHQAutoStart.ps1 -PackagePath "artifacts\<package>" -DryRun
+
+# 3. register it (this does NOT start it)
+.\scripts\Install-EchoCastHQAutoStart.ps1 -PackagePath "artifacts\<package>"
+
+# 4. start it deliberately, when the ports are free
+Start-ScheduledTask -TaskName "EchoCast HQ Runtime"
+
+# 5. check it
+.\scripts\Test-EchoCastHQAutoStart.ps1
+#    expect: ECHOCAST_HQ_AUTOSTART_VERIFIED
+```
+
+`EchoCastHQRuntime.exe` is a **windowed** application (PE subsystem 2), so there
+is no black window on the HQ desk at any point.
+
+### What "it is running" actually means
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\EchoCast-AI\hq-runtime-status.json"
+```
+
+| `state` | What is true |
+|---|---|
+| `READY` | the backend **and** the frontend both answered over HTTP |
+| `DEGRADED` | one of them would not stay healthy; the recovery trigger will retry |
+| `CONFIG_ERROR` | it refused to start. `detail` says why, in one sentence |
+| `STOPPED` | not running |
+
+A process existing in Task Manager is **not** evidence that HQ works. That is
+the whole reason this file exists.
+
+### Two limits worth repeating
+
+1. **HQ starts when the HQ user signs in.** After an unattended reboot, somebody
+   has to sign in. No setting changes this.
+2. Uninstalling keeps every byte of data. Re-installing brings back all 44
+   Stores, every user and every Device.

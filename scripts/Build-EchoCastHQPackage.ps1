@@ -217,7 +217,7 @@ there and this package does not touch it.
 
     .\Test-EchoCastHQAutoStart.ps1
 
-   Expect: ECHOCAST_HQ_AUTO_START_VERIFIED
+   Expect: ECHOCAST_HQ_AUTOSTART_VERIFIED
 
    The runtime writes what it is doing to
    %LOCALAPPDATA%\EchoCast-AI\hq-runtime-status.json. READY means the backend

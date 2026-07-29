@@ -288,6 +288,31 @@ def test_uninstall_stops_only_a_verified_runtime_process():
     assert "ExecutablePath" in body, "it stops processes by name alone"
 
 
+def test_a_recorded_pid_alone_can_never_stop_anything():
+    """Windows reuses process numbers. Every place that stops something must
+    prove identity first - by the image path for the runtime, by the command
+    line for its Python children - because a stale record can name an editor.
+
+    Both scripts that stop processes are held to this, not just the one that
+    was written most carefully."""
+    for script in (UNINSTALL, INSTALL, REPAIR):
+        body = _text(script)
+        if "Stop-Process" not in body:
+            continue
+        for fragment in body.split("Stop-Process")[:-1]:
+            window = fragment[-900:]
+            assert ("ExecutablePath" in window or "CommandLine" in window), (
+                f"{script.name} stops a process without proving it is ours")
+
+
+def test_the_children_are_matched_by_command_line_not_by_image_name():
+    """The runtime's children are python.exe. Stopping every python.exe on an
+    HQ desk would be a rude way to end an uninstall."""
+    body = _text(UNINSTALL)
+    assert "CommandLine" in body
+    assert "uvicorn" in body
+
+
 def test_uninstall_removes_only_a_task_that_is_ours():
     body = _text(UNINSTALL)
     before = body[:body.index("Unregister-ScheduledTask")]
@@ -310,6 +335,60 @@ def test_uninstall_removes_only_a_task_that_is_ours():
 ])
 def test_the_verifier_checks_it(question: str):
     assert question in _text(VERIFY), f"the verifier never looks at {question}"
+
+
+def test_the_verifier_checks_the_database_is_not_corrupt():
+    """A database file that EXISTS is not a database that reads. SQLite will
+    happily open a truncated file and fail on the first query an hour later,
+    which is the same 'it is there, so it works' claim this project keeps
+    finding. integrity_check is read-only and answers it properly."""
+    assert "integrity_check" in _text(VERIFY)
+
+
+def test_the_verifier_opens_the_database_read_only():
+    body = _text(VERIFY)
+    integrity = body[body.index("integrity_check") - 600:]
+    assert "mode=ro" in integrity, "the verifier could write to HQ's database"
+
+
+def test_the_verifier_confirms_the_task_points_at_the_install_root_it_was_given():
+    """Otherwise it verifies a correctly-configured task that runs a DIFFERENT
+    installation - an older one still on disk - and reports PASS."""
+    body = _text(VERIFY)
+    assert "expected install root" in body
+
+
+def test_the_first_start_guard_keys_off_a_successful_start_not_a_file(tmp_path):
+    """FOUND BY STAGING A REAL INSTALL.
+
+    The HMAC container and the signing secret are created at the FIRST start,
+    so before HQ has ever run their absence must be UNKNOWN rather than FAIL.
+    The guard asked 'does a status file exist' - and a status file recording
+    CONFIG_ERROR exists precisely when the runtime REFUSED, which is exactly
+    the case where those files legitimately do not exist yet. So the guard let
+    the check through and reported FAIL on a correct installation.
+
+    Existence is not evidence of success. That is the same mistake as a process
+    that exists not being a backend that answers, one level further down.
+
+    THE FIRST VERSION OF THIS TEST PASSED WITHOUT THE FIX. It searched a window
+    of text that happened to include the new helper while the two checks below
+    still called the old one, so it was green against the very code it was
+    written to reject. It asserts on the CALL SITES now.
+    """
+    body = _text(VERIFY)
+    assert "function Test-HQHasStarted" in body
+    assert "CONFIG_ERROR" in body[body.index("function Test-HQHasStarted"):
+                                  body.index("function Test-HQHasStarted") + 400]
+    for check in ("the Receiver key container is present",
+                  "the signing secret is present"):
+        call_site = body[body.index(f"Check '{check}'"):][:220]
+        assert "Test-HQHasStarted" in call_site, f"{check} uses the old guard"
+        assert "Test-Path $StatusFile" not in call_site
+
+
+def test_the_verifier_emits_the_agreed_marker():
+    assert "ECHOCAST_HQ_AUTOSTART_VERIFIED" in _text(VERIFY)
 
 
 def test_the_verifier_reports_unknown_rather_than_guessing():
