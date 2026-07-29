@@ -107,6 +107,13 @@ if (-not $commit) { throw 'Not a git working tree. The kit manifest must record 
 Write-Output "  kit commit     : $shortCommit ($branch)$(if ($dirty.Count) { ' DIRTY' })"
 
 $installerScripts = @(
+    # The Store runtime: what an operator installs and a technician repairs.
+    'Install-EchoCastStoreReceiver.ps1'
+    'Test-EchoCastStoreReceiver.ps1'
+    'Repair-EchoCastStoreReceiver.ps1'
+    'Uninstall-EchoCastStoreReceiver.ps1'
+    # The earlier pilot scripts, kept because the two-desktop runbook still
+    # names them and a half-finished pilot must not be stranded mid-procedure.
     'Install-EchoCastReceiverLanPilot.ps1'
     'Test-EchoCastReceiverLanPilot.ps1'
     'Uninstall-EchoCastReceiverLanPilot.ps1'
@@ -217,14 +224,20 @@ STEP 6 - run it once by hand, with sound, and watch it
   missing one. Copy one of the selectors it printed and try again. Nothing was
   changed on your computer.
 
-STEP 7 - make it start automatically when you log on
+STEP 7 - install it as the background Store Receiver
 
-    .\Installer\Install-EchoCastReceiverLanPilot.ps1 -PackagePath .\Receiver ``
-        -AudioSink windows ``
+    .\Installer\Install-EchoCastStoreReceiver.ps1 ``
+        -PackagePath .\Receiver ``
+        -BackendUrl http://192.168.4.134:8000 ``
         -AudioOutputDevice "index:N@Exact Name From The List"
 
-  Leave the two audio options off ONLY if you do not want this computer to make
-  any sound.
+  This copies the Receiver to
+      %LOCALAPPDATA%\EchoCast-AI\receiver-app
+  saves your settings so you never type them again, registers it to start when
+  you log on, and starts it now.
+
+  From this point on it runs in the BACKGROUND with NO window. You can close
+  PowerShell. You do not need to open it again for normal use.
 
   This COPIES the Receiver to
       %LOCALAPPDATA%\EchoCast-AI\receiver-app
@@ -232,18 +245,31 @@ STEP 7 - make it start automatically when you log on
   away the USB stick or emptying Downloads does not stop the Store working
   weeks later.
 
-STEP 8 - check the task
+STEP 8 - check it
 
-    .\Installer\Test-EchoCastReceiverLanPilot.ps1
+    .\Installer\Test-EchoCastStoreReceiver.ps1
 
-  Expect ECHOCAST_RECEIVER_TASK_SCHEDULER_VERIFIED.
+  Expect ECHOCAST_STORE_RECEIVER_VERIFIED.
 
-STEP 9 - sign out and sign back in. Ask HQ whether this Store shows CONNECTED.
+STEP 9 - sign out and sign back in. Open NOTHING. Ask HQ whether this Store
+         shows CONNECTED on its own.
+
+IF SOMETHING LOOKS WRONG
+
+    .\Receiver\EchoCastReceiver.exe diagnose
+
+  Read that out to your HQ technician. It shows no password and no credential.
+
+TO REPAIR OR UPGRADE (keeps this computer enrolled, keeps your settings)
+
+    .\Installer\Repair-EchoCastStoreReceiver.ps1 -PackagePath .\Receiver
 
 TO REMOVE EVERYTHING
 
-    .\Installer\Uninstall-EchoCastReceiverLanPilot.ps1 -StopRunning
-    .\Receiver\EchoCastReceiver.exe remove-local-credential
+    .\Installer\Uninstall-EchoCastStoreReceiver.ps1
+
+  That keeps this computer enrolled so you can reinstall without a new code.
+  To un-enrol as well, add -RemoveCredential. Only do that if HQ asks.
 
 WHERE THINGS LIVE
   installed Receiver : %LOCALAPPDATA%\EchoCast-AI\receiver-app
@@ -253,11 +279,21 @@ WHERE THINGS LIVE
   The credential is sealed to THIS Windows account on THIS computer. Copying
   the file to another machine gives that machine nothing.
 
+POWERSHELL
+  PowerShell is needed to INSTALL and to DIAGNOSE. It is not needed for normal
+  daily use. Once installed you can close every PowerShell window and the
+  Receiver keeps running, because it is a separate background process started
+  by Windows, not something running inside your PowerShell window.
+
 IMPORTANT - WHAT THIS DOES NOT DO
   It starts when you LOG ON. It is not a Windows service. It does not start
-  before anybody signs in, and it does not keep playing while the computer sits
-  locked with nobody signed in. If this Store must announce with nobody logged
-  in, this kit does not cover it - tell HQ.
+  before anybody signs in, and audio before login is not supported at all - the
+  Windows sound device belongs to a signed-in user's session. If this Store must
+  announce with nobody logged in, this kit does not cover it - tell HQ.
+
+  PLAYBACK_CONFIRMED on the HQ screen is not SPEAKER_VERIFIED. It means the
+  audio reached the sound device. Only a person in the room can say it was
+  heard.
 
   A green result here means the Receiver decoded audio and handed it to a sound
   device. It does not mean a speaker made a sound. Listen, and tell HQ what you

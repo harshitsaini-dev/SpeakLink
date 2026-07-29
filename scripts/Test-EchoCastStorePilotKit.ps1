@@ -146,13 +146,38 @@ Check 'no installer script downloads anything' {
 # The instructions are followable from inside the kit
 # ---------------------------------------------------------------------------
 $readme = Get-Content (Join-Path $KitPath 'README-FIRST.txt') -Raw
+# Prose in the README is hard-wrapped, so a sentence a human reads as one line
+# is several in the file. Matching the raw text failed on wording that was
+# present and correct - the check was testing the line width, not the content.
+$readmeProse = ($readme -replace '\s+', ' ')
 Check 'README-FIRST names only paths inside the kit' {
     # The original defect: instructions pointing at .\scripts\ in a repository
     # the Store computer does not have.
     $readme -notmatch '\.\\scripts\\'
 }
 Check 'README-FIRST gives the enrol command' { $readme -match 'EchoCastReceiver\.exe enrol' }
-Check 'README-FIRST gives the install command' { $readme -match 'Installer\\Install-EchoCastReceiverLanPilot\.ps1' }
+Check 'README-FIRST gives the install command' { $readme -match 'Installer\\Install-EchoCastStoreReceiver\.ps1' }
+Check 'README-FIRST tells the operator to list audio devices first' {
+    $readme -match 'list-audio-devices'
+}
+Check 'README-FIRST says PowerShell is not needed for daily use' {
+    $readmeProse -match '(?i)not needed for normal daily use'
+}
+Check 'README-FIRST says audio before login is not supported' {
+    $readmeProse -match '(?i)audio before login is not supported'
+}
+Check 'README-FIRST separates PLAYBACK_CONFIRMED from SPEAKER_VERIFIED' {
+    $readmeProse -match 'PLAYBACK_CONFIRMED[^.]{0,40}is not SPEAKER_VERIFIED'
+}
+Check 'the kit carries the Store runtime scripts' {
+    @('Install-EchoCastStoreReceiver.ps1', 'Test-EchoCastStoreReceiver.ps1',
+      'Repair-EchoCastStoreReceiver.ps1', 'Uninstall-EchoCastStoreReceiver.ps1') |
+        ForEach-Object { Test-Path (Join-Path $installer $_) } |
+        Where-Object { -not $_ } | Measure-Object | ForEach-Object { $_.Count -eq 0 }
+}
+Check 'the kit carries the windowed background executable' {
+    Test-Path (Join-Path $receiver 'EchoCastReceiverBackground.exe')
+}
 Check 'README-FIRST warns that plain HTTP is pilot-only' { $readme -match '(?i)plain HTTP' }
 Check 'README-FIRST states this is not a service' { $readme -match '(?i)not a Windows service' }
 Check 'README-FIRST refuses to claim a speaker was heard' {
