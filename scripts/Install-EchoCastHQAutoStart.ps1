@@ -106,10 +106,20 @@ if ($subsystem -ne 2) {
 # ---------------------------------------------------------------------------
 # The persistent profile. Read only. Refuse rather than initialize.
 # ---------------------------------------------------------------------------
+# The database and the folder layout, and deliberately NOT the key container or
+# the signing secret. Nothing creates those until the first start - the backend
+# mints the HMAC container and the runtime mints the signing secret - so
+# demanding them here refused a correctly initialized HQ with an instruction no
+# procedure in this repository can carry out. That was the defect in the runtime
+# and it was the same defect here.
+#
+# Whether a MISSING container is normal or an emergency depends on how many
+# Devices are enrolled, and only the runtime can count those. It refuses at
+# start, with the number, which is where that check belongs.
 $persistentDatabase = Join-Path $PersistentRoot 'data\echocast.db'
-$persistentKeys = Join-Path $PersistentRoot 'keys\receiver-hmac-keys.bin'
-$persistentSigning = Join-Path $PersistentRoot 'keys\jwt-secret.txt'
-foreach ($required in @($persistentDatabase, $persistentKeys, $persistentSigning)) {
+foreach ($required in @($persistentDatabase,
+                        (Join-Path $PersistentRoot 'keys'),
+                        (Join-Path $PersistentRoot 'data'))) {
     if (-not (Test-Path $required)) {
         throw ("The persistent HQ profile is not initialized: $required is " +
                "missing. Run Initialize-EchoCastPersistentLanServer.ps1 first. " +

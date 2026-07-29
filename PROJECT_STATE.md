@@ -2173,3 +2173,99 @@ audio/WebSocket/queue audit, the security audit document, load tests and E2E.
 12. Physical amplifier and speaker pilot; two-Store real hardware evidence.
 13. Device-credential load campaign at 5, 10, 20 and 40 Devices.
 14. Staged 40-Store rollout, and staging deployment validation.
+
+---
+
+## 2026-07-29 — the HQ runtime became a thing that runs
+
+Commits: `0efe7b8`, `e0cc648`, plus the documentation commit.
+Branch `feature/persistent-hq-and-one-click-store-setup`. Not pushed.
+
+### The finding that mattered most
+
+The previous session built `EchoCastHQRuntime.exe`, verified its PE subsystem
+directly from the file, and committed it. That verification was correct and
+still holds. **The executable did nothing.** `tools/hq_runtime.py` defined a
+supervisor and never called it — no `main`, no `__main__` block. Run it and it
+imports, defines classes, and exits 0.
+
+Exit 0 is what Task Scheduler records as "the task ran successfully". The end
+state would have been a green task history, no window, no error and no HQ.
+
+It is the same failure shape as a Receiver process that exists and never plays:
+**the evidence looks like success because nobody asked the running thing a
+question.** The lesson is not "add an entry point" — it is that a build
+artifact verified only for its *shape* has not been verified for its *behaviour*,
+and shape is the easier thing to check, so it is the thing that gets checked.
+
+### What running the executable found that the unit suite could not
+
+Three defects, all found by `EchoCastHQRuntime.exe --check` against the real
+initialized persistent root rather than by 1864 passing tests:
+
+1. **A refusal nobody could satisfy.** It demanded
+   `keys\receiver-hmac-keys.bin` and told the operator to restore it. Nothing
+   creates that file: `Initialize` makes empty folders, the *backend* mints the
+   container on first start, and the existing start script mints the signing
+   secret. A correctly initialized HQ could never start.
+2. **`sys.executable` is the supervisor when frozen** — the backend command
+   would have relaunched the supervisor with `-m uvicorn`.
+3. **`Path(__file__).parents[1]` is the bundle when frozen** — it looked for the
+   React build inside its own unpacked bundle.
+
+Then the installer dry run found the *same* refusal as (1), still present in
+PowerShell after being fixed in Python. One defect, two languages; fixing one
+and not searching for the other is how it survived.
+
+### The asymmetry the fix turns on
+
+Deleting the check would have been wrong. A key container that vanishes from a
+server with Stores enrolled is a real emergency — mint a new one and every
+Device credential stops verifying while every Store still *looks* enrolled, and
+all 44 need re-enrolling.
+
+The two situations differ by evidence already on disk, so the runtime counts
+enrolled Devices instead of guessing. And the two secrets are treated
+differently on purpose:
+
+> A new **signing secret** costs everybody one sign-in.
+> A new **HMAC container** costs 44 Stores a re-enrolment.
+
+So the signing secret is created when absent and never replaced; the key
+container is never created, and a missing one refuses only when Devices exist.
+An unreadable database refuses rather than reporting zero — "I could not count
+them" must never quietly become "there are none".
+
+### Delivered
+
+- `tools/hq_runtime.py`: `main()`, `HQRuntime`, a status file a windowed process
+  can be read through, `count_enrolled_devices`, frozen-aware path resolution,
+  exit codes Task Scheduler can act on
+- `scripts/Install-`/`Test-`/`Repair-`/`Uninstall-EchoCastHQAutoStart.ps1`
+- `scripts/Build-`/`Test-EchoCastHQPackage.ps1`
+- `docs/HQ_RUNTIME_DESIGN.md`, `docs/HQ_AUTO_START.md`, `docs/ROLLBACK_PLAN.md`
+
+### Gate
+
+```
+full backend suite                1864 passed, 2 skipped, 0 FAILED  (was 1758)
+compileall backend tools          exit 0
+HQ runtime + entry point          54 passed
+HQ auto-start                     73 passed
+HQ package                        40 passed
+EchoCastHQRuntime.exe             PE subsystem 2 (WINDOWS_GUI), read from the file
+  sha256                          B8F3FA90…4A19903B0
+RC package                        EchoCastHQ-0.1.0-rc1-e0cc648-20260729-212302
+  verification                    ECHOCAST_HQ_PACKAGE_VERIFIED, 32/32
+secret scan                       clean
+git diff --check / status         clean
+protected database                unchanged
+```
+
+### Not claimed
+
+The live HQ Scheduled Task was **not installed**. The live pilot was **not
+stopped**. Nothing was pushed. `EchoCastStoreSetup.exe`, the Store
+task/recovery tests, the audio/WebSocket/queue audit, the security audit
+document and the load tests are `NOT STARTED` — see
+[docs/NONSTOP_COMPLETION_QUEUE.md](docs/NONSTOP_COMPLETION_QUEUE.md).
