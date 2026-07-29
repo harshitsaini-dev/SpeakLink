@@ -150,10 +150,18 @@ if ($task) {
 Check 'the persistent database is present' {
     Test-Path (Join-Path $PersistentRoot 'data\speaklink.db')
 }
+Check 'the keys folder exists' { Test-Path (Join-Path $PersistentRoot 'keys') }
+# Both of these are created at the FIRST start - the backend mints the HMAC
+# container, the runtime mints the signing secret - so before HQ has ever run
+# their absence is normal and reporting FAIL would send an operator looking for
+# a backup that was never taken. Unreadable-yet is UNKNOWN, which is what a
+# throw here produces.
 Check 'the Receiver key container is present' {
+    if (-not (Test-Path $StatusFile)) { throw 'HQ has not started yet' }
     Test-Path (Join-Path $PersistentRoot 'keys\receiver-hmac-keys.bin')
 }
 Check 'the signing secret is present' {
+    if (-not (Test-Path $StatusFile)) { throw 'HQ has not started yet' }
     Test-Path (Join-Path $PersistentRoot 'keys\jwt-secret.txt')
 }
 

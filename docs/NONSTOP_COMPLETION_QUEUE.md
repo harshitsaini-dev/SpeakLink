@@ -52,8 +52,11 @@ Stated plainly rather than left to read as passed.
 | 5 | Receiver onboarding: refusal categories | `AUTOMATED PASS` | `backend/enrolment_refusal.py`; category logged, wire response stays generic; 17 tests |
 | 5 | Receiver onboarding: code countdown/state | `AUTOMATED PASS` | live countdown, UNUSED/EXPIRED, value removed on expiry; 11 Playwright tests |
 | 5 | Receiver onboarding: setup-progress + USED state | `NOT STARTED` | needs backend evidence the page does not receive |
-| 7 | `SpeakLinkHQRuntime.exe` supervisor | `AUTOMATED PASS` | `tools/hq_runtime.py` + `hq_runtime.spec`; built, PE Subsystem 2 read from the file; 26 tests |
-| 7 | HQ auto-start scripts + package | `NOT STARTED` | Install/Test/Repair/Uninstall-SpeakLinkHQAutoStart.ps1 and the versioned package do not exist |
+| 7 | `SpeakLinkHQRuntime.exe` supervisor | `AUTOMATED PASS` | `tools/hq_runtime.py` + `hq_runtime.spec`; **entry point added** - the earlier build defined a supervisor and never called it; 54 tests |
+| 7 | HQ auto-start scripts | `AUTOMATED PASS` | Install/Test/Repair/Uninstall-SpeakLinkHQAutoStart.ps1; 73 tests; dry-run and four refusal paths executed for real against an isolated task |
+| 7 | HQ versioned package | `AUTOMATED PASS` | `Build-`/`Test-SpeakLinkHQPackage.ps1`; 40 tests; RC package built and verified 32/32 |
+| 7 | HQ documentation | `AUTOMATED PASS` | `HQ_RUNTIME_DESIGN.md`, `HQ_AUTO_START.md`, `ROLLBACK_PLAN.md` |
+| 7 | HQ live task installation | `OPERATOR CHECKPOINT` | deliberately not installed; registering and starting are separate decisions |
 | 8 | `SpeakLinkStoreSetup.exe` wizard | `NOT STARTED` | a new GUI application; substantial |
 | 9 | Audio/WebSocket/queue audit | `NOT STARTED` | not examined this session |
 | 10 | Security audit document | `NOT STARTED` | not examined this session |
@@ -86,3 +89,52 @@ Every automated gate that exists is green, and the persistent HQ foundation is
 built and verified. It is **not** `GREEN_FOR_CONTROLLED_TWO_STORE_PILOT`,
 because Phases 4, 5, 7, 8, 9 and 10 have not been done, and no physical Store
 test has been run.
+
+---
+
+## HQ phase — completed 2026-07-29
+
+Commits `0efe7b8` (runtime entry point + auto-start scripts), `e0cc648`
+(versioned package), and the documentation commit that follows them.
+
+### P0/P1 found and fixed
+
+| # | Severity | Finding | Found by |
+|---|---|---|---|
+| 1 | P0 | `SpeakLinkHQRuntime.exe` had **no entry point**. Built, packaged and correctly verified WINDOWS_GUI, it imported, defined classes and exited 0 — which Task Scheduler records as success. Green task history, no window, no HQ | writing the entry-point tests |
+| 2 | P0 | The runtime refused a correctly initialized persistent profile because `keys\receiver-hmac-keys.bin` was absent, and told the operator to "restore it". **Nothing in this repository creates it before the first start** — the refusal could not be satisfied by any documented procedure | running the packaged `--check` against the real profile |
+| 3 | P0 | The same refusal, again, in `Install-SpeakLinkHQAutoStart.ps1`. Fixed in Python and left in PowerShell | dry-running the installer against the real profile |
+| 4 | P1 | `sys.executable` inside a frozen build is the supervisor itself, so the backend command would have relaunched `SpeakLinkHQRuntime.exe` with `-m uvicorn` — and the spec excludes uvicorn deliberately | reasoning about the frozen layout, confirmed by test |
+| 5 | P1 | `Path(__file__).parents[1]` inside a frozen build is the unpacked bundle, so the packaged runtime looked for the React build inside itself | running the packaged `--check` |
+| 6 | P1 | The installer and the runtime **disagreed** about where the frontend lives (`frontend\index.html` vs `frontend\build\index.html`), so a package that installed cleanly could not start | writing the test that holds them to one answer |
+| 7 | P1 | `$PSScriptRoot` is empty inside a `param()` block under `powershell -File`, so package-builder defaults failed only under automated invocation | the package tests |
+| 8 | P2 | The package verifier read 400 characters after `New-ScheduledTaskAction` looking for a literal executable name and reported FAIL on a correct installer that passes a variable | running the verifier on a real package |
+| 9 | P2 | `tools/persistent_lan_server.py` opened with a docstring containing `\lan-pilot` — an invalid escape sequence warned about on every parse | the byte-order-mark suite's warning output |
+
+**Findings 2 and 3 are the same defect in two languages.** Fixing one and not
+searching for the other is how it survived; the rule now lives in one place
+per concern — the installer requires the database and the `keys` folder, and
+whether a *missing* container is normal or an emergency is decided by the
+runtime at start, because only it can count the enrolled Devices.
+
+### The rule that came out of finding 2
+
+A new **signing secret** costs everybody one sign-in. A new **HMAC key
+container** costs 44 Stores a re-enrolment, silently, while every Store still
+looks enrolled. So the signing secret is created if absent and never replaced;
+the key container is never created, and a missing one is refused only when
+Devices are actually enrolled against it. An unreadable database refuses rather
+than reporting zero — "I could not count them" must never become "there are
+none".
+
+### Still not done
+
+| Phase | Status |
+|---|---|
+| `SpeakLinkStoreSetup.exe` | `NOT STARTED` |
+| Store task/recovery tests (Phase 5 of the sprint brief) | `NOT STARTED` |
+| Receiver onboarding: USED state + setup progress | `NOT STARTED` |
+| Audio/WebSocket/queue P0/P1 audit | `NOT STARTED` |
+| `docs/SECURITY_AUDIT.md` | `NOT STARTED` |
+| Load tests 2/5/10/20/40 | `NOT STARTED` |
+| Live HQ task installation, reboot/sign-in, locked desktop | `OPERATOR CHECKPOINT` |

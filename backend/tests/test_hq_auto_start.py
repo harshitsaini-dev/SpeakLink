@@ -471,6 +471,52 @@ def test_an_uninitialized_persistent_root_is_refused(tmp_path):
 
 
 @windows_only
+def test_a_never_started_profile_is_accepted(tmp_path):
+    """THE SAME DEFECT, IN A SECOND PLACE.
+
+    The runtime demanded keys/receiver-hmac-keys.bin up front and refused a
+    correctly initialized HQ, because nothing creates that file until the
+    backend's first start. That was fixed in the runtime and left here - the
+    installer demanded it too, so a freshly initialized HQ could be verified,
+    packaged and then not installed.
+
+    The rule is the same in both places now, and the parts of it live where the
+    evidence does: the installer requires the database and the keys FOLDER,
+    and whether a missing container is normal or an emergency is decided by the
+    runtime at start, because only it can count the enrolled Devices.
+    """
+    package = _package(tmp_path)
+    fresh = tmp_path / "fresh"
+    for folder in ("data", "config", "keys", "logs", "backups", "runtime"):
+        (fresh / folder).mkdir(parents=True)
+    (fresh / "data" / "speaklink.db").write_bytes(b"SQLite format 3\x00")
+
+    result = _run(INSTALL, [
+        "-PackagePath", str(package), "-TaskName", ISOLATED_TASK,
+        "-InstallRoot", str(tmp_path / "install"),
+        "-PersistentRoot", str(fresh), "-DryRun",
+    ])
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@windows_only
+def test_a_missing_database_is_still_refused(tmp_path):
+    """The check that had to survive the fix above."""
+    package = _package(tmp_path)
+    empty = tmp_path / "empty"
+    for folder in ("data", "keys"):
+        (empty / folder).mkdir(parents=True)
+
+    result = _run(INSTALL, [
+        "-PackagePath", str(package), "-TaskName", ISOLATED_TASK,
+        "-InstallRoot", str(tmp_path / "install"),
+        "-PersistentRoot", str(empty), "-DryRun",
+    ])
+    assert result.returncode != 0
+    assert "Initialize" in result.stdout + result.stderr
+
+
+@windows_only
 def test_the_verifier_on_an_absent_task_fails_rather_than_passing(tmp_path):
     result = _run(VERIFY, [
         "-TaskName", ISOLATED_TASK,
