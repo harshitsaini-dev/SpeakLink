@@ -2114,6 +2114,39 @@ environment has no interactive desktop — window enumeration returned no visibl
 window for *either* variant, so it proves nothing either way. The manual Store
 acceptance test is the only evidence for that claim, and it has not been run.
 
+### 2026-07-29 (final) — persistent HQ is built, initialized and verified
+
+The P0 is closed in code and the persistent server now exists on disk.
+
+| | |
+|---|---|
+| root | `%LOCALAPPDATA%\EchoCast-AI\persistent-lan-server\` (fixed, no date) |
+| database | `data\echocast.db` — `admin` (ADMIN), `owneradmin` (OWNER), 13 Stores, 17 sessions, 194 logs, integrity ok |
+| source | `backend\echocast_live.db` — **byte-identical after the copy** |
+| backups | `backups\source-20260729-190540.db`, `backups\echocast_live-20260729-160359.db` |
+| scripts | Initialize / Start / Stop / Test / **Repair** |
+| verification | `ECHOCAST_PERSISTENT_SERVER_VERIFIED`, 11/11 |
+
+Protected baseline rebaselined a second time under every authorized condition:
+`8C858B13… → EEF1EA79… → 8A7E3413…`. The whole chain is in
+`BASELINE_HISTORY` with what moved it, and two tests now prevent a value being
+pasted over history instead of appended to it. `admin`'s password-hash
+fingerprint is unchanged, so the existing account was preserved rather than
+rewritten.
+
+**Automated gate: green.** 1687 passed, 2 skipped, 0 failed; `compileall` 0;
+`pip check` clean; frontend production build succeeds; Receiver package and
+Store kit verified; secret scan clean; tree clean.
+
+**Not done, and not claimed** — see
+[docs/NONSTOP_COMPLETION_QUEUE.md](docs/NONSTOP_COMPLETION_QUEUE.md): User and
+Store hard-delete with dependency rules, their frontend dialogs, Receiver
+onboarding UI, `EchoCastHQRuntime.exe`, `EchoCastStoreSetup.exe`, the
+audio/WebSocket/queue audit, the security audit document, load tests and E2E.
+
+**Verdict: `GREEN_FOR_MANUAL_ACCEPTANCE` (partial scope).** Not
+`GREEN_FOR_CONTROLLED_TWO_STORE_PILOT`.
+
 ### Remaining blockers
 
 1. **DPAPI key custody under the dedicated service identity.** The prerequisite
