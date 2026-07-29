@@ -1,7 +1,7 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
-import { Plus, RefreshCw, KeyRound, MonitorSmartphone, Pencil, Power, Archive, ArchiveRestore } from "lucide-react";
+import { Plus, RefreshCw, KeyRound, MonitorSmartphone, Pencil, Power, Archive, ArchiveRestore, Trash2 } from "lucide-react";
 import StatusBadge from "@/components/StatusBadge";
 
 // A Store is never deleted. It owns Receiver Devices, broadcast sessions,
@@ -39,6 +39,7 @@ export default function StoreManagement() {
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState("");
+  const [deleting, setDeleting] = React.useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -165,6 +166,12 @@ export default function StoreManagement() {
                     {archived && (
                       <button data-testid={`restore-store-${s.store_code}`} onClick={() => restore(s)} disabled={busy === `restore-${s.id}`} title="Restore to disabled" aria-label={`Restore ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-blue-200 text-blue-800 rounded hover:bg-blue-50 disabled:opacity-50"><ArchiveRestore size={12}/></button>
                     )}
+                    {/* Offered on every Store, because whether it is actually
+                        allowed is decided by the dependency summary the dialog
+                        fetches - and again by the server inside the deleting
+                        transaction. Hiding it on a guess would hide it from the
+                        one never-used Store it exists for. */}
+                    <button data-testid={`delete-store-${s.store_code}`} onClick={() => setDeleting(s)} title="Delete permanently" aria-label={`Delete ${s.store_name} permanently`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50"><Trash2 size={12}/></button>
                   </td>
                 </tr>
               );
@@ -173,8 +180,130 @@ export default function StoreManagement() {
         </table>
       </div>
 
+      {deleting && (
+        <DeleteStoreModal
+          store={deleting}
+          onClose={() => setDeleting(null)}
+          onDeleted={() => { setDeleting(null); load(); }}
+        />
+      )}
+
       {showAdd && <AddStoreModal onClose={() => setShowAdd(false)} onCreated={() => { setShowAdd(false); load(); }} />}
       {editing && <EditStoreModal store={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />}
+    </div>
+  );
+}
+
+/**
+ * Permanent Store deletion, which is refused far more often than it succeeds.
+ *
+ * A Store owns Receiver Devices, broadcast targets, sessions and Receiver
+ * events. Removing the row would orphan that history or cascade it away, and
+ * both destroy the only record of what was announced where. So the dialog asks
+ * the backend what still refers to this Store BEFORE offering the button, and
+ * points at Archive when anything does.
+ *
+ * The typed short code is the confirmation that cannot be clicked through by
+ * muscle memory. The server checks it again inside the deleting transaction,
+ * because a dialog is not a control.
+ */
+function DeleteStoreModal({ store, onClose, onDeleted }) {
+  const [summary, setSummary] = React.useState(null);
+  const [failed, setFailed] = React.useState("");
+  const [typed, setTyped] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  React.useEffect(() => {
+    let cancelled = false;
+    api.get(`/stores/${store.id}/dependencies`)
+      .then((r) => { if (!cancelled) setSummary(r.data); })
+      .catch(() => { if (!cancelled) setFailed("The dependency check could not be run."); });
+    return () => { cancelled = true; };
+  }, [store.id]);
+
+  const remove = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await api.delete(`/stores/${store.id}/permanently`, { params: { confirm: typed } });
+      onDeleted();
+    } catch (e) {
+      setError(e?.response?.data?.detail || "That Store could not be deleted.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+         data-testid="delete-store-modal">
+      <div className="bg-white rounded-lg w-full max-w-md p-5 space-y-3">
+        <h3 className="font-semibold text-red-900">
+          Delete {store.store_code} permanently
+        </h3>
+
+        {summary === null && !failed && (
+          <p className="text-sm text-slate-600" data-testid="delete-store-checking">
+            Checking what still refers to this Store…
+          </p>
+        )}
+
+        {failed && (
+          <p className="text-sm text-red-800" data-testid="delete-store-check-failed">
+            {failed} Nothing has been deleted. Archive this Store instead.
+          </p>
+        )}
+
+        {summary && (
+          <>
+            <p className="text-sm text-slate-700" data-testid="delete-store-summary">
+              {summary.explanation}
+            </p>
+            {!summary.deletable && (
+              <p className="text-sm text-red-800" data-testid="delete-store-blocked">
+                This Store contains operational history or Receiver Devices.
+                Archive it instead — the history stays readable and the Store can
+                be restored.
+              </p>
+            )}
+            {summary.deletable && (
+              <>
+                <p className="text-sm text-red-800">
+                  This cannot be undone. Type <strong>{store.store_code}</strong> to confirm.
+                </p>
+                <input
+                  className="w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                  value={typed} onChange={(e) => setTyped(e.target.value)}
+                  autoComplete="off" data-testid="delete-store-confirm-input"
+                />
+              </>
+            )}
+          </>
+        )}
+
+        {error && (
+          <div role="alert" data-testid="delete-store-error"
+               className="text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">
+            {error}
+          </div>
+        )}
+
+        <div className="flex gap-2 pt-1">
+          <button type="button" data-testid="delete-store-cancel" onClick={onClose}
+                  className="flex-1 px-4 py-2 border border-slate-300 rounded-md text-sm">
+            Cancel
+          </button>
+          <button
+            type="button" data-testid="delete-store-confirm"
+            disabled={busy || !summary || !summary.deletable || typed !== store.store_code}
+            onClick={remove}
+            className="flex-1 px-4 py-2 bg-red-700 text-white rounded-md text-sm disabled:opacity-40"
+          >
+            Delete permanently
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
