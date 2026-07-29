@@ -18,7 +18,7 @@ import React from "react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import {
-  UserPlus, RefreshCw, KeyRound, Pencil, Power, Archive, ArchiveRestore, ShieldAlert,
+  UserPlus, RefreshCw, KeyRound, Pencil, Power, Archive, ArchiveRestore, ShieldAlert, Trash2,
 } from "lucide-react";
 
 const ROLES = ["OWNER", "ADMIN", "BROADCASTER", "VIEWER"];
@@ -42,7 +42,12 @@ const STATE_STYLE = {
  * disagree, so this decides only what to SHOW. The server decides what happens.
  */
 const MANAGEABLE = {
-  SUPER_ADMIN: new Set(ROLES),
+  // OWNER, not SUPER_ADMIN. The rename that introduced OWNER rewrote the
+  // quoted string "SUPER_ADMIN" everywhere but not this unquoted object KEY, so
+  // MANAGEABLE had no entry for the role an owner actually has - canManage()
+  // returned false for every row and an OWNER saw no management buttons at all.
+  // A rename tool cannot tell an identifier from a string; a person can.
+  OWNER: new Set(ROLES),
   ADMIN: new Set(["BROADCASTER", "VIEWER"]),
   BROADCASTER: new Set(),
   VIEWER: new Set(),
@@ -65,6 +70,7 @@ export default function UserManagement() {
   const [creating, setCreating] = React.useState(false);
   const [editing, setEditing] = React.useState(null);
   const [resetting, setResetting] = React.useState(null);
+  const [deleting, setDeleting] = React.useState(null);
 
   const myRole = me?.role || "VIEWER";
   const canManage = (role) => (MANAGEABLE[myRole] || new Set()).has(role);
@@ -252,6 +258,17 @@ export default function UserManagement() {
                         <KeyRound size={14} /> Reset password
                       </button>
                     )}
+                    {/* Offered only where the backend could conceivably allow
+                        it. Whether it is actually permitted is decided by the
+                        dependency summary the dialog fetches, and again by the
+                        server inside the deleting transaction. */}
+                    {allowed && row.role !== "OWNER" && (
+                      <button type="button" disabled={busy} onClick={() => setDeleting(row)}
+                              className="inline-flex items-center gap-1 rounded border border-red-300 px-2 py-1 text-red-700"
+                              data-testid={`delete-${row.username}`}>
+                        <Trash2 size={14} /> Delete
+                      </button>
+                    )}
                   </td>
                 </tr>
               );
@@ -287,6 +304,20 @@ export default function UserManagement() {
           }}
           canChangeRole={canManage(editing.role) && editing.id !== me?.id}
           assignableRoles={ROLES.filter((role) => canManage(role))}
+        />
+      )}
+
+      {deleting && (
+        <DeleteUserDialog
+          user={deleting}
+          onCancel={() => setDeleting(null)}
+          onConfirm={async (typed) => {
+            const ok = await act(
+              () => api.delete(`/users/${deleting.id}/permanently`,
+                               { params: { confirm: typed } }),
+              `${deleting.username} was permanently deleted.`);
+            if (ok) setDeleting(null);
+          }}
         />
       )}
 
@@ -400,6 +431,92 @@ function EditUserForm({ user, onCancel, onSubmit, canChangeRole, assignableRoles
         </label>
       )}
     </Panel>
+  );
+}
+
+/**
+ * Permanent deletion, which is refused far more often than it succeeds.
+ *
+ * The dialog asks the backend what still refers to this account BEFORE
+ * offering the button, so somebody is not invited to press a thing that will
+ * come back 409. The typed username is the one confirmation that cannot be
+ * clicked through by muscle memory - and it is checked again on the server,
+ * inside the transaction that deletes, because a dialog is not a control.
+ */
+function DeleteUserDialog({ user, onCancel, onConfirm }) {
+  const [summary, setSummary] = React.useState(null);
+  const [failed, setFailed] = React.useState("");
+  const [typed, setTyped] = React.useState("");
+
+  React.useEffect(() => {
+    let cancelled = false;
+    api.get(`/users/${user.id}/dependencies`)
+      .then((response) => { if (!cancelled) setSummary(response.data); })
+      .catch(() => { if (!cancelled) setFailed("The dependency check could not be run."); });
+    return () => { cancelled = true; };
+  }, [user.id]);
+
+  const matches = typed === user.username;
+
+  return (
+    <div className="rounded border border-red-200 bg-red-50 p-4 space-y-3"
+         data-testid="delete-user-dialog">
+      <h2 className="font-medium text-red-900">Permanently delete {user.username}</h2>
+
+      {summary === null && !failed && (
+        <p className="text-sm text-slate-600" data-testid="delete-checking">
+          Checking what still refers to this account…
+        </p>
+      )}
+
+      {failed && (
+        <p className="text-sm text-red-800" data-testid="delete-check-failed">
+          {failed} Nothing has been deleted. Archive this account instead.
+        </p>
+      )}
+
+      {summary && (
+        <>
+          <p className="text-sm text-slate-700" data-testid="delete-summary">
+            {summary.explanation}
+          </p>
+          {!summary.deletable && (
+            <p className="text-sm text-red-800" data-testid="delete-blocked">
+              This account cannot be deleted. Archive it instead — the history stays
+              readable and the account can be restored.
+            </p>
+          )}
+          {summary.deletable && (
+            <>
+              <p className="text-sm text-red-800">
+                This cannot be undone. Type <strong>{user.username}</strong> to confirm.
+              </p>
+              <input
+                className="w-full max-w-xs rounded border px-2 py-1" value={typed}
+                onChange={(event) => setTyped(event.target.value)}
+                autoComplete="off" data-testid="delete-confirm-input"
+              />
+            </>
+          )}
+        </>
+      )}
+
+      <div className="flex gap-2">
+        <button
+          type="button"
+          disabled={!summary || !summary.deletable || !matches}
+          onClick={() => onConfirm(typed)}
+          className="rounded bg-red-700 px-3 py-2 text-sm text-white disabled:opacity-40"
+          data-testid="delete-confirm"
+        >
+          Delete permanently
+        </button>
+        <button type="button" onClick={onCancel} className="rounded border px-3 py-2 text-sm"
+                data-testid="delete-cancel">
+          Cancel
+        </button>
+      </div>
+    </div>
   );
 }
 
