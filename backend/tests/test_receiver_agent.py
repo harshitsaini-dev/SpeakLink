@@ -765,7 +765,14 @@ def test_the_agent_has_exactly_the_intended_commands():
         for name in action.choices
     }
     assert commands == {
-        "enrol", "run", "status", "rotate-local-credential", "remove-local-credential"
+        "enrol", "run", "status", "rotate-local-credential", "remove-local-credential",
+        # Added deliberately, and this guard is why it had to be. The device
+        # inventory existed only as `python tools/windows_audio_devices.py`,
+        # which is unavailable on the machines that need it: a Store desktop has
+        # no Python. Without a way to list devices an operator can only guess a
+        # name, and one endpoint appears under MME, DirectSound, WASAPI and
+        # WDM-KS, so a guess is usually ambiguous and refused.
+        "list-audio-devices",
     }
 
 

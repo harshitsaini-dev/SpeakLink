@@ -63,7 +63,20 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from tools.audio_receiver_pilot import (  # noqa: E402
     AudioReceiverPilot,
+    AudioReceiverError,
+    OUTPUT_SAMPLE_RATE,
+    SINK_MODE_NULL,
+    SINK_MODE_WINDOWS,
+    SUPPORTED_SINK_MODES,
+    SinkConfiguration,
+    SinkConfigurationError,
     resolve_sink_configuration,
+)
+from tools.windows_audio_devices import (  # noqa: E402
+    AudioDeviceError,
+    format_device_table,
+    list_output_devices,
+    resolve_output_device,
 )
 from tools.receiver_credential_store import (  # noqa: E402
     CredentialStoreError,
@@ -380,6 +393,104 @@ def configure_logging(
     logger.setLevel(logging.INFO)
     logger.propagate = False
     return logger
+
+
+# ===========================================================================
+# Which audio output, and saying so out loud
+# ===========================================================================
+#: The Receiver has always defaulted to a sink that decodes audio and throws it
+#: away. That is right for a software smoke test and wrong on a Store desktop,
+#: and nothing said which one you were getting: a Store reported
+#: PLAYBACK_CONFIRMED on the dashboard while its speakers stayed silent.
+#:
+#: PLAYBACK_CONFIRMED is emitted when ``decoder.wait_for_decode`` returns true.
+#: In windows mode that only happens after frames have been written to the
+#: output stream, so it genuinely means "handed to the device". In null mode it
+#: means "FFmpeg produced PCM" and nothing more. Both are honest; neither was
+#: visible. These helpers make the mode explicit on the command line and in the
+#: console, and give a Store PC a way to find a device selector at all.
+
+
+def resolve_agent_sink(*, sink_mode, selector, devices=None, backend=None) -> SinkConfiguration:
+    """Resolve the sink from explicit arguments rather than the environment.
+
+    Same rules as ``resolve_sink_configuration``: never picks a device, never
+    falls back to the Windows default, never guesses from a partial name. The
+    difference is only where the answer comes from, so an operator can see the
+    choice on the command line instead of in a variable somebody exported.
+    """
+    mode = (sink_mode or SINK_MODE_NULL).strip().lower()
+    if mode not in SUPPORTED_SINK_MODES:
+        raise SinkConfigurationError(
+            f"{mode!r} is not a supported audio sink; use one of {SUPPORTED_SINK_MODES}"
+        )
+
+    if mode == SINK_MODE_NULL:
+        # A leftover device selector is ignored on purpose, so a stale value can
+        # never produce an unexpected sound.
+        return SinkConfiguration(sink_mode=SINK_MODE_NULL, device=None)
+
+    chosen = (selector or "").strip()
+    if not chosen:
+        raise SinkConfigurationError(
+            "the windows audio sink needs exactly one output device. Run "
+            "'EchoCastReceiver.exe list-audio-devices' and copy a verified "
+            "'index:N@Name' selector. The Receiver will not choose one for you "
+            "and will never use the Windows default device."
+        )
+
+    try:
+        device = resolve_output_device(chosen, devices=devices, backend=backend)
+    except AudioDeviceError as error:
+        raise SinkConfigurationError(str(error)) from None
+
+    # Adopt the device's own advertised format. Hardcoding 48 kHz mono made the
+    # open fail on strict host APIs such as WDM-KS, where the same endpoint may
+    # advertise 44.1 kHz stereo. FFmpeg resamples to whatever the device wants.
+    sample_rate = device.default_samplerate or OUTPUT_SAMPLE_RATE
+    channels = min(max(device.max_output_channels, 1), 2)
+    return SinkConfiguration(
+        sink_mode=SINK_MODE_WINDOWS,
+        device=device,
+        sample_rate=sample_rate,
+        channels=channels,
+    )
+
+
+def describe_sink(configuration: SinkConfiguration) -> "list[str]":
+    """What to print at start-up so nobody has to guess. Carries no secret."""
+    if configuration.sink_mode != SINK_MODE_WINDOWS or configuration.device is None:
+        return [
+            "AUDIO: null sink. Decoded audio is DISCARDED and no sound will be",
+            "       played on this computer. PLAYBACK_CONFIRMED will still be",
+            "       reported to HQ, because in this mode it means only that",
+            "       FFmpeg decoded the audio - not that anything was heard.",
+            "       For a real speaker test, run list-audio-devices and pass",
+            "       --audio-sink windows --audio-output-device index:N@Name",
+        ]
+    device = configuration.device
+    return [
+        f"AUDIO: windows sink, device index {device.index}",
+        f"       name    : {device.name}",
+        f"       host API: {device.host_api}",
+        f"       format  : {int(configuration.sample_rate)} Hz, "
+        f"{configuration.channels} channel(s)",
+        "       PLAYBACK_CONFIRMED in this mode means decoded audio was",
+        "       accepted by that device. It is still not proof anybody heard it.",
+    ]
+
+
+def list_audio_devices_report(*, devices=None, backend=None) -> str:
+    """The device inventory, reachable from the frozen executable.
+
+    This existed only as ``python tools/windows_audio_devices.py``, which is
+    unavailable on precisely the machines that need it: a Store desktop has no
+    Python. Without it an operator can only guess a device name - and the same
+    display name appears under MME, DirectSound, WASAPI and WDM-KS, so a guess
+    is usually ambiguous and refused.
+    """
+    inventory = tuple(devices) if devices is not None else list_output_devices(backend=backend)
+    return format_device_table(inventory)
 
 
 # ===========================================================================
@@ -1091,6 +1202,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run_command.add_argument(
+        "--audio-sink", choices=SUPPORTED_SINK_MODES, default=None,
+        help=(
+            "Where decoded audio goes. 'null' decodes and DISCARDS it - correct "
+            "for a software test, silent on a Store desktop. 'windows' plays it "
+            "through the device named by --audio-output-device. Defaults to the "
+            "ECHOCAST_AUDIO_SINK_MODE environment variable, and to 'null'."
+        ),
+    )
+    run_command.add_argument(
+        "--audio-output-device", default=None, metavar="SELECTOR",
+        help=(
+            "Which output device, from 'list-audio-devices'. Prefer the verified "
+            "form 'index:N@Exact Name', which refuses to open the wrong endpoint "
+            "after Windows renumbers. A bare device name is usually ambiguous, "
+            "because one endpoint appears under MME, DirectSound, WASAPI and "
+            "WDM-KS."
+        ),
+    )
+    run_command.add_argument(
         "--legacy-pilot-mode", action="store_true",
         help=(
             "MIGRATION ONLY. Authenticate with the shared per-Store token from "
@@ -1110,6 +1240,14 @@ def build_parser() -> argparse.ArgumentParser:
     rotate_command.add_argument(
         "--from-stdin", action="store_true",
         help="Read the new credential from stdin instead of a hidden prompt.",
+    )
+
+    # Deliberately takes no backend URL and no credential path: it reads the
+    # sound card inventory and nothing else, so an operator can safely run it on
+    # a Store desktop before anything is enrolled.
+    add_command(
+        "list-audio-devices",
+        help="List Windows audio output devices and their stable selectors.",
     )
 
     remove_command = add_command(
@@ -1151,11 +1289,37 @@ def _run_command(arguments) -> int:
     ws_url = receiver_websocket_url(base)
     path = _credential_path(arguments)
 
+    # Resolved BEFORE the credential is unsealed and before the lock is taken.
+    # A bad device selector is a configuration mistake, and finding out about it
+    # after a Store has connected and been promoted is how a silent Receiver
+    # ends up looking like a working one.
+    sink = _agent_sink(arguments)
+    for line in describe_sink(sink):
+        print(line)
+        log.info("%s", line)
+
     with InstanceLock(path):
-        return _run_locked(arguments, ws_url=ws_url, path=path, log=log)
+        return _run_locked(arguments, ws_url=ws_url, path=path, log=log, sink=sink)
 
 
-def _run_locked(arguments, *, ws_url: str, path: Path, log: logging.Logger) -> int:
+def _agent_sink(arguments) -> SinkConfiguration:
+    """Command line first, environment second, discard-everything last.
+
+    The environment variables keep working unchanged, so every existing smoke
+    test and script behaves exactly as before; the options simply make the same
+    choice visible in the command that a scheduled task stores.
+    """
+    if arguments.audio_sink is None and arguments.audio_output_device is None:
+        return resolve_sink_configuration()
+    return resolve_agent_sink(
+        sink_mode=arguments.audio_sink or os.environ.get("ECHOCAST_AUDIO_SINK_MODE"),
+        selector=arguments.audio_output_device
+        or os.environ.get("ECHOCAST_AUDIO_OUTPUT_DEVICE"),
+    )
+
+
+def _run_locked(arguments, *, ws_url: str, path: Path, log: logging.Logger,
+                sink: SinkConfiguration) -> int:
     if arguments.legacy_pilot_mode:
         print("WARNING: legacy pilot mode. This computer is authenticating with the")
         print("         shared per-Store token, which every computer in that Store")
@@ -1166,7 +1330,7 @@ def _run_locked(arguments, *, ws_url: str, path: Path, log: logging.Logger) -> i
             ws_url=ws_url,
             queue_capacity=arguments.queue_capacity,
             report_path=Path(arguments.report) if arguments.report else None,
-            sink=resolve_sink_configuration(),
+            sink=sink,
         )
         report = asyncio.run(pilot.run())
         return EXIT_OK if report["overall_result"].endswith("PASSED") else EXIT_NETWORK
@@ -1180,7 +1344,6 @@ def _run_locked(arguments, *, ws_url: str, path: Path, log: logging.Logger) -> i
         record.device_public_id, record.store_id, record.backend_origin,
     )
 
-    sink = resolve_sink_configuration()
     report_path = Path(arguments.report) if arguments.report else None
 
     async def attempt() -> dict:
@@ -1220,10 +1383,23 @@ def main(argv: list[str] | None = None) -> int:
     # Before anything looks for FFmpeg. Harmless when running from source.
     prefer_packaged_ffmpeg()
     arguments = build_parser().parse_args(argv)
-    protector = _protector()
-    path = _credential_path(arguments)
 
     try:
+        # Before the credential machinery is touched at all. list-audio-devices
+        # deliberately has no --credential-path, and computing one here crashed
+        # it outright - on the one command an operator runs on a Store desktop
+        # before anything has been enrolled.
+        if arguments.command == "list-audio-devices":
+            # Read-only. Opens nothing, plays nothing, needs no credential.
+            print(list_audio_devices_report())
+            print()
+            print("Copy a VERIFIED selector (index:N@Name) and pass it as:")
+            print("  --audio-sink windows --audio-output-device \"index:N@Name\"")
+            return EXIT_OK
+
+        protector = _protector()
+        path = _credential_path(arguments)
+
         if arguments.command == "enrol":
             code = read_enrolment_code(stream=sys.stdin if arguments.from_stdin else None)
             outcome = enrol(
@@ -1273,7 +1449,13 @@ def main(argv: list[str] | None = None) -> int:
     except TerminalAuthentication as refusal:
         print(f"Refused: {refusal}", file=sys.stderr)
         return EXIT_AUTHENTICATION
-    except (AgentError, CredentialStoreError) as failure:
+    # AudioReceiverError is NOT an AgentError, and SinkConfigurationError is one
+    # of its subclasses. Without this clause, naming a device that does not
+    # exist - or one whose name is ambiguous across host APIs, which most are -
+    # escaped as an unhandled exception. The operator got a Python traceback
+    # naming files that do not exist on a Store desktop, and the Store simply
+    # went OFFLINE with nothing explaining why.
+    except (AgentError, CredentialStoreError, AudioReceiverError) as failure:
         print(f"Refused: {failure}", file=sys.stderr)
         return EXIT_REFUSED
     except KeyboardInterrupt:
