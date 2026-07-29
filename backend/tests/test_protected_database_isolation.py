@@ -258,7 +258,7 @@ def test_the_worker_database_is_outside_the_repository():
 #: The previous value is kept below rather than deleted. A baseline that is
 #: quietly overwritten every time it fails is not a baseline; keeping the old one
 #: means the next person can see that it moved, when, and on whose say-so.
-PROTECTED_BASELINE_SHA256 = "EEF1EA79BC901A989AE0E73D1F4882F6517844436139E981EB9051839DD70D51"
+PROTECTED_BASELINE_SHA256 = "8A7E341365626BE67727156D84EE57B704B83E9F73CEC954CFC52A2FB1A547CA"
 PROTECTED_BASELINE_SIZE = 507904
 
 #: What it was before, and why it changed.
@@ -276,7 +276,33 @@ PROTECTED_BASELINE_SIZE = 507904
 #:   system_logs            : 194
 #:   plaintext password col : none
 #: and a consistent SQLite-backup-API copy exists under backups/.
-PREVIOUS_BASELINE_SHA256 = "8C858B132907DC72180A134D4981C5E8C4BBC03D190D7370B3823DB2BD2EF2AB"
+PREVIOUS_BASELINE_SHA256 = "EEF1EA79BC901A989AE0E73D1F4882F6517844436139E981EB9051839DD70D51"
+
+#: The whole chain, kept so nobody has to reconstruct it from commit messages.
+#:
+#:   8C858B13…BD2EF2AB  original
+#:     -> four additive user-lifecycle columns (lifecycle_state, display_name,
+#:        disabled_at, archived_at)
+#:   EEF1EA79…9DD70D51  accepted 2026-07-29
+#:     -> tools/create_owner.py ran successfully: hq_users.session_version added
+#:        by ensure_rbac_schema, and one row inserted for owneradmin
+#:   8A7E3413…B1A547CA  accepted 2026-07-29, current
+#:
+#: Verified before accepting the current value:
+#:   PRAGMA integrity_check : ok
+#:   hq_users               : exactly 2 - admin (ADMIN) and owneradmin (OWNER),
+#:                            both active. admin's password-hash fingerprint is
+#:                            unchanged from the previous baseline, so the
+#:                            existing account was preserved rather than rewritten
+#:   stores / sessions / logs : 13 / 17 / 194, all unchanged
+#:   plaintext password col : none - only password_hash
+#:   consistent backups     : backups/echocast_live-20260729-160359.db and
+#:                            persistent-lan-server/backups/source-20260729-190540.db
+BASELINE_HISTORY = (
+    "8C858B132907DC72180A134D4981C5E8C4BBC03D190D7370B3823DB2BD2EF2AB",
+    "EEF1EA79BC901A989AE0E73D1F4882F6517844436139E981EB9051839DD70D51",
+    "8A7E341365626BE67727156D84EE57B704B83E9F73CEC954CFC52A2FB1A547CA",
+)
 
 
 def test_the_protected_database_matches_its_recorded_baseline():
@@ -291,6 +317,23 @@ def test_the_protected_database_matches_its_recorded_baseline():
     assert PROTECTED_DATABASE.stat().st_size == PROTECTED_BASELINE_SIZE
     digest = hashlib.sha256(PROTECTED_DATABASE.read_bytes()).hexdigest().upper()
     assert digest == PROTECTED_BASELINE_SHA256
+
+
+def test_the_baseline_history_is_kept_and_has_no_repeats():
+    """Every accepted value, in order, each one distinct.
+
+    A repeated entry would mean somebody pasted the current hash over an older
+    one instead of appending - which loses the fact that it ever moved, and with
+    it the reason. The chain is the audit trail.
+    """
+    assert len(BASELINE_HISTORY) == len(set(BASELINE_HISTORY))
+    assert BASELINE_HISTORY[-1] == PROTECTED_BASELINE_SHA256
+    assert BASELINE_HISTORY[-2] == PREVIOUS_BASELINE_SHA256
+
+
+def test_the_current_baseline_is_the_newest_entry_not_an_older_one():
+    """Guards against a rollback pasted in by mistake."""
+    assert PROTECTED_BASELINE_SHA256 not in BASELINE_HISTORY[:-1]
 
 
 def test_the_baseline_actually_moved_rather_than_being_edited_in_place():
