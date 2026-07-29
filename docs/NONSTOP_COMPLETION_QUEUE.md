@@ -23,7 +23,7 @@ Status values: `NOT STARTED` · `IN PROGRESS` · `AUTOMATED PASS` ·
 ```
 compileall backend tools          exit 0
 python -m pip check               No broken requirements found
-full backend suite                1687 passed, 2 skipped, 0 FAILED
+full backend suite                1715 passed, 2 skipped, 0 FAILED
 frontend production build         Done
 Receiver package verification     SPEAKLINK_RECEIVER_PACKAGE_VERIFIED
   background EXE = WINDOWS_GUI    PASS
@@ -44,8 +44,10 @@ Stated plainly rather than left to read as passed.
 | # | Phase | Status | Why |
 |---|---|---|---|
 | 1 | Persistent HQ frontend serving | `NOT STARTED` | needs the HQ runtime below |
-| 4 | User Management (full CRUD + delete) | `NOT STARTED` | backend lifecycle exists and is tested; **hard delete, dependency summary and the frontend forms do not exist** |
-| 5 | Store Management (full CRUD + delete) | `NOT STARTED` | lifecycle exists; **hard delete, dependency rules and the frontend dialogs do not exist** |
+| 4 | User hard delete + dependency summary | `AUTOMATED PASS` | `backend/deletion_safety.py`, `GET /api/users/{id}/dependencies`, permanent-delete route; 25 tests |
+| 4 | User Management frontend forms | `NOT STARTED` | the page exists with lifecycle actions; **Delete button, dependency dialog and typed confirmation do not** |
+| 5 | Store hard delete + dependency summary | `AUTOMATED PASS` | same module, `GET /api/stores/{id}/dependencies`, permanent-delete route |
+| 5 | Store Management frontend dialogs | `NOT STARTED` | **dependency summary display and typed confirmation do not exist** |
 | 5 | Receiver Device onboarding UI | `NOT STARTED` | backend endpoints exist; token countdown, states and safe refusal categories do not |
 | 7 | `SpeakLinkHQRuntime.exe` + HQ task | `NOT STARTED` | a new GUI supervisor executable; substantial |
 | 8 | `SpeakLinkStoreSetup.exe` wizard | `NOT STARTED` | a new GUI application; substantial |
