@@ -24,6 +24,7 @@ Status values: `NOT STARTED` · `IN PROGRESS` · `AUTOMATED PASS` ·
 compileall backend tools          exit 0
 python -m pip check               No broken requirements found
 full backend suite                1715 passed, 2 skipped, 0 FAILED
+Playwright (chromium)             144 passed, 0 FAILED
 frontend production build         Done
 Receiver package verification     SPEAKLINK_RECEIVER_PACKAGE_VERIFIED
   background EXE = WINDOWS_GUI    PASS
@@ -45,16 +46,16 @@ Stated plainly rather than left to read as passed.
 |---|---|---|---|
 | 1 | Persistent HQ frontend serving | `NOT STARTED` | needs the HQ runtime below |
 | 4 | User hard delete + dependency summary | `AUTOMATED PASS` | `backend/deletion_safety.py`, `GET /api/users/{id}/dependencies`, permanent-delete route; 25 tests |
-| 4 | User Management frontend forms | `NOT STARTED` | the page exists with lifecycle actions; **Delete button, dependency dialog and typed confirmation do not** |
+| 4 | User Management frontend | `AUTOMATED PASS` | Add/Edit/Reset/Enable/Disable/Archive/Restore + dependency dialog + typed-confirmation delete; 38 Playwright tests |
 | 5 | Store hard delete + dependency summary | `AUTOMATED PASS` | same module, `GET /api/stores/{id}/dependencies`, permanent-delete route |
-| 5 | Store Management frontend dialogs | `NOT STARTED` | **dependency summary display and typed confirmation do not exist** |
+| 5 | Store Management frontend | `AUTOMATED PASS` | Add/Edit/Enable/Disable/Archive/Restore + dependency dialog + typed short-code delete; 8 Playwright tests |
 | 5 | Receiver Device onboarding UI | `NOT STARTED` | backend endpoints exist; token countdown, states and safe refusal categories do not |
 | 7 | `SpeakLinkHQRuntime.exe` + HQ task | `NOT STARTED` | a new GUI supervisor executable; substantial |
 | 8 | `SpeakLinkStoreSetup.exe` wizard | `NOT STARTED` | a new GUI application; substantial |
 | 9 | Audio/WebSocket/queue audit | `NOT STARTED` | not examined this session |
 | 10 | Security audit document | `NOT STARTED` | not examined this session |
 | 12 | Load tests 2/5/10/20/40 | `NOT STARTED` | needs a running persistent server |
-| 12 | Playwright / E2E | `BLOCKED` | the live pilot holds port 3000 |
+| 12 | Playwright / E2E | `AUTOMATED PASS` | port 3000 freed; 144 passed |
 
 **None of the above should be read as "passed". They were not done.**
 
