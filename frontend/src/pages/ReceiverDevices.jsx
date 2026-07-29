@@ -41,6 +41,86 @@ function RoleBadge({ role }) {
   );
 }
 
+/**
+ * The one-time enrolment code, with a live countdown and an honest state.
+ *
+ * The countdown is not decoration. A code is short-lived and shown once, and
+ * "expires in 15 minutes" written at the moment of issue is wrong from the
+ * second after - an operator reading it ten minutes later has no idea how long
+ * they have. The state is derived from the clock rather than from a flag,
+ * because nothing tells this page when the code was redeemed.
+ *
+ * UNUSED and EXPIRED are the only two this page can honestly report. USED needs
+ * evidence from the backend - a Device appearing for this Store - and is shown
+ * only when that evidence arrives.
+ */
+function EnrolmentCodePanel({ issued, onDismiss }) {
+  const issuedAt = React.useMemo(() => Date.now(), [issued]);
+  const total = issued.expires_in_seconds || 0;
+  const [remaining, setRemaining] = React.useState(total);
+
+  React.useEffect(() => {
+    setRemaining(total);
+    const timer = setInterval(() => {
+      const left = Math.max(0, total - Math.floor((Date.now() - issuedAt) / 1000));
+      setRemaining(left);
+      if (left === 0) clearInterval(timer);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [issuedAt, total]);
+
+  const expired = remaining <= 0;
+  const minutes = Math.floor(remaining / 60);
+  const seconds = String(remaining % 60).padStart(2, "0");
+
+  return (
+    <div data-testid="enrolment-code-panel"
+         className={`rounded border px-3 py-2 ${expired
+           ? "border-slate-300 bg-slate-50" : "border-amber-200 bg-amber-50"}`}>
+      <div className="mb-1 flex items-center gap-2 text-xs">
+        <span className="font-medium text-slate-700">One-time enrolment code</span>
+        <span
+          data-testid="enrolment-code-state"
+          className={`rounded border px-2 py-0.5 font-medium ${expired
+            ? "border-slate-300 bg-slate-200 text-slate-700"
+            : "border-amber-300 bg-amber-100 text-amber-900"}`}
+        >
+          {expired ? "EXPIRED" : "UNUSED"}
+        </span>
+        {!expired && (
+          <span data-testid="enrolment-code-countdown" className="text-slate-600"
+                aria-live="polite">
+            expires in {minutes}:{seconds}
+          </span>
+        )}
+      </div>
+
+      {expired ? (
+        // The value is removed from the DOM entirely once it can no longer be
+        // used. A dead secret left on screen is still a secret on screen.
+        <p className="text-sm text-slate-700" data-testid="enrolment-code-expired">
+          This code has run out of time and was removed. Generate a new one and
+          use it straight away.
+        </p>
+      ) : (
+        <ShownOnce
+          testId="issued-enrolment-code"
+          label="Read this out to the Store now. It is shown once and works once."
+          value={issued.code}
+          onDismiss={onDismiss}
+        />
+      )}
+
+      {expired && (
+        <button type="button" onClick={onDismiss} data-testid="enrolment-code-dismiss"
+                className="mt-2 rounded border px-2 py-1 text-xs">
+          Dismiss
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ShownOnce({ label, value, testId, onDismiss }) {
   return (
     <div
@@ -222,12 +302,8 @@ export default function ReceiverDevices() {
       )}
 
       {issuedCode && (
-        <ShownOnce
-          testId="issued-enrolment-code"
-          label={`One-time enrolment code — expires in ${Math.round(
-            (issuedCode.expires_in_seconds || 0) / 60,
-          )} minutes`}
-          value={issuedCode.code}
+        <EnrolmentCodePanel
+          issued={issuedCode}
           onDismiss={() => setIssuedCode(null)}
         />
       )}

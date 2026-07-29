@@ -77,14 +77,19 @@ test.describe('Listing Devices', () => {
 
 test.describe('The enrolment code is shown exactly once', () => {
   test('creating a code shows it with an expiry and a warning', async ({ page }) => {
+    // The expiry used to be a static "15 minutes" written at the moment of
+    // issue - already wrong a second later, and useless to somebody reading it
+    // ten minutes in. It is a live countdown now, so this asserts the property
+    // (an expiry is shown, and it is this code's) rather than the old wording.
     await openDevices(page);
     await page.getByTestId('create-enrolment-code-btn').click();
 
-    const shown = page.getByTestId('issued-enrolment-code');
-    await expect(shown).toBeVisible();
+    const panel = page.getByTestId('enrolment-code-panel');
+    await expect(panel).toBeVisible();
     await expect(page.getByTestId('issued-enrolment-code-value')).toContainText('ECHO-CODE-1');
-    await expect(shown).toContainText('15 minutes');
-    await expect(shown).toContainText('cannot be retrieved again');
+    await expect(page.getByTestId('enrolment-code-countdown')).toContainText(/expires in \d+:\d{2}/);
+    await expect(page.getByTestId('enrolment-code-state')).toHaveText('UNUSED');
+    await expect(panel).toContainText('cannot be retrieved again');
   });
 
   test('the code never reaches the URL', async ({ page }) => {
