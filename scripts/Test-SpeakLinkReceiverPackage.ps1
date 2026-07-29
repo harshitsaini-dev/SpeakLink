@@ -153,6 +153,35 @@ try {
         $out = (& $exe run --help 2>&1) -join ' '
         $out -match 'allow-insecure-private-lan' -and $out -match 'expected-hq-host'
     }
+    # The only claim that matters for a Store counter, and the only one that can
+    # be checked without a person watching the screen. Windows decides whether a
+    # process gets a console from the Subsystem field in the PE header - 3 is a
+    # console application, 2 is a windowed one. Task Scheduler's "hidden"
+    # setting hides the task in its own UI and does nothing about this.
+    function Get-PeSubsystem {
+        param([string]$Path)
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            $reader = New-Object System.IO.BinaryReader($stream)
+            $stream.Position = 0x3C
+            $peOffset = $reader.ReadInt32()
+            $stream.Position = $peOffset + 4 + 20 + 68
+            return $reader.ReadUInt16()
+        } finally { $stream.Dispose() }
+    }
+
+    Check 'the background executable is present' {
+        Test-Path (Join-Path $sandbox 'SpeakLinkReceiver\SpeakLinkReceiverBackground.exe')
+    }
+    Check 'the background executable creates NO console window' {
+        (Get-PeSubsystem (Join-Path $sandbox 'SpeakLinkReceiver\SpeakLinkReceiverBackground.exe')) -eq 2
+    }
+    Check 'the operator executable still HAS a console' {
+        # list-audio-devices prints a table and enrol reads a hidden prompt.
+        # Neither works in a process with no stdout.
+        (Get-PeSubsystem (Join-Path $sandbox 'SpeakLinkReceiver\SpeakLinkReceiver.exe')) -eq 3
+    }
+
     Check 'the packaged ffmpeg runs' {
         $packaged = Join-Path $sandbox 'SpeakLinkReceiver\ffmpeg.exe'
         $out = (& $packaged -version 2>&1 | Select-Object -First 1) -join ''
