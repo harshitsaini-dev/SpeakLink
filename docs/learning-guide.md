@@ -220,7 +220,43 @@ had been rewritten first.
 
 ---
 
-## Learning Box 10 — Test the command, not the parser
+## Learning Box 10 — A process with no console gives its children a new one
+
+The background Receiver was built GUI-subsystem specifically so no window would
+appear. It worked. Then a black window appeared the moment a broadcast started.
+
+The rule nobody had written down: on Windows, a process with **no** console that
+starts a **console-subsystem** child gets that child a brand-new console — and a
+new console is a visible window. Making the parent windowless does not make its
+children windowless; if anything it guarantees the opposite.
+
+The fix is `CREATE_NO_WINDOW` on every spawn. The measurement that proved it,
+using `pythonw.exe` as a stand-in parent because it is GUI-subsystem too:
+
+```
+parent_has_console            : False
+child, no creation flags      : has_console=True,  console_hwnd=721134
+child, with CREATE_NO_WINDOW  : has_console=False, console_hwnd=0
+```
+
+Three lessons:
+
+1. **Hiding the parent is not hiding the tree.** Any claim about "no window"
+   has to name every process that will exist, not just the one you launched.
+2. **Not `shell=True`.** Running through `cmd.exe` to hide a console swaps one
+   console for another and adds a shell that parses your command line.
+3. **Put the flags in one helper and route every spawn through it.** There were
+   three spawn sites; the one that was missed was the only one that runs during
+   a broadcast. A test now walks the AST and fails on any spawn that skips it.
+
+And the honest limit: this environment has no interactive desktop, so window
+enumeration returned "no visible window" for the broken *and* the fixed variant.
+It proves nothing. The console-allocation measurement above is real evidence;
+the window claim needs a person watching a Store screen.
+
+---
+
+## Learning Box 11 — Test the command, not the parser
 
 Two of my own tests in this change passed while the code was broken.
 
