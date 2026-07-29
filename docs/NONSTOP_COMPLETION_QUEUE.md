@@ -23,7 +23,7 @@ Status values: `NOT STARTED` · `IN PROGRESS` · `AUTOMATED PASS` ·
 ```
 compileall backend tools          exit 0
 python -m pip check               No broken requirements found
-full backend suite                1732 passed, 2 skipped, 0 FAILED
+full backend suite                1758 passed, 2 skipped, 0 FAILED
 Playwright (chromium)             155 passed, 0 FAILED
 frontend production build         Done
 Receiver package verification     SPEAKLINK_RECEIVER_PACKAGE_VERIFIED
@@ -52,7 +52,8 @@ Stated plainly rather than left to read as passed.
 | 5 | Receiver onboarding: refusal categories | `AUTOMATED PASS` | `backend/enrolment_refusal.py`; category logged, wire response stays generic; 17 tests |
 | 5 | Receiver onboarding: code countdown/state | `AUTOMATED PASS` | live countdown, UNUSED/EXPIRED, value removed on expiry; 11 Playwright tests |
 | 5 | Receiver onboarding: setup-progress + USED state | `NOT STARTED` | needs backend evidence the page does not receive |
-| 7 | `SpeakLinkHQRuntime.exe` + HQ task | `NOT STARTED` | a new GUI supervisor executable; substantial |
+| 7 | `SpeakLinkHQRuntime.exe` supervisor | `AUTOMATED PASS` | `tools/hq_runtime.py` + `hq_runtime.spec`; built, PE Subsystem 2 read from the file; 26 tests |
+| 7 | HQ auto-start scripts + package | `NOT STARTED` | Install/Test/Repair/Uninstall-SpeakLinkHQAutoStart.ps1 and the versioned package do not exist |
 | 8 | `SpeakLinkStoreSetup.exe` wizard | `NOT STARTED` | a new GUI application; substantial |
 | 9 | Audio/WebSocket/queue audit | `NOT STARTED` | not examined this session |
 | 10 | Security audit document | `NOT STARTED` | not examined this session |
