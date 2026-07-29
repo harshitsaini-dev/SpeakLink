@@ -72,17 +72,24 @@ print(con.execute('PRAGMA integrity_check').fetchone()[0]); con.close()
 }
 
 Check 'it holds at least one enabled administrator' {
+    # Roles are compared in Python rather than in SQL. The first version put an
+    # IN ('OWNER','ADMIN',...) list inside a double-quoted PowerShell here-string
+    # and the nested quoting broke, so the check reported UNKNOWN against a
+    # database that was completely fine. A quoting accident should not look like
+    # a missing administrator.
     if (-not (Test-Path $serverProfile.database)) { throw 'no database yet' }
     $count = & $python -c @"
 import sqlite3
 con = sqlite3.connect('file:' + r'$($serverProfile.database)' + '?mode=ro', uri=True)
-try:
-    print(con.execute("SELECT COUNT(*) FROM hq_users WHERE is_active AND role IN ('OWNER','ADMIN','SUPER_ADMIN','admin')").fetchone()[0])
-except Exception:
-    print(0)
+privileged = {'OWNER', 'ADMIN', 'SUPER_ADMIN', 'admin'}
+total = 0
+for role, active in con.execute('SELECT role, is_active FROM hq_users'):
+    if active and str(role) in privileged:
+        total += 1
+print(total)
 con.close()
 "@
-    [int]$count.Trim() -ge 1
+    [int]($count | Select-Object -Last 1).Trim() -ge 1
 }
 
 Check 'the keys directory exists' { Test-Path (Split-Path -Parent $serverProfile.keys) }
