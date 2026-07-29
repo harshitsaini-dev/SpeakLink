@@ -730,8 +730,16 @@ def main(argv=None) -> int:
         return EXIT_CONFIG_ERROR
 
     if arguments.check:
-        # Deliberately writes nothing: overwriting a live READY status with the
-        # result of a side check would destroy the evidence it was run to read.
+        # A successful check may clear a CONFIG_ERROR, because it has just
+        # proved that refusal false - and the status file is the only channel a
+        # windowed process has, so a stale refusal in it is not clutter, it is
+        # the runtime lying. It may clear NOTHING else: overwriting a live READY
+        # with the result of a side check would destroy the evidence it was run
+        # to read.
+        if read_status(profile.status_file).get("state") == RuntimeState.CONFIG_ERROR.value:
+            write_status(profile.status_file, RuntimeState.STOPPED,
+                         detail="configuration check passed; the earlier refusal "
+                                "no longer applies. Nothing is running.")
         return EXIT_OK
 
     lock = runtime_lock()

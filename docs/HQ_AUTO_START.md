@@ -132,7 +132,7 @@ is denied", and scored that as "the rule is not installed".)
 It reads the runtime's **status file** rather than inferring health from a
 process existing.
 
-Emits `SPEAKLINK_HQ_AUTO_START_VERIFIED`.
+Emits `SPEAKLINK_HQ_AUTOSTART_VERIFIED`.
 
 Its scope, stated in its own output: the task is registered correctly and the
 runtime is installed windowed. It says nothing about behaviour after a reboot,

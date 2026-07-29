@@ -217,7 +217,7 @@ there and this package does not touch it.
 
     .\Test-SpeakLinkHQAutoStart.ps1
 
-   Expect: SPEAKLINK_HQ_AUTO_START_VERIFIED
+   Expect: SPEAKLINK_HQ_AUTOSTART_VERIFIED
 
    The runtime writes what it is doing to
    %LOCALAPPDATA%\SpeakLink\hq-runtime-status.json. READY means the backend

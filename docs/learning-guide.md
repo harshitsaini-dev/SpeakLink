@@ -407,3 +407,82 @@ Two of my own tests in this change passed while the code was broken.
 **Rule.** Assert on the specific message or state you care about, not on a
 generic outcome several paths share. And invoke the entry point — parsing an
 argument list proves the parser works, nothing more.
+
+---
+
+## Learning Box 17 — A build artifact can be verified and still do nothing
+
+`SpeakLinkHQRuntime.exe` was built, its PE subsystem was read directly from the
+file, it was confirmed `WINDOWS_GUI`, and it was committed. All of that was
+correct and still is.
+
+**The executable did nothing.** The module defined a supervisor class and never
+called it — no `main`, no `__main__` block. Run it and it imports, defines, and
+exits 0.
+
+Exit 0 is what Task Scheduler records as *"the task ran successfully"*. The end
+state would have been a green task history, no window, no error, and no HQ.
+
+Why it got that far: **shape is easy to check and behaviour is not.** "Is this
+file a GUI-subsystem PE?" is one header read. "Does this program do its job?"
+needs somebody to run it and ask it a question. So the easy check got done, and
+it looked like verification.
+
+**Rule.** Verifying an artifact's *shape* is not verifying its *behaviour*.
+Before a build is called done, run it and make it answer something — an exit
+code, a status file, a health response. This is Learning Box 16's rule one level
+up: don't test the parser, test the command; and don't measure the file, run it.
+
+Everything else worth having in this phase came from doing that. Running
+`--check` against the real profile found three more defects in minutes that
+1864 passing tests had not:
+
+- a refusal that no documented procedure could satisfy
+- `sys.executable` being the supervisor itself once frozen
+- `Path(__file__).parents[1]` being the bundle, not the repository
+
+---
+
+## Learning Box 18 — A test can pass without the fix it was written for
+
+Twice in this project now.
+
+Writing the guard for "has HQ ever actually started", I searched a *window of
+text* in the script for the new helper's name. The helper was there. The two
+checks that were supposed to call it were still calling the old one, a few lines
+below the window. Green test, unfixed code.
+
+I only caught it because the edit that was supposed to rewire those call sites
+had failed loudly a moment earlier — and I nearly read the passing test as
+proof that it hadn't mattered.
+
+**Rule.** Assert on the **call site**, not on the presence of a name somewhere
+in the file. "The function exists" and "the function is used" are different
+claims, and only the second one is the fix.
+
+**And the cheap way to prove it:** revert only the production file, run the test,
+watch it fail, put the file back. Thirty seconds, and it converts "I believe
+this test works" into evidence. If a test cannot be made to fail, it is not
+holding anything.
+
+---
+
+## Learning Box 19 — Fix a defect in every language it lives in
+
+The runtime demanded a key file that nothing creates before the first start, and
+refused a correctly initialized HQ with an instruction no procedure in this
+repository could carry out. I fixed it in Python, wrote it up, and moved on.
+
+Minutes later the installer dry run failed for the identical reason. **The same
+rule had been written twice — once in `hq_runtime.py`, once in
+`Install-SpeakLinkHQAutoStart.ps1`** — and fixing one copy left the other.
+
+**Rule.** When you fix a rule, grep for the rule, not for the function. A
+duplicated *policy* is far more dangerous than duplicated code, because the two
+copies drift silently and each one looks correct on its own.
+
+The repair here was not "fix both copies" — it was to give each half of the rule
+one home. The installer checks what a filesystem can answer (is there a database,
+is there a keys folder). Whether a *missing* key container is normal or an
+emergency depends on how many Devices are enrolled, so the runtime decides that,
+because only the runtime can count them.

@@ -76,7 +76,7 @@ Start-ScheduledTask -TaskName "SpeakLink HQ Runtime"
 .\Test-SpeakLinkHQAutoStart.ps1
 ```
 
-Expect `SPEAKLINK_HQ_AUTO_START_VERIFIED`, and the status file to read `READY`:
+Expect `SPEAKLINK_HQ_AUTOSTART_VERIFIED`, and the status file to read `READY`:
 
 ```powershell
 Get-Content "$env:LOCALAPPDATA\SpeakLink\hq-runtime-status.json"

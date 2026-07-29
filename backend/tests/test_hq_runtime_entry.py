@@ -114,6 +114,39 @@ def test_check_mode_resolves_the_profile_and_exits_zero(persistent, monkeypatch)
     assert main(["--check"]) == EXIT_OK
 
 
+def test_check_mode_clears_a_refusal_it_has_just_disproved(persistent, monkeypatch):
+    """The status file is the ONLY channel a windowed process has, so a stale
+    refusal in it is not clutter - it is the runtime lying.
+
+    --check deliberately writes nothing on success, so that running it beside a
+    live runtime cannot destroy a READY it was run to read. But that left a
+    CONFIG_ERROR from a fixed problem sitting there for ever, and the verifier
+    correctly reported FAIL against it long after the cause was gone.
+
+    So the rule is narrow: a successful check may clear a CONFIG_ERROR, because
+    it has just proved that refusal false. It may clear nothing else.
+    """
+    monkeypatch.setattr(hq_runtime, "FRONTEND_BUILD", _fake_build(persistent))
+    status = hq_runtime.runtime_status_path()
+    write_status(status, RuntimeState.CONFIG_ERROR, detail="a problem since fixed")
+
+    assert main(["--check"]) == EXIT_OK
+    assert read_status(status).get("state") != RuntimeState.CONFIG_ERROR.value
+
+
+@pytest.mark.parametrize("live", [RuntimeState.READY, RuntimeState.DEGRADED,
+                                  RuntimeState.BACKEND_STARTING])
+def test_check_mode_never_overwrites_a_running_runtimes_state(persistent, monkeypatch,
+                                                              live):
+    """Running a side check must not destroy the evidence it was run to read."""
+    monkeypatch.setattr(hq_runtime, "FRONTEND_BUILD", _fake_build(persistent))
+    status = hq_runtime.runtime_status_path()
+    write_status(status, live, detail="a runtime is using this")
+
+    main(["--check"])
+    assert read_status(status)["state"] == live.value
+
+
 def test_check_mode_does_not_start_anything(persistent, monkeypatch):
     monkeypatch.setattr(hq_runtime, "FRONTEND_BUILD", _fake_build(persistent))
     started = []
