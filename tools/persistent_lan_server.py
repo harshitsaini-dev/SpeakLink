@@ -1,4 +1,4 @@
-"""Where the persistent HQ server keeps its data, for ever, at one fixed path.
+r"""Where the persistent HQ server keeps its data, for ever, at one fixed path.
 
 THE P0 THIS ENDS
 
