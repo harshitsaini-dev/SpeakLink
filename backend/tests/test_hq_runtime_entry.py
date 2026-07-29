@@ -131,7 +131,12 @@ def test_check_mode_clears_a_refusal_it_has_just_disproved(persistent, monkeypat
     write_status(status, RuntimeState.CONFIG_ERROR, detail="a problem since fixed")
 
     assert main(["--check"]) == EXIT_OK
-    assert read_status(status).get("state") != RuntimeState.CONFIG_ERROR.value
+    recorded = read_status(status).get("state")
+    assert recorded != RuntimeState.CONFIG_ERROR.value
+    # And NOT "STOPPED". A configuration check starts nothing, so recording it
+    # as a stop made the auto-start verifier conclude HQ had run when it never
+    # had - the third appearance of "existence is not evidence" in one phase.
+    assert recorded == RuntimeState.CONFIG_OK.value
 
 
 @pytest.mark.parametrize("live", [RuntimeState.READY, RuntimeState.DEGRADED,

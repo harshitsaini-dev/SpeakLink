@@ -179,10 +179,14 @@ Check 'the keys folder exists' { Test-Path (Join-Path $PersistentRoot 'keys') }
 # runtime REFUSED, which is precisely when the two files below legitimately do
 # not exist yet. Keying off the file let that through and reported FAIL on a
 # correct installation. Existence is not evidence of success.
+# CONFIG_ERROR is a refusal. CONFIG_OK is a configuration CHECK, which starts
+# nothing - and the first version of this treated a passed check as a start,
+# reported FAIL for a key file the backend had never had a chance to create,
+# and was the third appearance of the same mistake in one phase.
 function Test-HQHasStarted {
     if (-not (Test-Path $StatusFile)) { return $false }
     $recorded = (Get-Content $StatusFile -Raw | ConvertFrom-Json).state
-    return $recorded -and $recorded -ne 'CONFIG_ERROR'
+    return $recorded -and $recorded -notin @('CONFIG_ERROR', 'CONFIG_OK')
 }
 # Both of these are created at the FIRST start - the backend mints the HMAC
 # container, the runtime mints the signing secret - so before HQ has ever run
