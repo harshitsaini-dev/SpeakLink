@@ -89,7 +89,29 @@ analysis = Analysis(
 
 pyz = PYZ(analysis.pure)
 
-executable = EXE(
+# TWO EXECUTABLES, ONE CODEBASE, AND WHY
+#
+# Windows decides whether a process gets a console window from a flag in the
+# executable header, not from how it was launched. Task Scheduler's "hidden"
+# setting hides the task in its own UI; it does not stop a console application
+# creating a console. So a console-mode Receiver started at logon puts a black
+# window on the Store counter, and a member of staff eventually closes it.
+#
+# The obvious fix - build the whole thing windowed - breaks the commands an
+# operator and a technician actually need: `list-audio-devices` prints a table,
+# `enrol` reads a code from a hidden prompt, `status` and `diagnose` print
+# reports. A windowed process has no stdout to print any of it to.
+#
+# So the package ships both, built from the same analysis so they cannot drift:
+#
+#   EchoCastReceiver.exe            console - enrol, status, list-audio-devices,
+#                                   diagnose, and anything a person runs and reads
+#   EchoCastReceiverBackground.exe  windowed - what the scheduled task runs, and
+#                                   the only one that must never show a window
+#
+# The background executable writes everything to the rotating log file instead,
+# which is why file logging had to exist before this was possible.
+console_executable = EXE(
     pyz,
     analysis.scripts,
     [],
@@ -107,8 +129,31 @@ executable = EXE(
     entitlements_file=None,
 )
 
+background_executable = EXE(
+    pyz,
+    analysis.scripts,
+    [],
+    exclude_binaries=True,
+    name="EchoCastReceiverBackground",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    # A windowed build normally pops a message box on an unhandled exception.
+    # On an unattended Store counter that is a dialog nobody will ever close,
+    # and the Receiver would sit there dead behind it. Failures belong in the
+    # log file.
+    disable_windowed_traceback=True,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
 collection = COLLECT(
-    executable,
+    console_executable,
+    background_executable,
     analysis.binaries,
     analysis.datas,
     strip=False,
