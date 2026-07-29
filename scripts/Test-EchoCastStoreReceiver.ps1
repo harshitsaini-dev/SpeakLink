@@ -106,6 +106,14 @@ if ($task) {
     Check 'it runs the WINDOWED executable' {
         ($task.Actions | ForEach-Object { $_.Execute }) -match 'EchoCastReceiverBackground\.exe'
     }
+    Check 'it does NOT run the console executable' {
+        # The old pilot task did, which is a black window at every logon.
+        ($task.Actions | ForEach-Object { $_.Execute }) -notmatch 'EchoCastReceiver\.exe$'
+    }
+    Check 'it runs no PowerShell or cmd wrapper' {
+        $ran = ($task.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }) -join ' '
+        $ran -notmatch '(?i)(powershell|pwsh|cmd)\.exe' -and $ran -notmatch '(?i)\.(ps1|bat|cmd)\b'
+    }
     Check 'it runs as the interactive user, not SYSTEM' {
         $task.Principal.UserId -notmatch '(?i)(SYSTEM|LOCALSERVICE|NETWORKSERVICE)'
     }
@@ -139,6 +147,17 @@ Check 'exactly one Receiver is running' { $live.Count -eq 1 }
 Check 'no console-mode Receiver is running in the background' {
     @(Get-CimInstance Win32_Process -Filter "Name = 'EchoCastReceiver.exe'" |
       Where-Object { $_.CommandLine -match '\brun\b' }).Count -eq 0
+}
+Check 'no obsolete EchoCast task survives' {
+    # A leftover pilot task runs the console build and shows a window at logon.
+    @(Get-ScheduledTask | Where-Object {
+        $_.TaskName -like '*EchoCast*' -and $_.TaskName -ne $TaskName
+    }).Count -eq 0
+}
+Check 'no FFmpeg is left running from the install root' {
+    @(Get-CimInstance Win32_Process -Filter "Name = 'ffmpeg.exe'" |
+      Where-Object { $_.ExecutablePath -and
+                     $_.ExecutablePath.StartsWith($InstallRoot, 'OrdinalIgnoreCase') }).Count -eq 0
 }
 
 # ---- logs ------------------------------------------------------------------
