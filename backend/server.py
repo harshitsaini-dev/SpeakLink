@@ -54,6 +54,7 @@ from rbac import (
     parse_role,
     require_permission,
 )
+from enrolment_refusal import classify_enrolment_refusal
 from deletion_safety import (
     DeletionRefused,
     delete_store_if_unused,
@@ -791,11 +792,21 @@ def enroll_receiver(
         # a bad code.
         _write_log(db, "warn", "enrollment_unavailable")
         raise HTTPException(status_code=503, detail=str(unavailable))
-    except EnrollmentRefused:
+    except EnrollmentRefused as refusal:
         enrollment_limiter.record_attempt(client_key)
-        # One generic refusal: saying which of unknown, expired or already-used
-        # applied would let a caller map out valid codes.
-        _write_log(db, "warn", "enrollment_code_rejected")
+        # The category is recorded, the caller is not told it.
+        #
+        # An operator needs to know whether the code was unknown, expired,
+        # already used or refused because the Store is archived - four different
+        # actions. But this endpoint is unauthenticated, so telling the CALLER
+        # which one applied turns it into an oracle: "expired" means the code
+        # existed, "already used" means somebody enrolled with it. So the
+        # category goes to the audit log, which needs a signed-in account to
+        # read, and the wire response stays one generic sentence.
+        #
+        # The raw code is never part of either.
+        category = classify_enrolment_refusal(str(refusal))
+        _write_log(db, "warn", f"enrollment_code_rejected category={category.value}")
         raise HTTPException(status_code=400, detail=ENROLMENT_REFUSED)
 
     enrollment_limiter.forget(client_key)
