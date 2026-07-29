@@ -2052,6 +2052,42 @@ command has to be run by the operator.
 was blocked by the sandbox, correctly — they belong to the protected database.
 They contain no pending data and can be removed when the database is not open.
 
+### 2026-07-29 (last) — the black window at broadcast time
+
+A Store running the background Receiver showed a console window the moment HQ
+started a broadcast. **Two independent causes, both real.**
+
+**1. FFmpeg had no console to inherit, so Windows gave it one.**
+`SpeakLinkReceiverBackground.exe` is GUI-subsystem and has no console.
+`ffmpeg.exe` is a console application. A parent with no console that starts a
+console child *without* `CREATE_NO_WINDOW` gets that child a brand-new console —
+and a new console is a visible window. Measured with `pythonw.exe` as the
+parent, which is GUI-subsystem exactly like the background Receiver:
+
+| spawn | child console |
+|---|---|
+| today's flags (none) | `has_console=True`, `console_hwnd=721134` |
+| `CREATE_NO_WINDOW` | `has_console=False`, `console_hwnd=0` |
+
+It appeared at broadcast time because that is when `FfmpegDecoder.start` runs.
+`hidden_child_process_options()` in
+[tools/audio_receiver_pilot.py](tools/audio_receiver_pilot.py) now covers all
+three FFmpeg spawn sites; it is empty off Windows, where those constants do not
+exist.
+
+**2. The old pilot task ran the console executable.**
+`Install-SpeakLinkReceiverLanPilot.ps1` registers `SpeakLinkReceiver.exe`, so a
+Store still carrying `SpeakLink Receiver LAN Pilot (disposable)` shows a window at
+every logon regardless of the FFmpeg fix — and both tasks would compete for the
+same credential. The Store installer now removes obsolete SpeakLink tasks,
+stopping their console Receiver first, and refuses to remove a task whose action
+is not ours. No credential and no settings are touched.
+
+**Not proven here, and not claimed:** that a Store desktop shows no window. This
+environment has no interactive desktop — window enumeration returned no visible
+window for *either* variant, so it proves nothing either way. The manual Store
+acceptance test is the only evidence for that claim, and it has not been run.
+
 ### Remaining blockers
 
 1. **DPAPI key custody under the dedicated service identity.** The prerequisite
