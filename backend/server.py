@@ -54,6 +54,7 @@ from rbac import (
     parse_role,
     require_permission,
 )
+from user_schema import UserSchemaError, ensure_user_auth_schema
 from user_lifecycle import (
     migrate_super_admin_to_owner,
     DuplicateUsernameError,
@@ -349,33 +350,26 @@ def startup_event():
     except Exception:
         logger.warning("Store lifecycle column could not be prepared", exc_info=False)
 
-    # Roles and the session-version column. Both additive; the role migration is
-    # idempotent and creates nobody. A database whose only administrator used
-    # the legacy "admin" role gains exactly one SUPER_ADMIN, because a system
-    # with none can never change its own security settings again.
+    # Every hq_users migration, in one call, in the one order that works.
+    #
+    # This used to be two try blocks that ran the steps in the wrong order:
+    # migrate_legacy_roles queries through the HQUser model, which knows about
+    # display_name and lifecycle_state, so on a database that still had the
+    # original six-column table it failed with
+    #
+    #     (sqlite3.OperationalError) no such column: hq_users.display_name
+    #
+    # and the except turned that into one warning line. On a fresh database
+    # create_all builds the full table so the step worked and nobody noticed;
+    # on a legacy one it has been failing silently, leaving roles unnormalised.
+    # user_schema.ensure_user_auth_schema owns the order now, and the CLI calls
+    # the same function - the duplication is what allowed them to disagree.
     try:
-        ensure_rbac_schema(engine)
-        outcome = migrate_legacy_roles(SessionLocal)
-        if outcome.get("promoted"):
-            logger.info(
-                "Promoted the lowest-id active administrator to SUPER_ADMIN (user_id=%s)",
-                outcome["super_admin_user_id"],
-            )
+        ensure_user_auth_schema(engine, session_factory=SessionLocal)
+    except UserSchemaError as failure:
+        logger.warning("User tables could not be prepared: %s", failure)
     except Exception:
-        logger.warning("Role model could not be prepared", exc_info=False)
-
-    # After the role model: the backfill reads is_active, and roles must already
-    # be normalised for the last-SUPER_ADMIN rule to count correctly.
-    try:
-        ensure_user_lifecycle_schema(engine)
-        # Forward-only, one UPDATE, idempotent, creates nobody. Old rows say
-        # SUPER_ADMIN; parse_role still accepts that string, so a database that
-        # has not run this yet keeps working and nobody is locked out mid-upgrade.
-        renamed = migrate_super_admin_to_owner(engine)
-        if renamed:
-            logger.info("Renamed %s SUPER_ADMIN account(s) to OWNER", renamed)
-    except Exception:
-        logger.warning("User lifecycle schema could not be prepared", exc_info=False)
+        logger.warning("User tables could not be prepared", exc_info=False)
 
     # Decided here rather than at import: whether Device credentials can be
     # verified depends on the database and the key container, and neither is
@@ -403,15 +397,11 @@ def startup_event():
     # restoring an archived Store, and now resetting a password. The recovery
     # would have been editing the database by hand.
     #
-    # Both are idempotent, so on an existing install this finds nothing to do.
+    # Idempotent, so on an existing install this finds nothing to do. Same
+    # function and therefore the same order as above - two hand-written
+    # sequences is exactly how the first one drifted out of step.
     try:
-        outcome = migrate_legacy_roles(SessionLocal)
-        if outcome.get("promoted"):
-            logger.info(
-                "Promoted the seeded administrator to SUPER_ADMIN (user_id=%s)",
-                outcome.get("super_admin_user_id"),
-            )
-        ensure_user_lifecycle_schema(engine)
+        ensure_user_auth_schema(engine, session_factory=SessionLocal)
     except Exception:
         logger.warning("Role or lifecycle backfill after seeding failed", exc_info=False)
         _write_log(db, "info", "EchoCast Live server started")
