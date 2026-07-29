@@ -182,19 +182,49 @@ STEP 4 - check what was stored
 
     .\Receiver\SpeakLinkReceiver.exe status
 
-STEP 5 - run it once by hand, and watch it
+STEP 5 - CHOOSE WHERE THE SOUND GOES. Do not skip this.
+
+  By default the Receiver decodes the audio and THROWS IT AWAY. HQ will still
+  show PLAYBACK_CONFIRMED, because in that mode it only means "the audio
+  decoded" - not that anybody heard it. That is correct for a software test and
+  silent on a real Store computer.
+
+  List the sound outputs on THIS computer:
+
+    .\Receiver\SpeakLinkReceiver.exe list-audio-devices
+
+  Copy a VERIFIED selector from the SELECTOR column - the "index:N@Name" form,
+  not just the name. The same speakers appear four times, once per Windows
+  sound system (MME, DirectSound, WASAPI, WDM-KS), so a bare name is ambiguous
+  and will be refused. If you are unsure, pick the "Windows WASAPI" row for the
+  speakers or headphones you actually want to hear.
+
+STEP 6 - run it once by hand, with sound, and watch it
 
     .\Receiver\SpeakLinkReceiver.exe run ``
         --backend-url http://192.168.4.134:8000 ``
-        --allow-insecure-private-lan --expected-hq-host 192.168.4.134
+        --allow-insecure-private-lan --expected-hq-host 192.168.4.134 ``
+        --audio-sink windows ``
+        --audio-output-device "index:N@Exact Name From The List"
 
-  It prints a warning about plain HTTP. That warning is correct. This pilot
-  sends the credential unencrypted, which is only ever acceptable on a private
-  network you control. Press Ctrl+C to stop.
+  It prints which device it opened. Check that line before going further.
 
-STEP 6 - make it start automatically when you log on
+  It also prints a warning about plain HTTP. That warning is correct. This
+  pilot sends the credential unencrypted, which is only ever acceptable on a
+  private network you control. Press Ctrl+C to stop.
 
-    .\Installer\Install-SpeakLinkReceiverLanPilot.ps1 -PackagePath .\Receiver
+  If it says "Refused:" and lists other selectors, you picked an ambiguous or
+  missing one. Copy one of the selectors it printed and try again. Nothing was
+  changed on your computer.
+
+STEP 7 - make it start automatically when you log on
+
+    .\Installer\Install-SpeakLinkReceiverLanPilot.ps1 -PackagePath .\Receiver ``
+        -AudioSink windows ``
+        -AudioOutputDevice "index:N@Exact Name From The List"
+
+  Leave the two audio options off ONLY if you do not want this computer to make
+  any sound.
 
   This COPIES the Receiver to
       %LOCALAPPDATA%\SpeakLink\receiver-app
@@ -202,13 +232,13 @@ STEP 6 - make it start automatically when you log on
   away the USB stick or emptying Downloads does not stop the Store working
   weeks later.
 
-STEP 7 - check the task
+STEP 8 - check the task
 
     .\Installer\Test-SpeakLinkReceiverLanPilot.ps1
 
   Expect SPEAKLINK_RECEIVER_TASK_SCHEDULER_VERIFIED.
 
-STEP 8 - sign out and sign back in. Ask HQ whether this Store shows CONNECTED.
+STEP 9 - sign out and sign back in. Ask HQ whether this Store shows CONNECTED.
 
 TO REMOVE EVERYTHING
 
