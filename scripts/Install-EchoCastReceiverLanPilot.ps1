@@ -51,6 +51,8 @@ param(
     [string]$TaskName = 'EchoCast Receiver LAN Pilot (disposable)',
     [string]$LogDirectory,
     [string]$CredentialPath,
+    [ValidateSet('null', 'windows')][string]$AudioSink,
+    [string]$AudioOutputDevice,
     [int]$RestartCount = 3,
     [int]$RepetitionMinutes = 5,
     [int]$RepetitionDurationDays = 1,
@@ -155,6 +157,24 @@ if ($BackendUrl -match '^http://') {
     $argumentList += @('--allow-insecure-private-lan', '--expected-hq-host', $ExpectedHqHost)
 }
 if ($CredentialPath) { $argumentList += @('--credential-path', $CredentialPath) }
+
+# Without these the task runs the Receiver's default sink, which decodes audio
+# and discards it - the Store reports PLAYBACK_CONFIRMED to HQ and stays silent.
+# Neither the device name nor the sink mode is a secret, so both belong on the
+# command line where an operator can read them back out of Task Scheduler.
+if ($AudioSink) { $argumentList += @('--audio-sink', $AudioSink) }
+if ($AudioOutputDevice) { $argumentList += @('--audio-output-device', $AudioOutputDevice) }
+if ($AudioSink -eq 'windows' -and -not $AudioOutputDevice) {
+    throw ("-AudioSink windows needs -AudioOutputDevice. Run " +
+           "'EchoCastReceiver.exe list-audio-devices' on this computer and copy a " +
+           "verified 'index:N@Name' selector; a bare device name is ambiguous because " +
+           'the same endpoint appears under MME, DirectSound, WASAPI and WDM-KS.')
+}
+if (-not $AudioSink) {
+    Write-Output '  audio       : DEFAULT (null) - decoded audio is DISCARDED, this Store will be silent'
+} else {
+    Write-Output "  audio       : $AudioSink $(if ($AudioOutputDevice) { "-> $AudioOutputDevice" })"
+}
 
 $arguments = ($argumentList | ForEach-Object {
     if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
