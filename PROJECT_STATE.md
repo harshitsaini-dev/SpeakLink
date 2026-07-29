@@ -1910,6 +1910,49 @@ readable:
   migration ran before seeding, so every `require_super_admin` endpoint
   answered 403 to everyone, silently.
 
+### 2026-07-29 — why a Store was green and silent
+
+The two-PC test reached PLAYBACK_CONFIRMED on the HQ dashboard and produced no
+sound on a Realtek desktop whose Windows test tone was audible through the same
+earphones. Three facts, all read from the source:
+
+1. **The Receiver discards audio by default.** `resolve_sink_configuration`
+   returns the *null* sink unless `SPEAKLINK_AUDIO_SINK_MODE` says otherwise
+   ([audio_receiver_pilot.py:148-158](tools/audio_receiver_pilot.py#L148-L158)),
+   and in null mode the decoder thread is `_read_progress`, which reads FFmpeg's
+   progress output and never opens a Windows device
+   ([audio_receiver_pilot.py:401](tools/audio_receiver_pilot.py#L401)).
+
+2. **PLAYBACK_CONFIRMED never meant "a speaker played it".** It is emitted when
+   `decoder.wait_for_decode` returns true
+   ([audio_receiver_pilot.py:759-769](tools/audio_receiver_pilot.py#L759-L769)).
+   In *windows* mode `_pump_pcm` sets that flag only after frames were written
+   to the output stream
+   ([audio_receiver_pilot.py:417-423](tools/audio_receiver_pilot.py#L417-L423)),
+   so there it does mean "accepted by the device". In *null* mode it means
+   "FFmpeg produced PCM". Both are honest; neither was visible.
+
+3. **The escape hatch was unreachable and failed like a crash.** Windows mode
+   needs an exact, unambiguous selector, and one endpoint appears under MME,
+   DirectSound, WASAPI and WDM-KS — measured on the build machine, one display
+   name matched three devices. The only way to discover a stable `index:N@Name`
+   selector was `python tools/windows_audio_devices.py`, which does not exist on
+   a Store desktop. `SinkConfigurationError` inherits `AudioReceiverError`, not
+   `AgentError`, so `main()` never caught it: the operator got a traceback and
+   the Store went OFFLINE with nothing explaining why. That is exactly what the
+   attempted `SPEAKLINK_AUDIO_OUTPUT_DEVICE="Speakers (Realtek(R) Audio)"` did —
+   the variable names were right, the value was ambiguous.
+
+Fixed in `tools/receiver_agent.py` only; `tools/audio_receiver_pilot.py` is
+untouched because its per-mode semantics were already correct and it is the
+hardware-proven path. The Agent gained a `list-audio-devices` command needing no
+credential or backend, `--audio-sink` / `--audio-output-device`, sink resolution
+*before* the credential is unsealed, a start-up banner naming the mode, and a
+clean `Refused:` for audio errors. The kit README and the logon-task installer
+carry the same options.
+
+**Still unproven:** that any sound was heard. That needs a person in the room.
+
 ### Remaining blockers
 
 1. **DPAPI key custody under the dedicated service identity.** The prerequisite
