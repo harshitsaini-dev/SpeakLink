@@ -125,6 +125,9 @@ async function mockBackend(page, options = {}) {
     operator: options.operator || OPERATOR,
     users: options.users || HQ_USERS.map((row) => ({ ...row })),
     usersStatus: options.usersStatus || 200,
+    //: How many broadcast sessions each account is recorded as having started.
+    //: Anything above zero must block a permanent delete.
+    userHistory: options.userHistory || { 2: 3 },
     userActions: [],
     passwordResets: [],
     passwordChanges: [],
@@ -188,6 +191,54 @@ async function mockBackend(page, options = {}) {
         state.users.push(created);
         state.userActions.push({ action: 'create', body });
         return route.fulfill(json(created, 201));
+      }
+
+      // Dependency summary and the dependency-guarded permanent delete.
+      // Mirrors backend/deletion_safety.py: an OWNER is never deletable, an
+      // account with recorded history is refused with 409, and the username
+      // must be typed exactly.
+      const dependencyMatch = path.match(/^\/users\/(\d+)\/dependencies$/);
+      if (method === 'GET' && dependencyMatch) {
+        const row = state.users.find((c) => c.id === Number(dependencyMatch[1]));
+        if (!row) return route.fulfill(json({ detail: 'No such HQ User' }, 404));
+        const sessions = state.userHistory[row.id] || 0;
+        return route.fulfill(json({
+          counts: { broadcast_sessions: sessions },
+          unchecked: [],
+          total: sessions,
+          deletable: sessions === 0 && row.role !== 'OWNER',
+          explanation: sessions === 0
+            ? 'Nothing refers to this record, so it can be removed.'
+            : `This record still has ${sessions} broadcast sessions. Deleting it would `
+              + 'destroy operational history. Archive it instead.',
+        }));
+      }
+
+      const permanentMatch = path.match(/^\/users\/(\d+)\/permanently$/);
+      if (method === 'DELETE' && permanentMatch) {
+        const id = Number(permanentMatch[1]);
+        const row = state.users.find((c) => c.id === id);
+        if (!row) return route.fulfill(json({ detail: 'No such HQ User' }, 404));
+        const confirm = url.searchParams.get('confirm');
+        if (row.role === 'OWNER') {
+          return route.fulfill(json({
+            detail: 'An OWNER account is never hard-deleted. Archive it instead.' }, 409));
+        }
+        if (id === state.operator.id) {
+          return route.fulfill(json({ detail: 'You cannot delete your own account.' }, 409));
+        }
+        if (confirm !== row.username) {
+          return route.fulfill(json({
+            detail: `The typed confirmation did not match. Type the username exactly: ${row.username}` }, 409));
+        }
+        if ((state.userHistory[id] || 0) > 0) {
+          return route.fulfill(json({
+            detail: 'This account is recorded as the actor in operational history. '
+                  + 'Archive it instead.' }, 409));
+        }
+        state.users = state.users.filter((c) => c.id !== id);
+        state.userActions.push({ action: 'delete', id });
+        return route.fulfill(json({ ok: true, deleted: { id, username: row.username } }));
       }
 
       const match = path.match(/^\/users\/(\d+)(?:\/([a-z-]+))?$/);

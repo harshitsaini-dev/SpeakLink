@@ -240,6 +240,88 @@ test.describe('Lifecycle actions', () => {
   });
 });
 
+test.describe('Permanent deletion', () => {
+  test('an OWNER is never offered Delete', async ({ page }) => {
+    // Losing the last one cannot be undone from inside the product, so the
+    // control is not offered at all - and the backend refuses it regardless.
+    await open(page, { operator: SUPER_ADMIN });
+    await expect(page.getByTestId('delete-founder')).toHaveCount(0);
+  });
+
+  test('the dialog asks what depends on the account before offering the button',
+    async ({ page }) => {
+      await open(page, { operator: SUPER_ADMIN });
+      await page.getByTestId('delete-anita').click();
+      await expect(page.getByTestId('delete-user-dialog')).toBeVisible();
+      await expect(page.getByTestId('delete-summary')).toBeVisible();
+    });
+
+  test('an account with history cannot be deleted and says why', async ({ page }) => {
+    // priya (id 2) has three recorded broadcast sessions in the fixture.
+    await open(page, { operator: SUPER_ADMIN });
+    await page.getByTestId('delete-priya').click();
+    await expect(page.getByTestId('delete-blocked')).toBeVisible();
+    await expect(page.getByTestId('delete-summary')).toContainText(/history/i);
+    await expect(page.getByTestId('delete-confirm')).toBeDisabled();
+    await expect(page.getByTestId('delete-confirm-input')).toHaveCount(0);
+  });
+
+  test('a clean account still needs the username typed exactly', async ({ page }) => {
+    await open(page, { operator: SUPER_ADMIN });
+    await page.getByTestId('delete-anita').click();
+    await expect(page.getByTestId('delete-confirm')).toBeDisabled();
+    await page.getByTestId('delete-confirm-input').fill('anit');
+    await expect(page.getByTestId('delete-confirm')).toBeDisabled();
+    await page.getByTestId('delete-confirm-input').fill('anita');
+    await expect(page.getByTestId('delete-confirm')).toBeEnabled();
+  });
+
+  test('confirming removes the row and reports it', async ({ page }) => {
+    const state = await open(page, { operator: SUPER_ADMIN });
+    await page.getByTestId('delete-anita').click();
+    await page.getByTestId('delete-confirm-input').fill('anita');
+    await page.getByTestId('delete-confirm').click();
+    await expect(page.getByTestId('user-notice')).toContainText(/permanently deleted/i);
+    await expect(page.getByTestId('user-row-anita')).toHaveCount(0);
+    expect(state.userActions.some((entry) => entry.action === 'delete')).toBe(true);
+  });
+
+  test('cancelling deletes nothing', async ({ page }) => {
+    const state = await open(page, { operator: SUPER_ADMIN });
+    await page.getByTestId('delete-anita').click();
+    await page.getByTestId('delete-cancel').click();
+    await expect(page.getByTestId('delete-user-dialog')).toHaveCount(0);
+    await expect(page.getByTestId('user-row-anita')).toBeVisible();
+    expect(state.userActions.some((entry) => entry.action === 'delete')).toBe(false);
+  });
+
+  test('a server refusal is shown rather than swallowed', async ({ page }) => {
+    // The dialog cannot know every rule the server enforces, so the message
+    // has to survive when the server says no anyway.
+    await open(page, { operator: SUPER_ADMIN, userHistory: {} });
+    await page.getByTestId('delete-anita').click();
+    await page.getByTestId('delete-confirm-input').fill('anita');
+    // A regex, not a glob. The request carries ?confirm=..., and
+    // '**/api/users/*/permanently' does not match a URL with a query string -
+    // so the override never applied and the mock answered normally.
+    await page.route(/\/api\/users\/\d+\/permanently/, (route) =>
+      route.fulfill({ status: 409, contentType: 'application/json',
+                      body: JSON.stringify({ detail: 'Refused by the server.' }) }));
+    await page.getByTestId('delete-confirm').click();
+    await expect(page.getByTestId('user-error')).toContainText(/refused/i);
+    await expect(page.getByTestId('user-row-anita')).toBeVisible();
+  });
+
+  test('the dialog never shows a hash or a password', async ({ page }) => {
+    await open(page, { operator: SUPER_ADMIN });
+    await page.getByTestId('delete-anita').click();
+    const body = await page.locator('body').innerText();
+    for (const forbidden of ['$2b$', 'password_hash', 'session_version']) {
+      expect(body).not.toContain(forbidden);
+    }
+  });
+});
+
 test.describe('Changing your own password', () => {
   async function openChangePassword(page, options = {}) {
     const state = await mockBackend(page, options);
