@@ -256,7 +256,62 @@ the window claim needs a person watching a Store screen.
 
 ---
 
-## Learning Box 11 — Test the command, not the parser
+## Learning Box 11 — Rebaseline deliberately, and keep the old value
+
+A checksum guard on the live database failed. The file had changed: four
+additive columns from a migration, no row deleted, no password hash touched.
+Size identical, hash different — which is exactly why the guard checks both.
+
+The tempting move is to paste the new hash over the old one and move on. That
+turns a guard into a rubber stamp: it will "pass" for ever, because it is
+re-derived from whatever the file happens to be whenever it complains.
+
+What was done instead:
+
+1. **Prove the content first, not the hash.** `integrity_check`, row counts in
+   every table, the administrator's row and password-hash fingerprint, and that
+   no plaintext password column exists. A hash tells you *that* something
+   changed; only the content tells you *whether it mattered*.
+2. **Take a real backup before accepting anything** — SQLite's backup API, not a
+   file copy. Copying a WAL-mode database can capture the main file without the
+   committed pages still sitting in the `-wal`, giving you a backup that is
+   silently older than the thing it came from.
+3. **Get an explicit decision.** Rebaselining is the operator's call, not the
+   engineer's. Ask, with the evidence attached.
+4. **Keep the old value next to the new one**, with a note on what moved it, and
+   a test asserting the two differ. If somebody ever "fixes" a failure by
+   overwriting the current hash with itself, that test notices.
+
+The habit generalises well past checksums: any expected-value fixture — golden
+files, snapshot tests, approved screenshots — is only worth something if
+updating it is a decision somebody made rather than a reflex.
+
+---
+
+## Learning Box 12 — Prove the file is free before deleting anything beside it
+
+The `-wal` and `-shm` sidecars had to go. Deleting a `-wal` that still holds
+committed pages destroys data, so "it looks empty" is not good enough.
+
+Two checks, both cheap:
+
+```powershell
+# 1. nothing references it
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'echocast_live' }
+
+# 2. the decisive one - an exclusive open fails if anything holds the file
+[System.IO.File]::Open($path, 'Open', 'ReadWrite', 'None')
+```
+
+The second is worth more than the first: process-list matching depends on
+command lines that may not mention the file at all, while an exclusive open asks
+the operating system directly. Plus the WAL was 0 bytes, so there was nothing to
+lose either way — and the main file's hash was unchanged afterwards, which is
+the proof that the removal took nothing with it.
+
+---
+
+## Learning Box 13 — Test the command, not the parser
 
 Two of my own tests in this change passed while the code was broken.
 
