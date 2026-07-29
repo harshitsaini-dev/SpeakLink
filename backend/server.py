@@ -54,6 +54,13 @@ from rbac import (
     parse_role,
     require_permission,
 )
+from deletion_safety import (
+    DeletionRefused,
+    delete_store_if_unused,
+    delete_user_if_unused,
+    store_dependencies,
+    user_dependencies,
+)
 from user_schema import UserSchemaError, ensure_user_auth_schema
 from user_lifecycle import (
     migrate_super_admin_to_owner,
@@ -1107,6 +1114,73 @@ def delete_store(store_id: int, db: Session = Depends(get_db), user: HQUser = De
     removing the row would destroy the only record of what was announced where."""
     _lifecycle_action(archive_store, store_id, user)
     return {"ok": True, "archived": True}
+
+
+@api.get("/stores/{store_id}/dependencies")
+def read_store_dependencies(store_id: int,
+                            user: HQUser = Depends(require(Permission.MANAGE_STORES))):
+    """What still refers to this Store, so the UI can show it before offering
+    a delete that would be refused anyway."""
+    summary = store_dependencies(engine, store_id=store_id)
+    if not summary.exists:
+        raise HTTPException(status_code=404, detail="Store not found")
+    return {"counts": summary.counts, "unchecked": summary.unchecked,
+            "total": summary.total, "deletable": summary.deletable,
+            "explanation": summary.explain()}
+
+
+@api.delete("/stores/{store_id}/permanently")
+def hard_delete_store(store_id: int, confirm: str,
+                      db: Session = Depends(get_db),
+                      user: HQUser = Depends(require(Permission.MANAGE_STORES))):
+    """Remove a never-used Store for real. Refuses anything with history.
+
+    Separate from DELETE /stores/{id}, which archives. Two verbs that do very
+    different things must not be the same endpoint with a flag - somebody
+    eventually passes the flag by accident.
+    """
+    try:
+        removed = delete_store_if_unused(engine, store_id=store_id,
+                                         typed_confirmation=confirm)
+    except DeletionRefused as refusal:
+        # 409, not 403: the caller has the permission, and the refusal is about
+        # what the deletion would destroy.
+        raise HTTPException(status_code=409, detail=str(refusal))
+    _write_log(db, "warn",
+               f"STORE_DELETED store_code={removed['store_code']} by={user.username}")
+    return {"ok": True, "deleted": removed}
+
+
+@api.get("/users/{user_id}/dependencies")
+def read_user_dependencies(user_id: int,
+                           user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+    summary = user_dependencies(engine, user_id=user_id)
+    if not summary.exists:
+        raise HTTPException(status_code=404, detail="No such HQ User")
+    return {"counts": summary.counts, "unchecked": summary.unchecked,
+            "total": summary.total, "deletable": summary.deletable,
+            "explanation": summary.explain()}
+
+
+@api.delete("/users/{user_id}/permanently")
+def hard_delete_user(user_id: int, confirm: str,
+                     db: Session = Depends(get_db),
+                     user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+    """Remove an account that never did anything. Archive is still the default.
+
+    The role check inside delete_user_if_unused refuses an OWNER outright, and
+    _require_may_manage stops an ADMIN reaching one in the first place.
+    """
+    existing = _user_or_404(user_id)
+    _require_may_manage(user, existing["role"])
+    try:
+        removed = delete_user_if_unused(engine, user_id=user_id,
+                                        typed_confirmation=confirm, actor_id=user.id)
+    except DeletionRefused as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    _write_log(db, "warn",
+               f"USER_DELETED username={removed['username']} by={user.username}")
+    return {"ok": True, "deleted": removed}
 
 
 @api.post("/stores/{store_id}/regenerate-token", response_model=StoreOut)

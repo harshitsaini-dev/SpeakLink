@@ -78,6 +78,18 @@ EXPECTED: dict[str, object] = {
     # to take a SUPER_ADMIN one.
     "reset_hq_user_password": "OWNER",
 
+    # Dependency summaries, and the dependency-guarded hard deletes.
+    #
+    # MANAGE_STORES / MANAGE_USERS is the right gate rather than OWNER: the
+    # protection lives in what the operation refuses - anything with Devices,
+    # targets, events, enrolment codes or recorded history - and
+    # _require_may_manage still stops an ADMIN reaching an OWNER account. A role
+    # cannot buy its way past a referential check.
+    "read_store_dependencies": Permission.MANAGE_STORES,
+    "hard_delete_store": Permission.MANAGE_STORES,
+    "read_user_dependencies": Permission.MANAGE_USERS,
+    "hard_delete_user": Permission.MANAGE_USERS,
+
     # Receiver Devices: credentials, enrolment, promotion, revocation.
     "create_receiver_enrollment_code": Permission.MANAGE_DEVICES,
     "list_receiver_devices": Permission.MANAGE_DEVICES,

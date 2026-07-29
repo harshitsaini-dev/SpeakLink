@@ -183,14 +183,52 @@ def test_a_user_is_never_deleted(client, founder):
     assert client.get(f"/api/users/{user_id}", headers=founder).status_code == 200
 
 
-def test_there_is_no_delete_endpoint(client):
-    paths = {route.path for route in client.server_module.app.routes
-             if "users" in getattr(route, "path", "")}
+def test_a_user_cannot_be_casually_deleted(client):
+    """The property this pins changed shape, so the test did too.
+
+    It used to assert that NO DELETE route existed on /api/users, which was the
+    right way to express "Users are archived, not removed" when archive was the
+    only option. A dependency-guarded hard delete now exists for an account that
+    never did anything, so asserting the route's absence would now be asserting
+    that a deliberate feature is missing.
+
+    The real property is unchanged: a User cannot be removed by an ordinary
+    delete. Any DELETE route must be the explicit `/permanently` one, which
+    refuses an OWNER, refuses your own account, requires the username typed
+    exactly, and refuses anything with recorded history.
+    """
+    delete_routes = {
+        route.path for route in client.server_module.app.routes
+        if getattr(route, "path", "").startswith("/api/users")
+        and "DELETE" in getattr(route, "methods", set())
+    }
+    assert delete_routes <= {"/api/users/{user_id}/permanently"}, (
+        f"an unguarded user delete route exists: {delete_routes}")
+
+
+def test_the_plain_user_route_cannot_be_deleted(client):
+    """DELETE /api/users/{id} must not exist at all - archive is that verb."""
     for route in client.server_module.app.routes:
-        if getattr(route, "path", "").startswith("/api/users"):
-            assert "DELETE" not in getattr(route, "methods", set()), (
-                f"{route.path} can be deleted; HQ Users are archived, never removed")
-    assert paths, "no user routes are registered at all"
+        if getattr(route, "path", "") == "/api/users/{user_id}":
+            assert "DELETE" not in getattr(route, "methods", set())
+
+
+def test_deleting_a_user_with_history_is_refused_with_409(client, founder):
+    """Ordinary refusal, not a permission error: the caller may delete users,
+    and this one is refused because of what removing it would destroy."""
+    created = make_user(client, founder, "priya").json()
+    response = client.delete(f"/api/users/{created['id']}/permanently",
+                             headers=founder, params={"confirm": "wrong-name"})
+    assert response.status_code == 409
+    assert client.get(f"/api/users/{created['id']}", headers=founder).status_code == 200
+
+
+def test_an_owner_cannot_be_hard_deleted(client, founder):
+    founder_id = client.get("/api/auth/me", headers=founder).json()["id"]
+    response = client.delete(f"/api/users/{founder_id}/permanently",
+                             headers=founder, params={"confirm": "founder"})
+    assert response.status_code == 409
+    assert "owner" in response.text.lower()
 
 
 # ===========================================================================
