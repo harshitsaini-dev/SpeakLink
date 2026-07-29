@@ -275,7 +275,7 @@ def build_receiver_runtime_authenticator():
         return default_receiver_runtime_authenticator
 configure_receiver_runtime(
     app,
-    authenticator=default_receiver_runtime_authenticator,
+    authenticator=build_receiver_runtime_authenticator(),
     connection_manager=manager,
 )
 
