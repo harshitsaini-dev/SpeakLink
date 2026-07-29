@@ -148,7 +148,79 @@ someone can plan around. One that is buried is a 3am support call.
 
 ---
 
-## Learning Box 7 — Test the command, not the parser
+## Learning Box 7 — Check the premise before you build on it
+
+A request arrived to "remove the inconsistent 16-character password minimum" and
+to "add an OWNER role". Both sounded like straightforward work. Neither premise
+survived five minutes of `git grep`.
+
+**There was no 16-character rule.** Not anywhere, in any tracked file. The real
+number was 12, in four places. Building to the stated brief would have meant
+hunting for something that did not exist, then quietly "fixing" the wrong number.
+
+**The OWNER role already existed**, called `SUPER_ADMIN`, with precisely the
+protections being asked for. Adding a *second* top-level role beside it was the
+genuinely dangerous option: two accounts-of-last-resort means two separate "this
+one may not be removed" rules, and the failure mode is that only one of them
+ends up being applied — which is exactly the permanent lockout the rule exists
+to prevent. Renaming was smaller, safer, and gave the same vocabulary.
+
+**The habit.** When a request describes the current state of the code, verify
+that description before designing against it. Two greps cost nothing. Building
+on a wrong premise costs the whole change, and the wrongness usually only
+surfaces after review, when it looks like your mistake rather than a
+misunderstanding.
+
+Say the correction out loud, plainly, and then get on with the work.
+
+---
+
+## Learning Box 8 — Renaming a value is not the same as renaming a variable
+
+A find-and-replace turned `Role.SUPER_ADMIN` into `Role.OWNER` across seventeen
+files. It also rewrote this:
+
+```python
+LEGACY_ROLE_ALIASES = {"SUPER_ADMIN": Role.OWNER}   # before
+LEGACY_ROLE_ALIASES = {"OWNER": Role.OWNER}         # after — a no-op
+```
+
+That is the one place in the entire change where the *old string literal* was
+the point. The replacement left code that reads perfectly, passes a casual eye,
+and silently removes backward compatibility: every account row still saying
+`SUPER_ADMIN` would have parsed to `None`, which means **no permissions at all**
+— every administrator locked out at the moment of upgrade.
+
+**The lesson.** Before a bulk rename, ask which occurrences are *references* and
+which are *data*. Compatibility shims, migration tables, serialized payloads and
+test fixtures hold the old name deliberately. A rename tool cannot tell the
+difference; you can, and the test that catches it is one asserting the old value
+still resolves.
+
+The same sweep also put a UTF-8 BOM on sixteen files via
+`Set-Content -Encoding utf8`. That one was caught by a guard written after it
+happened the first time — which is the whole argument for writing such guards.
+
+---
+
+## Learning Box 9 — Refusing must mean refusing
+
+The owner-bootstrap command refuses when the account already exists. The
+tempting shortcut is to make a second run "helpful" by resetting the password
+instead.
+
+Do not. A create command that quietly becomes a reset command is an account
+takeover with a friendly name: whoever runs the installer next owns the account
+that everything else is protected by.
+
+There is a test for it, and the test is not "it raises an error" — it is that
+the **stored hash is unchanged** and the **original password still verifies**
+after the refusal. Asserting only on the exception would pass even if the row
+had been rewritten first.
+
+---
+
+## Learning Box 10 — Test the command, not the parser
 
 Two of my own tests in this change passed while the code was broken.
 

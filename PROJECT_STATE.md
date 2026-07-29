@@ -1998,6 +1998,60 @@ and audible playback. All of those need the operator and the second desktop —
 the manual checklist is in
 [STORE_RECEIVER_ACCEPTANCE_CHECKLIST.md](STORE_RECEIVER_ACCEPTANCE_CHECKLIST.md).
 
+### 2026-07-29 (later still) — OWNER, and an 8-character password minimum
+
+**Two corrections to the request, both checked before any edit.**
+
+There was never a 16-character password rule. `git grep` for `min_length=16`,
+`minLength={16}` and `"16 characters"` across all tracked files returns nothing.
+The real value was **12**, in four places: two Pydantic schemas, two React forms
+and a PowerShell guard.
+
+The OWNER role already existed, under the name **SUPER_ADMIN**, with exactly the
+rules that were asked for — ADMIN cannot create, promote to or manage it, and the
+last active one cannot be disabled, archived or demoted. So it was **renamed**,
+not duplicated. A second top-level role beside it would have meant two
+accounts-of-last-resort and two "may not be removed" rules, and eventually only
+one of them being applied — which is the lockout the rule exists to prevent.
+
+| | OWNER | ADMIN |
+|---|---|---|
+| Dashboard, Stores, Devices, broadcasts, emergency stop, history, logs | yes | yes |
+| User management | yes | yes, for BROADCASTER and VIEWER |
+| Change how authentication works (`MANAGE_SECURITY`) | yes | **no** |
+| Create, promote to, disable, archive or demote an OWNER | yes | **no** |
+| Be the last enabled OWNER and still be removable | **no** | n/a |
+
+The rename is backward compatible: `rbac.LEGACY_ROLE_ALIASES` maps the old
+string to `Role.OWNER`, so rows written before the change and tokens minted
+minutes before an upgrade both keep working. **No session is invalidated by the
+rename itself** — the role is read from the database on every request and the
+stored value parses either way.
+
+Migration: `user_lifecycle.migrate_super_admin_to_owner` — one `UPDATE` in one
+transaction, forward-only, idempotent, creates nobody, touches no password hash.
+Rollback is the mirror `UPDATE` documented in its docstring; no automatic
+down-migration exists because the legacy string still parses.
+
+Password minimum is now **8**, defined once in `backend/password_policy.py` and
+imported by the schemas; the React forms and the pilot script match. Maximum
+stays 200. Whitespace is deliberately **not** trimmed.
+
+`tools/create_owner.py` creates the Owner account from a hidden prompt asked
+twice. No `--password` option and no environment variable, and nothing creates
+the account at startup or in a migration.
+
+**Not done, and not claimed:** the live `owneradmin` account does not exist yet.
+The protected database was read but never migrated or written — the interactive
+command has to be run by the operator.
+
+**Open item for the operator:** a read-only probe of
+`backend/echocast_live.db` caused SQLite to create a **0-byte `-wal` and a
+32 KB `-shm`** beside it. The main file is byte-identical (507,904 bytes, SHA-256
+`8C858B13…BD2EF2AB`, mtime `2026-07-26 14:13:13.819`). Removing the two sidecars
+was blocked by the sandbox, correctly — they belong to the protected database.
+They contain no pending data and can be removed when the database is not open.
+
 ### Remaining blockers
 
 1. **DPAPI key custody under the dedicated service identity.** The prerequisite
