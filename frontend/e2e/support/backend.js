@@ -131,6 +131,9 @@ async function mockBackend(page, options = {}) {
     //: How many things still refer to each Store, by id. Store 1 (UN) has
     //: Devices; the others are untouched and therefore deletable.
     storeDependencies: options.storeDependencies || { 1: 2, 2: 0, 5: 0 },
+    //: How long an issued enrolment code lives. Overridable so a spec can
+    //: watch the real expiry transition instead of mocking the clock.
+    enrolmentCodeSeconds: options.enrolmentCodeSeconds || 900,
     userActions: [],
     passwordResets: [],
     passwordChanges: [],
@@ -447,7 +450,7 @@ async function mockBackend(page, options = {}) {
     if (method === 'POST' && path === '/receiver-devices/enrollment-codes') {
       state.codesIssued += 1;
       return route.fulfill(
-        json({ code: `ECHO-CODE-${state.codesIssued}`, store_id: 1, expires_in_seconds: 900 }),
+        json({ code: `ECHO-CODE-${state.codesIssued}`, store_id: 1, expires_in_seconds: state.enrolmentCodeSeconds }),
       );
     }
 
