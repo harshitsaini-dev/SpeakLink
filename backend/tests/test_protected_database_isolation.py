@@ -253,17 +253,54 @@ def test_the_worker_database_is_outside_the_repository():
 # ===========================================================================
 # 6. The protected file set, unchanged
 # ===========================================================================
+#: The current accepted baseline, rebaselined on 2026-07-29 by operator decision.
+#:
+#: The previous value is kept below rather than deleted. A baseline that is
+#: quietly overwritten every time it fails is not a baseline; keeping the old one
+#: means the next person can see that it moved, when, and on whose say-so.
+PROTECTED_BASELINE_SHA256 = "EEF1EA79BC901A989AE0E73D1F4882F6517844436139E981EB9051839DD70D51"
+PROTECTED_BASELINE_SIZE = 507904
+
+#: What it was before, and why it changed.
+#:
+#: The schema gained four additive user-lifecycle columns - lifecycle_state,
+#: display_name, disabled_at, archived_at - from a migration that ran against
+#: this database. No row was deleted and no password hash was touched, but an
+#: ALTER TABLE rewrites the file, so the hash moved while the size did not.
+#:
+#: Verified before the operator accepted it:
+#:   PRAGMA integrity_check : ok
+#:   hq_users               : 1 row, username 'admin', role 'admin', active
+#:   stores                 : 13
+#:   broadcast_sessions     : 17
+#:   system_logs            : 194
+#:   plaintext password col : none
+#: and a consistent SQLite-backup-API copy exists under backups/.
+PREVIOUS_BASELINE_SHA256 = "8C858B132907DC72180A134D4981C5E8C4BBC03D190D7370B3823DB2BD2EF2AB"
+
+
 def test_the_protected_database_matches_its_recorded_baseline():
     """Size and hash together. Size alone would have passed throughout the
-    incident, because the incident never changed the size."""
+    incident, because the incident never changed the size - and it did not
+    change it for the additive columns either."""
     import hashlib
 
     if not PROTECTED_DATABASE.exists():
         pytest.skip("no protected database on this machine")
 
-    assert PROTECTED_DATABASE.stat().st_size == 507904
+    assert PROTECTED_DATABASE.stat().st_size == PROTECTED_BASELINE_SIZE
     digest = hashlib.sha256(PROTECTED_DATABASE.read_bytes()).hexdigest().upper()
-    assert digest == "8C858B132907DC72180A134D4981C5E8C4BBC03D190D7370B3823DB2BD2EF2AB"
+    assert digest == PROTECTED_BASELINE_SHA256
+
+
+def test_the_baseline_actually_moved_rather_than_being_edited_in_place():
+    """A guard on the guard.
+
+    If somebody ever "fixes" a failing baseline by pasting the new hash over the
+    old one, this notices that the two are the same value and says so. The point
+    of recording the previous hash is that it is different from the current one.
+    """
+    assert PROTECTED_BASELINE_SHA256 != PREVIOUS_BASELINE_SHA256
 
 
 def test_no_sidecar_exists_beside_the_protected_database():

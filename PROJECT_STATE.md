@@ -2045,12 +2045,38 @@ the account at startup or in a migration.
 The protected database was read but never migrated or written — the interactive
 command has to be run by the operator.
 
-**Open item for the operator:** a read-only probe of
-`backend/speaklink_live.db` caused SQLite to create a **0-byte `-wal` and a
-32 KB `-shm`** beside it. The main file is byte-identical (507,904 bytes, SHA-256
-`8C858B13…BD2EF2AB`, mtime `2026-07-26 14:13:13.819`). Removing the two sidecars
-was blocked by the sandbox, correctly — they belong to the protected database.
-They contain no pending data and can be removed when the database is not open.
+**Resolved 2026-07-29 — the protected database was rebaselined by operator
+decision.** The schema gained four additive user-lifecycle columns
+(`lifecycle_state`, `display_name`, `disabled_at`, `archived_at`) from a
+migration that ran against it. An `ALTER TABLE` rewrites the file, so the hash
+moved while the size did not — which is why the guard checks both and why size
+alone would have said nothing.
+
+Verified before the new baseline was accepted:
+
+| | |
+|---|---|
+| `PRAGMA integrity_check` | ok |
+| `hq_users` | 1 row — `admin`, role `admin`, active, password hash unchanged |
+| `stores` / `broadcast_sessions` / `system_logs` | 13 / 17 / 194 |
+| plaintext password column | none |
+| consistent backup | `backups/speaklink_live-20260729-160359.db` (SQLite backup API) |
+
+| | SHA-256 | size |
+|---|---|---|
+| previous | `8C858B13…BD2EF2AB` | 507,904 |
+| **current baseline** | `EEF1EA79…9DD70D51` | 507,904 |
+
+Both values are recorded in `test_protected_database_isolation.py`, and a second
+test asserts they differ — so a future failure cannot be "fixed" by pasting the
+new hash over the old one and losing the fact that it ever moved.
+
+The transient `-wal` (0 bytes) and `-shm` (32 KB) were removed after proving
+nothing owned the file: an exclusive open succeeded, and no process command line
+referenced it. Removing them did not change the main file's hash.
+
+**Still not done:** `owneradmin` does not exist. The interactive command has not
+been run.
 
 ### 2026-07-29 (last) — the black window at broadcast time
 
