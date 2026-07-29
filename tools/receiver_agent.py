@@ -396,6 +396,125 @@ def configure_logging(
 
 
 # ===========================================================================
+# The settings a Store keeps between restarts
+# ===========================================================================
+CONFIG_FILENAME = "config.json"
+
+#: Everything the installer records so nobody has to retype it after a reboot,
+#: a repair or an upgrade. Every field here is deliberately NON-SECRET: a
+#: backend address, a device selector, a folder. The Device credential stays
+#: sealed by DPAPI in its own file, because a config file is a plain file on a
+#: shop counter and anything written in it is written in the clear.
+_CONFIG_FIELDS = (
+    "backend_url",
+    "expected_hq_host",
+    "allow_insecure_private_lan",
+    "audio_sink",
+    "audio_output_device",
+    "log_directory",
+    "installed_version",
+    "source_commit",
+)
+
+#: Keys that must never appear in a config file. If one does, the file is
+#: refused rather than loaded: an installer bug - or somebody being helpful -
+#: must not be able to turn this into a plaintext credential store.
+_FORBIDDEN_CONFIG_KEYS = frozenset({
+    "credential", "password", "code", "token", "secret",
+    "enrolment_code", "enrollment_code", "authorization",
+})
+
+
+@dataclass
+class ReceiverConfig:
+    """Non-secret settings, read at every start."""
+
+    backend_url: str | None = None
+    expected_hq_host: str | None = None
+    allow_insecure_private_lan: bool = False
+    audio_sink: str | None = None
+    audio_output_device: str | None = None
+    log_directory: str | None = None
+    installed_version: str | None = None
+    source_commit: str | None = None
+
+
+def default_config_path() -> Path:
+    return _agent_state_directory() / CONFIG_FILENAME
+
+
+def load_config(path) -> "ReceiverConfig | None":
+    """Read the saved settings, or ``None`` if this machine has none.
+
+    A missing file is not an error: a technician must still be able to run the
+    Receiver by hand with everything on the command line, exactly as the pilot
+    did. A *corrupt* file is an error, because half-applied settings are how a
+    Store ends up pointed at the right HQ with the wrong speaker.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (ValueError, OSError) as failure:
+        raise AgentError(
+            f"the Receiver configuration at {path} could not be read "
+            f"({failure.__class__.__name__}). Repair the installation."
+        ) from None
+    if not isinstance(raw, dict):
+        raise AgentError(f"the Receiver configuration at {path} is not a set of settings.")
+
+    present = {str(key).lower() for key in raw}
+    smuggled = sorted(present & _FORBIDDEN_CONFIG_KEYS)
+    if smuggled:
+        # The offending value is deliberately not echoed.
+        raise AgentError(
+            f"the Receiver configuration at {path} contains {', '.join(smuggled)}, "
+            "which must never be stored in a plain file. Delete it and re-run the "
+            "installer; the Device credential belongs in the DPAPI-sealed store."
+        )
+
+    # Unknown keys are ignored on purpose: a newer installer must not stop an
+    # older executable from starting before it has been upgraded.
+    return ReceiverConfig(**{
+        field: raw[field] for field in _CONFIG_FIELDS if field in raw
+    })
+
+
+def save_config(path, config: "ReceiverConfig") -> None:
+    """Write the settings, replacing any earlier file in one step.
+
+    Written to a temporary file and moved into place, so a power cut leaves
+    either the old settings or the new ones - never a half-written file that
+    stops the Store starting at all.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {field: getattr(config, field) for field in _CONFIG_FIELDS}
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def merge_config_into_arguments(arguments, config: "ReceiverConfig | None") -> None:
+    """Fill in whatever the command line left out. The command line wins.
+
+    A technician debugging on site overrides with an option, and their override
+    is not remembered - it lasts exactly as long as that one run.
+    """
+    if config is None:
+        return
+    for field in ("backend_url", "expected_hq_host", "audio_sink",
+                  "audio_output_device", "log_directory"):
+        if getattr(arguments, field, None) in (None, ""):
+            value = getattr(config, field)
+            if value:
+                setattr(arguments, field, value)
+    if not getattr(arguments, "allow_insecure_private_lan", False):
+        arguments.allow_insecure_private_lan = bool(config.allow_insecure_private_lan)
+
+
+# ===========================================================================
 # Which audio output, and saying so out loud
 # ===========================================================================
 #: The Receiver has always defaulted to a sink that decodes audio and throws it
@@ -478,6 +597,91 @@ def describe_sink(configuration: SinkConfiguration) -> "list[str]":
         "       PLAYBACK_CONFIRMED in this mode means decoded audio was",
         "       accepted by that device. It is still not proof anybody heard it.",
     ]
+
+
+def diagnose_report(*, config_path, credential_path, devices=None, backend=None) -> str:
+    """Everything a technician needs, over the phone, showing nothing secret.
+
+    Read-only. It opens no audio device, starts nothing, and never reads the
+    credential - only whether the file is there.
+    """
+    config_path = Path(config_path)
+    credential_path = Path(credential_path)
+    lines = [
+        "SpeakLink Receiver diagnostics",
+        "=============================",
+        f"agent version    : {AGENT_VERSION}",
+        f"executable       : {Path(sys.executable).name if getattr(sys, 'frozen', False) else 'running from source'}",
+        f"windows user     : {os.environ.get('USERNAME', '<unknown>')}",
+        "",
+        f"config file      : {config_path}",
+    ]
+
+    try:
+        config = load_config(config_path)
+    except AgentError as failure:
+        config = None
+        lines.append(f"config status    : UNREADABLE - {failure}")
+    else:
+        lines.append(f"config status    : {'present' if config else 'ABSENT (never installed?)'}")
+
+    if config is not None:
+        lines += [
+            f"  backend        : {config.backend_url or '<not set>'}",
+            f"  expected host  : {config.expected_hq_host or '<not set>'}",
+            f"  plain HTTP     : {'allowed (pilot only)' if config.allow_insecure_private_lan else 'no'}",
+            f"  audio sink     : {config.audio_sink or 'null (audio is DISCARDED)'}",
+            f"  audio device   : {config.audio_output_device or '<not set>'}",
+            f"  log directory  : {config.log_directory or default_log_directory()}",
+            f"  installed ver  : {config.installed_version or '<not recorded>'}",
+            f"  source commit  : {config.source_commit or '<not recorded>'}",
+        ]
+
+    # Presence only. The contents are sealed and are never read here.
+    lines += [
+        "",
+        f"credential file  : {credential_path}",
+        f"credential status: {'present' if credential_path.exists() else 'ABSENT (not enrolled)'}",
+    ]
+
+    if config is not None and config.audio_sink == SINK_MODE_WINDOWS and config.audio_output_device:
+        lines.append("")
+        lines.append("configured audio device, resolved now:")
+        try:
+            resolved = resolve_agent_sink(
+                sink_mode=SINK_MODE_WINDOWS, selector=config.audio_output_device,
+                devices=devices, backend=backend)
+        except SinkConfigurationError as failure:
+            lines.append(f"  UNAVAILABLE - {failure}")
+        else:
+            lines.append(f"  index {resolved.device.index}  {resolved.device.name}")
+            lines.append(f"  host API {resolved.device.host_api}, "
+                         f"{int(resolved.sample_rate)} Hz, {resolved.channels} channel(s)")
+
+    log_directory = Path(config.log_directory) if (config and config.log_directory) \
+        else default_log_directory()
+    lines += ["", f"log directory    : {log_directory}"]
+    if log_directory.exists():
+        files = sorted(log_directory.glob("receiver*.log*"))
+        total = sum(path.stat().st_size for path in files)
+        lines.append(f"log files        : {len(files)} ({total} bytes)")
+        newest = max(files, key=lambda path: path.stat().st_mtime, default=None)
+        if newest is not None:
+            lines.append(f"newest log       : {newest.name}")
+            tail = newest.read_text(encoding="utf-8", errors="replace").splitlines()[-5:]
+            lines.append("last lines       :")
+            # Already redacted when written; redacted again in case an older
+            # file predates the filter.
+            lines += [f"  {redact(line)}" for line in tail]
+    else:
+        lines.append("log files        : none yet")
+
+    lines += [
+        "",
+        "This report is read-only and contains no credential, code or password.",
+        "It does not prove any sound was heard - only a person in the room can.",
+    ]
+    return "\n".join(lines)
 
 
 def list_audio_devices_report(*, devices=None, backend=None) -> str:
@@ -1148,10 +1352,16 @@ def build_parser() -> argparse.ArgumentParser:
     def add_command(name: str, **kwargs) -> argparse.ArgumentParser:
         return commands.add_parser(name, allow_abbrev=False, **kwargs)
 
-    def common(subparser, *, needs_url: bool) -> None:
+    def common(subparser, *, needs_url: bool, url_required: bool = True) -> None:
         if needs_url:
-            subparser.add_argument("--backend-url", required=True,
-                                   help="HQ base URL, https:// in production.")
+            # `run` no longer requires it on the command line: an installed
+            # Store keeps it in its config file, so the scheduled task's
+            # arguments stay short and boring. Everything else still demands it,
+            # because enrolling against the wrong HQ by omission would be worse
+            # than being asked.
+            subparser.add_argument("--backend-url", required=url_required, default=None,
+                                   help="HQ base URL, https:// in production. "
+                                        "For 'run', may come from the saved configuration.")
             subparser.add_argument("--allow-insecure-loopback", action="store_true",
                                    help="Permit plain HTTP to 127.0.0.1 for local testing only.")
             subparser.add_argument(
@@ -1171,6 +1381,8 @@ def build_parser() -> argparse.ArgumentParser:
             )
         subparser.add_argument("--credential-path", default=None,
                                help="Where the sealed credential FILE lives (not a secret).")
+        subparser.add_argument("--config-path", default=None,
+                               help="Where the saved non-secret settings live.")
 
     enrol_command = add_command("enrol", help="Enrol this computer with a one-time code.")
     common(enrol_command, needs_url=True)
@@ -1184,7 +1396,7 @@ def build_parser() -> argparse.ArgumentParser:
                                help="Retries are attempted only while nothing can have been issued.")
 
     run_command = add_command("run", help="Run using the stored Device credential.")
-    common(run_command, needs_url=True)
+    common(run_command, needs_url=True, url_required=False)
     run_command.add_argument("--queue-capacity", type=int, default=24)
     run_command.add_argument("--report", default=None, help="Optional secret-free JSON report path.")
     run_command.add_argument("--max-attempts", type=int, default=None)
@@ -1249,6 +1461,14 @@ def build_parser() -> argparse.ArgumentParser:
         "list-audio-devices",
         help="List Windows audio output devices and their stable selectors.",
     )
+
+    # Read-only, and safe to read out over the phone: it shows no credential,
+    # no code and no password.
+    diagnose_command = add_command(
+        "diagnose",
+        help="Read-only report: version, settings, audio device, logs.",
+    )
+    common(diagnose_command, needs_url=False)
 
     remove_command = add_command(
         "remove-local-credential",
@@ -1399,6 +1619,23 @@ def main(argv: list[str] | None = None) -> int:
 
         protector = _protector()
         path = _credential_path(arguments)
+        config_path = Path(arguments.config_path) if arguments.config_path \
+            else default_config_path()
+
+        if arguments.command == "diagnose":
+            print(diagnose_report(config_path=config_path, credential_path=path))
+            return EXIT_OK
+
+        # Saved settings fill in whatever the command line left out, so an
+        # installed Store keeps working after a reboot without anybody retyping
+        # a device selector. An explicit option always wins and is never saved.
+        if arguments.command == "run":
+            merge_config_into_arguments(arguments, load_config(config_path))
+            if not arguments.backend_url:
+                raise AgentError(
+                    "no backend URL was given and none is saved. Pass --backend-url, "
+                    "or install this Receiver so its settings are recorded."
+                )
 
         if arguments.command == "enrol":
             code = read_enrolment_code(stream=sys.stdin if arguments.from_stdin else None)

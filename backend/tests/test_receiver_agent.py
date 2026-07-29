@@ -773,6 +773,10 @@ def test_the_agent_has_exactly_the_intended_commands():
         # name, and one endpoint appears under MME, DirectSound, WASAPI and
         # WDM-KS, so a guess is usually ambiguous and refused.
         "list-audio-devices",
+        # Read-only, and the one thing a technician can be asked to run over
+        # the phone: it shows version, settings, resolved audio device and the
+        # tail of the log, and no credential, code or password.
+        "diagnose",
     }
 
 
