@@ -311,7 +311,88 @@ the proof that the removal took nothing with it.
 
 ---
 
-## Learning Box 13 — Test the command, not the parser
+## Learning Box 13 — A path built from the clock is a fact you forget
+
+One line caused two bugs that looked completely unrelated:
+
+```powershell
+$pilotRoot = ...\lan-pilot\$(Get-Date -Format 'yyyyMMdd-HHmmss')
+```
+
+Every start of the server made a new, empty database. So:
+
+* the Store went **OFFLINE** — its Device was in a database the server no longer
+  used;
+* **`owneradmin` could not sign in** — that account was in a different database.
+
+Two tickets, two suspects (the Receiver, the auth code), one cause: *the server
+forgot*. Neither suspect had a bug.
+
+**The tell.** When two unrelated features break together after a restart,
+suspect shared state that the restart discarded, before suspecting either
+feature.
+
+**The rule.** A throwaway environment and a daily one must be different tools
+with different names, not the same tool run differently. Ours now refuses to
+adopt a throwaway database at all, because "point it at the pilot file for now"
+is exactly how the temporary thing becomes permanent.
+
+And the smaller habit that made it visible: the pilot root changed **three
+times** during a single day's investigation. Measuring the same thing twice, an
+hour apart, is often faster than reasoning about it.
+
+---
+
+## Learning Box 14 — Repair must not be able to create what it repairs
+
+A repair tool that can build a database is a repair tool that will one day build
+one *over the real one* — and the operator will find out when every Store has
+vanished.
+
+So `Repair-SpeakLinkPersistentLanServer.ps1` splits its world in two:
+
+* **rebuildable** — folder layout, a stale lock left by a dead process;
+* **never touched** — database, keys, users, Stores, Devices, history, backups.
+
+If the database is missing it stops and points at the backups. A missing
+database is a *restore* decision, made by a person who knows which backup, not a
+side effect of running a tool called "repair".
+
+The same reasoning gave `Start` its refusal to create an empty fallback
+database. Being helpful there is what turns "some data is missing" into "the
+Store has disappeared".
+
+---
+
+## Learning Box 15 — Rebaseline by appending, never by overwriting
+
+The protected-database hash has now moved twice, both times for a good reason
+and both times with the operator's explicit approval.
+
+What makes that safe is not the approval. It is that the file keeps the whole
+chain:
+
+```
+8C858B13…  original
+EEF1EA79…  + four additive user-lifecycle columns
+8A7E3413…  + session_version, + the owneradmin row
+```
+
+with what moved each one, and two tests: the chain contains no repeated entry,
+and the current value is the newest rather than an older one pasted back.
+
+A baseline overwritten in place looks identical to one that was never
+challenged. Appending keeps the argument, so the next person can see that it
+moved, when, and why — and can disagree.
+
+The verification that mattered most was not the hash at all: `admin`'s
+password-hash *fingerprint* was unchanged, which proved the existing account was
+preserved rather than quietly rewritten. Check the property you actually care
+about, not the checksum that noticed something.
+
+---
+
+## Learning Box 16 — Test the command, not the parser
 
 Two of my own tests in this change passed while the code was broken.
 
