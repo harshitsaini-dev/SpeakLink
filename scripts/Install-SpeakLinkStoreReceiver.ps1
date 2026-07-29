@@ -205,6 +205,30 @@ if ($existing) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 }
 
+# The earlier pilot task runs SpeakLinkReceiver.exe - the CONSOLE build - so a
+# Store still carrying it gets a black window at logon regardless of anything
+# fixed here. Left in place it would also fight this task for the same
+# credential. Removing the task removes no credential and no settings: those
+# live in the state directory and are untouched.
+foreach ($obsolete in @('SpeakLink Receiver LAN Pilot (disposable)',
+                        'SpeakLink Store Probe',
+                        'SpeakLink Restart Probe')) {
+    $old = Get-ScheduledTask -TaskName $obsolete -ErrorAction SilentlyContinue
+    if (-not $old) { continue }
+    $ran = ($old.Actions | ForEach-Object { $_.Execute }) -join ' '
+    if ($ran -notmatch 'SpeakLink') {
+        Write-Output "  NOT removing '$obsolete': it runs '$ran', which is not ours"
+        continue
+    }
+    Write-Output "  removing the obsolete task '$obsolete' (ran $ran)"
+    foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name = 'SpeakLinkReceiver.exe'" |
+                           Where-Object { $_.CommandLine -match '\brun\b' })) {
+        Write-Output "    stopping its console Receiver, PID $($process.ProcessId)"
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    Unregister-ScheduledTask -TaskName $obsolete -Confirm:$false
+}
+
 # Short and boring on purpose: everything else is in the config file, so the
 # task definition carries no device name to go stale and nothing secret. The
 # state root is named only when it is not the default, so a normal Store task

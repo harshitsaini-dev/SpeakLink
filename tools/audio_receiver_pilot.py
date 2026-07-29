@@ -203,6 +203,45 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def hidden_child_process_options() -> dict:
+    """Start a child process with no console window. Windows only.
+
+    THE BUG THIS ENDS
+
+    ``SpeakLinkReceiverBackground.exe`` is built GUI-subsystem, so it has no
+    console. ``ffmpeg.exe`` is a console application. When a parent with no
+    console starts a console child and does not ask for ``CREATE_NO_WINDOW``,
+    Windows gives that child a **brand-new console** - and a new console is a
+    black window on the Store counter. It appeared exactly when a broadcast
+    started, because that is when the decoder starts.
+
+    Measured with ``pythonw.exe`` as the parent, which is GUI subsystem exactly
+    like the background Receiver::
+
+        parent_has_console            : False
+        child, no creation flags      : has_console=True,  console_hwnd=721134
+        child, with CREATE_NO_WINDOW  : has_console=False, console_hwnd=0
+
+    ``CREATE_NO_WINDOW`` alone is what fixes it. ``STARTUPINFO`` with
+    ``SW_HIDE`` is added as well because it costs nothing and covers a child
+    that opens a window of its own for some other reason.
+
+    Deliberately **not** ``shell=True``: running through cmd.exe to hide a
+    window swaps one console for another and adds a shell that parses the
+    command line. And deliberately empty off Windows, where these constants do
+    not exist and passing them would raise.
+    """
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+        "startupinfo": startupinfo,
+    }
+
+
 def opus_webm_decode_supported() -> bool:
     """Real capability check, not an assumption."""
     ffmpeg = shutil.which("ffmpeg")
@@ -212,10 +251,12 @@ def opus_webm_decode_supported() -> bool:
         decoders = subprocess.run(
             [ffmpeg, "-hide_banner", "-decoders"],
             capture_output=True, text=True, timeout=30,
+            **hidden_child_process_options(),
         )
         formats = subprocess.run(
             [ffmpeg, "-hide_banner", "-formats"],
             capture_output=True, text=True, timeout=30,
+            **hidden_child_process_options(),
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -392,11 +433,15 @@ class FfmpegDecoder:
     def start(self) -> None:
         if self._process is not None:
             raise AudioReceiverError("the FFmpeg decoder is already running")
+        # The spawn that produced the black window on the Store counter. The
+        # pipes are unchanged - stdin carries the audio in, stdout carries the
+        # decoded PCM and progress back - only the console is suppressed.
         self._process = subprocess.Popen(
             self.command(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            **hidden_child_process_options(),
         )
         target = self._pump_pcm if self.sink_mode == SINK_MODE_WINDOWS else self._read_progress
         self._reader = threading.Thread(target=target, daemon=True)
