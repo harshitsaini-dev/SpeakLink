@@ -1953,6 +1953,51 @@ carry the same options.
 
 **Still unproven:** that any sound was heard. That needs a person in the room.
 
+### 2026-07-29 (later) — the Store background runtime
+
+**Architecture chosen: the Receiver runs in the Store user's own interactive
+session, started at logon by Task Scheduler.** A plain SYSTEM Windows service
+was rejected on a measurable fact, not a preference: a service runs in session
+0, which has no audio endpoint, so it would authenticate, decode and write PCM
+into nothing — a more convincing silence than the one this project already
+shipped once. A service-plus-agent split was also rejected: it adds a second
+process, a second failure domain and a local IPC channel, and *still* cannot
+play a sound before somebody logs in, because the audio endpoint does not exist
+until then. It buys nothing for the requirement that was actually stated.
+
+**Stated honestly: announcements need the Store user signed in.** A locked
+screen with the user still signed in is expected to be fine; a machine sitting
+at the login screen is not, and no setting here changes that.
+
+Three changes made it workable:
+
+1. **Two executables from one analysis** ([receiver_agent.spec](receiver_agent.spec)).
+   Windows decides on a console from the PE Subsystem field, not from how the
+   process was launched — Task Scheduler's "hidden" setting hides the task in
+   its own UI and does nothing about a black window on the counter.
+   `EchoCastReceiverBackground.exe` is windowed (Subsystem 2) and is what the
+   task runs; `EchoCastReceiver.exe` stays console (Subsystem 3) for `enrol`,
+   `status`, `list-audio-devices` and `diagnose`, which all print things a
+   person reads. Verified by reading the PE header of both.
+
+2. **A configuration file** at `%LOCALAPPDATA%\EchoCast-AI\receiver\config.json`.
+   Non-secret by construction: a file containing a credential, code, password or
+   token is refused rather than loaded. The task command line is now just `run`,
+   so it cannot go stale against a speaker Windows renumbered.
+
+3. **A `diagnose` command** — read-only, safe to read out over the phone, shows
+   no secret.
+
+Installer suite: `Install-` / `Test-` / `Repair-` / `Uninstall-EchoCastStoreReceiver.ps1`.
+Uninstall keeps the Device credential and logs by default. Repair and upgrade
+are the same operation with a different package.
+
+**Not tested, and not claimed:** reboot recovery, sign-out/sign-in recovery,
+lock/unlock behaviour, crash recovery timing, backend-outage reconnect timing,
+and audible playback. All of those need the operator and the second desktop —
+the manual checklist is in
+[STORE_RECEIVER_ACCEPTANCE_CHECKLIST.md](STORE_RECEIVER_ACCEPTANCE_CHECKLIST.md).
+
 ### Remaining blockers
 
 1. **DPAPI key custody under the dedicated service identity.** The prerequisite
