@@ -23,8 +23,8 @@ Status values: `NOT STARTED` · `IN PROGRESS` · `AUTOMATED PASS` ·
 ```
 compileall backend tools          exit 0
 python -m pip check               No broken requirements found
-full backend suite                1715 passed, 2 skipped, 0 FAILED
-Playwright (chromium)             144 passed, 0 FAILED
+full backend suite                1732 passed, 2 skipped, 0 FAILED
+Playwright (chromium)             155 passed, 0 FAILED
 frontend production build         Done
 Receiver package verification     ECHOCAST_RECEIVER_PACKAGE_VERIFIED
   background EXE = WINDOWS_GUI    PASS
@@ -49,7 +49,9 @@ Stated plainly rather than left to read as passed.
 | 4 | User Management frontend | `AUTOMATED PASS` | Add/Edit/Reset/Enable/Disable/Archive/Restore + dependency dialog + typed-confirmation delete; 38 Playwright tests |
 | 5 | Store hard delete + dependency summary | `AUTOMATED PASS` | same module, `GET /api/stores/{id}/dependencies`, permanent-delete route |
 | 5 | Store Management frontend | `AUTOMATED PASS` | Add/Edit/Enable/Disable/Archive/Restore + dependency dialog + typed short-code delete; 8 Playwright tests |
-| 5 | Receiver Device onboarding UI | `NOT STARTED` | backend endpoints exist; token countdown, states and safe refusal categories do not |
+| 5 | Receiver onboarding: refusal categories | `AUTOMATED PASS` | `backend/enrolment_refusal.py`; category logged, wire response stays generic; 17 tests |
+| 5 | Receiver onboarding: code countdown/state | `AUTOMATED PASS` | live countdown, UNUSED/EXPIRED, value removed on expiry; 11 Playwright tests |
+| 5 | Receiver onboarding: setup-progress + USED state | `NOT STARTED` | needs backend evidence the page does not receive |
 | 7 | `EchoCastHQRuntime.exe` + HQ task | `NOT STARTED` | a new GUI supervisor executable; substantial |
 | 8 | `EchoCastStoreSetup.exe` wizard | `NOT STARTED` | a new GUI application; substantial |
 | 9 | Audio/WebSocket/queue audit | `NOT STARTED` | not examined this session |
