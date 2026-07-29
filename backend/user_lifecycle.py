@@ -115,6 +115,33 @@ def _now() -> datetime:
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
+def migrate_super_admin_to_owner(engine: Engine) -> int:
+    """Rewrite the stored role string ``SUPER_ADMIN`` to ``OWNER``.
+
+    Returns how many rows changed, so a caller can log "nothing to do" honestly
+    rather than announcing a migration that did not happen.
+
+    Forward-only, and deliberately tiny: one UPDATE inside one transaction, no
+    table rebuild, no row deleted, no account created, no password hash read or
+    written. Idempotent - the second run matches nothing.
+
+    **Rollback**, if it were ever needed, is the mirror-image UPDATE:
+
+        UPDATE hq_users SET role = 'SUPER_ADMIN' WHERE role = 'OWNER';
+
+    No automatic down-migration is provided, because ``parse_role`` still
+    accepts ``SUPER_ADMIN`` (see rbac.LEGACY_ROLE_ALIASES). A database that has
+    not been migrated keeps working, and one that has can be reverted with the
+    line above. There is no window in which an administrator is locked out.
+    """
+    with engine.begin() as connection:
+        result = connection.execute(
+            text("UPDATE hq_users SET role = :new WHERE role = :old"),
+            {"new": Role.OWNER.value, "old": "SUPER_ADMIN"},
+        )
+        return int(result.rowcount or 0)
+
+
 def ensure_user_lifecycle_schema(engine: Engine) -> None:
     """Add the lifecycle columns if they are missing, and backfill them.
 
@@ -224,8 +251,8 @@ def validate_display_name(display_name: str) -> str:
 
 
 def validate_role(role) -> str:
-    # Role is a (str, Enum) mixin, and on Python 3.12 str(Role.SUPER_ADMIN) is
-    # "Role.SUPER_ADMIN", not "SUPER_ADMIN" - so converting first and looking up
+    # Role is a (str, Enum) mixin, and on Python 3.12 str(Role.OWNER) is
+    # "Role.OWNER", not "OWNER" - so converting first and looking up
     # afterwards rejects the very values this system defines.
     if isinstance(role, Role):
         return role.value
@@ -304,7 +331,7 @@ def update_user(engine: Engine, *, user_id: int, display_name: str | None = None
 def _active_super_admin_ids(connection) -> set[int]:
     rows = connection.execute(text(
         "SELECT id FROM hq_users WHERE role = :role AND lifecycle_state = :state"
-    ), {"role": Role.SUPER_ADMIN.value, "state": ACTIVE}).all()
+    ), {"role": Role.OWNER.value, "state": ACTIVE}).all()
     return {row.id for row in rows}
 
 
@@ -407,7 +434,7 @@ def assign_role(engine: Engine, *, user_id: int, role, actor_id: int | None = No
     role = validate_role(role)
     with engine.begin() as connection:
         _require_row(connection, user_id)
-        if role != Role.SUPER_ADMIN.value:
+        if role != Role.OWNER.value:
             _refuse_if_last_super_admin(connection, user_id, "Changing its role")
         connection.execute(text("UPDATE hq_users SET role = :role WHERE id = :user_id"),
                            {"role": role, "user_id": user_id})

@@ -95,7 +95,7 @@ def test_a_brand_new_install_has_a_super_admin(client, founder):
 
     Nothing failed loudly. The endpoints simply answered 403 to everyone.
     """
-    assert client.get("/api/auth/me", headers=founder).json()["role"] == "SUPER_ADMIN"
+    assert client.get("/api/auth/me", headers=founder).json()["role"] == "OWNER"
 
 
 def test_the_seeded_administrator_can_reach_a_super_admin_only_endpoint(client, founder):
@@ -314,7 +314,7 @@ def test_a_short_password_is_refused(client, founder):
 # ===========================================================================
 def test_the_last_super_admin_cannot_be_disabled(client, founder):
     founder_id = client.get("/api/auth/me", headers=founder).json()["id"]
-    second = make_user(client, founder, "second", role=Role.SUPER_ADMIN.value).json()
+    second = make_user(client, founder, "second", role=Role.OWNER.value).json()
     other = sign_in(client, "second")
     # Only one is needed to demonstrate the rule; disable the founder first.
     assert client.post(f"/api/users/{founder_id}/disable", headers=other).status_code == 200
@@ -331,13 +331,13 @@ def test_the_last_super_admin_cannot_be_demoted(client, founder):
 
 def test_you_cannot_disable_yourself(client, founder):
     founder_id = client.get("/api/auth/me", headers=founder).json()["id"]
-    make_user(client, founder, "second", role=Role.SUPER_ADMIN.value)
+    make_user(client, founder, "second", role=Role.OWNER.value)
     assert client.post(f"/api/users/{founder_id}/disable", headers=founder).status_code == 409
 
 
 def test_you_cannot_archive_yourself(client, founder):
     founder_id = client.get("/api/auth/me", headers=founder).json()["id"]
-    make_user(client, founder, "second", role=Role.SUPER_ADMIN.value)
+    make_user(client, founder, "second", role=Role.OWNER.value)
     assert client.post(f"/api/users/{founder_id}/archive", headers=founder).status_code == 409
 
 
@@ -378,7 +378,7 @@ def test_a_broadcaster_cannot_change_anybody_s_state(client, roles, action):
 def test_an_admin_cannot_create_a_super_admin(client, roles):
     """Being able to promote yourself makes every other restriction decorative."""
     response = client.post("/api/users", headers=roles[Role.ADMIN]["headers"], json={
-        "username": "climber", "display_name": "Climber", "role": "SUPER_ADMIN",
+        "username": "climber", "display_name": "Climber", "role": "OWNER",
         "password": "a-long-enough-temporary-password"})
     assert response.status_code == 403
 
@@ -386,7 +386,7 @@ def test_an_admin_cannot_create_a_super_admin(client, roles):
 def test_an_admin_cannot_promote_anybody_to_super_admin(client, roles):
     target = roles[Role.VIEWER]["record"]["id"]
     assert client.post(f"/api/users/{target}/role", headers=roles[Role.ADMIN]["headers"],
-                       json={"role": "SUPER_ADMIN"}).status_code == 403
+                       json={"role": "OWNER"}).status_code == 403
 
 
 def test_an_admin_cannot_touch_a_super_admin(client, founder, roles):

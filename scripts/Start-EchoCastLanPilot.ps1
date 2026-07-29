@@ -107,8 +107,8 @@ Write-Output "A temporary SUPER_ADMIN will be created as: $adminUsername"
 $securePassword = Read-Host -Prompt 'Choose a password for it (not shown, not stored)' -AsSecureString
 $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
     [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword))
-if ([string]::IsNullOrWhiteSpace($plainPassword) -or $plainPassword.Length -lt 12) {
-    throw 'That password is shorter than 12 characters. Refusing.'
+if ([string]::IsNullOrWhiteSpace($plainPassword) -or $plainPassword.Length -lt 8) {
+    throw 'That password is shorter than 8 characters. Refusing.'
 }
 
 $bytes = New-Object byte[] 48

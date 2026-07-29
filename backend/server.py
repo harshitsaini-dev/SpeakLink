@@ -55,6 +55,7 @@ from rbac import (
     require_permission,
 )
 from user_lifecycle import (
+    migrate_super_admin_to_owner,
     DuplicateUsernameError,
     LastSuperAdminError,
     RoleAssignmentRefused,
@@ -314,7 +315,7 @@ def require_super_admin(user: HQUser = Depends(get_current_user)) -> HQUser:
     Restoring an archived Store is one: archiving is how a Store is retired, and
     un-retiring it should need the account that also owns security settings.
     """
-    if parse_role(user.role) is not Role.SUPER_ADMIN or not user.is_active:
+    if parse_role(user.role) is not Role.OWNER or not user.is_active:
         raise HTTPException(
             status_code=403, detail="You do not have permission to perform this action."
         )
@@ -367,6 +368,12 @@ def startup_event():
     # be normalised for the last-SUPER_ADMIN rule to count correctly.
     try:
         ensure_user_lifecycle_schema(engine)
+        # Forward-only, one UPDATE, idempotent, creates nobody. Old rows say
+        # SUPER_ADMIN; parse_role still accepts that string, so a database that
+        # has not run this yet keeps working and nobody is locked out mid-upgrade.
+        renamed = migrate_super_admin_to_owner(engine)
+        if renamed:
+            logger.info("Renamed %s SUPER_ADMIN account(s) to OWNER", renamed)
     except Exception:
         logger.warning("User lifecycle schema could not be prepared", exc_info=False)
 
@@ -1281,7 +1288,7 @@ async def emergency_stop(db: Session = Depends(get_db), user: HQUser = Depends(r
         await _end_session(db, session, "emergency_stopped", reason="emergency", broadcast_to_all=True)
         _write_log(db, "error", f"EMERGENCY STOP triggered by {user.username} on session #{session.id}")
         return {"ok": True, "session_id": session.id}
-    # No live session — still broadcast a STOP to all receivers for safety
+    # No live session â€” still broadcast a STOP to all receivers for safety
     for sid_ in list(manager.receivers.keys()):
         await manager.send_to_receiver(sid_, {"type": "stop", "reason": "emergency"})
     _write_log(db, "warn", f"Emergency stop invoked with no live session by {user.username}")

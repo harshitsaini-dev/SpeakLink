@@ -27,7 +27,7 @@ export default function ChangePassword() {
   const [error, setError] = React.useState("");
   const [busy, setBusy] = React.useState(false);
 
-  const tooShort = next.length > 0 && next.length < 12;
+  const tooShort = next.length > 0 && next.length < 8;
   const mismatched = repeat.length > 0 && next !== repeat;
 
   async function submit(event) {
@@ -80,8 +80,8 @@ export default function ChangePassword() {
                  autoComplete="current-password" data-testid="current-password" />
         </label>
         <label className="block text-sm">
-          <span className="mb-1 block text-slate-600">New password (at least 12 characters)</span>
-          <input type="password" className="w-full rounded border px-2 py-1" required minLength={12}
+          <span className="mb-1 block text-slate-600">New password (at least 8 characters)</span>
+          <input type="password" className="w-full rounded border px-2 py-1" required minLength={8}
                  value={next} onChange={(event) => setNext(event.target.value)}
                  autoComplete="new-password" data-testid="new-password" />
           {tooShort && (

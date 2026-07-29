@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Repair or upgrade an installed Store Receiver, keeping its identity.
 

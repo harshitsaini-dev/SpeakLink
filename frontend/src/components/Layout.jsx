@@ -13,7 +13,7 @@ const NAV = [
   // protection - the backend answers 403 to the request either way, and a
   // navigation link is not a permission check.
   { to: "/users", label: "User Management", icon: Users, testid: "nav-users",
-    roles: ["SUPER_ADMIN", "ADMIN"] },
+    roles: ["OWNER", "ADMIN"] },
   // Everybody, deliberately: read-only does not mean unable to secure your own
   // account.
   { to: "/account/password", label: "Change Password", icon: KeyRound, testid: "nav-password" },
@@ -83,8 +83,8 @@ export default function Layout() {
           >
             {open ? <X size={20} /> : <Menu size={20} />}
           </button>
-          <div className="text-xs uppercase tracking-[0.15em] text-slate-500">HQ Broadcast Console · v1.0</div>
-          <div className="text-xs text-slate-500 hidden sm:block">Windows 11 · Local Server · SQLite</div>
+          <div className="text-xs uppercase tracking-[0.15em] text-slate-500">HQ Broadcast Console Â· v1.0</div>
+          <div className="text-xs text-slate-500 hidden sm:block">Windows 11 Â· Local Server Â· SQLite</div>
         </header>
         <main className="flex-1 p-4 md:p-6 overflow-x-hidden">
           <Outlet />

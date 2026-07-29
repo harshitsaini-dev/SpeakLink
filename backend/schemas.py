@@ -3,6 +3,11 @@ from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, ConfigDict, Field
 
+# One source of truth for how long a human password must be. Four copies of a
+# number is four chances for them to disagree, and the disagreement shows up as
+# a browser accepting what the server then rejects.
+from password_policy import PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH
+
 
 class LoginRequest(BaseModel):
     username: str
@@ -45,7 +50,7 @@ class HQUserCreate(BaseModel):
     # Long enough to matter, short enough to be typed accurately by somebody
     # reading it out. Complexity rules push people towards Passw0rd! and a
     # sticky note; length does not.
-    password: str = Field(min_length=12, max_length=200)
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
 
 
 class HQUserUpdate(BaseModel):
@@ -58,12 +63,12 @@ class HQUserRoleUpdate(BaseModel):
 
 
 class PasswordChangeIn(BaseModel):
-    current_password: str = Field(min_length=1, max_length=200)
-    new_password: str = Field(min_length=12, max_length=200)
+    current_password: str = Field(min_length=1, max_length=PASSWORD_MAX_LENGTH)
+    new_password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
 
 
 class PasswordResetIn(BaseModel):
-    new_password: str = Field(min_length=12, max_length=200)
+    new_password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
 
 
 class PasswordResetOut(BaseModel):
