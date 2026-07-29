@@ -21,10 +21,10 @@ import {
   UserPlus, RefreshCw, KeyRound, Pencil, Power, Archive, ArchiveRestore, ShieldAlert,
 } from "lucide-react";
 
-const ROLES = ["SUPER_ADMIN", "ADMIN", "BROADCASTER", "VIEWER"];
+const ROLES = ["OWNER", "ADMIN", "BROADCASTER", "VIEWER"];
 
 const ROLE_STYLE = {
-  SUPER_ADMIN: "bg-purple-100 text-purple-800 border-purple-200",
+  OWNER: "bg-purple-100 text-purple-800 border-purple-200",
   ADMIN: "bg-blue-100 text-blue-800 border-blue-200",
   BROADCASTER: "bg-emerald-100 text-emerald-800 border-emerald-200",
   VIEWER: "bg-slate-100 text-slate-700 border-slate-200",
@@ -68,7 +68,7 @@ export default function UserManagement() {
 
   const myRole = me?.role || "VIEWER";
   const canManage = (role) => (MANAGEABLE[myRole] || new Set()).has(role);
-  const isSuperAdmin = myRole === "SUPER_ADMIN";
+  const isSuperAdmin = myRole === "OWNER";
 
   const load = React.useCallback(async () => {
     setError("");
@@ -123,6 +123,15 @@ export default function UserManagement() {
           <p className="text-sm text-slate-500">
             Accounts are archived, never deleted, so the record of who did what stays readable.
           </p>
+          {/* Said here rather than only in a refusal message, so an ADMIN
+              understands why a control is missing instead of thinking the page
+              is broken. */}
+          <p className="mt-1 text-xs text-slate-500" data-testid="owner-protection-note">
+            <strong>OWNER</strong> and <strong>ADMIN</strong> both have full operational
+            access. The one difference: only an OWNER can change another OWNER, and the
+            last enabled OWNER cannot be disabled, archived or demoted — otherwise nobody
+            would be able to administer SpeakLink again.
+          </p>
         </div>
         <div className="flex gap-2">
           <button
@@ -158,7 +167,7 @@ export default function UserManagement() {
       )}
 
       {users === null && (
-        <p className="text-sm text-slate-500" data-testid="users-loading">Loading Users…</p>
+        <p className="text-sm text-slate-500" data-testid="users-loading">Loading Usersâ€¦</p>
       )}
       {users !== null && users.length === 0 && !error && (
         <p className="text-sm text-slate-500" data-testid="users-empty">
@@ -351,8 +360,8 @@ function CreateUserForm({ myRole, onCancel, onSubmit }) {
       </label>
       {/* type="password" so it is not read over a shoulder, and never written
           anywhere but this field and the request that follows. */}
-      <Field label="Temporary password (at least 12 characters)" type="password"
-             value={form.password} onChange={change("password")} minLength={12}
+      <Field label="Temporary password (at least 8 characters)" type="password"
+             value={form.password} onChange={change("password")} minLength={8}
              required data-testid="create-password" autoComplete="new-password" />
       <p className="text-xs text-slate-500">
         Tell them this password in person or by phone, and ask them to change it. It is not
@@ -405,8 +414,8 @@ function ResetPasswordForm({ user, onCancel, onSubmit }) {
       <p className="text-sm text-slate-600">
         This ends every session that account currently has, everywhere.
       </p>
-      <Field label="New password (at least 12 characters)" type="password" value={password}
-             onChange={(event) => setPassword(event.target.value)} minLength={12}
+      <Field label="New password (at least 8 characters)" type="password" value={password}
+             onChange={(event) => setPassword(event.target.value)} minLength={8}
              required data-testid="reset-password-value" autoComplete="new-password" />
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={confirmed} data-testid="reset-confirm"

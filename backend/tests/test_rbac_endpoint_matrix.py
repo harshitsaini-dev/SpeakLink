@@ -76,7 +76,7 @@ EXPECTED: dict[str, object] = {
     # Setting somebody else's password is reserved, like restoring an archived
     # Store: it is the action an attacker who took an ADMIN account would use
     # to take a SUPER_ADMIN one.
-    "reset_hq_user_password": "SUPER_ADMIN",
+    "reset_hq_user_password": "OWNER",
 
     # Receiver Devices: credentials, enrolment, promotion, revocation.
     "create_receiver_enrollment_code": Permission.MANAGE_DEVICES,
@@ -100,7 +100,7 @@ EXPECTED: dict[str, object] = {
     "delete_store": Permission.MANAGE_STORES,
     "regenerate_token": Permission.MANAGE_STORES,
     # Un-retiring a Store needs the account that also owns security settings.
-    "restore_store_endpoint": "SUPER_ADMIN",
+    "restore_store_endpoint": "OWNER",
 
     # Broadcasting. Starting and stopping are separate permissions so a role
     # can be allowed to stop a runaway announcement without being able to begin
@@ -165,7 +165,7 @@ def _guard_of(endpoint) -> str | None:
             permission = closure.nonlocals.get("permission")
             return permission.value if permission is not None else "guard"
         if name == "require_super_admin":
-            return "SUPER_ADMIN"
+            return "OWNER"
         if name == "get_current_user":
             return None
     return "UNGUARDED"
@@ -181,8 +181,8 @@ def test_each_route_is_guarded_by_the_expected_permission(function_name: str):
     actual = _guard_of(endpoint)
     if expected is None:
         assert actual is None, f"{function_name} expected authenticated-only, got {actual}"
-    elif expected == "SUPER_ADMIN":
-        assert actual == "SUPER_ADMIN", f"{function_name} expected SUPER_ADMIN, got {actual}"
+    elif expected == "OWNER":
+        assert actual == "OWNER", f"{function_name} expected SUPER_ADMIN, got {actual}"
     else:
         assert actual == expected.value, (
             f"{function_name} is guarded by {actual}, expected {expected.value}"

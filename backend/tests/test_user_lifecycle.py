@@ -94,7 +94,7 @@ def make(engine, username, role=Role.ADMIN, display_name=None):
 @pytest.fixture()
 def founder(engine):
     """One SUPER_ADMIN, as a fresh install has."""
-    return make(engine, "founder", role=Role.SUPER_ADMIN)
+    return make(engine, "founder", role=Role.OWNER)
 
 
 # ===========================================================================
@@ -287,20 +287,20 @@ def test_the_last_active_super_admin_cannot_be_demoted(engine, founder):
 
 
 def test_a_second_super_admin_makes_the_first_removable(engine, founder):
-    second = make(engine, "second", role=Role.SUPER_ADMIN)
+    second = make(engine, "second", role=Role.OWNER)
     assert disable_user(engine, user_id=founder["id"], actor_id=second["id"])
 
 
 def test_a_disabled_super_admin_does_not_count_as_cover(engine, founder):
     """Two SUPER_ADMINs, one switched off, is one SUPER_ADMIN."""
-    second = make(engine, "second", role=Role.SUPER_ADMIN)
+    second = make(engine, "second", role=Role.OWNER)
     disable_user(engine, user_id=second["id"], actor_id=founder["id"])
     with pytest.raises(LastSuperAdminError):
         disable_user(engine, user_id=founder["id"], actor_id=second["id"])
 
 
 def test_an_archived_super_admin_does_not_count_as_cover(engine, founder):
-    second = make(engine, "second", role=Role.SUPER_ADMIN)
+    second = make(engine, "second", role=Role.OWNER)
     archive_user(engine, user_id=second["id"], actor_id=founder["id"])
     with pytest.raises(LastSuperAdminError):
         archive_user(engine, user_id=founder["id"], actor_id=second["id"])
@@ -309,13 +309,13 @@ def test_an_archived_super_admin_does_not_count_as_cover(engine, founder):
 def test_you_cannot_disable_yourself(engine, founder):
     """Not a safety net for the organisation - a safety net for the person
     clicking, who is one row away from being unable to undo it."""
-    second = make(engine, "second", role=Role.SUPER_ADMIN)
+    second = make(engine, "second", role=Role.OWNER)
     with pytest.raises(SelfActionRefused):
         disable_user(engine, user_id=second["id"], actor_id=second["id"])
 
 
 def test_you_cannot_archive_yourself(engine, founder):
-    second = make(engine, "second", role=Role.SUPER_ADMIN)
+    second = make(engine, "second", role=Role.OWNER)
     with pytest.raises(SelfActionRefused):
         archive_user(engine, user_id=second["id"], actor_id=second["id"])
 
@@ -335,9 +335,17 @@ def test_a_role_can_be_assigned(engine, founder):
 
 
 def test_an_unknown_role_cannot_be_assigned(engine, founder):
+    """The example used to be "OWNER", back when that was not a role.
+
+    Then OWNER became one, and this test started asserting that a perfectly
+    valid role is refused - it failed, correctly, and the failure was the test's
+    example going stale rather than the rule breaking. The replacement is a
+    string nobody will ever add.
+    """
     created = make(engine, "priya")
     with pytest.raises(RoleAssignmentRefused):
-        assign_role(engine, user_id=created["id"], role="OWNER", actor_id=founder["id"])
+        assign_role(engine, user_id=created["id"], role="SUPREME_OVERLORD",
+                    actor_id=founder["id"])
 
 
 # ===========================================================================
@@ -419,7 +427,7 @@ def test_an_existing_active_row_is_backfilled_as_active(tmp_path):
         )
         connection.exec_driver_sql(
             "INSERT INTO hq_users (username, password_hash, role, is_active) VALUES"
-            " ('kept', 'h', 'super_admin', 1), ('switched-off', 'h', 'admin', 0)"
+            " ('kept', 'h', 'OWNER', 1), ('switched-off', 'h', 'admin', 0)"
         )
     ensure_user_lifecycle_schema(made)
     states = {record["username"]: record["lifecycle_state"] for record in list_users(made)}

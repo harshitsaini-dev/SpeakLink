@@ -36,10 +36,29 @@ from sqlalchemy.engine import Engine
 
 
 class Role(str, Enum):
-    SUPER_ADMIN = "SUPER_ADMIN"
+    #: The account that owns the system. Formerly called SUPER_ADMIN.
+    #:
+    #: Renamed rather than joined by a second top-level role. A separate OWNER
+    #: beside SUPER_ADMIN would have meant two accounts-of-last-resort, two
+    #: "this one may not be removed" rules, and eventually only one of them
+    #: being applied - which is exactly the lockout the rule exists to prevent.
+    OWNER = "OWNER"
     ADMIN = "ADMIN"
     BROADCASTER = "BROADCASTER"
     VIEWER = "VIEWER"
+
+
+#: Old role strings that still resolve. Rows written before the rename say
+#: SUPER_ADMIN, and so does any token minted in the minutes before an upgrade.
+#: Refusing them would sign out every administrator at the moment of upgrade -
+#: including the one running it.
+LEGACY_ROLE_ALIASES: dict[str, Role] = {
+    # The literal old string. A bulk rename briefly turned this into
+    # {"OWNER": Role.OWNER}, which is a no-op that silently removed backward
+    # compatibility while looking entirely reasonable - every stored
+    # SUPER_ADMIN row would have parsed to None, meaning no permissions at all.
+    "SUPER_ADMIN": Role.OWNER,
+}
 
 
 class Permission(str, Enum):
@@ -73,7 +92,7 @@ _BROADCAST = {
 #: is the one an attacker who compromises an ADMIN account would reach for
 #: first.
 ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
-    Role.SUPER_ADMIN: ALL_PERMISSIONS,
+    Role.OWNER: ALL_PERMISSIONS,
     Role.ADMIN: frozenset(
         {
             Permission.MANAGE_USERS,
@@ -95,7 +114,7 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
 #: because being able to promote yourself makes every other restriction here
 #: decorative.
 _MANAGEABLE_ROLES: dict[Role, frozenset[Role]] = {
-    Role.SUPER_ADMIN: frozenset(Role),
+    Role.OWNER: frozenset(Role),
     Role.ADMIN: frozenset({Role.BROADCASTER, Role.VIEWER}),
     Role.BROADCASTER: frozenset(),
     Role.VIEWER: frozenset(),
@@ -124,10 +143,11 @@ def parse_role(value: object) -> Role | None:
         return value
     if not isinstance(value, str):
         return None
+    candidate = value.strip().upper()
     try:
-        return Role(value.strip().upper())
+        return Role(candidate)
     except ValueError:
-        return None
+        return LEGACY_ROLE_ALIASES.get(candidate)
 
 
 def effective_permissions(user) -> frozenset[Permission]:
@@ -228,7 +248,7 @@ def migrate_legacy_roles(session_factory) -> dict:
 
         existing_super = (
             db.query(HQUser)
-            .filter(HQUser.role == Role.SUPER_ADMIN.value)
+            .filter(HQUser.role == Role.OWNER.value)
             .order_by(HQUser.id)
             .first()
         )
@@ -257,7 +277,7 @@ def migrate_legacy_roles(session_factory) -> dict:
                 "created_users": 0,
             }
 
-        candidate.role = Role.SUPER_ADMIN.value
+        candidate.role = Role.OWNER.value
         db.commit()
         return {
             "super_admin_user_id": candidate.id,

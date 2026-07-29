@@ -76,7 +76,7 @@ const OPERATOR = { id: 1, username: 'pilot-operator', role: 'admin' };
 //: either, a test written against this fixture would not notice, so the fixture
 //: must not model something the API must never do.
 const HQ_USERS = [
-  { id: 1, username: 'founder', display_name: 'The Founder', role: 'SUPER_ADMIN',
+  { id: 1, username: 'founder', display_name: 'The Founder', role: 'OWNER',
     is_active: true, lifecycle_state: 'active' },
   { id: 2, username: 'priya', display_name: 'Priya Sharma', role: 'ADMIN',
     is_active: true, lifecycle_state: 'active' },
@@ -219,9 +219,9 @@ async function mockBackend(page, options = {}) {
         // The refusals the real backend enforces, mirrored so a test cannot
         // pass here and fail against the server.
         const activeSuperAdmins = state.users.filter(
-          (candidate) => candidate.role === 'SUPER_ADMIN' && candidate.lifecycle_state === 'active');
+          (candidate) => candidate.role === 'OWNER' && candidate.lifecycle_state === 'active');
         if ((action === 'disable' || action === 'archive')
-            && row.role === 'SUPER_ADMIN' && activeSuperAdmins.length <= 1) {
+            && row.role === 'OWNER' && activeSuperAdmins.length <= 1) {
           return route.fulfill(json({
             detail: 'This is the only active SUPER_ADMIN. That would leave nobody able to administer SpeakLink.',
           }, 409));

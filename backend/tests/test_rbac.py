@@ -111,7 +111,7 @@ def runtime(tmp_path) -> Runtime:
 # ===========================================================================
 def test_the_four_roles_are_the_only_roles():
     assert {role.value for role in Role} == {
-        "SUPER_ADMIN", "ADMIN", "BROADCASTER", "VIEWER"
+        "OWNER", "ADMIN", "BROADCASTER", "VIEWER"
     }
 
 
@@ -125,7 +125,7 @@ def test_every_role_has_an_entry_and_every_entry_is_a_known_permission():
 
 
 def test_super_admin_has_every_permission():
-    assert ROLE_PERMISSIONS[Role.SUPER_ADMIN] == ALL_PERMISSIONS
+    assert ROLE_PERMISSIONS[Role.OWNER] == ALL_PERMISSIONS
 
 
 def test_admin_can_run_the_estate_but_not_change_security():
@@ -180,7 +180,7 @@ def test_an_unknown_role_grants_nothing(runtime: Runtime):
 
 
 def test_an_inactive_user_has_no_permissions(runtime: Runtime):
-    runtime.add("gone", Role.SUPER_ADMIN.value, active=False)
+    runtime.add("gone", Role.OWNER.value, active=False)
     with runtime.Session() as db:
         user = db.query(HQUser).filter(HQUser.username == "gone").one()
         assert effective_permissions(user) == set()
@@ -214,12 +214,12 @@ def test_the_refusal_says_nothing_about_what_exists(runtime: Runtime):
 # Who may manage whom
 # ===========================================================================
 def test_an_admin_cannot_touch_a_super_admin():
-    assert not may_manage_role(Role.ADMIN, Role.SUPER_ADMIN)
+    assert not may_manage_role(Role.ADMIN, Role.OWNER)
 
 
 def test_an_admin_cannot_promote_anyone_to_super_admin():
     """The escalation that makes every other restriction pointless."""
-    assert not may_manage_role(Role.ADMIN, Role.SUPER_ADMIN)
+    assert not may_manage_role(Role.ADMIN, Role.OWNER)
 
 
 def test_an_admin_may_manage_broadcasters_and_viewers():
@@ -234,7 +234,7 @@ def test_an_admin_cannot_manage_another_admin():
 
 def test_a_super_admin_may_manage_every_role():
     for role in Role:
-        assert may_manage_role(Role.SUPER_ADMIN, role)
+        assert may_manage_role(Role.OWNER, role)
 
 
 def test_a_broadcaster_and_viewer_may_manage_nobody():
@@ -260,7 +260,7 @@ def test_legacy_admins_become_admin_and_exactly_one_becomes_super_admin(runtime:
 
     result = migrate_legacy_roles(runtime.Session)
 
-    assert runtime.role_of("alice") == Role.SUPER_ADMIN.value
+    assert runtime.role_of("alice") == Role.OWNER.value
     assert runtime.role_of("bob") == Role.ADMIN.value
     assert runtime.role_of("carol") == Role.ADMIN.value
     assert result["super_admin_user_id"] == first
@@ -301,11 +301,11 @@ def test_an_inactive_legacy_admin_is_not_chosen_as_super_admin(runtime: Runtime)
 
 
 def test_a_database_that_already_has_a_super_admin_gains_no_second_one(runtime: Runtime):
-    runtime.add("root", Role.SUPER_ADMIN.value)
+    runtime.add("root", Role.OWNER.value)
     runtime.add("alice", "admin")
     migrate_legacy_roles(runtime.Session)
     supers = runtime.query(
-        "SELECT COUNT(*) FROM hq_users WHERE role = ?", (Role.SUPER_ADMIN.value,)
+        "SELECT COUNT(*) FROM hq_users WHERE role = ?", (Role.OWNER.value,)
     )
     assert supers == [(1,)]
     assert runtime.role_of("alice") == Role.ADMIN.value

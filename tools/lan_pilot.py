@@ -153,7 +153,7 @@ def prepare(pilot_root: Path, *, hq_address: str, admin_username: str,
         db.add(HQUser(
             username=admin_username,
             password_hash=hash_password(admin_password),
-            role=Role.SUPER_ADMIN.value,
+            role=Role.OWNER.value,
             is_active=True,
         ))
         db.add(Store(store_code="LAN-1", store_name="LAN pilot Store",

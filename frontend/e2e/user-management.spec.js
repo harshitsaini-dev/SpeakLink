@@ -13,7 +13,7 @@
 const { test, expect } = require('@playwright/test');
 const { mockBackend, signIn, OPERATOR } = require('./support/backend');
 
-const SUPER_ADMIN = { id: 1, username: 'founder', role: 'SUPER_ADMIN' };
+const SUPER_ADMIN = { id: 1, username: 'founder', role: 'OWNER' };
 const ADMIN = { id: 2, username: 'priya', role: 'ADMIN' };
 const VIEWER = { id: 4, username: 'anita', role: 'VIEWER' };
 
@@ -28,7 +28,7 @@ test.describe('Seeing the accounts', () => {
   test('every account is listed with its role and status', async ({ page }) => {
     await open(page, { operator: SUPER_ADMIN });
     await expect(page.getByTestId('users-table')).toBeVisible();
-    await expect(page.getByTestId('user-row-founder')).toContainText('SUPER_ADMIN');
+    await expect(page.getByTestId('user-row-founder')).toContainText('OWNER');
     await expect(page.getByTestId('user-row-priya')).toContainText('ADMIN');
     await expect(page.getByTestId('user-row-rahul')).toContainText('disabled');
     await expect(page.getByTestId('user-row-anita')).toContainText('archived');
