@@ -216,7 +216,7 @@ def ensure_rbac_schema(engine: Engine) -> None:
 LEGACY_ADMIN_ROLE = "admin"
 
 
-def migrate_legacy_roles(session_factory) -> dict:
+def migrate_legacy_roles(session_factory, *, promote_missing_owner: bool = True) -> dict:
     """Turn the legacy single ``admin`` role into the four-role model.
 
     The rule is deterministic and written down here because an upgrade runs
@@ -245,6 +245,18 @@ def migrate_legacy_roles(session_factory) -> dict:
             user.role = Role.ADMIN.value
         if legacy:
             db.commit()
+
+        if not promote_missing_owner:
+            # Normalise roles and stop. The owner-bootstrap command passes this,
+            # because it is about to create an OWNER itself and promoting the
+            # existing administrator on the way would silently change an account
+            # the operator was promised would not be touched.
+            return {
+                "super_admin_user_id": None,
+                "promoted": False,
+                "migrated_legacy_roles": len(legacy),
+                "created_users": 0,
+            }
 
         existing_super = (
             db.query(HQUser)

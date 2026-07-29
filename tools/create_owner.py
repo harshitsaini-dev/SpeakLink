@@ -44,8 +44,8 @@ from user_lifecycle import (  # noqa: E402
     DuplicateUsernameError,
     UserLifecycleError,
     create_user,
-    ensure_user_lifecycle_schema,
 )
+from user_schema import UserSchemaError, ensure_user_auth_schema  # noqa: E402
 
 
 EXIT_OK = 0
@@ -83,7 +83,18 @@ def create_owner(engine, *, username: str, prompt=getpass.getpass) -> dict:
     """
     password = read_new_password(prompt=prompt)
     try:
-        ensure_user_lifecycle_schema(engine)
+        # Every migration the current create_user depends on, in the order
+        # application startup uses. This used to be a single call to
+        # ensure_user_lifecycle_schema, which adds four of the five missing
+        # columns - session_version comes from ensure_rbac_schema, and was
+        # simply forgotten. On a database that had already been through startup
+        # it worked; on the real HQ database it failed at the insert.
+        # promote_missing_owner=False on purpose. The startup safety net
+        # promotes the lowest-id active administrator when a database has no
+        # OWNER - correct there, wrong here. This command is about to create an
+        # OWNER itself, and promoting the existing administrator on the way
+        # would change an account the operator was told would not be touched.
+        ensure_user_auth_schema(engine, promote_missing_owner=False)
         created = create_user(
             engine,
             username=username,
@@ -97,8 +108,21 @@ def create_owner(engine, *, username: str, prompt=getpass.getpass) -> dict:
             "its password was NOT reset. To change an existing Owner's password, "
             "sign in as an Owner and use the User Management page."
         ) from None
+    except UserSchemaError as refusal:
+        # An old database is an ordinary situation, not a crash. The operator
+        # gets a sentence; the driver's traceback naming SQLAlchemy internals
+        # helps nobody standing at an HQ machine.
+        raise OwnerBootstrapError(str(refusal)) from None
     except UserLifecycleError as refusal:
         raise OwnerBootstrapError(str(refusal)) from None
+    except Exception as failure:
+        # Anything the layers below did not classify. The class name is kept
+        # because it is the only searchable part; the message is not, because a
+        # driver message can quote the row it was inserting.
+        raise OwnerBootstrapError(
+            f"the Owner account could not be created ({failure.__class__.__name__}). "
+            "Nothing was changed."
+        ) from None
     finally:
         # Not a security control - Python strings are immutable and this does
         # not scrub memory. It just stops the value staying reachable from this
