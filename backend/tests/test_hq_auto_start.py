@@ -378,8 +378,9 @@ def test_the_first_start_guard_keys_off_a_successful_start_not_a_file(tmp_path):
     """
     body = _text(VERIFY)
     assert "function Test-HQHasStarted" in body
-    assert "CONFIG_ERROR" in body[body.index("function Test-HQHasStarted"):
-                                  body.index("function Test-HQHasStarted") + 400]
+    helper = body[body.index("function Test-HQHasStarted"):][:400]
+    assert "CONFIG_ERROR" in helper
+    assert "CONFIG_OK" in helper, "a passed configuration check counts as a start"
     for check in ("the Receiver key container is present",
                   "the signing secret is present"):
         call_site = body[body.index(f"Check '{check}'"):][:220]

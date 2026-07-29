@@ -134,6 +134,10 @@ class RuntimeState(str, Enum):
     DEGRADED = "DEGRADED"
     STOPPING = "STOPPING"
     STOPPED = "STOPPED"
+    #: The configuration is usable and NOTHING was started. Distinct from
+    #: STOPPED on purpose: a config check is not a run, and overloading STOPPED
+    #: made a checker conclude HQ had started when it never had.
+    CONFIG_OK = "CONFIG_OK"
     CONFIG_ERROR = "CONFIG_ERROR"
     BACKEND_ERROR = "BACKEND_ERROR"
     FRONTEND_ERROR = "FRONTEND_ERROR"
@@ -737,9 +741,9 @@ def main(argv=None) -> int:
         # with the result of a side check would destroy the evidence it was run
         # to read.
         if read_status(profile.status_file).get("state") == RuntimeState.CONFIG_ERROR.value:
-            write_status(profile.status_file, RuntimeState.STOPPED,
+            write_status(profile.status_file, RuntimeState.CONFIG_OK,
                          detail="configuration check passed; the earlier refusal "
-                                "no longer applies. Nothing is running.")
+                                "no longer applies. Nothing was started.")
         return EXIT_OK
 
     lock = runtime_lock()
