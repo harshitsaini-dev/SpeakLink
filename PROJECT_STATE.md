@@ -2607,3 +2607,113 @@ protected database       8A7E3413…B1A547CA unchanged, integrity_check ok
 the final Release Candidate artifact set are all `NOT STARTED`. A real
 enrollment against a running HQ with a real code on real Store hardware remains
 an operator checkpoint.
+
+
+---
+
+## 2026-07-30 (5) - security audit, load evidence, and one finding that blocks the gate
+
+Commits: `9e84dca`, `4eb865f`, `9e6d83b`, plus the audit document.
+Branch `feature/persistent-hq-and-one-click-store-setup`. Not pushed.
+
+### The finding that matters most
+
+**`echocast-live.zip` in the repository root contains the current live
+`JWT_SECRET`, `ADMIN_USERNAME` and `ADMIN_PASSWORD` - byte-identical**, confirmed
+by SHA-256 fingerprint comparison rather than by printing anything.
+
+The signing secret *is* the authentication system: whoever holds that file can
+mint a valid token for any account, and no rate limit or lockout applies to a
+token that verifies.
+
+It was never committed - `.gitignore` matches `*.zip` and it is untracked. That is
+exactly why every existing secret scan missed it: they all enumerate through
+`git ls-files`, so an ignored file is invisible to all of them. **Not in git is
+not the same as not in the folder somebody zips up and emails.**
+
+I did not delete it. Removing an operator's archive is irreversible and rotating a
+live credential is an operational decision - both are human checkpoints. There is
+now a guard test that fails while any archive in the tree holds a `.env`, a
+database or a key container, and it **stays RED until the archive is gone**.
+
+**The security gate therefore does not pass, and must not be made to pass by
+editing that test.** A genuine live-secret exposure turned into a green tick would
+be worth less than no gate at all.
+
+### Three P1s found and fixed
+
+**The microphone uplink had no authorization at all.** `/api/ws/broadcaster`
+redeemed a handshake ticket, *discarded the user id*, and accepted audio - no
+permission, no role lookup. And one ticket opened both the dashboard and the
+uplink. A read-only `VIEWER` could push arbitrary audio to the loudspeakers of
+every targeted Store, or occupy the single slot and deny it to the operator who
+was allowed to use it. Reported independently by three of the fourteen audit
+areas. Tickets are audience-scoped now and the permission is checked twice - to
+mint, and again at the handshake against a freshly loaded account.
+
+**A Store could be locked out of enrolment permanently.** The per-Store cap
+counted every unredeemed code with no expiry term, and nothing ever prunes an
+expired code. Three abandoned codes and that Store can never enrol again - while
+the refusal advised waiting for them to expire, which could never help. The
+constant's own comment always said "in flight" and "live credentials"; only the
+filter disagreed.
+
+**A comment stopped the HQ server launching.** A `#` comment after a backtick
+continuation merges into one logical line and swallows everything after it. The
+parser confirms: zero errors, `Start-Process` with three elements, and a separate
+command literally named `-ArgumentList`. At runtime that launches a bare Python
+REPL in a visible window instead of uvicorn - on the documented operator path.
+The comment that broke it was explaining a *previous* launcher bug.
+
+### One P1 deliberately deferred
+
+Standby Device acknowledgements are applied to the primary's Store snapshot, so
+two Devices in one Store reject each other's messages - including the primary's
+`playback_confirmed`. It only manifests with a primary *and* a standby connected
+at once, which no Store does today, and the correct fix changes the live status
+model. Recorded in the completion queue as **must be fixed before any Store runs
+two Devices**, rather than buried in a commit message.
+
+### A metric nobody could read
+
+`WSManager.audio_metrics()` had existed since the bounded queues were built and
+was reachable from nowhere. `GET /api/broadcast/audio-metrics` exposes it under
+`VIEW_STATUS`, integers only. The load tool now reads the server's own counters
+mid-broadcast instead of inferring drops from what synthetic Receivers happened to
+receive - two different questions.
+
+### My own verification step tripped a guard
+
+Last session's `PRAGMA integrity_check` used `mode=ro`, which still creates
+`-shm`/`-wal` for a WAL database, and 13 tests failed on the next run. The main
+file was byte-identical and the WAL was empty, so nothing was lost - but the guard
+fired correctly. `immutable=1` is the rule, and it was already the rule the
+repository used in two other places. There is a test for it now.
+
+### Load evidence
+
+Five levels, 2 to 40 synthetic Receivers, 40 run only after 20 was clean. Every
+level: every Receiver READY, full delivery, zero dropped by the server's own
+counter, no queue over capacity, no queue surviving the stop. At 40: 0.27 s CPU
+across a 6.9 s broadcast, 86.1 MB RSS, 1072 kbps.
+
+`max_depth` was 1 of 24 at every level - which means there was no pressure, not
+that overflow works. [docs/LOAD_TEST_REPORT.md](docs/LOAD_TEST_REPORT.md) says so
+and points at the unit tests that force a stall instead.
+
+### Gate - everything run fresh
+
+```
+full backend suite      2153 passed, 3 skipped, 0 failed
+  + 1 RED by design      test_no_secret_archives_in_tree (the P0 above)
+Playwright chromium      164 passed, 0 failed
+frontend build           Done
+compileall / pip check   exit 0 / No broken requirements
+protected database       8A7E3413...B1A547CA unchanged, integrity ok, no sidecars
+```
+
+### Verdict
+
+**NOT `GREEN_FOR_MANUAL_TWO_STORE_ACCEPTANCE`.** Every automated gate is green
+except one, and that one is telling the truth about a live credential in the
+working tree. Rotate the secret, remove the archive, and the verdict follows.
