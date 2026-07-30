@@ -2269,3 +2269,86 @@ stopped**. Nothing was pushed. `EchoCastStoreSetup.exe`, the Store
 task/recovery tests, the audio/WebSocket/queue audit, the security audit
 document and the load tests are `NOT STARTED` — see
 [docs/NONSTOP_COMPLETION_QUEUE.md](docs/NONSTOP_COMPLETION_QUEUE.md).
+
+---
+
+## 2026-07-30 — EchoCastStoreSetup.exe: built, windowed, and started for real
+
+Commits: `da9c0e8`, `ed4b58b`, `5717306`, `8710ef1`.
+Branch `feature/persistent-hq-and-one-click-store-setup`. Not pushed.
+
+### The gap that had to close first: CONNECTED had no local evidence
+
+StoreSetup has to say whether a Store came online after installing the
+Receiver. The Receiver already tracked CONNECTED/READY/etc in memory, but that
+state dies with the process's own memory and nothing outside it could read it -
+the Receiver is backgrounded on purpose. So it now writes the same fact to
+`receiver-status.json`, reusing `write_status`/`read_status` verbatim by moving
+them out of `hq_runtime.py` into `receiver_agent.py`, the module both now share.
+
+Wiring this up found a real correctness bug before it shipped: my first draft
+wrote a top-level `STOPPED` state whenever `report["stopped"]` was true, but
+that field means one *broadcast* ended, not that the Receiver itself stopped
+running. Folding it into a Receiver-level state would have been exactly the
+kind of overclaim this project keeps finding and removing. Fixed to a single
+`DISCONNECTED` state with the distinction only in `detail`.
+
+### store_setup_core.py — every decision, no GUI import
+
+Connection safety, enrolment, audio classification, Test Sound, and waiting for
+CONNECTED are all plain functions, reusing `receiver_agent.enrol()`,
+`windows_audio_devices.list_output_devices()`, `hidden_child_process_options()`
+and `WindowsPcmSink` unchanged. 25 tests, RED first - one real design question
+(should the timeout path be provably reachable, not just declared - answered
+with a fake clock) and four fixture bugs worth naming rather than hiding: a
+fake audio stream missing `.start()`, a `FakeCredentialProtector()` called
+without the identity argument every other test in the repo already passes, and
+two fake credential strings that didn't match the real credential regex.
+
+### store_setup_gui.py — a real threading bug, caught by driving the window
+
+The enrolment screen's background thread called `self.device_name_var.get()`
+from *inside* the worker thread. Tkinter raises "main thread is not in main
+loop" for that - and because the exception was silently swallowed by an empty
+result list, the screen just hung on `ENROLLING...` forever with nothing to
+look at. A quick manual click-through would not have caught this; it only
+reproduces under the real thread-scheduling race that a headless instantiation
+test, waiting on the actual background thread, produces on every run. Fixed:
+every Tk variable is read on the main thread before the thread starts, and a
+worker exception is now caught and re-raised on the Tk thread instead of
+leaving the screen hung.
+
+### Built and verified
+
+```
+EchoCastStoreSetup.exe
+  PE Optional Header Subsystem = 2 (WINDOWS_GUI), read directly from the file
+  sha256  112ECBBC0369585BAA3EC23BF26264F404894869E8705303828A618990ED9072
+```
+
+Started for real and confirmed a window titled "EchoCast Store Setup" with no
+console - not a PyInstaller `--windowed` claim, and not a PE header read from a
+file that was never run.
+
+### Gate
+
+```
+full backend suite      1967 passed, 2 skipped, 0 FAILED   (was 1919)
+compileall               exit 0
+receiver status file     5 passed
+store_setup_core         25 passed
+store_setup_gui          13 passed
+store_setup.spec         5 passed (source inspection)
+```
+
+### Not claimed
+
+The Rerun screen's Status/Repair/Change Audio Output/Test Sound/Restart/Stop/
+Diagnostics/Uninstall buttons exist and are asserted present, but call a named
+placeholder rather than `store_setup_core` - only Replace Device Identity is
+fully wired. There is no `artifacts/receiver-package` yet for Install to point
+at, so a real end-to-end enrollment through the wizard has not been run. Store
+task/recovery tests, Receiver enrolment status evidence (USED state),
+audio/WebSocket/queue audit, `docs/SECURITY_AUDIT.md`, load tests and the final
+Release Candidate artifacts are all `NOT STARTED` - see
+[docs/NONSTOP_COMPLETION_QUEUE.md](docs/NONSTOP_COMPLETION_QUEUE.md).

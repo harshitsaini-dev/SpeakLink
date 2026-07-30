@@ -138,3 +138,40 @@ none".
 | `docs/SECURITY_AUDIT.md` | `NOT STARTED` |
 | Load tests 2/5/10/20/40 | `NOT STARTED` |
 | Live HQ task installation, reboot/sign-in, locked desktop | `OPERATOR CHECKPOINT` |
+
+
+---
+
+## StoreSetup phase — started 2026-07-30
+
+Commits `da9c0e8` (Receiver status file), `ed4b58b` (store_setup_core.py),
+`5717306` (store_setup_gui.py + a real threading bug it caught), `8710ef1`
+(EchoCastStoreSetup.exe built and verified).
+
+| Item | Status | Evidence |
+|---|---|---|
+| Receiver status file (CONNECTED evidence) | `AUTOMATED PASS` | write_status/read_status deduplicated into receiver_agent.py; 5 tests |
+| store_setup_core.py (connection/enrolment/audio/install logic) | `AUTOMATED PASS` | 25 tests, no GUI import |
+| store_setup_gui.py (4 screens + Rerun) | `IN PROGRESS` | 13 tests; Rerun screen buttons are placeholders except Replace Device Identity |
+| EchoCastStoreSetup.exe | `AUTOMATED PASS` | PE subsystem 2, started and showed a real window titled "EchoCast Store Setup" |
+| StoreSetup package (Build-/Test-EchoCastStoreSetupPackage.ps1) | `NOT STARTED` | |
+| Store task/recovery automated tests (Phase 2 of the sprint brief) | `NOT STARTED` | |
+| Receiver enrollment status evidence, USED state (Phase 3) | `NOT STARTED` | |
+| Audio/WebSocket/queue audit (Phase 4) | `NOT STARTED` | |
+| `docs/SECURITY_AUDIT.md` (Phase 5) | `NOT STARTED` | |
+| Load tests 2/5/10/20/40 (Phase 7) | `NOT STARTED` | |
+| Final Release Candidate artifacts (Phase 8) | `NOT STARTED` | |
+
+### What "install" cannot yet do end to end
+
+`InstallScreen` calls `run_receiver_installer` with `-PackagePath artifacts/receiver-package`, which does not exist yet - `Build-EchoCastReceiver.ps1`
+has never been pointed at `artifacts/` in this branch. Wiring a real Store
+enrollment through the wizard needs a Receiver package built there first.
+
+### Rerun screen buttons not yet wired
+
+Status, Repair, Change Audio Output, Test Sound (from the rerun screen),
+Restart/Stop Receiver, Redacted Diagnostics, Export Redacted Diagnostics, and
+Open Log Folder exist as real buttons (a test asserts they are all present) but
+call `_not_yet_wired` - a placeholder, not a silent no-op that pretends to
+work. Replace Device Identity is the one fully wired action.
