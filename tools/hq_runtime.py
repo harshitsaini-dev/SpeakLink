@@ -299,6 +299,23 @@ def resolve_runtime_profile() -> RuntimeProfile:
         # actually did. On a profile with Stores enrolled, a container that has
         # gone missing is an emergency: mint a new one and every Device
         # credential stops verifying while every Store still looks enrolled.
+        #
+        # "the backend mints the container itself" was written here, in
+        # Test-EchoCastHQAutoStart.ps1 and in the tests, and was TRUE IN NONE OF
+        # THEM until backend/receiver_key_bootstrap.py was written. The first
+        # installed HQ start came up and failed "the Receiver key container is
+        # present". The claim now names the module that implements it, so the
+        # next person can check rather than believe it:
+        #
+        #   backend/receiver_key_bootstrap.bootstrap_from_environment,
+        #   called from backend/server.py before the Receiver authenticator is
+        #   built.
+        #
+        # The split is deliberate. This runtime REFUSES and never creates - the
+        # check below stops a child process ever starting when a container is
+        # missing and Devices are enrolled. The backend CREATES, because DPAPI
+        # CURRENT_USER binds a container to the identity that sealed it and the
+        # backend is the process that has to open it.
         enrolled = count_enrolled_devices(server.database)
         if enrolled != 0:
             raise RuntimeConfigError(

@@ -193,6 +193,12 @@ function Test-HQHasStarted {
 # their absence is normal and reporting FAIL would send an operator looking for
 # a backup that was never taken. Unreadable-yet is UNKNOWN, which is what a
 # throw here produces.
+#
+# The first half of that sentence was false when it was written. Nothing minted
+# the HMAC container: backend/server.py only ever loaded it. This check is what
+# caught it on the first installed HQ start, and it was right to fail. The
+# creator now exists - backend/receiver_key_bootstrap.py, called from server.py
+# at startup - so this check passes for the reason it always claimed.
 Check 'the Receiver key container is present' {
     if (-not (Test-HQHasStarted)) { throw 'HQ has not started successfully yet' }
     Test-Path (Join-Path $PersistentRoot 'keys\receiver-hmac-keys.bin')

@@ -2927,3 +2927,113 @@ rollout.
   rotator bug fixed in `a6b69b6`. The value is correct and working; repairing the
   formatting would mint a third secret and void the fingerprint the operator
   recorded. Optional, and only worth doing alongside a deliberate rotation.
+
+---
+
+## 2026-07-30 — First installed HQ start: nobody minted the key container
+
+The first real installed HQ acceptance run started the server successfully and
+failed `Test-EchoCastHQAutoStart.ps1`:
+
+```
+the Receiver key container is present    FAIL
+```
+
+### Root cause: three documented owners, no implementation
+
+Three places stated that the backend creates the Receiver HMAC container on first
+start:
+
+| Place | What it said |
+| --- | --- |
+| `tools/hq_runtime.py` | *"the backend mints the container itself"* — the reason it stopped refusing on a zero-Device profile |
+| `scripts/Test-EchoCastHQAutoStart.ps1` | *"the backend mints the HMAC container"* — the reason it treats an absent container as normal before the first start |
+| the tests | written to match both |
+
+`backend/server.py` did not. `receiver_key_ring()` calls `load_key_ring` and its
+own docstring says *"The container is never created here"* — correct in itself,
+and correct about not minting a key as a side effect of a request. Nobody minted
+it anywhere else.
+
+**This is the inverse of the duplicated-policy defect this project already
+learned from.** That one had a rule written twice and fixed in one copy. This one
+had a rule written three times and implemented in none. Each statement read like
+the authority, and each was quoting the others.
+
+The removal of the unsatisfiable zero-Device refusal was right — it was a refusal
+no procedure in this repository could satisfy. It was made on the strength of a
+creator that did not exist.
+
+### The failure was quieter than that check makes it look
+
+`build_receiver_runtime_authenticator()` runs **at import**, and with no key ring
+it returns the legacy Store-token authenticator **alone, for the life of the
+process**. So an HQ with enrolled Devices would come up looking healthy while
+every Device credential was unusable, and a container appearing later would change
+nothing until a restart. The auto-start check caught the visible half.
+
+### Where the bootstrap went, and why
+
+`backend/receiver_key_bootstrap.py`, called from `backend/server.py` **before**
+`configure_receiver_runtime`.
+
+* **DPAPI `CURRENT_USER` binds the sealed blob to the identity that sealed it.**
+  The backend must *open* it, so the backend is the only process that can
+  guarantee it will be openable. A supervisor that sealed it would work today —
+  the child runs as the same user — and would fail the day HQ moves to a service
+  account, as `KeyCustodyUnavailable` → `None` → legacy authenticator → a server
+  that looks fine.
+* **One resolver.** `receiver_key_container_path()` and
+  `receiver_key_protector()` are now the single source for both the reader and
+  the bootstrap. Two resolvers drift, which is the defect above in another form.
+* **Ordering.** Anything minted after that import line is not used until restart.
+* **`hq_runtime.spec` excludes SQLAlchemy** and starts the backend as a child
+  under the machine's own Python. Creation there would need a second Device count
+  and a second path resolution.
+
+The split: **the supervisor refuses early** (missing container + Devices enrolled
+→ no child is started); **the backend creates** only when creating harms nobody.
+Neither creates what the other should.
+
+### Two things I got wrong while writing it
+
+**The gate would have had the test suite mint a live key.** The first version
+gated on `ECHOCAST_DB_PATH`, which conftest always sets. The container path falls
+back to `SERVICE_CONTAINER_PATH` — `C:\ProgramData\EchoCast-AI\keys\` — and the
+temporary test database has zero Devices, so **every test run would have created a
+real key container in the machine's service custody path**, which a later
+service-account HQ would find and reuse. A key nobody decided to make is exactly
+what this module exists to prevent. Caught before the suite was run; the gate now
+requires `ECHOCAST_KEY_CONTAINER` *and* `ECHOCAST_DB_PATH` to be set explicitly,
+and a test asserts the service path is never the implicit target.
+
+**"Absent" and "unreadable" are not the same claim.** I treated a missing database
+file as "count could not be established" and refused. That failed 66 tests and
+would have refused a first-ever start, because the backend is imported before it
+creates its own schema. Nothing can be enrolled in a file that is not there, so an
+absent database is **zero with certainty**. The dangerous case is a file that
+*exists* and will not open — corrupt, locked, permission denied — where the
+convenient answer is zero and zero mints a key over credentials still in use.
+Both are now separate, named, and tested.
+
+### Evidence
+
+```
+RED     collection ERROR - no module receiver_key_bootstrap  (28 tests uncollectable)
+RED     20 passed, 1 failed - "server.py never calls the bootstrap"
+GREEN   28 passed - tests/test_receiver_key_bootstrap.py
+GREEN   178 passed - package, runtime, custody, protected-DB and archive tests
+GREEN   2267 passed, 3 skipped, 0 failed - full backend suite
+```
+
+Four of the 28 start a **real backend process** with the environment
+`child_environment()` builds, and assert the container is minted, the ring loads,
+a second start changes nothing, and an enrolled-Device profile refuses with a
+non-zero exit and no file created.
+
+### Still not proven
+
+Every bootstrap test uses `FakeProtector`. **Real DPAPI on the installed HQ, under
+the account the Scheduled Task runs as, has not been exercised** — that is the
+first-start retest, and it is the only thing that can prove the container is
+sealed by and openable to the right identity.

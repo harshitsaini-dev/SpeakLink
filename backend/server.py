@@ -161,6 +161,7 @@ from key_custody import (
     load_key_ring,
 )
 from key_custody_acl import SERVICE_CONTAINER_PATH
+from receiver_key_bootstrap import bootstrap_from_environment
 from receiver_enrollment_api import (
     DeviceNotFound,
     EnrollmentRefused,
@@ -199,24 +200,40 @@ ENROLLMENT_GUARD = LoginGuardConfig(max_attempts=10, window_seconds=300, max_fai
 enrollment_limiter = LoginRateLimiter(ENROLLMENT_GUARD)
 
 
+def receiver_key_container_path() -> Path:
+    """Where this process reads and writes the Receiver HMAC container.
+
+    One resolver. The bootstrap and the reader must never be able to disagree
+    about which file they mean.
+    """
+    configured = os.environ.get("ECHOCAST_KEY_CONTAINER")
+    return Path(configured) if configured else SERVICE_CONTAINER_PATH
+
+
+def receiver_key_protector():
+    """One protector choice, for the same reason."""
+    if os.environ.get("ECHOCAST_KEY_PROTECTOR") == "fake":
+        # Local staging only. Never reachable unless explicitly configured.
+        return FakeProtector()
+    return DpapiProtector(scope=ProtectionScope.CURRENT_USER)
+
+
 def receiver_key_ring():
     """Open the Receiver HMAC key container, or return None.
 
     None rather than an exception so the caller can answer 503 with a message
-    about the server rather than one that looks like a bad enrolment code. The
-    container is never created here: DPAPI CURRENT_USER binds it to the identity
-    that sealed it, so it must be minted by this process under the service
-    account, deliberately, not as a side effect of the first request.
+    about the server rather than one that looks like a bad enrolment code.
+
+    The container is never created HERE - a key minted as a side effect of the
+    first request is a key nobody decided to make. It is minted once at startup
+    by ``bootstrap_receiver_key_container`` below, in this process, because DPAPI
+    CURRENT_USER binds a container to the identity that sealed it and this is the
+    identity that has to open it.
     """
-    configured = os.environ.get("ECHOCAST_KEY_CONTAINER")
-    path = Path(configured) if configured else SERVICE_CONTAINER_PATH
     try:
-        if os.environ.get("ECHOCAST_KEY_PROTECTOR") == "fake":
-            # Local staging only. Never reachable unless explicitly configured.
-            protector = FakeProtector()
-        else:
-            protector = DpapiProtector(scope=ProtectionScope.CURRENT_USER)
-        return load_key_ring(path, protector=protector)
+        return load_key_ring(
+            receiver_key_container_path(), protector=receiver_key_protector()
+        )
     except KeyCustodyError:
         return None
 
@@ -297,6 +314,24 @@ def build_receiver_runtime_authenticator():
     except Exception:
         # Never let a probe failure take the Receivers offline.
         return default_receiver_runtime_authenticator
+
+
+# Before the authenticator is built, never after. build_receiver_runtime_
+# authenticator() runs once, here, at import: with no key ring it returns the
+# legacy Store-token authenticator ALONE for the life of the process, so a
+# container minted later is not used until a restart. That is the shape of the
+# defect this fixes - the first installed HQ start came up "working" with every
+# enrolled Device silently unable to use its own credential.
+#
+# A refusal is allowed to propagate. Failing to start is the correct outcome when
+# the alternative is minting a key over credentials that are still in use: the
+# supervisor records the exit and reports it, which is louder than a server that
+# runs and quietly authenticates nobody.
+_key_bootstrap_outcome = bootstrap_from_environment(
+    container_path=receiver_key_container_path(),
+    protector=receiver_key_protector(),
+)
+
 configure_receiver_runtime(
     app,
     authenticator=build_receiver_runtime_authenticator(),
