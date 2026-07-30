@@ -842,6 +842,23 @@ def open_log_folder(path=None, *, opener=None) -> Path:
     return target
 
 
+@dataclass(frozen=True, slots=True)
+class UninstallResult:
+    ok: bool
+    detail: str
+
+
+def uninstall_receiver(*, task_name: str = DEFAULT_TASK_NAME, run=None) -> UninstallResult:
+    """Invoke the existing, tested Uninstall-SpeakLinkStoreReceiver.ps1. It
+    already preserves the credential, config and logs by default and never
+    revokes the HQ Device - not reimplemented here."""
+    script = REPOSITORY_ROOT / "scripts" / "Uninstall-SpeakLinkStoreReceiver.ps1"
+    result = _run_powershell_script(script, ["-TaskName", task_name], run=run, timeout=120.0)
+    if result.returncode != 0:
+        return UninstallResult(ok=False, detail=(result.stdout + result.stderr)[-1500:])
+    return UninstallResult(ok=True, detail="uninstalled; credential, config and logs preserved")
+
+
 def replace_device_identity(*, credential_path, confirmation_word: str) -> bool:
     """Delete the local credential ONLY on an exact typed confirmation. Never
     revokes the HQ Device - an administrator does that separately, and the

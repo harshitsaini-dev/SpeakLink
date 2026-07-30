@@ -410,11 +410,19 @@ class InstallScreen(ttk.Frame):
 
 
 class RerunScreen(ttk.Frame):
-    """Detected an existing installation. Never silently re-enrols."""
+    """Detected an existing installation. Never silently re-enrols.
+
+    Every button below calls store_setup_core directly - none is a
+    placeholder. Long-running ones (Repair, Restart, Change Audio Output) run
+    on a background thread through _run_in_background, exactly like the
+    first-run screens, and each shows a loading/success/error state in
+    self.status_var rather than only a Windows return code.
+    """
 
     def __init__(self, parent, app: StoreSetupApp, existing: "core.ExistingInstallation"):
         super().__init__(parent)
         self.app = app
+        self.existing = existing
 
         ttk.Label(self, text="This computer is already enrolled",
                  font=("Segoe UI", 14, "bold")).pack(pady=12)
@@ -423,22 +431,313 @@ class RerunScreen(ttk.Frame):
             f"Store: {existing.store_id}\n\n{existing.detail}"
         ), wraplength=480, justify="left").pack(pady=8, padx=24)
 
-        for label in ("Status", "Repair", "Change Audio Output", "Test Sound",
-                     "Restart Receiver", "Stop Receiver", "Redacted Diagnostics",
-                     "Export Redacted Diagnostics", "Open Log Folder",
-                     "Uninstall Application"):
-            ttk.Button(self, text=label,
-                      command=lambda l=label: self._not_yet_wired(l)).pack(pady=2, padx=24,
-                                                                          anchor="w")
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self.status_var, wraplength=480,
+                 justify="left").pack(pady=6, padx=24)
+
+        # The gate for the two destructive actions, INLINE rather than in a
+        # modal dialog. A modal was not a gate here at all: in an automated or
+        # headless session the dialog's default button fires on its own, so the
+        # confirmation returned "confirmed" with nothing typed - a destructive
+        # confirmation that did not confirm. Inline, the typed text is read from
+        # this widget on the main thread and handed to store_setup_core as data,
+        # so core's comparison is the single real check.
+        confirm_row = ttk.Frame(self)
+        confirm_row.pack(padx=24, pady=(4, 0), anchor="w")
+        ttk.Label(confirm_row,
+                 text=f"To Uninstall or Replace Device Identity, type the "
+                      f"confirmation word first:").pack(anchor="w")
+        self.confirm_var = tk.StringVar(value="")
+        ttk.Entry(confirm_row, textvariable=self.confirm_var, width=24).pack(anchor="w", pady=2)
+
+        button_row = ttk.Frame(self)
+        button_row.pack(padx=24, anchor="w")
+        for column, (label, handler) in enumerate((
+            ("Status", self._status),
+            ("Repair", self._repair),
+            ("Change Audio Output", self._change_audio_output),
+            ("Test Sound", self._test_sound),
+            ("Restart Receiver", self._restart),
+            ("Stop Receiver", self._stop),
+            ("Redacted Diagnostics", self._diagnostics),
+            ("Export Redacted Diagnostics", self._export_diagnostics),
+            ("Open Log Folder", self._open_log_folder),
+            ("Uninstall Application", self._uninstall),
+        )):
+            ttk.Button(button_row, text=label, command=handler, width=26).grid(
+                row=column // 2, column=column % 2, padx=4, pady=2, sticky="w")
 
         ttk.Button(self, text="Replace Device Identity (requires a fresh code)",
                   command=self._replace_identity).pack(pady=8, padx=24, anchor="w")
 
-    def _not_yet_wired(self, label: str) -> None:
-        pass  # menu items exist; each is wired to store_setup_core as it lands
+    # -- helpers --------------------------------------------------------------
+    def _busy(self, message: str) -> None:
+        self.status_var.set(message)
 
+    def _run(self, work, done) -> None:
+        poll = _run_in_background(work, done)
+        poll(self)
+
+    # -- Status -----------------------------------------------------------
+    def _status(self) -> None:
+        self._busy("Reading status...")
+
+        def work():
+            return core.get_status_snapshot(
+                credential_path=self.app.credential_path, protector=self.app.protector)
+
+        def done(snapshot: "core.StatusSnapshot"):
+            task = snapshot.task
+            lines = [
+                f"Device: {snapshot.device_public_id}  Store: {snapshot.store_id}",
+                f"Backend: {snapshot.backend_origin}",
+                f"Audio: {snapshot.audio_sink} / {snapshot.audio_output_device}",
+                f"Task: {'registered, ours' if task and task.is_ours else task.detail if task else 'unknown'}"
+                + (f" ({task.state}, {task.process_count} process(es))" if task and task.is_ours else ""),
+                f"Receiver status: {snapshot.receiver_state or '<none yet>'} - {snapshot.receiver_detail}",
+                f"HQ reachable: {snapshot.hq_reachable}",
+            ]
+            self.status_var.set("\n".join(lines))
+
+        self._run(work, done)
+
+    # -- Repair -------------------------------------------------------------
+    def _repair(self) -> None:
+        self._busy("REPAIRING...")
+
+        def work():
+            try:
+                package_path = core.locate_verified_receiver_package()
+            except core.NoVerifiedReceiverPackage as failure:
+                return core.RepairResult(ok=False, detail=str(failure))
+            return core.repair_installation(package_path=package_path)
+
+        def done(result: "core.RepairResult"):
+            self.status_var.set(("REPAIRED: " if result.ok else "REPAIR FAILED: ") + result.detail)
+
+        self._run(work, done)
+
+    # -- Change Audio Output --------------------------------------------------
+    def _change_audio_output(self) -> None:
+        # Deliberately NOT wait_window: this dialog is driven by the operator
+        # (select, Test Sound, tick "I heard it", Save) and closes itself. A
+        # blocking wait here would freeze the Tk loop for as long as the
+        # operator takes, and made an automated run hang for tens of seconds.
+        self._audio_dialog = _AudioOutputDialog(self, self.app)
+
+    # -- Test Sound (current selector) ---------------------------------------
+    def _test_sound(self) -> None:
+        self._busy("PLAYING...")
+
+        def work():
+            config = core.load_config(core.default_config_path())
+            if config is None or not config.audio_output_device:
+                return core.TestSoundResult(state=core.TestSoundState.DEVICE_ERROR,
+                                            detail="no audio output is configured")
+            from tools.windows_audio_devices import resolve_output_device
+
+            device = resolve_output_device(config.audio_output_device)
+            return core.play_test_tone(device)
+
+        def done(result: "core.TestSoundResult"):
+            self.status_var.set(f"{result.state.value}: {result.detail}")
+
+        self._run(work, done)
+
+    # -- Restart / Stop -------------------------------------------------------
+    def _restart(self) -> None:
+        self._busy("RESTARTING...")
+
+        def work():
+            return core.restart_receiver()
+
+        def done(result: "core.TaskActionResult"):
+            self.status_var.set(f"{result.state.value}: {result.detail}")
+
+        self._run(work, done)
+
+    def _stop(self) -> None:
+        self._busy("STOPPING...")
+
+        def work():
+            return core.stop_receiver()
+
+        def done(result: "core.StopResult"):
+            self.status_var.set(("STOPPED" if result.ok else "STOP FAILED") + f": {result.detail}")
+
+        self._run(work, done)
+
+    # -- Diagnostics -----------------------------------------------------
+    def _diagnostics(self) -> None:
+        self._busy("Building diagnostics...")
+
+        def work():
+            return core.build_redacted_diagnostics(credential_path=self.app.credential_path)
+
+        def done(text: str):
+            self.status_var.set(text)
+
+        self._run(work, done)
+
+    def _export_diagnostics(self) -> None:
+        self._busy("Exporting diagnostics...")
+
+        def work():
+            text = core.build_redacted_diagnostics(credential_path=self.app.credential_path)
+            return core.export_diagnostics(text)
+
+        def done(path: Path):
+            self.status_var.set(f"Diagnostics exported to {path}")
+
+        self._run(work, done)
+
+    def _open_log_folder(self) -> None:
+        try:
+            core.open_log_folder()
+            self.status_var.set(f"Opened {core.default_log_directory()}")
+        except core.UntrustedLogPath as failure:
+            self.status_var.set(str(failure))
+
+    # -- Uninstall ------------------------------------------------------
+    #: Typed in the inline confirmation field before Uninstall will run.
+    UNINSTALL_CONFIRMATION = "UNINSTALL"
+
+    def _uninstall(self) -> None:
+        typed = self.confirm_var.get().strip()
+        if typed != self.UNINSTALL_CONFIRMATION:
+            self.status_var.set(
+                f"Uninstall removes the Receiver application and its Scheduled Task. "
+                f"The Device credential, configuration and logs are PRESERVED, and the "
+                f"Device is NOT revoked at HQ - an administrator must do that separately "
+                f"if this computer is being retired.\n\n"
+                f"Type {self.UNINSTALL_CONFIRMATION} in the confirmation field, then "
+                f"press Uninstall Application again."
+            )
+            return
+        self.confirm_var.set("")
+        self._busy("UNINSTALLING...")
+
+        def work():
+            return core.uninstall_receiver()
+
+        def done(result: "core.UninstallResult"):
+            self.status_var.set(result.detail)
+
+        self._run(work, done)
+
+    # -- Replace Device Identity ----------------------------------------
     def _replace_identity(self) -> None:
-        self.app.go_to_connection()
+        # The operator's own text goes to core, which owns the comparison. The
+        # GUI must never supply the expected word itself: passing
+        # core.CONFIRMATION_WORD here made core's check receive the right answer
+        # no matter what was typed, so a real check could never fail.
+        typed = self.confirm_var.get().strip()
+        if not typed:
+            self.status_var.set(
+                "Replacing the Device identity deletes this computer's LOCAL Receiver "
+                "credential. The existing Device at HQ is NOT revoked - ask an "
+                "administrator to revoke it separately, or it stays listed as enrolled "
+                "while never connecting again. A fresh enrollment code will be needed.\n\n"
+                f"Type {core.CONFIRMATION_WORD} in the confirmation field, then press "
+                "Replace Device Identity again."
+            )
+            return
+        self.confirm_var.set("")
+        removed = core.replace_device_identity(
+            credential_path=self.app.credential_path, confirmation_word=typed)
+        if removed:
+            self.app.go_to_connection()
+        else:
+            self.status_var.set(
+                f"That confirmation word was not correct. Nothing was changed - the "
+                f"credential and Device identity are untouched. Type "
+                f"{core.CONFIRMATION_WORD} exactly to proceed."
+            )
+
+
+class _AudioOutputDialog(tk.Toplevel):
+    """Change Audio Output: select, Test Sound, require the heard checkbox,
+    save only after confirmation, then restart and wait for CONNECTED."""
+
+    def __init__(self, parent, app: StoreSetupApp):
+        super().__init__(parent)
+        self.app = app
+        self.title("Change Audio Output")
+        self.transient(parent)
+
+        try:
+            self.outputs = core.list_classified_outputs()
+        except Exception as failure:  # noqa: BLE001 - shown, not swallowed
+            self.outputs = []
+            ttk.Label(self, text=f"Could not list audio devices: {failure}",
+                     wraplength=420).pack(pady=8)
+
+        self.selected = tk.StringVar()
+        for classified in self.outputs:
+            label = f"[{classified.kind.value}] {classified.device.name}"
+            ttk.Radiobutton(self, text=label, variable=self.selected,
+                           value=classified.device.selector).pack(anchor="w", padx=16)
+
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self.status_var, wraplength=420).pack(pady=6, padx=16)
+
+        self.heard_var = tk.BooleanVar(value=False)
+        self.heard_check = ttk.Checkbutton(
+            self, text="I heard the test sound from the intended Store output",
+            variable=self.heard_var, state="disabled")
+        self.heard_check.pack(pady=6, padx=16, anchor="w")
+
+        button_row = ttk.Frame(self)
+        button_row.pack(pady=8)
+        ttk.Button(button_row, text="Test Sound", command=self._test_sound).pack(side="left", padx=6)
+        self.save_button = ttk.Button(button_row, text="Save and Restart",
+                                      state="disabled", command=self._save_and_restart)
+        self.save_button.pack(side="left", padx=6)
+        ttk.Button(button_row, text="Cancel", command=self.destroy).pack(side="left", padx=6)
+
+    def _selected_device(self):
+        for classified in self.outputs:
+            if classified.device.selector == self.selected.get():
+                return classified.device
+        return None
+
+    def _test_sound(self) -> None:
+        device = self._selected_device()
+        if device is None:
+            self.status_var.set("Choose an output device first.")
+            return
+        self.status_var.set("PLAYING...")
+        self.heard_var.set(False)
+        self.heard_check.config(state="disabled")
+        self.save_button.config(state="disabled")
+
+        def work():
+            return core.play_test_tone(device)
+
+        def done(result: "core.TestSoundResult"):
+            self.status_var.set(f"{result.state.value}: {result.detail}")
+            if result.state is core.TestSoundState.PLAYED:
+                self.heard_check.config(state="normal", command=self._on_heard_toggle)
+
+        poll = _run_in_background(work, done)
+        poll(self)
+
+    def _on_heard_toggle(self) -> None:
+        self.save_button.config(state="normal" if self.heard_var.get() else "disabled")
+
+    def _save_and_restart(self) -> None:
+        device = self._selected_device()
+        self.status_var.set("SAVING AND RESTARTING...")
+        self.save_button.config(state="disabled")
+
+        def work():
+            return core.change_audio_output(device=device)
+
+        def done(result: "core.TaskActionResult"):
+            self.status_var.set(f"{result.state.value}: {result.detail}")
+
+        poll = _run_in_background(work, done)
+        poll(self)
 
 
 def main(argv=None) -> int:
