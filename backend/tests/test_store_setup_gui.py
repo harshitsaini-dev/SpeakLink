@@ -243,9 +243,74 @@ def _all_button_texts(widget) -> "list[str]":
     return found
 
 
-def test_replace_device_identity_requires_a_fresh_code_not_silent_reenrolment(tmp_path):
-    """It must route through the connection/enrolment screens again - never
-    reuse the existing credential path without a new code being entered."""
+def test_replace_device_identity_leaves_the_computer_needing_a_fresh_code(tmp_path):
+    """After a CONFIRMED replace, this computer must genuinely be un-enrolled -
+    so the next enrolment demands a real code rather than reusing the old
+    credential. Checked through detect_existing_installation, the same function
+    the wizard itself gates on, not by re-reading the file.
+
+    (This test previously asserted that _replace_identity() navigated to the
+    connection screen unconditionally. That was only ever true of the
+    placeholder implementation, which navigated without confirming anything.)
+    """
+    from tools import store_setup_core as core_module
+
+    application, credential_path = _enrolled_app(tmp_path)
+    try:
+        application._current.confirm_var.set(core_module.CONFIRMATION_WORD)
+        application._current._replace_identity()
+
+        existing = core_module.detect_existing_installation(
+            credential_path=credential_path, protector=application.protector)
+        assert existing.is_installed is False
+        assert existing.device_public_id is None
+    finally:
+        application.destroy()
+
+
+# ===========================================================================
+# No placeholders, and destructive actions really are gated
+# ===========================================================================
+def test_no_placeholder_remains_in_the_production_gui():
+    """Phase 1's whole point: every visible button does something real."""
+    from pathlib import Path as _Path
+
+    source = (_Path(REPOSITORY_ROOT) / "tools" / "store_setup_gui.py").read_text(encoding="utf-8")
+    assert "_not_yet_wired" not in source
+    assert "not yet wired" not in source.lower()
+
+
+def test_the_destructive_confirmation_is_not_a_blocking_modal():
+    """A modal typed-confirmation was NOT a gate here. In this environment the
+    dialog's default button fires on its own, so _confirm_dialog returned True
+    with nothing typed - a destructive confirmation that does not confirm - and
+    it blocked the suite for 36 seconds per call while doing it.
+
+    The confirmation is an inline field on the screen now: no modal to
+    auto-activate, and the typed text is read from a widget on the main thread.
+    """
+    from pathlib import Path as _Path
+
+    source = (_Path(REPOSITORY_ROOT) / "tools" / "store_setup_gui.py").read_text(encoding="utf-8")
+    assert "_confirm_dialog" not in source
+    assert "grab_set" not in source
+
+
+def test_replace_identity_never_hardcodes_the_confirmation_word():
+    """The second defect, and the worse one: the GUI passed
+    core.CONFIRMATION_WORD straight into replace_device_identity, so the core
+    function's typed-word check received the correct answer no matter what the
+    operator typed. The check existed and could never fail."""
+    from pathlib import Path as _Path
+
+    source = (_Path(REPOSITORY_ROOT) / "tools" / "store_setup_gui.py").read_text(encoding="utf-8")
+    call_index = source.index("replace_device_identity(")
+    window = source[call_index:call_index + 300]
+    assert "core.CONFIRMATION_WORD" not in window, (
+        "the confirmation word is supplied by the GUI, not by the operator")
+
+
+def _enrolled_app(tmp_path):
     from tools import receiver_agent, store_setup_gui as gui
 
     protector = FakeCredentialProtector("test-computer")
@@ -261,11 +326,61 @@ def test_replace_device_identity_requires_a_fresh_code_not_silent_reenrolment(tm
         device_name="till-1", hostname="TILL-1",
         credential_path=credential_path, protector=protector, transport=_Transport(),
     )
-    application = gui.StoreSetupApp(credential_path=credential_path, protector=protector)
+    return gui.StoreSetupApp(credential_path=credential_path, protector=protector), credential_path
+
+
+def test_replace_identity_with_nothing_typed_preserves_the_credential(tmp_path):
+    application, credential_path = _enrolled_app(tmp_path)
     try:
-        application._current._replace_identity()
+        screen = application._current
+        screen.confirm_var.set("")
+        screen._replace_identity()
+        assert credential_path.exists(), "an unconfirmed replace must not delete the credential"
+        from tools.store_setup_gui import RerunScreen
+
+        assert isinstance(application._current, RerunScreen)
+    finally:
+        application.destroy()
+
+
+def test_replace_identity_with_the_wrong_word_preserves_the_credential(tmp_path):
+    application, credential_path = _enrolled_app(tmp_path)
+    try:
+        screen = application._current
+        screen.confirm_var.set("yes please")
+        screen._replace_identity()
+        assert credential_path.exists()
+    finally:
+        application.destroy()
+
+
+def test_replace_identity_with_the_exact_word_proceeds(tmp_path):
+    from tools import store_setup_core as core_module
+
+    application, credential_path = _enrolled_app(tmp_path)
+    try:
+        screen = application._current
+        screen.confirm_var.set(core_module.CONFIRMATION_WORD)
+        screen._replace_identity()
+        assert not credential_path.exists()
         from tools.store_setup_gui import ConnectionScreen
 
         assert isinstance(application._current, ConnectionScreen)
+    finally:
+        application.destroy()
+
+
+def test_uninstall_with_nothing_typed_does_nothing(tmp_path, monkeypatch):
+    from tools import store_setup_core as core_module
+
+    application, _ = _enrolled_app(tmp_path)
+    try:
+        called = []
+        monkeypatch.setattr(core_module, "uninstall_receiver",
+                            lambda **k: called.append(1))
+        screen = application._current
+        screen.confirm_var.set("")
+        screen._uninstall()
+        assert called == [], "uninstall ran without a typed confirmation"
     finally:
         application.destroy()
