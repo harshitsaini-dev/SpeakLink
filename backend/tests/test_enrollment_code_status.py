@@ -467,3 +467,66 @@ def test_a_code_cannot_be_redeemed_twice_and_stays_used(fresh):
         _enroll(fresh, code, name="Second PC")
     records = _list_codes(fresh)
     assert records[0].state == "USED"
+
+
+# ===========================================================================
+# The per-Store cap must count LIVE codes, not every code ever abandoned
+# ===========================================================================
+def test_expired_codes_do_not_count_against_the_outstanding_cap(fresh):
+    """FOUND BY THE SECURITY AUDIT.
+
+    The outstanding count filtered on `redeemed_at_epoch IS NULL` and nothing
+    else, so an expired-but-unredeemed code counted for ever - nothing in the
+    codebase ever prunes, deletes or marks one. After three abandoned codes a
+    Store could NEVER be enrolled again.
+
+    That is an ordinary sequence across 44 Stores: an admin clicks Generate
+    during a failed setup visit, again the next day, again a week later. And the
+    refusal told them to "use or let them expire before creating another" -
+    advice that could not work, because letting a code expire never changed the
+    count.
+
+    The intent was always live codes: the constant's own comment says "a primary,
+    a standby and one spare IN FLIGHT" and warns about "a haystack of LIVE
+    credentials". Only the filter disagreed.
+    """
+    from receiver_enrollment_api import MAX_OUTSTANDING_CODES_PER_STORE
+    from receiver_enrollment_codes import issue_enrollment_code
+
+    # Fill the cap entirely with codes that expired long ago.
+    with fresh.db.SessionLocal() as db:
+        for _ in range(MAX_OUTSTANDING_CODES_PER_STORE):
+            issue_enrollment_code(db, store_id=fresh.store_id,
+                                  actor_user_id=fresh.operator.id,
+                                  now=time.time() - 10_000, ttl_seconds=60)
+
+    # A fresh code must still be mintable: every existing one is dead.
+    issued = _create_code(fresh)
+    assert issued.code
+
+    records = _list_codes(fresh)
+    assert sum(1 for r in records if r.state == "EXPIRED") == MAX_OUTSTANDING_CODES_PER_STORE
+    assert sum(1 for r in records if r.state == "UNUSED") == 1
+
+
+def test_live_unredeemed_codes_still_hit_the_cap(fresh):
+    """The half that must not regress: the cap exists to stop a stuck script
+    minting live credentials for ever."""
+    from fastapi import HTTPException
+
+    from receiver_enrollment_api import MAX_OUTSTANDING_CODES_PER_STORE
+
+    for _ in range(MAX_OUTSTANDING_CODES_PER_STORE):
+        _create_code(fresh)
+    with pytest.raises(HTTPException):
+        _create_code(fresh)
+
+
+def test_a_redeemed_code_frees_a_slot(fresh):
+    """Redemption has always freed a slot; asserted here so the new expiry term
+    cannot accidentally change it."""
+    from receiver_enrollment_api import MAX_OUTSTANDING_CODES_PER_STORE
+
+    codes = [_create_code(fresh).code for _ in range(MAX_OUTSTANDING_CODES_PER_STORE)]
+    _enroll(fresh, codes[0])
+    assert _create_code(fresh).code

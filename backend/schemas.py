@@ -84,6 +84,18 @@ class LoginResponse(BaseModel):
     user: UserOut
 
 
+class WebSocketTicketRequest(BaseModel):
+    """Which socket the caller intends to open.
+
+    Required, with no default. A default audience would recreate the defect this
+    field exists to close: whichever value it fell back to would be mintable by
+    any authenticated account, and the microphone uplink is not something a
+    read-only account may open.
+    """
+
+    audience: str = Field(..., pattern="^(hq|broadcaster)$")
+
+
 class EnrollmentCodeRequest(BaseModel):
     store_id: int = Field(..., gt=0)
 

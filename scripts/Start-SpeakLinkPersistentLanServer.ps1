@@ -122,11 +122,19 @@ foreach ($name in $environment.Keys) { Set-Item -Path "Env:$name" -Value $enviro
 
 Write-Output ''
 Write-Output '  starting backend (one Uvicorn worker)...'
+# Every interpolated value below is quoted. PowerShell joins -ArgumentList with
+# spaces and does NOT quote them, so a value containing a space silently
+# truncates the argument - which is how an earlier launcher failed to start the
+# Receiver at all. There is a repository test that enforces this.
+#
+# This comment sits ABOVE the statement, and must stay there. It used to sit
+# between the backtick continuation on the Start-Process line and -ArgumentList,
+# which merges into ONE logical line - so the comment swallowed every parameter
+# after it. The file still parsed with zero errors, and PowerShell ran
+# Start-Process with -FilePath alone: a bare interactive Python REPL in a visible
+# window, no uvicorn, no --host, no --workers 1, no log redirection.
+# A '#' comment cannot follow a line continuation.
 $backend = Start-Process -FilePath $python `
-    # Every interpolated value is quoted. PowerShell joins -ArgumentList with
-    # spaces and does NOT quote them, so a value containing a space silently
-    # truncates the argument - which is how an earlier launcher failed to start
-    # the Receiver at all. There is a repository test that enforces this.
     -ArgumentList @('-m', 'uvicorn', 'server:app', '--host', "`"$HqAddress`"",
                     '--port', "`"$BackendPort`"", '--workers', '1', '--no-access-log') `
     -WorkingDirectory (Join-Path $repositoryRoot 'backend') `

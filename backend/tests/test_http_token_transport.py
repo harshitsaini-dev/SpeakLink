@@ -265,20 +265,20 @@ def test_the_hq_sockets_still_use_single_use_tickets():
 
 
 def test_a_websocket_ticket_is_still_single_use_and_expiring():
-    from ws_tickets import TicketRejected, WebSocketTicketStore, TICKET_TTL_SECONDS
+    from ws_tickets import AUDIENCE_HQ, TicketRejected, WebSocketTicketStore, TICKET_TTL_SECONDS
     from datetime import datetime, timezone
 
     base = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
     store = WebSocketTicketStore()
 
-    once = store.issue(user_id="1", now=base)
-    assert store.redeem(once, now=base) == "1"
+    once = store.issue(user_id="1", audience=AUDIENCE_HQ, now=base)
+    assert store.redeem(once, audience=AUDIENCE_HQ, now=base) == "1"
     with pytest.raises(TicketRejected):
-        store.redeem(once, now=base)
+        store.redeem(once, audience=AUDIENCE_HQ, now=base)
 
-    later = store.issue(user_id="1", now=base)
+    later = store.issue(user_id="1", audience=AUDIENCE_HQ, now=base)
     with pytest.raises(TicketRejected):
-        store.redeem(later, now=base + timedelta(seconds=TICKET_TTL_SECONDS + 1))
+        store.redeem(later, audience=AUDIENCE_HQ, now=base + timedelta(seconds=TICKET_TTL_SECONDS + 1))
 
 
 def test_the_receiver_socket_still_authenticates_by_header():
