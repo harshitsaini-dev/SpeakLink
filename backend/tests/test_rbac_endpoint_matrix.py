@@ -91,6 +91,9 @@ EXPECTED: dict[str, object] = {
     "hard_delete_user": Permission.MANAGE_USERS,
 
     # Receiver Devices: credentials, enrolment, promotion, revocation.
+    # Bounded-queue health an on-call person needs at 7am. Integers only, no
+    # payload and no credential, so VIEW_STATUS rather than a MANAGE_* right.
+    "read_audio_metrics": Permission.VIEW_STATUS,
     "create_receiver_enrollment_code": Permission.MANAGE_DEVICES,
     # Enrollment records are Device administration: a read-only account must not
     # be able to enumerate which Stores have pending or spent enrolments.

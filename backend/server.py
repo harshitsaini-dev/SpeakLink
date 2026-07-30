@@ -1527,6 +1527,33 @@ async def stop_session(sid: int, db: Session = Depends(get_db), user: HQUser = D
     return session
 
 
+@api.get("/broadcast/audio-metrics")
+def read_audio_metrics(user: HQUser = Depends(require(Permission.VIEW_STATUS))):
+    """Per-Store bounded-queue counters, so somebody can actually read them.
+
+    ``WSManager.audio_metrics()`` has existed since the bounded queues were
+    built and was reachable from nowhere - no route, no CLI, no log line. The
+    numbers that say "Store 12 is nearly dropping audio" were computed on every
+    broadcast and discarded. A metric nobody can read is a metric that does not
+    operationally exist.
+
+    ``max_depth`` is the one worth watching: ``depth`` is sampled, so a Store
+    that filled its queue and drained a moment earlier reads as zero, which is
+    indistinguishable from a Store that queued nothing at all.
+
+    VIEW_STATUS rather than MANAGE_*: this is operational health an on-call
+    person needs at 7am, and it carries integers only. No payload, no Store
+    token, no Device credential, no connection id - and a test asserts that
+    rather than trusting this docstring.
+    """
+    per_store = manager.audio_metrics()
+    return {
+        "capacity": manager.audio_fanout.capacity,
+        "store_count": len(per_store),
+        "stores": [dict(metrics) for _store_id, metrics in sorted(per_store.items())],
+    }
+
+
 @api.post("/broadcast/emergency-stop")
 async def emergency_stop(db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.EMERGENCY_STOP))):
     session = None

@@ -179,6 +179,54 @@ def _process_cost(process_id: int) -> dict:
         return {}
 
 
+def _read_audio_metrics(base_url: str, token: str) -> dict:
+    """The server's own per-Store queue counters, or an explicit absence.
+
+    Returns ``{"unavailable": "..."}`` rather than ``{}`` on failure. A load
+    report that silently shows no queue evidence reads as "the queues were fine";
+    one that says the metrics could not be read says what actually happened.
+    """
+    import requests
+
+    try:
+        response = requests.get(
+            f"{base_url}/api/broadcast/audio-metrics",
+            headers={"Authorization": f"Bearer {token}"}, timeout=15,
+        )
+    except Exception as failure:  # noqa: BLE001 - reported, never swallowed
+        return {"unavailable": failure.__class__.__name__}
+    if response.status_code != 200:
+        return {"unavailable": f"HTTP {response.status_code}"}
+    try:
+        return response.json()
+    except ValueError:
+        return {"unavailable": "the metrics response was not JSON"}
+
+
+def _summarise_queue_metrics(metrics: dict) -> dict:
+    """Fold the per-Store queue counters into the few numbers that matter."""
+    if not isinstance(metrics, dict) or "stores" not in metrics:
+        return {"unavailable": (metrics or {}).get("unavailable", "not collected")}
+    stores = metrics.get("stores") or []
+    if not stores:
+        return {"stores_measured": 0, "note": "no queue existed when sampled"}
+    return {
+        "stores_measured": len(stores),
+        "capacity": metrics.get("capacity"),
+        "max_depth_observed": max(s.get("max_depth", 0) for s in stores),
+        "max_depth_by_store": {s["store_id"]: s.get("max_depth", 0) for s in stores},
+        "dropped_total": sum(s.get("dropped", 0) for s in stores),
+        "dropped_by_store": {s["store_id"]: s.get("dropped", 0) for s in stores},
+        "delivered_total": sum(s.get("delivered", 0) for s in stores),
+        "enqueued_total": sum(s.get("enqueued", 0) for s in stores),
+        # The property the whole design rests on. If this is ever False the
+        # bounded queue is not bounded, and that is a P0, not a note.
+        "every_queue_within_capacity": all(
+            s.get("max_depth", 0) <= s.get("capacity", 0) for s in stores
+        ),
+    }
+
+
 def _store_credentials(database_path: Path, count: int) -> list[tuple[int, str, str]]:
     connection = _read_only_connection(database_path)
     try:
@@ -264,8 +312,18 @@ async def _drive(paths, store_count: int, port: int, backend_pid: int, fixture: 
             open_timeout=20, max_size=4 * 1024 * 1024,
         ) as uplink:
             await uplink.send(json.dumps({"type": "init", "mime": "audio/webm;codecs=opus"}))
-            for chunk in chunks:
+            queue_metrics = {"unavailable": "never sampled"}
+            for index, chunk in enumerate(chunks):
                 await uplink.send(chunk)
+                # Sampled MID-BROADCAST, on purpose. Reading after the uplink
+                # closes measures nothing: closing it ends the session, which
+                # calls stop_audio_fanout() and removes every queue - correct
+                # behaviour that leaves nothing to look at. The first version of
+                # this sampled afterwards and reported "no queue existed when
+                # sampled", which is why the absence is spelled out rather than
+                # reported as a row of zeros.
+                if index == len(chunks) // 2:
+                    queue_metrics = _read_audio_metrics(base_url, token)
                 await asyncio.sleep(CHUNK_INTERVAL_SECONDS)
 
         # Let the fan-out drain before measuring.
@@ -312,6 +370,12 @@ async def _drive(paths, store_count: int, port: int, backend_pid: int, fixture: 
             "backend_rss_mb_after": round(cost_after.get("rss", 0) / 1048576, 1) if cost_after else None,
             "receiver_errors": sum(len(r.errors) for r in receivers),
             "explicit_stop_http": stop_status,
+            # Server-side truth about the bounded queues, sampled while live.
+            # Distinct from dropped_chunks_total above, which is what the
+            # Receivers noticed missing - the two answer different questions and
+            # a report that conflated them would be guessing at the difference.
+            "server_queue_metrics": _summarise_queue_metrics(queue_metrics),
+            "queues_after_stop": _read_audio_metrics(base_url, token),
         }
     finally:
         for task in tasks:
