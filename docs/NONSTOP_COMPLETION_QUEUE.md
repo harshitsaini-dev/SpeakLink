@@ -154,6 +154,7 @@ Commits `da9c0e8` (Receiver status file), `ed4b58b` (store_setup_core.py),
 | store_setup_core.py (connection/enrolment/audio/install logic) | `AUTOMATED PASS` | 25 tests, no GUI import |
 | store_setup_gui.py (4 screens + Rerun) | `IN PROGRESS` | 13 tests; Rerun screen buttons are placeholders except Replace Device Identity |
 | SpeakLinkStoreSetup.exe | `AUTOMATED PASS` | PE subsystem 2, started and showed a real window titled "SpeakLink Store Setup" |
+| Receiver package location (Phase 1 of this sprint) | `AUTOMATED PASS` | locate_verified_receiver_package(); built SpeakLinkReceiver-1.0.0-7e6d704, verified 2 ways (PowerShell 20+ checks + Python locator) |
 | StoreSetup package (Build-/Test-SpeakLinkStoreSetupPackage.ps1) | `NOT STARTED` | |
 | Store task/recovery automated tests (Phase 2 of the sprint brief) | `NOT STARTED` | |
 | Receiver enrollment status evidence, USED state (Phase 3) | `NOT STARTED` | |
@@ -164,9 +165,9 @@ Commits `da9c0e8` (Receiver status file), `ed4b58b` (store_setup_core.py),
 
 ### What "install" cannot yet do end to end
 
-`InstallScreen` calls `run_receiver_installer` with `-PackagePath artifacts/receiver-package`, which does not exist yet - `Build-SpeakLinkReceiver.ps1`
-has never been pointed at `artifacts/` in this branch. Wiring a real Store
-enrollment through the wizard needs a Receiver package built there first.
+**RESOLVED.** `InstallScreen` now calls `core.locate_verified_receiver_package()`, which finds the newest `SpeakLinkReceiver-*` package under `artifacts/` and re-verifies it independently (PE subsystems, every hash, no forbidden file) before installing from it. A real package was built (`SpeakLinkReceiver-1.0.0-7e6d704-20260730-124134`) and verified both by `Test-SpeakLinkReceiverPackage.ps1` (20+ checks) and the new locator. `Build-SpeakLinkReceiver.ps1` itself had never been run end to end on this branch and its PyInstaller call aborted on PyInstaller's own stderr under PowerShell's ErrorActionPreference=Stop - fixed the same way every other chatty native-command call in this repository already is.
+
+A real end-to-end enrollment through the wizard against a running HQ instance has still not been run - that needs a live HQ to enrol against, which is an operator/network setup step beyond this sprint's automatable scope.
 
 ### Rerun screen buttons not yet wired
 

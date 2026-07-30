@@ -2352,3 +2352,67 @@ task/recovery tests, Receiver enrolment status evidence (USED state),
 audio/WebSocket/queue audit, `docs/SECURITY_AUDIT.md`, load tests and the final
 Release Candidate artifacts are all `NOT STARTED` - see
 [docs/NONSTOP_COMPLETION_QUEUE.md](docs/NONSTOP_COMPLETION_QUEUE.md).
+
+---
+
+## 2026-07-30 (2) — StoreSetup points at a real, verified Receiver package
+
+Commits: `7e6d704`, `7f5cc76`.
+
+### The gap: a placeholder path that read correctly and pointed at nothing
+
+`InstallScreen` called the Receiver installer with
+`-PackagePath artifacts\receiver-package` - a path that has never existed on
+this branch. It would have failed the first time anyone actually clicked
+Install, which is the exact "looks finished" pattern this project keeps
+finding: code that reads correctly and was never run.
+
+`locate_verified_receiver_package()` finds the newest `SpeakLinkReceiver-*`
+package `Build-SpeakLinkReceiver.ps1` already produces under `artifacts/`, and
+does not trust it by name or recency - each candidate is independently
+re-verified: both PE subsystems read from the file (`WINDOWS_GUI` for the
+background executable, `WINDOWS_CUI` for the console one), every file against
+`SHA256SUMS.txt`, and a scan for anything that must never ship (`.env`, a
+database, `server.py`, a key). A newer package that fails any check is skipped
+in favour of an older one that passes - never installed because it sorted
+first. This is a second, independent check inside the process about to
+install from the package, not a replacement for
+`Test-SpeakLinkReceiverPackage.ps1`, which stays the authoritative build-time
+gate.
+
+### A second defect, found only by actually building the package
+
+`Build-SpeakLinkReceiver.ps1` had apparently never been run end to end on this
+branch. PyInstaller writes its own progress to stderr, and under
+`$ErrorActionPreference = 'Stop'` - set for this whole script, like every
+script in this repository - Windows PowerShell 5.1 treats any stderr text from
+a native command as a terminating error, even when the process later exits 0.
+The build aborted on PyInstaller's first INFO line. Fixed the same way every
+other chatty native-command call in this repository already handles it:
+`ErrorActionPreference` flipped to `Continue` for exactly that call,
+`$LASTEXITCODE` checked by hand afterward.
+
+### Built and verified, two independent ways
+
+```
+SpeakLinkReceiver-1.0.0-7e6d704-20260730-124134
+  Test-SpeakLinkReceiverPackage.ps1   SPEAKLINK_RECEIVER_PACKAGE_VERIFIED (20+ checks)
+  locate_verified_receiver_package() chose it without special-casing
+```
+
+### Gate
+
+```
+full backend suite      1986 passed, 2 skipped, 0 FAILED   (was 1967)
+compileall               exit 0
+receiver package tests   18 passed (backend/tests/test_store_setup_receiver_package.py)
+```
+
+### Not claimed
+
+A real end-to-end enrollment through the wizard against a running HQ instance
+has not been run - that needs a live HQ to enrol against. The Rerun screen's
+placeholder buttons, Store task/recovery tests, enrolment USED-state evidence,
+the audio/WebSocket/queue audit, the security audit document, load tests and
+the final Release Candidate artifacts remain `NOT STARTED` - see
+[docs/NONSTOP_COMPLETION_QUEUE.md](docs/NONSTOP_COMPLETION_QUEUE.md).
