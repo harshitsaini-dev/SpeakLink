@@ -376,7 +376,14 @@ chain:
 8C858B13…  original
 EEF1EA79…  + four additive user-lifecycle columns
 8A7E3413…  + session_version, + the owneradmin row
+9F155E1D…  exposed ADMIN password replaced, session_version 1 → 2
 ```
+
+The fourth entry is the one worth studying, because it is the first that was not
+a schema change. The size stayed at 507904 bytes through all four. When the
+fourth one was checked, the size assertion **passed** and only the hash failed —
+a password change rewrites one row in place. A guard that had checked size alone
+would have reported the database as untouched while a credential inside it moved.
 
 with what moved each one, and two tests: the chain contains no repeated entry,
 and the current value is the newest rather than an older one pasted back.

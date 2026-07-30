@@ -2128,7 +2128,9 @@ The P0 is closed in code and the persistent server now exists on disk.
 | verification | `ECHOCAST_PERSISTENT_SERVER_VERIFIED`, 11/11 |
 
 Protected baseline rebaselined a second time under every authorized condition:
-`8C858B13… → EEF1EA79… → 8A7E3413…`. The whole chain is in
+`8C858B13… → EEF1EA79… → 8A7E3413…` (a third, `→ 9F155E1D…`, followed on
+2026-07-30 for the credential-incident remediation — see the incident section
+below). The whole chain is in
 `BASELINE_HISTORY` with what moved it, and two tests now prevent a value being
 pasted over history instead of appended to it. `admin`'s password-hash
 fingerprint is unchanged, so the existing account was preserved rather than
@@ -2717,3 +2719,94 @@ protected database       8A7E3413...B1A547CA unchanged, integrity ok, no sidecar
 **NOT `GREEN_FOR_MANUAL_TWO_STORE_ACCEPTANCE`.** Every automated gate is green
 except one, and that one is telling the truth about a live credential in the
 working tree. Rotate the secret, remove the archive, and the verdict follows.
+
+---
+
+## 2026-07-30 — Credential incident: remediation verified, protected baseline moved
+
+The archive found by the security audit held a live `JWT_SECRET`, `ADMIN_USERNAME`
+and `ADMIN_PASSWORD`. Remediation was carried out by the operator, one action at a
+time, with every step verified afterwards from the files rather than from the
+report.
+
+### What was actually exposed, and what was not
+
+| Credential | Exposed | Action |
+| --- | --- | --- |
+| `backend/.env` `JWT_SECRET` | yes | rotated — fingerprint `05902bbbbf87` → `275f08985899` |
+| `ADMIN` password | yes, verified against **both** databases | changed in both, offline |
+| Persistent HQ `jwt-secret.txt` | **no** — `01fe26c76c5a`, minted later by `hq_runtime` | not rotated |
+| `OWNER` password | **no** — archived username fingerprint `3d9a13ea8e39` ≠ live `5e1bb91bcea8` | not changed |
+| Receiver Device credentials | no | not rotated |
+
+Two of those five rows correct an earlier version of this report. Both were wrong
+in the same direction: they assumed a secret that *appeared* in the archive was
+the one in use. Fingerprint comparison, not inspection, settled each one.
+
+### Both password changes, proven from the backups
+
+`tools/change_hq_user_password.py` takes a SQLite-backup-API copy before it
+writes. Both copies were compared against the live files afterwards, every open
+through `mode=ro&immutable=1`:
+
+```
+                          protected                persistent
+integrity before/after    ok / ok                  ok / ok
+schema, table list        identical                identical
+changed rows              hq_users id 1 only       hq_users id 1 only
+changed columns           password_hash,           password_hash,
+                          session_version          session_version
+admin session_version     1 -> 2                   1 -> 2
+admin id/username/role    1 / admin / ADMIN, unchanged (both)
+admin lifecycle/active    active / 1, unchanged (both)
+exposed password verifies  no                      no
+owneradmin (OWNER)        every column unchanged, session_version still 1 (both)
+stores                    13, rows byte-identical (both)
+sessions / targets        17 / 175 unchanged (both)
+receiver_events / logs    3014 / 194 unchanged (both)
+sidecars                  none on any of the four files
+SHA-256 after             9F155E1D...D993AE523     E4808707...A00F641EF
+```
+
+The exposed password was read out of the archive in memory for that check, so
+"no longer verifies" is a real bcrypt comparison rather than an assumption. It
+was never printed and never asked for.
+
+### Two things the pass list did not actually prove
+
+**`receiver_devices` and `receiver_enrollment_codes` do not exist in either
+database.** Both are created by `backend/migrations.py`, which has never run
+against either file — `receiver_enrollment_codes` and `login_security_state` are
+in `models.py` but absent here too. So "Device rows unchanged" and "enrollment
+records unchanged" hold because there is nothing to change: neither database holds
+a single Device row or Receiver credential. No re-enrollment is required, for that
+reason and not because rows were compared. The first version of the comparison
+script skipped those tables silently and printed nothing for them, which reads as
+coverage. That is the failure mode this project keeps finding.
+
+**The pre-change backups are not byte-identical to the recorded baseline** —
+`63BEC580…` against `8A7E3413…`. That is correct and expected: `source.backup()`
+writes a fresh database with its own page layout, so a backup can prove the
+*logical* pre-change state and never the byte state. The byte baseline is carried
+by the chain in `BASELINE_HISTORY`, confirmed unchanged at `8A7E3413…` by the gate
+run at `a6b69b6`, immediately before the operator's change. Both backups sharing
+one hash is the same effect: two logically identical databases, each rewritten by
+the backup API.
+
+### Baseline moved: `8A7E3413…` → `9F155E1D…`
+
+The size stayed at **507904 bytes**. On the failing run the size assertion passed
+and only the hash caught it — a password change rewrites one row in place. Hashing
+as well as sizing is the only reason this was visible at all.
+
+`test_the_remediated_admin_session_version_did_not_go_backwards` was added
+alongside. The hash guard would notice a restore from a pre-remediation backup,
+but only as "the hash moved", which reads like any other schema change and invites
+another rebaseline. The new test says the specific thing: `session_version` only
+counts up, it reached 2 here, and below 2 means the exposed password works again.
+
+### Still open
+
+`echocast-live.zip` is still in the working tree, so
+`test_no_secret_archives_in_tree` is still correctly RED. Removal needs explicit
+operator approval and has not been requested yet.

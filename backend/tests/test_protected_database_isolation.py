@@ -253,30 +253,50 @@ def test_the_worker_database_is_outside_the_repository():
 # ===========================================================================
 # 6. The protected file set, unchanged
 # ===========================================================================
-#: The current accepted baseline, rebaselined on 2026-07-29 by operator decision.
+#: The current accepted baseline, rebaselined on 2026-07-30 by operator decision
+#: as the final step of the credential incident.
 #:
 #: The previous value is kept below rather than deleted. A baseline that is
 #: quietly overwritten every time it fails is not a baseline; keeping the old one
 #: means the next person can see that it moved, when, and on whose say-so.
-PROTECTED_BASELINE_SHA256 = "8A7E341365626BE67727156D84EE57B704B83E9F73CEC954CFC52A2FB1A547CA"
+PROTECTED_BASELINE_SHA256 = "9F155E1DB7ABB22EABF1F5F2BA1E76151903F5C3E76E3F5D963FC03D993AE523"
 PROTECTED_BASELINE_SIZE = 507904
 
 #: What it was before, and why it changed.
 #:
-#: The schema gained four additive user-lifecycle columns - lifecycle_state,
-#: display_name, disabled_at, archived_at - from a migration that ran against
-#: this database. No row was deleted and no password hash was touched, but an
-#: ALTER TABLE rewrites the file, so the hash moved while the size did not.
+#: THE EXPOSED ADMIN PASSWORD WAS REMEDIATED. An archive in the repository root
+#: held the live ADMIN password, and it verified against this database. The
+#: operator changed it offline through tools/change_hq_user_password.py, which
+#: writes password_hash and session_version in one transaction - so every session
+#: minted under the exposed password is invalid, not merely discouraged.
 #:
-#: Verified before the operator accepted it:
-#:   PRAGMA integrity_check : ok
-#:   hq_users               : 1 row, username 'admin', role 'admin', active
-#:   stores                 : 13
-#:   broadcast_sessions     : 17
-#:   system_logs            : 194
+#: The size did not move, which is the whole argument for hashing as well as
+#: sizing: a password change rewrites a single row in place. The failing run
+#: before this rebaseline asserted the size successfully and only the hash
+#: caught it.
+#:
+#: Verified before the operator accepted it, by comparing this file against the
+#: consistent pre-change backup at
+#: ~/echocast-database-backups/echocast_live-before-password-change-20260730-113113.db
+#: through mode=ro&immutable=1 on both sides:
+#:   PRAGMA integrity_check : ok, on the backup and on this file
+#:   schema and table list  : identical
+#:   changed rows           : exactly one - hq_users id 1, username 'admin'
+#:   changed columns        : exactly password_hash and session_version
+#:   admin session_version  : 1 -> 2
+#:   admin id/username/role : 1 / 'admin' / 'ADMIN', unchanged
+#:   admin lifecycle/active : 'active' / 1, unchanged
+#:   exposed password       : no longer verifies against the stored hash
+#:   owneradmin (OWNER)     : every column unchanged, session_version still 1
+#:   stores                 : 13, rows byte-identical
+#:   broadcast_sessions     : 17     broadcast_targets: 175
+#:   receiver_events        : 3014   system_logs      : 194
+#:   receiver_devices       : table absent from this database - the migration in
+#:                            backend/migrations.py has never run against it, so
+#:                            it holds no Device row and no Receiver credential
 #:   plaintext password col : none
-#: and a consistent SQLite-backup-API copy exists under backups/.
-PREVIOUS_BASELINE_SHA256 = "EEF1EA79BC901A989AE0E73D1F4882F6517844436139E981EB9051839DD70D51"
+#:   sidecars               : none, before or after
+PREVIOUS_BASELINE_SHA256 = "8A7E341365626BE67727156D84EE57B704B83E9F73CEC954CFC52A2FB1A547CA"
 
 #: The whole chain, kept so nobody has to reconstruct it from commit messages.
 #:
@@ -286,22 +306,19 @@ PREVIOUS_BASELINE_SHA256 = "EEF1EA79BC901A989AE0E73D1F4882F6517844436139E981EB90
 #:   EEF1EA79…9DD70D51  accepted 2026-07-29
 #:     -> tools/create_owner.py ran successfully: hq_users.session_version added
 #:        by ensure_rbac_schema, and one row inserted for owneradmin
-#:   8A7E3413…B1A547CA  accepted 2026-07-29, current
+#:   8A7E3413…B1A547CA  accepted 2026-07-29
+#:     -> the exposed ADMIN password was changed offline by the operator through
+#:        tools/change_hq_user_password.py: hq_users id 1 password_hash rewritten
+#:        and session_version 1 -> 2, in one transaction. Credential-incident
+#:        remediation, not a schema change.
+#:   9F155E1D…D993AE523  accepted 2026-07-30, current
 #:
-#: Verified before accepting the current value:
-#:   PRAGMA integrity_check : ok
-#:   hq_users               : exactly 2 - admin (ADMIN) and owneradmin (OWNER),
-#:                            both active. admin's password-hash fingerprint is
-#:                            unchanged from the previous baseline, so the
-#:                            existing account was preserved rather than rewritten
-#:   stores / sessions / logs : 13 / 17 / 194, all unchanged
-#:   plaintext password col : none - only password_hash
-#:   consistent backups     : backups/echocast_live-20260729-160359.db and
-#:                            persistent-lan-server/backups/source-20260729-190540.db
+#: Every entry so far moved the hash while leaving the size at 507904.
 BASELINE_HISTORY = (
     "8C858B132907DC72180A134D4981C5E8C4BBC03D190D7370B3823DB2BD2EF2AB",
     "EEF1EA79BC901A989AE0E73D1F4882F6517844436139E981EB9051839DD70D51",
     "8A7E341365626BE67727156D84EE57B704B83E9F73CEC954CFC52A2FB1A547CA",
+    "9F155E1DB7ABB22EABF1F5F2BA1E76151903F5C3E76E3F5D963FC03D993AE523",
 )
 
 
@@ -344,6 +361,40 @@ def test_the_baseline_actually_moved_rather_than_being_edited_in_place():
     of recording the previous hash is that it is different from the current one.
     """
     assert PROTECTED_BASELINE_SHA256 != PREVIOUS_BASELINE_SHA256
+
+
+def test_the_remediated_admin_session_version_did_not_go_backwards():
+    """The credential incident is not allowed to un-happen quietly.
+
+    The baseline hash above would catch a restore from a pre-remediation backup,
+    but only as "the hash moved" - which reads like any other schema change and
+    invites another rebaseline. This says the specific thing out loud: ADMIN's
+    session_version reached 2 when the exposed password was replaced, and
+    session_version only ever counts up. If it is ever below 2 again, an old copy
+    of this database is in place and the exposed password works once more.
+    """
+    import sqlite3
+
+    if not PROTECTED_DATABASE.exists():
+        pytest.skip("no protected database on this machine")
+
+    # immutable=1 as well as mode=ro. mode=ro alone still builds the shared-memory
+    # index a WAL database wants, and creating it is a file creation - which is
+    # exactly what the sidecar test below forbids.
+    uri = f"file:{PROTECTED_DATABASE.as_posix()}?mode=ro&immutable=1"
+    connection = sqlite3.connect(uri, uri=True)
+    try:
+        row = connection.execute(
+            "SELECT session_version FROM hq_users WHERE username = 'admin'"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert row is not None, "the admin account is missing from the protected database"
+    assert row[0] >= 2, (
+        f"admin session_version is {row[0]}, expected at least 2. This database "
+        "predates the 2026-07-30 exposed-password remediation."
+    )
 
 
 def test_no_sidecar_exists_beside_the_protected_database():
