@@ -11,7 +11,7 @@
 | Python | 3.12.10 |
 | Backend | Uvicorn, **one worker** |
 | Database | temporary SQLite per level, fresh pilot root per level |
-| Protected database | never opened — `8A7E3413…B1A547CA` unchanged |
+| Protected database | never opened — `8A7E3413…B1A547CA` unchanged at the time of this run. That baseline moved to `9F155E1D…D993AE523` on 2026-07-30 for the exposed-password remediation; the load runs never touched it either way. |
 
 ---
 

@@ -191,3 +191,10 @@ Even with all eight green:
   recording above is a human hearing something, which is more than the software
   can claim and less than acoustic verification.
 - **Anything about the other 43 Stores.**
+- **Two Receiver computers in one Store.** These eight cover a single Receiver.
+  Primary + standby has its own acceptance — Part E2 of
+  [PRIVATE_LAN_TWO_DESKTOP_TEST_RUNBOOK.md](PRIVATE_LAN_TWO_DESKTOP_TEST_RUNBOOK.md)
+  — and until that is signed off a Store must run **one** Receiver. The automated
+  tests for primary/standby health run on a fake socket; they prove the routing and
+  cannot prove two machines. The specific thing to catch is a Store that stays
+  green on the HQ page while its primary computer is switched off.

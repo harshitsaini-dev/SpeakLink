@@ -39,6 +39,9 @@ Playwright Chromium 128 passed (twice), `yarn build` succeeds,
 | User lifecycle: create, edit, disable, enable, archive, restore | `COMPLETE` | `user_lifecycle.py`; 44 tests. Never deleted — a User is the author of broadcast history |
 | Last-SUPER_ADMIN and self-action lock-out rules | `COMPLETE` | The last active SUPER_ADMIN cannot be disabled, archived or demoted; nobody may switch off their own account. A disabled or archived SUPER_ADMIN does not count as cover |
 | Password change and administrator reset | `COMPLETE` | Current password required; a reset returns nothing reusable — no echoed password, no link, no token |
+| **Offline password change, no running server** | `COMPLETE` | `tools/change_hq_user_password.py`; 31 tests. Added during the 2026-07-30 credential incident, when it turned out nothing could change a password without a running server and a signed-in session. getpass only — no flag, environment variable, file or stdin accepts a password; two named targets, no free-form path; refuses while a backend appears to be running, because a live server keeps serving sessions minted under the old password |
+| **JWT secret rotation** | `COMPLETE` | `tools/rotate_jwt_secret.py`; 35 tests. Atomic write, redacted backup outside the repository, fingerprints only — never the value |
+| **Secrets in ignored archives** | `COMPLETE` | `test_no_secret_archives_in_tree`; the 2026-07-30 P0 was invisible to every existing scan because they all walk `git ls-files` and the archive was gitignored. This one walks the disk |
 | Immediate session revocation | `COMPLETE` | `session_version` bumped by disable, archive, role change, password change and reset; existing JWTs fail on their next request. Renaming somebody deliberately does not sign them out |
 | RBAC enforced at the endpoint, not by hidden buttons | `COMPLETE` | 43 endpoint tests calling as the wrong role and expecting 403; `test_rbac_endpoint_matrix` walks the routing table and fails on any undeclared authenticated route |
 | User responses carry no hash, session counter or token | `COMPLETE` | Response models written field by field, so adding a column cannot start publishing it. Asserted in both the backend suite and Playwright |
@@ -89,7 +92,8 @@ Playwright Chromium 128 passed (twice), `yarn build` succeeds,
 | Honest play status | `COMPLETE` | `f533c06`; command-sent is never shown as Playing |
 | Two Stores on real hardware | `NOT_IMPLEMENTED` | 1 of 44 Stores tested |
 | Store vs Device status separation | `COMPLETE` | `6147d6e`; two Devices in one Store are two inventory records; the Store aggregate follows the primary, not the best of its Devices |
-| Primary / standby Device policy | `COMPLETE` | `6147d6e`; one primary enforced by a PRIMARY KEY, not by check-then-write; standby receives zero chunks — measured in the staging smoke at 17 chunks to the primary and 0 to a genuinely connected standby |
+| Primary / standby Device policy | `TESTED_AUTOMATICALLY` | `6147d6e`; one primary enforced by a PRIMARY KEY, not by check-then-write; standby receives zero chunks — measured in the staging smoke at 17 chunks to the primary and 0 to a genuinely connected standby |
+| Primary / standby **health attribution** | `TESTED_AUTOMATICALLY` | `3c3d945`; 16 tests. Audio isolation was always right; health was not — a standby's acks landed in the Store snapshot, so a standby heartbeat kept a switched-off primary reading online. Was recorded as one defect, was four. **Do not run a Store with primary + standby simultaneously until the two-machine manual acceptance passes** |
 | No silent failover | `COMPLETE` | `6147d6e`; disabling or revoking the primary clears the role and promotes nothing; the dashboard warns instead |
 | Synthetic load with Device credentials | `NOT_IMPLEMENTED` | `tools/load_test_receivers.py` still drives legacy Store tokens only. The 5/10/20/40 figures below predate the Device model |
 
