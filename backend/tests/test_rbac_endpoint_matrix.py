@@ -92,6 +92,9 @@ EXPECTED: dict[str, object] = {
 
     # Receiver Devices: credentials, enrolment, promotion, revocation.
     "create_receiver_enrollment_code": Permission.MANAGE_DEVICES,
+    # Enrollment records are Device administration: a read-only account must not
+    # be able to enumerate which Stores have pending or spent enrolments.
+    "list_receiver_enrollment_codes": Permission.MANAGE_DEVICES,
     "list_receiver_devices": Permission.MANAGE_DEVICES,
     "read_receiver_device": Permission.MANAGE_DEVICES,
     "read_receiver_device_roles": Permission.MANAGE_DEVICES,

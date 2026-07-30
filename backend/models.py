@@ -93,6 +93,12 @@ class ReceiverEnrollmentCode(Base):
     created_at = Column(DateTime, default=utcnow, nullable=False)
     expires_at_epoch = Column(Float, nullable=False)
     redeemed_at_epoch = Column(Float, nullable=True)
+    #: Which Device the redemption produced. NULL means "not recorded" - never
+    #: "no Device" - because every code redeemed before this column existed has
+    #: no link. Deliberately the public id rather than a foreign key: it is what
+    #: the API already exposes, it never changes, and keeping the row after a
+    #: Device is deleted preserves the audit trail rather than erasing it.
+    device_public_id = Column(String(36), nullable=True)
 
 
 class LoginSecurityState(Base):
