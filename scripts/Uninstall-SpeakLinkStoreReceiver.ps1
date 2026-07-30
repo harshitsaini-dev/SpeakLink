@@ -99,6 +99,13 @@ if ($RemoveCredential -and (Test-Path $credentialPath)) {
     Write-Output '  WARNING: removing the Device credential UN-ENROLS this Store.'
     Write-Output '           Getting it back needs an administrator at HQ to issue a'
     Write-Output '           fresh one-time code and somebody here to type it.'
+    # The same sentence receiver_agent.remove_local_credential already prints.
+    # It was missing here, which is how an operator ends up with a Device that
+    # HQ still lists as enrolled and that will never connect again - a Store
+    # that looks fine on the dashboard and is silent.
+    Write-Output '           The Device is NOT revoked at HQ. Ask an administrator to'
+    Write-Output '           revoke it, or it stays listed as enrolled while never'
+    Write-Output '           connecting again.'
     if ($PSCmdlet.ShouldProcess($credentialPath, 'Remove the Device credential')) {
         Remove-Item $credentialPath -Force
         Write-Output '  Device credential removed - this Store is no longer enrolled'
