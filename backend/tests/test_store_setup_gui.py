@@ -384,3 +384,26 @@ def test_uninstall_with_nothing_typed_does_nothing(tmp_path, monkeypatch):
         assert called == [], "uninstall ran without a typed confirmation"
     finally:
         application.destroy()
+
+
+def test_every_tk_variable_has_an_explicit_master():
+    """FOUND BY THE PARALLEL SUITE, NOT BY THIS FILE ALONE.
+
+    tk.StringVar() with no master binds to tkinter's module-global
+    _default_root. In production there is one root, so it works; across
+    repeated root creation - which is what an xdist worker running this file
+    does - _default_root can point at a destroyed interpreter, and the NEXT
+    StoreSetupApp() fails inside tk.Tk() itself. It surfaced as an
+    intermittent setup error on an unrelated test, in the full suite only,
+    never in this file on its own.
+
+    Every variable is owned by the widget that uses it now, so none of them
+    depend on a global at all.
+    """
+    import re
+    from pathlib import Path as _Path
+
+    source = (_Path(REPOSITORY_ROOT) / "tools" / "store_setup_gui.py").read_text(encoding="utf-8")
+    masterless = re.findall(r"tk\.(?:String|Boolean|Int|Double)Var\((?!master=)", source)
+    assert masterless == [], (
+        f"{len(masterless)} Tk variable(s) rely on tkinter's global default root")

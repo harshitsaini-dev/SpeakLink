@@ -123,23 +123,23 @@ class ConnectionScreen(ttk.Frame):
 
         ttk.Label(self, text="Connect to HQ", font=("Segoe UI", 14, "bold")).pack(pady=12)
         ttk.Label(self, text="HQ URL").pack(anchor="w", padx=24)
-        self.url_var = tk.StringVar(value=app.state_data["backend_url"])
+        self.url_var = tk.StringVar(master=self, value=app.state_data["backend_url"])
         ttk.Entry(self, textvariable=self.url_var, width=48).pack(padx=24, pady=4)
 
-        self.advanced_visible = tk.BooleanVar(value=False)
+        self.advanced_visible = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(self, text="Advanced settings", variable=self.advanced_visible,
                         command=self._toggle_advanced).pack(anchor="w", padx=24)
 
         self.advanced_frame = ttk.Frame(self)
         ttk.Label(self.advanced_frame, text="Expected HQ host (private LAN only)").pack(anchor="w")
-        self.host_var = tk.StringVar()
+        self.host_var = tk.StringVar(master=self)
         ttk.Entry(self.advanced_frame, textvariable=self.host_var, width=32).pack(anchor="w")
-        self.allow_lan_var = tk.BooleanVar(value=False)
+        self.allow_lan_var = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(self.advanced_frame,
                         text="Allow plain HTTP to this private LAN address",
                         variable=self.allow_lan_var).pack(anchor="w", pady=4)
 
-        self.status_var = tk.StringVar(value="")
+        self.status_var = tk.StringVar(master=self, value="")
         ttk.Label(self, textvariable=self.status_var, wraplength=480).pack(pady=8, padx=24)
 
         button_row = ttk.Frame(self)
@@ -199,18 +199,18 @@ class EnrolmentScreen(ttk.Frame):
 
         code_row = ttk.Frame(self)
         code_row.pack(padx=24, pady=4, anchor="w")
-        self.code_var = tk.StringVar()
+        self.code_var = tk.StringVar(master=self)
         self.code_entry = ttk.Entry(code_row, textvariable=self.code_var, width=32, show="*")
         self.code_entry.pack(side="left")
-        self.show_var = tk.BooleanVar(value=False)
+        self.show_var = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(code_row, text="Show", variable=self.show_var,
                         command=self._toggle_show).pack(side="left", padx=6)
 
         ttk.Label(self, text="Device name").pack(anchor="w", padx=24, pady=(8, 0))
-        self.device_name_var = tk.StringVar(value=app.state_data["device_name"])
+        self.device_name_var = tk.StringVar(master=self, value=app.state_data["device_name"])
         ttk.Entry(self, textvariable=self.device_name_var, width=32).pack(padx=24, pady=4)
 
-        self.status_var = tk.StringVar(value="")
+        self.status_var = tk.StringVar(master=self, value="")
         ttk.Label(self, textvariable=self.status_var, wraplength=480).pack(pady=8, padx=24)
 
         button_row = ttk.Frame(self)
@@ -290,16 +290,16 @@ class AudioScreen(ttk.Frame):
             ttk.Label(self, text=f"Could not list audio devices: {failure}",
                      wraplength=480).pack(pady=8)
 
-        self.selected = tk.StringVar()
+        self.selected = tk.StringVar(master=self)
         for classified in self.outputs:
             label = f"[{classified.kind.value}] {classified.device.name}"
             ttk.Radiobutton(self, text=label, variable=self.selected,
                            value=classified.device.selector).pack(anchor="w", padx=24)
 
-        self.status_var = tk.StringVar(value="")
+        self.status_var = tk.StringVar(master=self, value="")
         ttk.Label(self, textvariable=self.status_var, wraplength=480).pack(pady=8, padx=24)
 
-        self.heard_var = tk.BooleanVar(value=False)
+        self.heard_var = tk.BooleanVar(master=self, value=False)
         self.heard_check = ttk.Checkbutton(
             self, text="I heard the test sound from the intended Store output",
             variable=self.heard_var, state="disabled", command=self._on_heard_toggle)
@@ -359,7 +359,7 @@ class InstallScreen(ttk.Frame):
 
         ttk.Label(self, text="Install the Receiver",
                  font=("Segoe UI", 14, "bold")).pack(pady=12)
-        self.status_var = tk.StringVar(value="Ready to install.")
+        self.status_var = tk.StringVar(master=self, value="Ready to install.")
         ttk.Label(self, textvariable=self.status_var, wraplength=480,
                  justify="left").pack(pady=8, padx=24)
 
@@ -431,7 +431,7 @@ class RerunScreen(ttk.Frame):
             f"Store: {existing.store_id}\n\n{existing.detail}"
         ), wraplength=480, justify="left").pack(pady=8, padx=24)
 
-        self.status_var = tk.StringVar(value="")
+        self.status_var = tk.StringVar(master=self, value="")
         ttk.Label(self, textvariable=self.status_var, wraplength=480,
                  justify="left").pack(pady=6, padx=24)
 
@@ -447,7 +447,7 @@ class RerunScreen(ttk.Frame):
         ttk.Label(confirm_row,
                  text=f"To Uninstall or Replace Device Identity, type the "
                       f"confirmation word first:").pack(anchor="w")
-        self.confirm_var = tk.StringVar(value="")
+        self.confirm_var = tk.StringVar(master=self, value="")
         ttk.Entry(confirm_row, textvariable=self.confirm_var, width=24).pack(anchor="w", pady=2)
 
         button_row = ttk.Frame(self)
@@ -672,16 +672,16 @@ class _AudioOutputDialog(tk.Toplevel):
             ttk.Label(self, text=f"Could not list audio devices: {failure}",
                      wraplength=420).pack(pady=8)
 
-        self.selected = tk.StringVar()
+        self.selected = tk.StringVar(master=self)
         for classified in self.outputs:
             label = f"[{classified.kind.value}] {classified.device.name}"
             ttk.Radiobutton(self, text=label, variable=self.selected,
                            value=classified.device.selector).pack(anchor="w", padx=16)
 
-        self.status_var = tk.StringVar(value="")
+        self.status_var = tk.StringVar(master=self, value="")
         ttk.Label(self, textvariable=self.status_var, wraplength=420).pack(pady=6, padx=16)
 
-        self.heard_var = tk.BooleanVar(value=False)
+        self.heard_var = tk.BooleanVar(master=self, value=False)
         self.heard_check = ttk.Checkbutton(
             self, text="I heard the test sound from the intended Store output",
             variable=self.heard_var, state="disabled")
