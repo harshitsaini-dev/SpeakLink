@@ -357,3 +357,82 @@ def test_the_rotated_value_is_readable_by_dotenv_exactly_as_generated(tmp_path):
             f"dotenv read {parsed!r} but the file holds {stripped!r} "
             f"(original style: {original!r})")
         assert len(parsed) >= 43, "the secret lost characters through quoting"
+
+
+# ===========================================================================
+# CRLF: the real file's line endings
+# ===========================================================================
+CRLF_SAMPLE = (
+    'MONGO_URL="mongodb://x"\r\n'
+    'DB_NAME="test_database"\r\n'
+    'JWT_SECRET="old-exposed-value"\r\n'
+    'ADMIN_PASSWORD="a-password"\r\n'
+)
+
+
+def test_crlf_line_endings_survive_a_rotation():
+    """SHIPPED AS A BUG AND CAUGHT ON THE REAL FILE.
+
+    backend/.env is CRLF. Splitting the file on "\n" leaves a trailing "\r" on
+    every line, so the first version of replace_env_value saw '"value"\r',
+    concluded it was not quoted, and rewrote the line WITHOUT the "\r" - leaving
+    one LF line among five CRLF ones and the quotes silently dropped.
+
+    It passed every test I had written, because my fixture used "\n" and the real
+    file does not. A fixture that does not look like the file it stands in for
+    cannot catch this class of damage.
+    """
+    updated = replace_env_value(CRLF_SAMPLE, "JWT_SECRET", "brand-new")
+    assert updated == (
+        'MONGO_URL="mongodb://x"\r\n'
+        'DB_NAME="test_database"\r\n'
+        'JWT_SECRET="brand-new"\r\n'
+        'ADMIN_PASSWORD="a-password"\r\n'
+    )
+
+
+def test_no_line_ending_becomes_mixed(tmp_path):
+    """The consequence worth naming: a file where one line ends differently from
+    its neighbours. python-dotenv copes, and a naive line-oriented parser or a
+    diff tool does not."""
+    target = tmp_path / ".env"
+    target.write_bytes(CRLF_SAMPLE.encode("utf-8"))
+
+    rotate_env_file(target, backup_directory=None)
+
+    raw = target.read_bytes()
+    crlf = raw.count(b"\r\n")
+    bare_lf = raw.count(b"\n") - crlf
+    assert bare_lf == 0, f"{bare_lf} line(s) lost their carriage return"
+    assert crlf == 4
+
+
+def test_crlf_quoting_is_preserved(tmp_path):
+    target = tmp_path / ".env"
+    target.write_bytes(CRLF_SAMPLE.encode("utf-8"))
+
+    rotate_env_file(target, backup_directory=None)
+
+    line = next(
+        l for l in target.read_text(encoding="utf-8").splitlines()
+        if l.startswith("JWT_SECRET=")
+    )
+    value = line.split("=", 1)[1]
+    assert value.startswith('"') and value.endswith('"'), (
+        f"quoting lost on a CRLF file: {line[:20]}...")
+
+
+def test_a_crlf_file_round_trips_through_dotenv(tmp_path):
+    """End to end through the real parser, on the real line endings."""
+    from dotenv import dotenv_values
+
+    target = tmp_path / ".env"
+    target.write_bytes(b"\xef\xbb\xbf" + CRLF_SAMPLE.encode("utf-8"))
+
+    rotate_env_file(target, backup_directory=None)
+
+    parsed = dotenv_values(target)["JWT_SECRET"]
+    assert len(parsed) >= 43, "the secret lost characters"
+    assert "\r" not in parsed and '"' not in parsed, (
+        "a line ending or a quote leaked into the parsed value")
+    assert target.read_bytes().startswith(b"\xef\xbb\xbf"), "the BOM was lost"
