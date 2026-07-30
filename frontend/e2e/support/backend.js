@@ -134,6 +134,11 @@ async function mockBackend(page, options = {}) {
     //: How long an issued enrolment code lives. Overridable so a spec can
     //: watch the real expiry transition instead of mocking the clock.
     enrolmentCodeSeconds: options.enrolmentCodeSeconds || 900,
+    //: The authenticated enrollment records the page polls for. Empty by
+    //: default: a page that has not yet learned anything must fall back to the
+    //: clock, never the other way round.
+    enrolmentRecords: options.enrolmentRecords || [],
+    enrolmentCodeStatus: options.enrolmentCodeStatus || 200,
     userActions: [],
     passwordResets: [],
     passwordChanges: [],
@@ -452,6 +457,17 @@ async function mockBackend(page, options = {}) {
       return route.fulfill(
         json({ code: `ECHO-CODE-${state.codesIssued}`, store_id: 1, expires_in_seconds: state.enrolmentCodeSeconds }),
       );
+    }
+
+    // The authenticated enrollment record. Shaped exactly like
+    // schemas.EnrollmentCodeStatusOut: state, timestamps, the Device the code
+    // produced, and evidence-backed stages - and deliberately no code and no
+    // hash, because the real endpoint returns neither.
+    if (method === 'GET' && /^\/stores\/\d+\/enrollment-codes$/.test(path)) {
+      if (state.enrolmentCodeStatus !== 200) {
+        return route.fulfill(json({ detail: 'unavailable' }, state.enrolmentCodeStatus));
+      }
+      return route.fulfill(json(state.enrolmentRecords));
     }
 
     if (method === 'POST' && /^\/receiver-devices\/[^/]+\/rotate-credential$/.test(path)) {

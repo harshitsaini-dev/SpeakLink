@@ -50,11 +50,46 @@ function RoleBadge({ role }) {
  * they have. The state is derived from the clock rather than from a flag,
  * because nothing tells this page when the code was redeemed.
  *
- * UNUSED and EXPIRED are the only two this page can honestly report. USED needs
- * evidence from the backend - a Device appearing for this Store - and is shown
- * only when that evidence arrives.
+ * USED now comes from the backend rather than being guessed. The distinction
+ * matters: a code redeemed thirty seconds into a fifteen-minute life is USED for
+ * ever, and letting the countdown relabel it EXPIRED would report a Store that
+ * IS enrolled as one whose setup failed. When the server says USED, the server
+ * wins - the clock is only consulted while nothing better is known.
+ *
+ * The setup stages come from the same response and are each backed by stored or
+ * currently-true evidence. None is inferred from elapsed time, so a stage that
+ * is absent means "not proved", never "probably fine by now".
  */
-function EnrolmentCodePanel({ issued, onDismiss }) {
+const STAGE_LABELS = {
+  CODE_CREATED: "Code created",
+  CODE_REDEEMED: "Code redeemed",
+  DEVICE_CREATED: "Device created",
+  DEVICE_CONNECTED: "Device connected",
+  PRIMARY_ASSIGNED: "Primary assigned",
+};
+const STAGE_ORDER = Object.keys(STAGE_LABELS);
+
+function SetupProgress({ progress }) {
+  const reached = new Set(progress || []);
+  return (
+    <ol data-testid="setup-progress" className="mt-2 space-y-0.5 text-xs">
+      {STAGE_ORDER.map((stage) => {
+        const done = reached.has(stage);
+        return (
+          <li key={stage} data-testid={`setup-stage-${stage}`}
+              data-reached={done ? "true" : "false"}
+              className={done ? "text-emerald-800" : "text-slate-400"}>
+            <span aria-hidden="true">{done ? "✓" : "○"}</span>{" "}
+            {STAGE_LABELS[stage]}
+            {!done && <span className="sr-only"> (not proved)</span>}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function EnrolmentCodePanel({ issued, record, onDismiss }) {
   const issuedAt = React.useMemo(() => Date.now(), [issued]);
   const total = issued.expires_in_seconds || 0;
   const [remaining, setRemaining] = React.useState(total);
@@ -69,25 +104,34 @@ function EnrolmentCodePanel({ issued, onDismiss }) {
     return () => clearInterval(timer);
   }, [issuedAt, total]);
 
-  const expired = remaining <= 0;
+  // The server's answer is authoritative whenever there is one. The clock is a
+  // fallback for the window before the first poll returns, not a second opinion.
+  const used = record?.state === "USED";
+  const expired = !used && remaining <= 0;
+  const state = used ? "USED" : expired ? "EXPIRED" : "UNUSED";
   const minutes = Math.floor(remaining / 60);
   const seconds = String(remaining % 60).padStart(2, "0");
 
+  const tone = used
+    ? "border-emerald-200 bg-emerald-50"
+    : expired
+      ? "border-slate-300 bg-slate-50"
+      : "border-amber-200 bg-amber-50";
+  const badgeTone = used
+    ? "border-emerald-300 bg-emerald-100 text-emerald-900"
+    : expired
+      ? "border-slate-300 bg-slate-200 text-slate-700"
+      : "border-amber-300 bg-amber-100 text-amber-900";
+
   return (
-    <div data-testid="enrolment-code-panel"
-         className={`rounded border px-3 py-2 ${expired
-           ? "border-slate-300 bg-slate-50" : "border-amber-200 bg-amber-50"}`}>
+    <div data-testid="enrolment-code-panel" className={`rounded border px-3 py-2 ${tone}`}>
       <div className="mb-1 flex items-center gap-2 text-xs">
         <span className="font-medium text-slate-700">One-time enrolment code</span>
-        <span
-          data-testid="enrolment-code-state"
-          className={`rounded border px-2 py-0.5 font-medium ${expired
-            ? "border-slate-300 bg-slate-200 text-slate-700"
-            : "border-amber-300 bg-amber-100 text-amber-900"}`}
-        >
-          {expired ? "EXPIRED" : "UNUSED"}
+        <span data-testid="enrolment-code-state"
+              className={`rounded border px-2 py-0.5 font-medium ${badgeTone}`}>
+          {state}
         </span>
-        {!expired && (
+        {!used && !expired && (
           <span data-testid="enrolment-code-countdown" className="text-slate-600"
                 aria-live="polite">
             expires in {minutes}:{seconds}
@@ -95,7 +139,21 @@ function EnrolmentCodePanel({ issued, onDismiss }) {
         )}
       </div>
 
-      {expired ? (
+      {used ? (
+        // The code is gone from the DOM the moment it is spent. Keeping it on
+        // screen after redemption is keeping a secret on screen for no reason.
+        <div data-testid="enrolment-code-used">
+          <p className="text-sm text-emerald-900">
+            This code was used. It cannot be used again and cannot be shown again.
+          </p>
+          {record?.device_public_id && (
+            <p className="mt-1 text-xs text-slate-700">
+              Enrolled Device:{" "}
+              <code data-testid="enrolled-device-public-id">{record.device_public_id}</code>
+            </p>
+          )}
+        </div>
+      ) : expired ? (
         // The value is removed from the DOM entirely once it can no longer be
         // used. A dead secret left on screen is still a secret on screen.
         <p className="text-sm text-slate-700" data-testid="enrolment-code-expired">
@@ -111,7 +169,9 @@ function EnrolmentCodePanel({ issued, onDismiss }) {
         />
       )}
 
-      {expired && (
+      {record && <SetupProgress progress={record.progress} />}
+
+      {(expired || used) && (
         <button type="button" onClick={onDismiss} data-testid="enrolment-code-dismiss"
                 className="mt-2 rounded border px-2 py-1 text-xs">
           Dismiss
@@ -157,6 +217,10 @@ export default function ReceiverDevices() {
   // Deliberately component state. See the note at the top of this file.
   const [issuedCode, setIssuedCode] = React.useState(null);
   const [issuedCredential, setIssuedCredential] = React.useState(null);
+  // The authenticated evidence for the code on screen. Null means "not known
+  // yet", which is why the panel falls back to the clock until it arrives -
+  // and never the other way round.
+  const [codeRecord, setCodeRecord] = React.useState(null);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -175,6 +239,40 @@ export default function ReceiverDevices() {
   React.useEffect(() => {
     load();
   }, [load]);
+
+  // Poll the authenticated enrollment record while a code is on screen, so USED
+  // and the setup stages come from the server instead of being guessed. Stops as
+  // soon as the code is spent: there is nothing further to learn, and a page
+  // left open on a Store desk should not keep asking for ever.
+  React.useEffect(() => {
+    if (!issuedCode) {
+      setCodeRecord(null);
+      return undefined;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const { data } = await api.get(`/stores/${storeId}/enrollment-codes`);
+        if (cancelled) return;
+        const newest = Array.isArray(data) && data.length ? data[0] : null;
+        setCodeRecord(newest);
+        if (newest?.state === "USED") {
+          // A redemption changes which Devices exist, so refresh the list too.
+          load();
+          clearInterval(timer);
+        }
+      } catch (e) {
+        // Leave the last known record in place. Losing one poll must not make a
+        // USED code look UNUSED again.
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [issuedCode, storeId, load]);
 
   const act = async (key, request, onDone) => {
     setBusy(key);
@@ -304,6 +402,7 @@ export default function ReceiverDevices() {
       {issuedCode && (
         <EnrolmentCodePanel
           issued={issuedCode}
+          record={codeRecord}
           onDismiss={() => setIssuedCode(null)}
         />
       )}
