@@ -176,3 +176,45 @@ Restart/Stop Receiver, Redacted Diagnostics, Export Redacted Diagnostics, and
 Open Log Folder exist as real buttons (a test asserts they are all present) but
 call `_not_yet_wired` - a placeholder, not a silent no-op that pretends to
 work. Replace Device Identity is the one fully wired action.
+
+
+---
+
+## StoreSetup completion sprint - 2026-07-30
+
+Commits `9657558`, `11a95c6`, `bbab632`, `34f6a6e`.
+
+| Item | Status | Evidence |
+|---|---|---|
+| Rerun-screen actions wired (no placeholders) | `AUTOMATED PASS` | `_not_yet_wired` gone; 21 GUI tests; a test greps for the string so it cannot return |
+| Task start/stop/status seam | `AUTOMATED PASS` | `Manage-SpeakLinkStoreReceiverTask.ps1`; 9 tests, incl. staged Start/Stop both refusing an impostor task |
+| StoreSetup end-to-end vs real backend | `AUTOMATED PASS` | 12 tests, real FastAPI routes + real credential store; 3 mutations proved they can fail |
+| Store Scheduled Task requirements in CI | `AUTOMATED PASS` | 49 tests; previously only checked against a live installed task |
+| Receiver reconnect / backoff / revocation | `AUTOMATED PASS` (pre-existing) | `test_receiver_agent.py` - deliberately not duplicated |
+| `SpeakLinkStoreSetup.exe` rebuilt from current source | `AUTOMATED PASS` | PE subsystem 2; launched, real window, 0 new conhost processes |
+| Enrollment USED state + setup progress (Phase 4) | `NOT STARTED` | |
+| Audio/WebSocket bounded-queue audit (Phase 5) | `NOT STARTED` | |
+| `docs/SECURITY_AUDIT.md` (Phase 6) | `NOT STARTED` | |
+| Playwright / frontend build this sprint | `NOT RUN` | not re-run; no frontend code changed |
+| Load tests 2/5/10/20/40 (Phase 7) | `NOT STARTED` | |
+| Final Release Candidate artifacts (Phase 8) | `NOT STARTED` | |
+
+### P0/P1 found and fixed this sprint
+
+| # | Sev | Finding | Found by |
+|---|---|---|---|
+| 1 | P0 | `_replace_identity` passed `core.CONFIRMATION_WORD` as the answer to its own typed-confirmation check, so the check could never fail | driving the window |
+| 2 | P0 | The modal guarding it returned `True` with nothing typed - the headless/automated environment fires the dialog's default button. Measured: credential deleted with no input | running a script against the real app |
+| 3 | P1 | Every `tk.StringVar`/`BooleanVar` had no master, binding to tkinter's global `_default_root`; after repeated root creation the next `tk.Tk()` failed. Intermittent setup error, full parallel suite only | the parallel suite |
+| 4 | P2 | `Uninstall-...ps1 -RemoveCredential` never said the HQ Device is not revoked, though the Python helper always had. A Store that looks enrolled on the dashboard and is silent | the new task tests |
+| 5 | P2 | `stop_receiver` returned `InstallState.CONNECTED` to mean "the stop succeeded" | writing it |
+
+Findings 1+2 compounded: either alone would have destroyed a Store's Device
+identity on a stray click; together they made an unconfirmable destructive
+action look carefully guarded.
+
+### Still an operator checkpoint
+
+A real end-to-end enrollment against a *running* HQ with a *real* code, on real
+Store hardware. Everything up to that is automated, including the whole chain
+against the real backend routes.
