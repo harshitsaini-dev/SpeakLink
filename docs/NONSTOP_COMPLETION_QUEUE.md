@@ -218,3 +218,42 @@ action look carefully guarded.
 A real end-to-end enrollment against a *running* HQ with a *real* code, on real
 Store hardware. Everything up to that is automated, including the whole chain
 against the real backend routes.
+
+---
+
+## Enrollment evidence and queue audit - 2026-07-30 (later)
+
+Commits `1981f78`, `8788628`, `2cac9b6`.
+
+| Item | Status | Evidence |
+|---|---|---|
+| Enrollment USED state - backend | `AUTOMATED PASS` | `GET /api/stores/{id}/enrollment-codes`; 24 tests; migration proven on a legacy table |
+| Enrollment USED state - frontend | `AUTOMATED PASS` | panel polls the record; 9 new Playwright tests; Playwright 164 passed fresh |
+| Evidence-backed setup progress | `AUTOMATED PASS` | 5 stages, each on its own evidence; no stage inferred from elapsed time |
+| Bounded per-Store queues | `AUTOMATED PASS` (pre-existing) | `audio_streaming.py` + 29 tests in `test_audio_protocol.py` - not rewritten |
+| Queue high-water mark | `AUTOMATED PASS` | `max_depth` added; 11 new tests incl. five Stores and no-stale-audio-across-sessions |
+| Emergency Stop clears queues | `AUTOMATED PASS` (pre-existing) | `_end_session` calls `stop_audio_fanout()` before clearing live state |
+| Playwright Chromium | `AUTOMATED PASS` | 164 passed, 0 failed - run fresh this sprint |
+| Frontend production build | `AUTOMATED PASS` | Done - run fresh this sprint |
+| `docs/SECURITY_AUDIT.md` (Phase 6) | `NOT STARTED` | |
+| Load tests 2/5/10/20/40 (Phase 7) | `NOT STARTED` | needs a running persistent server |
+| Final Release Candidate artifacts (Phase 8) | `NOT STARTED` | |
+
+### P0/P1 found and fixed
+
+| # | Sev | Finding | Found by |
+|---|---|---|---|
+| 1 | P1 | `except Exception` swallowed a `NameError` from a missing `text` import, so the public-id→device-id lookup silently returned `{}` and `DEVICE_CONNECTED` was **unreachable**. The test asserting its absence passed for the wrong reason | adding the test that proves the stage CAN appear |
+| 2 | P1 | `_enrollment_progress` gated `PRIMARY_ASSIGNED` (a **stored** fact) behind `DEVICE_CONNECTED` (a **live** one), hiding a promotion that had definitely happened | a test |
+| 3 | P1 | Role comparison used `"primary"` against `DeviceRole.PRIMARY` (`"PRIMARY"`) - silently always false | a test |
+| 4 | P2 | Queue metrics had no `max_depth`; sampled `depth` cannot distinguish "never queued" from "filled and drained" | the audit |
+
+### Deliberately NOT added
+
+**No REVOKED state.** Nothing in this schema can revoke an enrollment code - no
+column, no service function, no route. The label would have nothing behind it.
+Device revocation is a different thing and already exists on the Device.
+
+### Still an operator checkpoint
+
+A real enrollment against a running HQ with a real code, on real Store hardware.

@@ -2517,3 +2517,93 @@ worse than saying so. Enrollment USED-state evidence, the audio/WebSocket
 bounded-queue audit, `docs/SECURITY_AUDIT.md`, load tests and the final Release
 Candidate artifacts are all `NOT STARTED`. A real enrollment against a running
 HQ with a real code on real Store hardware remains an operator checkpoint.
+
+---
+
+## 2026-07-30 (4) — the enrolment page stopped guessing
+
+Commits: `1981f78`, `8788628`, `2cac9b6`.
+Branch `feature/persistent-hq-and-one-click-store-setup`. Not pushed.
+
+### The misreport this closes
+
+`EnrolmentCodePanel` derived its state from a countdown, because nothing told it
+anything else. That is honest for UNUSED and EXPIRED and wrong for the case that
+matters: **a code redeemed thirty seconds into a fifteen-minute life, viewed
+eleven minutes later, was labelled EXPIRED.** The Store *is* enrolled; the page
+said its setup had failed.
+
+`GET /api/stores/{id}/enrollment-codes` now supplies the evidence, and when the
+server says USED, the server wins — the clock is a fallback for the window
+before the first poll returns, never a second opinion that can contradict
+evidence. A Playwright test drives exactly the old misreport: a USED record with
+a one-second expiry, still USED after the countdown runs out.
+
+### A column, because the alternative was inference
+
+`receiver_enrollment_codes` recorded *that* a code was spent but nothing about
+*which Device* the redemption produced. Answering that from a store_id plus a
+timestamp is inference from elapsed time — precisely what this evidence model
+forbids. Redemption records the Device's public id now. `NULL` means "not
+recorded", never "no Device", so a code redeemed before the column existed
+degrades the reported progress instead of asserting something false. Proven
+against a hand-built legacy table: column added, run twice safely, existing row
+preserved.
+
+**No REVOKED state.** Nothing here can revoke a code, so the label would have
+nothing behind it.
+
+### Three real bugs in my own first draft
+
+A **stored** fact gated behind a **live** one: `PRIMARY_ASSIGNED` was hidden
+whenever the Device happened to be offline. Being primary is stored; holding a
+socket is live; a Device can be primary and switched off. Hiding a promotion
+that definitely happened is the same class of error as asserting one that did
+not.
+
+A case-mismatched role comparison (`"primary"` vs `DeviceRole.PRIMARY`) — the
+same silently-always-false shape this repository has hit before.
+
+And the one worth remembering: **`except Exception` swallowed a `NameError`**
+from a missing `text` import, so the device-id lookup silently returned `{}` and
+`DEVICE_CONNECTED` was *unreachable*. The test asserting that stage was absent
+passed for entirely the wrong reason — a test that only ever checks a stage is
+missing cannot tell "correctly withheld" from "impossible to produce". There is
+now a test proving the stage *does* appear, and the handler is narrowed to
+`SQLAlchemyError`.
+
+### Phase 5 was mostly already built, and saying so is the point
+
+Bounded per-Store queues, drop-oldest overflow with counters, a `broadcast()`
+that never awaits a Receiver, and `_end_session` clearing the fanout *before*
+clearing live state — all already real, all already covered by 29 tests. None of
+it was rewritten.
+
+What was genuinely missing was the **high-water mark**: `depth` is sampled, so a
+Store that filled up and drained a moment before anybody looked reads as zero,
+indistinguishable from one that never queued anything. `max_depth` identifies a
+Store nearly dropping audio *before* it starts.
+
+Two of my own new tests failed for being unfaithful: I enqueued eight chunks at
+capacity two and expected only the slow Store to overflow, but `broadcast()` is
+synchronous so every chunk queued before any sender ran — the healthy Store
+overflowed too. Real chunks arrive ~250 ms apart; there is a yield between them
+now and a note saying why.
+
+### Gate — all run fresh this sprint
+
+```
+full backend suite      2124 passed, 3 skipped, 0 FAILED   (was 2088)
+Playwright chromium      164 passed, 0 FAILED              (was 155)
+frontend build           Done
+compileall               exit 0
+pip check                No broken requirements found
+protected database       8A7E3413…B1A547CA unchanged, integrity_check ok
+```
+
+### Not claimed
+
+`docs/SECURITY_AUDIT.md`, the synthetic Receiver load tests (2/5/10/20/40) and
+the final Release Candidate artifact set are all `NOT STARTED`. A real
+enrollment against a running HQ with a real code on real Store hardware remains
+an operator checkpoint.
