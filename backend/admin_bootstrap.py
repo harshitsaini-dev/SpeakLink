@@ -35,6 +35,20 @@ ADMIN_PASSWORD_ENV = "ADMIN_PASSWORD"
 
 CREATED = "created"
 ALREADY_PRESENT = "already_present"
+#: Rows exist, but none of them is an enabled administrator. Startup continues
+#: and says so; see ``seed.seed_admin`` for why it neither creates nor refuses.
+NO_ENABLED_ADMINISTRATOR = "no_enabled_administrator"
+
+#: What counts as an administrator, copied deliberately from the check an
+#: operator has already been shown - 'it holds at least one enabled
+#: administrator' in Test-EchoCastPersistentLanServer.ps1.
+#:
+#: Both spellings of the legacy role are here on purpose: a database that has not
+#: been through ``migrate_legacy_roles`` still holds lowercase 'admin', and that
+#: account can sign in and administer. Treating it as unprivileged would make
+#: startup demand bootstrap credentials for an HQ that already has a working
+#: administrator - which is the defect this constant exists to fix, in a new form.
+PRIVILEGED_ROLES = frozenset({"OWNER", "ADMIN", "SUPER_ADMIN", "admin"})
 
 
 class AdminBootstrapError(RuntimeError):
@@ -43,6 +57,46 @@ class AdminBootstrapError(RuntimeError):
     Raised before anything is read from or written to the database, so a
     refusal can never leave a half-created administrator behind.
     """
+
+
+class AdminStateUnavailable(AdminBootstrapError):
+    """Whether an administrator exists could not be established.
+
+    A subclass, so an existing caller handling ``AdminBootstrapError`` still
+    fails closed rather than letting an unreadable database through a narrower
+    ``except``.
+
+    This is never "there are none". The convenient answer to an unreadable
+    database is zero administrators, and zero is the answer that creates one.
+    """
+
+
+def count_enabled_administrators(db: Session) -> int:
+    """How many accounts can actually administer this HQ right now.
+
+    Roles are compared in Python rather than in SQL for the same reason the
+    PowerShell verifier does it: the role column holds legacy and normalised
+    spellings, and an ``IN (...)`` list is one quoting accident away from
+    reporting a healthy database as having no administrator.
+
+    ``is_active`` is the flag rather than ``lifecycle_state`` because
+    ``user_lifecycle`` writes both in one statement and ``is_active`` is the one
+    that exists on every schema version, including databases that predate the
+    lifecycle columns entirely.
+
+    Any failure raises ``AdminStateUnavailable``. There is deliberately no
+    ``except`` that returns 0.
+    """
+    try:
+        rows = db.query(HQUser.role, HQUser.is_active).all()
+    except Exception as failure:
+        raise AdminStateUnavailable(
+            "the administrator state could not be read from the database "
+            f"({failure.__class__.__name__}). Refusing to continue rather than "
+            "assume there is no administrator: assuming none is what would "
+            "create one."
+        ) from None
+    return sum(1 for role, active in rows if active and str(role) in PRIVILEGED_ROLES)
 
 
 @dataclass(frozen=True)

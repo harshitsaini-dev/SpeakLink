@@ -703,3 +703,107 @@ unreachable without one. The test here strips the docstring and walks the AST,
 because the docstring *explains* the constant and a text scan flags its own
 explanation. That is the fifth time prose has tripped a text scan in this
 repository.
+
+---
+
+## Test the layer the defect lives in, not the layer below it
+
+`bootstrap_administrator` is idempotent and has excellent tests: restarting with
+the same password does not touch the hash, restarting with a *different* password
+does not rotate it, a changed username does not create a second account, the
+original password still works afterwards. Read the list and you would swear
+restart behaviour was nailed down.
+
+Every one of those tests builds the credentials by hand and calls
+`bootstrap_administrator` directly. **None of them calls `seed_admin`**, which is
+two lines:
+
+```python
+credentials = resolve_bootstrap_credentials()   # raises when unset
+return bootstrap_administrator(db, credentials) # never reached
+```
+
+So the idempotent function was never reached on a real restart, and a plaintext
+`ADMIN_PASSWORD` became a precondition of every boot for ever. The tests were
+right about the thing they tested and silent about the thing that shipped.
+
+**Rule.** When you test that an operation is safe to repeat, repeat it *through
+the entry point the system actually uses*. A unit test of the inner function
+proves the inner function; it says nothing about whether anything reaches it.
+Write at least one test at the outermost layer you own — here, `startup_event()`
+in a real process.
+
+**The tell.** If a defect report describes a call chain (`startup_event ->
+seed_admin -> resolve_bootstrap_credentials`) and your test suite only ever enters
+that chain halfway down, the untested half is where the bug is.
+
+## Your `.env` is why you cannot see it
+
+`server.py` loads `backend/.env` from a path relative to itself. Every developer
+run therefore has `ADMIN_USERNAME` and `ADMIN_PASSWORD` set, so the unconditional
+credential resolve always succeeded. The installed HQ has no `.env` — correctly,
+and by policy — and was the first environment in which the ordering could fail at
+all.
+
+The trap repeated itself one level up. My first regression test asserted the
+subprocess had no `ADMIN_USERNAME`, and it failed: dotenv had loaded it from the
+repository's own `.env`. **Had I written the weaker assertion — just "startup
+succeeds" — the test would have passed against the broken code and proved
+nothing.** The failing assertion is what revealed that the test environment did
+not resemble the environment being simulated.
+
+**Rule.** A test that reproduces a production failure must reproduce the
+*environment* of that failure, not just its inputs. When production lacks a file
+your test machine has, neutralise it explicitly and say so in the test. And assert
+that the neutralisation worked — an unverified precondition is where a green test
+quietly stops testing anything.
+
+## `sys.modules["x"]` is not always the module your function came from
+
+Two tests patched `seed.count_enabled_administrators` by name. They passed alone
+and failed only in a full run.
+
+Several fixtures in that suite pop `seed` and `server` out of `sys.modules` and
+re-import them so they can bind to a temporary database. By the time these tests
+ran, `sys.modules["seed"]` was a **different module object** from the one the test
+file had imported `seed_admin` out of. `monkeypatch.setattr("seed....")` patched
+the new instance; the function under test kept resolving its globals from the old
+one.
+
+Reaching for `seed_admin.__module__` does not help either — it is the string
+`"seed"`, so looking it up goes straight back to the wrong instance.
+
+What works is the dictionary the function object itself reads from:
+
+```python
+monkeypatch.setitem(seed_admin.__globals__, "count_enabled_administrators", exploding)
+```
+
+**Rule.** In a suite that reloads modules, patch through `__globals__` of the
+function you are actually exercising, not through a name in `sys.modules`. And
+treat "passes alone, fails in the suite" as a *result*, not as flakiness — it is
+the suite telling you your patch target is wrong, and the next person to see it
+will add a rerun flag and lose the signal.
+
+## Refusing to start is not automatically the safe choice
+
+The instinct with a fail-closed rule is to refuse whenever something looks wrong.
+For a database holding accounts but no *enabled* administrator, refusing to start
+would have been the tidy answer.
+
+It is the wrong one. HQ not starting means Receivers get no announcements — 44
+Stores silent because of an HQ sign-in problem. A Store plays announcements
+without anybody being signed in to HQ at all. The blast radius of refusing is
+larger than the fault.
+
+Creating an administrator would have been worse in the other direction: an
+operator who deliberately disabled an account would find a reboot had granted a
+new one.
+
+So it does neither, logs loudly, and is tested as a deliberate policy.
+
+**Rule.** "Fail closed" means *do not proceed as if the dangerous thing is fine*.
+It does not automatically mean *stop the whole system*. Ask what each option
+costs: refusing, continuing degraded, and acting. Then write down which you chose
+and why, next to the code — because the next reader's instinct will be the tidy
+answer.

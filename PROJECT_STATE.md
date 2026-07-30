@@ -3037,3 +3037,136 @@ Every bootstrap test uses `FakeProtector`. **Real DPAPI on the installed HQ, und
 the account the Scheduled Task runs as, has not been exercised** — that is the
 first-start retest, and it is the only thing that can prove the container is
 sealed by and openable to the right identity.
+
+---
+
+## 2026-07-30 — Every restart demanded the credentials that created the account
+
+With the key container minted, the installed HQ got one step further and stopped:
+
+```
+startup_event() -> seed_admin(db) -> resolve_bootstrap_credentials()
+  -> AdminBootstrapError: ADMIN_USERNAME is not set, or is blank.
+```
+
+against a persistent database the verifier had already confirmed holds an enabled
+administrator.
+
+### Root cause: two lines in the wrong order
+
+```python
+def seed_admin(db):
+    credentials = resolve_bootstrap_credentials()   # raises when unset
+    return bootstrap_administrator(db, credentials) # would have said ALREADY_PRESENT
+```
+
+`bootstrap_administrator` was **already idempotent** — `if db.query(HQUser).first()
+is not None: return ALREADY_PRESENT` — and thoroughly tested: same password,
+different password, different username, hash untouched, original password still
+valid. None of that ever ran, because resolving the credentials came first and
+refused. A plaintext `ADMIN_PASSWORD` was therefore a precondition of **every
+boot, for ever**, long after the account it describes was created.
+
+### Why it survived: the idempotency was tested one layer below the defect
+
+Every "restart" test in `test_startup_admin_bootstrap.py` constructs a
+`BootstrapCredentials` by hand and calls `bootstrap_administrator` directly.
+**Not one of them calls `seed_admin`.** The write path had excellent coverage; the
+startup path had none, and the bug lived exactly in the gap between them.
+
+### Why nobody hit it in development
+
+`server.py` calls `load_dotenv(Path(__file__).parent / ".env")` from a path
+relative to itself. Any developer run picks up `backend/.env`, which supplies
+`ADMIN_USERNAME` and `ADMIN_PASSWORD`, so the unconditional resolve always
+succeeded. The installed HQ has no `backend/.env` — correctly, and by policy —
+so it was the first environment in which the ordering could show at all.
+
+This is why the regression test neutralises `dotenv` in its subprocess rather
+than reading the repository's `.env`: without that it passes against the broken
+code and proves nothing. The real file was not read, moved or modified.
+
+### The fix
+
+`seed_admin` consults the database first. Three outcomes, and only the third
+reads the environment:
+
+| State | Behaviour |
+| --- | --- |
+| An enabled administrator exists | nothing read, nothing written, `ALREADY_PRESENT` |
+| Rows exist but none is an enabled administrator | reported loudly, nothing read, nothing written |
+| The table is empty | explicit credentials, or the existing refusal |
+
+`count_enabled_administrators` uses the **same definition an operator has already
+been shown** — `Test-EchoCastPersistentLanServer.ps1`'s *'it holds at least one
+enabled administrator'*: role in `{OWNER, ADMIN, SUPER_ADMIN, admin}` and
+`is_active`. Roles are compared in Python for the reason that check documents: an
+`IN (...)` list is one quoting accident away from reporting a healthy database as
+having no administrator. Both spellings of the legacy role count, because a
+database that has not been through `migrate_legacy_roles` still holds lowercase
+`admin` and that account really can administer.
+
+Any failure to read raises `AdminStateUnavailable`, a subclass of
+`AdminBootstrapError` so an existing narrower `except` still fails closed. There is
+deliberately no branch that returns 0 — the convenient answer to an unreadable
+database is "no administrators", and that is the answer that creates one.
+
+### The middle row is a policy decision, not a fallthrough
+
+A database with rows but no enabled administrator neither creates nor refuses. It
+logs and continues, because both alternatives are worse:
+
+* **Creating one** would be startup performing an administrative act. An operator
+  who deliberately disabled an account would find a restart had quietly granted a
+  new one — the exact behaviour this module was written to remove.
+  `bootstrap_administrator` has always gated creation on *"does any HQ user
+  exist"* for a documented reason, and that gate is unchanged.
+* **Refusing to start** would take Receivers off the air over an HQ sign-in
+  problem. A Store plays announcements without anybody signed in to HQ.
+
+It is also not reachable through supported operations: the lifecycle rules refuse
+to disable, archive or demote the last active privileged account. It is tested
+explicitly rather than left to whichever branch happened to run first.
+
+**Known gap:** there is no offline tool to *re-enable* a disabled administrator.
+`tools/change_hq_user_password.py` changes a password but not lifecycle state. If
+this state is ever reached, recovery needs one.
+
+### Two things I got wrong
+
+**A test that passed alone and failed in the full suite.** Two tests patched
+`seed.count_enabled_administrators` by name. Several fixtures in this suite pop
+`seed` and `server` out of `sys.modules` and re-import them, so
+`sys.modules["seed"]` was a *different* module object from the one the test file
+imported `seed_admin` out of — the patch landed on an instance nobody was calling.
+`__module__` did not help either: it is the string `"seed"` and resolves straight
+back to the wrong instance. Fixed with `monkeypatch.setitem(seed_admin.__globals__,
+…)`, the dictionary that particular function object actually reads from. Three
+consecutive full runs confirm it. **This is precisely how a real assertion gets
+written off as a flake.**
+
+**My first regression test proved nothing.** It asserted `ADMIN_USERNAME` was
+absent from the subprocess and failed, because dotenv had loaded it from
+`backend/.env`. Had I asserted only the outcome, it would have passed against the
+broken code.
+
+### Evidence
+
+```
+RED    collection ERROR - no NO_ENABLED_ADMINISTRATOR / AdminStateUnavailable
+RED    19 failed, 9 passed with only seed.py reverted to the shipped version
+GREEN  28 passed  test_startup_admin_bootstrap_restart.py
+GREEN  59 passed  both admin-bootstrap suites together
+GREEN  208 passed persistent-server, HQ runtime, user-admin, catalog, key bootstrap
+GREEN  2295 passed, 3 skipped, 0 failed - full backend suite, three times running
+```
+
+One of the 28 drives the real `startup_event()` in a separate interpreter against
+a database that already holds an administrator, with no bootstrap credentials
+anywhere — the path that failed on the installed machine.
+
+### Still not proven
+
+The installed HQ has not been restarted. This is verified against temporary
+SQLite databases and a subprocess, not against the live persistent profile under
+the Scheduled Task's account. That is the retest.
