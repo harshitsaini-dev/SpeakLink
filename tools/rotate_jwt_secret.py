@@ -117,18 +117,32 @@ def replace_env_value(text: str, key: str, value: str) -> str:
     found = False
     for index, line in enumerate(lines):
         if line.startswith(f"{key}="):
-            existing = line.split("=", 1)[1]
-            # Preserve the quoting style. The real backend/.env quotes its
-            # values, and python-dotenv accepts either - but rewriting one line
-            # unquoted while its neighbours stay quoted is a silent style change
-            # in a file an operator reads by eye, and any naive parser that
-            # expects quotes would then read the new value with different edges.
+            # Split the line ending off FIRST. The real backend/.env is CRLF, and
+            # splitting the file on "\n" leaves a trailing "\r" on every line - so
+            # the first version of this saw '"value"\r', decided it was not
+            # quoted, and rewrote the line WITHOUT the \r. The result was one
+            # LF line among five CRLF ones and the quotes silently dropped.
+            #
+            # It went unnoticed because my fixture used "\n" and the real file
+            # does not. A fixture that does not look like the file it stands in
+            # for is a fixture that cannot catch this.
+            body = line
+            ending = ""
+            if body.endswith("\r"):
+                body, ending = body[:-1], "\r"
+
+            existing = body.split("=", 1)[1]
+            # Preserve the quoting style. python-dotenv accepts either, but
+            # rewriting one line unquoted while its neighbours stay quoted is a
+            # silent style change in a file an operator reads by eye, and any
+            # naive parser expecting quotes would read the new value with
+            # different edges.
             for quote in ('"', "'"):
                 if len(existing) >= 2 and existing.startswith(quote) and existing.endswith(quote):
-                    lines[index] = f"{key}={quote}{value}{quote}"
+                    lines[index] = f"{key}={quote}{value}{quote}{ending}"
                     break
             else:
-                lines[index] = f"{key}={value}"
+                lines[index] = f"{key}={value}{ending}"
             found = True
     if not found:
         raise RotationError(
