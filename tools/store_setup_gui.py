@@ -373,8 +373,17 @@ class InstallScreen(ttk.Frame):
         outcome = self.app.state_data["enrolment_outcome"]
 
         def work():
+            try:
+                # Never a hardcoded placeholder: the newest EchoCastReceiver-*
+                # package under artifacts/ that independently re-verifies -
+                # PE subsystems, every file hash, no forbidden file - rather
+                # than a path trusted because it sorts first or is named right.
+                package_path = core.locate_verified_receiver_package()
+            except core.NoVerifiedReceiverPackage as failure:
+                return core.InstallResult(state=core.InstallState.INSTALL_FAILED,
+                                          detail=str(failure))
             arguments = [
-                "-PackagePath", str(REPOSITORY_ROOT / "artifacts" / "receiver-package"),
+                "-PackagePath", str(package_path),
                 "-BackendUrl", self.app.state_data["backend_url"],
                 "-AudioOutputDevice", device.verified_selector if device else "",
             ]

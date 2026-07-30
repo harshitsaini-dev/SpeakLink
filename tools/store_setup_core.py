@@ -346,6 +346,147 @@ def play_test_tone(
 
 
 # ===========================================================================
+# Locating the Receiver package - never a hardcoded placeholder path
+# ===========================================================================
+#: Files that must never be inside a Receiver package. A build step gone wrong
+#: is the only way one of these gets in, and it must not ship to a Store.
+_FORBIDDEN_PACKAGE_MARKERS = (
+    ".env", ".db", ".sqlite", ".sqlite3", ".pem", ".key", "server.py",
+)
+_FORBIDDEN_TEXT_PATTERNS = (
+    "echocast_rcv_v", "BEGIN PRIVATE KEY", "BEGIN RSA PRIVATE KEY",
+    "ADMIN_PASSWORD", "JWT_SECRET",
+)
+
+
+def read_pe_subsystem(path) -> int:
+    """The PE Optional Header Subsystem field, read from the file itself.
+
+    2 = WINDOWS_GUI (no console), 3 = WINDOWS_CUI (console). Never inferred
+    from a PyInstaller flag or a build log - the same rule the HQ runtime and
+    the HQ package verifier already hold every other executable to.
+    """
+    with open(path, "rb") as handle:
+        handle.seek(0x3C)
+        pe_offset = int.from_bytes(handle.read(4), "little")
+        handle.seek(pe_offset + 4 + 20 + 68)
+        return int.from_bytes(handle.read(2), "little")
+
+
+@dataclass(frozen=True, slots=True)
+class PackageVerdict:
+    package_path: Path
+    ok: bool
+    reasons: "tuple[str, ...]" = ()
+
+
+def verify_receiver_package(package_path) -> PackageVerdict:
+    """Check one candidate package. Read-only; never repairs, never trusts a
+    filename alone.
+
+    This is a second, independent check inside the Python that is about to
+    install from the package - not a replacement for
+    Test-EchoCastReceiverPackage.ps1, which remains the authoritative build-time
+    gate. Defence in depth: a StoreSetup wizard about to hand a Store computer
+    a Receiver should not simply trust that whatever sorts newest is safe.
+    """
+    package_path = Path(package_path)
+    reasons: "list[str]" = []
+
+    console_exe = package_path / "EchoCastReceiver.exe"
+    background_exe = package_path / "EchoCastReceiverBackground.exe"
+    ffmpeg_exe = package_path / "ffmpeg.exe"
+    manifest_file = package_path / "manifest.json"
+    sums_file = package_path / "SHA256SUMS.txt"
+
+    for required in (console_exe, background_exe, ffmpeg_exe, manifest_file, sums_file):
+        if not required.exists():
+            reasons.append(f"missing {required.name}")
+
+    if not manifest_file.exists() or not sums_file.exists():
+        return PackageVerdict(package_path=package_path, ok=False, reasons=tuple(reasons))
+
+    if background_exe.exists():
+        try:
+            if read_pe_subsystem(background_exe) != 2:
+                reasons.append("EchoCastReceiverBackground.exe is not WINDOWS_GUI")
+        except (OSError, ValueError):
+            reasons.append("could not read EchoCastReceiverBackground.exe's PE header")
+    if console_exe.exists():
+        try:
+            if read_pe_subsystem(console_exe) != 3:
+                reasons.append("EchoCastReceiver.exe is not WINDOWS_CUI")
+        except (OSError, ValueError):
+            reasons.append("could not read EchoCastReceiver.exe's PE header")
+
+    import hashlib
+
+    for line in sums_file.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        digest, _, relative = line.partition("  ")
+        target = package_path / relative.replace("/", "\\")
+        if not target.exists():
+            reasons.append(f"{relative} is listed but missing")
+            continue
+        actual = hashlib.sha256(target.read_bytes()).hexdigest()
+        if actual.lower() != digest.strip().lower():
+            reasons.append(f"{relative} does not match its recorded hash")
+
+    for item in package_path.rglob("*"):
+        if not item.is_file():
+            continue
+        lowered = item.name.lower()
+        if any(lowered.endswith(marker) or lowered == marker
+              for marker in _FORBIDDEN_PACKAGE_MARKERS):
+            reasons.append(f"forbidden file present: {item.relative_to(package_path)}")
+
+    return PackageVerdict(package_path=package_path, ok=(len(reasons) == 0),
+                          reasons=tuple(reasons))
+
+
+class NoVerifiedReceiverPackage(AgentError):
+    """Every candidate under artifacts/ failed verification, or none exist."""
+
+
+def locate_verified_receiver_package(artifacts_root=None) -> Path:
+    """The newest EchoCastReceiver-* package under artifacts/ that verifies.
+
+    Never a hardcoded 'artifacts/receiver-package' placeholder: package
+    directories are versioned and timestamped
+    (EchoCastReceiver-<version>-<commit>-<timestamp>), sort lexicographically
+    newest-last for a fixed version/commit width, and are re-verified here
+    rather than trusted by name alone.
+    """
+    root = Path(artifacts_root) if artifacts_root is not None else REPOSITORY_ROOT / "artifacts"
+    if not root.exists():
+        raise NoVerifiedReceiverPackage(
+            f"there is no artifacts directory at {root}. Build a Receiver package "
+            "with Build-EchoCastReceiver.ps1 first."
+        )
+    candidates = sorted(
+        (item for item in root.iterdir() if item.is_dir() and item.name.startswith("EchoCastReceiver-")),
+        key=lambda p: p.stat().st_mtime, reverse=True,
+    )
+    if not candidates:
+        raise NoVerifiedReceiverPackage(
+            f"no EchoCastReceiver-* package exists under {root}. Build one with "
+            "Build-EchoCastReceiver.ps1 first."
+        )
+
+    failures = []
+    for candidate in candidates:
+        verdict = verify_receiver_package(candidate)
+        if verdict.ok:
+            return candidate
+        failures.append(f"{candidate.name}: {'; '.join(verdict.reasons)}")
+
+    raise NoVerifiedReceiverPackage(
+        "no Receiver package under artifacts/ passed verification:\n" + "\n".join(failures)
+    )
+
+
+# ===========================================================================
 # Screen 4 - Install, and CONNECTED evidence
 # ===========================================================================
 class InstallState(str, Enum):
