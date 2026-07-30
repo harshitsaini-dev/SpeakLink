@@ -247,3 +247,31 @@ def test_start_scripts_record_the_creation_time_for_pid_reuse_detection():
             f"{name} still writes a bare PID; the stop script then cannot tell a "
             "recycled PID from the real one"
         )
+
+
+# ===========================================================================
+# A native command's own INFO/warning logging must not abort the script
+# ===========================================================================
+def test_the_pyinstaller_build_call_does_not_treat_its_own_stderr_as_fatal():
+    """FOUND BY ACTUALLY RUNNING Build-EchoCastReceiver.ps1.
+
+    PyInstaller writes its own progress ("114 INFO: PyInstaller: 6.18.0...")
+    to STDERR. Under $ErrorActionPreference = 'Stop' - which every script in
+    this repository sets - PowerShell 5.1 treats ANY stderr text from a native
+    command as a terminating NativeCommandError, even when the process exits 0
+    a moment later. The build failed on its very first line of PyInstaller
+    output, before PyInstaller had done anything wrong at all.
+
+    Every other script in this repository that calls a chatty native command
+    already works around this the same way: flip ErrorActionPreference to
+    Continue for exactly that one call, then check $LASTEXITCODE by hand. This
+    is that same guard, now required of the PyInstaller call too.
+    """
+    script = (Path(__file__).resolve().parents[2] / "scripts" /
+              "Build-EchoCastReceiver.ps1").read_text(encoding="utf-8")
+    call_line = next(line for line in script.splitlines() if "PyInstaller $spec" in line)
+    index = script.index(call_line)
+    window = script[max(0, index - 400):index]
+    assert "'Continue'" in window, (
+        "the PyInstaller call runs under ErrorActionPreference=Stop and will "
+        "abort on PyInstaller's own INFO/warning output")

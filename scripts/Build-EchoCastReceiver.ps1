@@ -126,7 +126,22 @@ Write-Output "  newest source input: $sourceNewest"
 
 Write-Output ''
 Write-Output '--- PyInstaller ---'
-& $venvPython -m PyInstaller $spec --noconfirm --distpath $distPath --workpath $workPath | Select-Object -Last 1
+# PyInstaller writes its own progress ("114 INFO: PyInstaller: ...") to STDERR.
+# Under $ErrorActionPreference = 'Stop' - set for this whole script - Windows
+# PowerShell 5.1 treats ANY stderr text from a native command as a terminating
+# error, even when the process goes on to exit 0. Measured directly: the build
+# aborted on PyInstaller's very first INFO line, before PyInstaller had done
+# anything wrong. Flipped to Continue for exactly this call, exit code checked
+# by hand - the same guard every other chatty native command in this
+# repository already needs.
+$previousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & $venvPython -m PyInstaller $spec --noconfirm --distpath $distPath --workpath $workPath 2>&1 |
+        Select-Object -Last 1
+} finally {
+    $ErrorActionPreference = $previousErrorAction
+}
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE." }
 
 $builtExe = Join-Path $distPath 'EchoCastReceiver\EchoCastReceiver.exe'
