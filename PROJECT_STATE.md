@@ -2810,3 +2810,120 @@ counts up, it reached 2 here, and below 2 means the exposed password works again
 `echocast-live.zip` is still in the working tree, so
 `test_no_secret_archives_in_tree` is still correctly RED. Removal needs explicit
 operator approval and has not been requested yet.
+
+---
+
+## 2026-07-30 — Release candidate, rebuilt after remediation
+
+### The gate, everything run fresh after the archive was removed
+
+```
+compileall backend tools          exit 0
+pip check                         No broken requirements found
+test_no_secret_archives_in_tree   2 passed        <- the P0 guard, green at last
+test_protected_database_isolation 17 passed       <- baseline 9F155E1D...D993AE523
+full backend suite                2238 passed, 3 skipped, 0 failed
+Playwright chromium               164 passed (3.8m)
+frontend production build         Done, main bundle 121.37 kB
+secret scan                       clean - 11 hits, all triaged
+archive scan                      62 archives, none carries a secret or database
+protected database                9F155E1D...D993AE523, integrity ok, no sidecars
+git diff --check / git status      clean
+```
+
+The 11 secret-scan hits were each checked rather than assumed: three runbooks
+saying `'choose-a-temporary-pilot-only-value'`, a load-test doc saying
+`"<a fresh throwaway value>"`, rotator fixtures, and a bcrypt string commented
+*"a real-shaped bcrypt hash, of nothing in particular"*. The pattern is
+deliberately broad, so placeholders are the price of catching real ones.
+
+### Packages, all four rebuilt from current source
+
+| Package | Commit | Evidence |
+| --- | --- | --- |
+| HQ | `3c3d945` | 31 checks passed, 87 files hashed, runtime WINDOWS_GUI |
+| Receiver | `3c3d945` | verified; background EXE GUI, operator EXE CUI, packaged FFmpeg runs |
+| Store kit | `3c3d945` | 43 checks passed, 50 files |
+| StoreSetup | `013fb5e` | **new package** — 968 files hashed, wizard WINDOWS_GUI |
+
+**A stale package nearly shipped.** The first Store kit build was made from
+`EchoCastReceiver-1.0.0-ff04aea-20260727-211145` — a package from three days
+earlier — because I selected the newest by sorting on **name**, and `ff04aea`
+sorts above `3c3d945`. The kit printed "package commit ff04aea" and
+"kit commit 3c3d945" on adjacent lines and still declared
+`ECHOCAST_STORE_PILOT_KIT_BUILT`. Rebuilt by creation time: 50 files against the
+stale build's 49, so it was a real content difference and not a cosmetic one.
+Sort artifacts by time, never by a name containing a commit hash.
+
+**`EchoCastStoreSetup.exe` was shipping in nothing.** Built into `dist/` with no
+version, no recorded commit and no `SHA256SUMS`, and absent from the Store kit —
+so a Store could not check that the wizard it received was the one that was built.
+`scripts/Build-EchoCastStoreSetupPackage.ps1` now packages it with the same
+guarantees as HQ, plus one the HQ script lacks: the executable must be newer than
+`store_setup_gui.py`, `store_setup_core.py` and `store_setup.spec`. Whether the
+wizard should also live *inside* the Store kit is an operational decision, left to
+the operator rather than changed quietly.
+
+### Two documentation defects, found by using the documentation
+
+**`docs/ROLLBACK_PLAN.md` documented a command that does not work.** It showed
+`compare_databases.py --left <current> --right <backup>`; the tool takes
+positional paths, so `--left` was read as a filename and reported
+`UNREADABLE - file does not exist` while still printing a confident-looking
+SUGGESTION about the two real files underneath. Found while using it during a real
+incident, which is the worst possible moment to find it.
+
+**That SUGGESTION is wrong after a security change.** It ranks by operational
+history, and with equal counts it favours the older file — so it recommended
+keeping the *pre-change* backup of both databases, which would have restored the
+exposed ADMIN password and undone the remediation. The tool's own closing line,
+*"This tool does not choose. You do."*, is the operative part, and the plan now
+says so explicitly.
+
+The tool did independently confirm the Phase 1 and Phase 3 comparisons: identical
+SHA-256 values, 2 users, 13 Stores, **0 Devices**, 17 sessions, 194 logs, and
+integrity ok on all four files.
+
+### One thing I got wrong about StoreSetup, recorded rather than buried
+
+While probing for a `--version` flag, the packaged wizard appeared to exit 0
+instantly with no window — which would have been a P0 for a one-click installer.
+It does not: on a normal launch the window opens, titled "EchoCast Store Setup",
+and stays open. The instant exit happens only when stdout and stderr are
+redirected, which is a harness artifact. `--version` does not exist at all —
+`main()` ignores `argv` — so the probe was looking for something that was never
+there.
+
+Launching the real first-run wizard as part of an automated sweep was careless. It
+wrote nothing, and that was luck rather than design. Verified afterwards: no state
+under `%LOCALAPPDATA%`, `%PROGRAMDATA%` or `%APPDATA%`, no scheduled task, tree
+clean.
+
+### Verdict
+
+**`GREEN_FOR_MANUAL_TWO_STORE_ACCEPTANCE`.**
+
+Every automated gate is green, with no test weakened and no failure reclassified as
+an accepted risk. The credential incident is closed and verified from the files
+rather than from the report.
+
+**NOT `GREEN_FOR_CONTROLLED_TWO_STORE_PILOT`.** That needs physical two-Store
+sound, reboot, recovery and network-isolation results — and it now also needs
+**Part E2** of the two-desktop runbook: primary + standby on two real machines,
+including the primary switched off at the wall while the standby keeps
+heartbeating. The automated proof for that is unit-level on a fake socket.
+
+**NOT `PRODUCTION_READY`.** Unchanged: HTTPS/WSS, firewall, monitoring, a proven
+backup restore, amplifier and speaker evidence, an EchoGuard decision, and a staged
+rollout.
+
+### Still open
+
+* **DPAPI under `EchoCastService`** — the account does not exist on this machine.
+  Operator gate, unchanged.
+* **Primary + standby on real hardware** — Part E2 above. Until it is signed off, a
+  Store runs **one** Receiver.
+* `backend/.env` has one LF line among five CRLF ones and lost its quoting, from the
+  rotator bug fixed in `a6b69b6`. The value is correct and working; repairing the
+  formatting would mint a third secret and void the fingerprint the operator
+  recorded. Optional, and only worth doing alongside a deliberate rotation.

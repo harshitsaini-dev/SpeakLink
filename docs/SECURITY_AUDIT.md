@@ -13,7 +13,15 @@ the adversarial pass refuted are recorded as refuted, not quietly dropped.
 
 ---
 
-## P0 — ACTION REQUIRED BY A HUMAN
+## P0 — RESOLVED 2026-07-30
+
+> **Status: closed.** The operator carried out every step below, one action at a
+> time, and each was verified afterwards from the files rather than from the
+> report. `test_no_secret_archives_in_tree` now passes. The finding is kept in
+> full — a closed P0 that has been edited down to "fixed" teaches nobody what to
+> look for next time. What actually happened is recorded under
+> *[Remediation as carried out](#remediation-as-carried-out)* below, including
+> two places where this section was **wrong**.
 
 ### The current live JWT signing secret is in an archive in the repository folder
 
@@ -55,8 +63,44 @@ human checkpoints.
 
 **Guard added:** [`test_no_secret_archives_in_tree.py`](../backend/tests/test_no_secret_archives_in_tree.py)
 fails while any archive in the tree contains a `.env`, a database or a key
-container. It names the entry and deletes nothing. **It is currently RED, and it
-should stay RED until step 3 is done** — see *Gate status*.
+container. It names the entry and deletes nothing. It stayed RED until step 3 was
+done, and now passes — 62 archives inspected by entry name, none carrying a
+secret or a database.
+
+### Remediation as carried out
+
+| Step | Outcome |
+| --- | --- |
+| 1. Rotate `backend/.env` `JWT_SECRET` | done — fingerprint `05902bbbbf87` → `275f08985899`, verified no longer equal to the exposed value |
+| 1b. Rotate the persistent HQ `jwt-secret.txt` | **not needed — this instruction was wrong**, see below |
+| 2. Change the `admin` password | done in **both** databases, offline, `session_version` 1 → 2 each |
+| 3. Delete `echocast-live.zip` | done on explicit operator approval, exact literal path, SHA-256 confirmed first |
+| 4. Review where the folder was copied | operator action, outside this repository |
+
+**Two things this section got wrong**, both in the same direction — assuming a
+secret that *appears* in an archive is the one in use:
+
+* **The persistent HQ secret was never exposed.** Its fingerprint is
+  `01fe26c76c5a`, not the archive's `e78c272f53ed`: it was minted fresh by
+  `hq_runtime` during a later `--check`. Step 1 asked for a rotation that would
+  have invalidated every live HQ session for no reason.
+* **The OWNER password was not in the archive.** The archived username
+  fingerprint is `3d9a13ea8e39`; the live OWNER's is `5e1bb91bcea8`. The exposed
+  account was `admin` only. `owneradmin`'s `session_version` is still 1,
+  confirming it was never touched.
+
+Fingerprint comparison settled both. Neither would have been caught by reading
+the file.
+
+**Two things the remediation itself surfaced:**
+
+* `tools/change_hq_user_password.py` had to be written, because nothing could
+  change a password offline — `create_owner.py` refuses an existing account and
+  both HTTP routes need a running server and a signed-in session.
+* The protected database's recorded baseline moved
+  `8A7E3413…B1A547CA` → `9F155E1D…D993AE523`. **The size did not change**
+  (507904 bytes both sides): on the failing run the size assertion passed and
+  only the hash caught it. A password change rewrites one row in place.
 
 > Related, lower severity: `backups/echocast_live-20260729-160359.db` is a full
 > copy of the protected production database in the tree. Gitignored, so never
@@ -145,21 +189,56 @@ Two claims were withdrawn by the adversarial pass with `file:line` proof that th
 concern was already handled elsewhere. They are not listed as findings because
 they were not findings.
 
-### Not fixed: standby acknowledgements share the primary's snapshot
+### FIXED 2026-07-30: standby acknowledgements shared the primary's snapshot
 
-`server.py:1898-1902` calls `apply_receiver_payload(store_id, ...)` with no
-`device_id` and no standby branch, so a primary and a standby in one Store write
-to one snapshot (`ws_manager.py:347-363`). Their sequence counters are independent
-and interleaved, so each rejects some of the other's messages with
-`NON_MONOTONIC_SEQUENCE` — including the primary's `playback_confirmed`.
+`server.py` called `apply_receiver_payload(store_id, ...)` with no `device_id`
+and no standby branch, so a primary and a standby in one Store wrote to one
+snapshot. Deferred out of the security sprint on the grounds that it needed its
+own change with its own tests; that change is commit `3c3d945`.
 
-**Deferred, with reasons.** The correct fix keys health state by
-`(store_id, device_id)` and aggregates through the already-written
-`store_aggregate_state` — a change to the live status model that deserves its own
-change with its own tests, not a corner of a security sprint. It only manifests
-when a Store runs a primary *and* a standby simultaneously, which no Store does
-today. **It must be fixed before any two-Device Store goes live**, and it is
-recorded in the completion queue rather than in a commit message.
+**The audit understated it.** It recorded one consequence — interleaved sequence
+counters rejecting each other's messages. Writing the tests found **four**, and
+the second is worse than the one that was recorded:
+
+1. **Sequence lock-out.** A standby up for hours sits at a high `sequence`; once
+   its ack lands in the Store snapshot the primary's next ack is below
+   `last_sequence` and is refused. As recorded.
+2. **A standby heartbeat kept a dead primary looking online.** Freshness is
+   decided by `last_received_at` on the Store snapshot, so a standby heartbeating
+   every few seconds refreshed it and a primary whose machine was switched off
+   never went STALE or OFFLINE. **HQ shows a green Store and nothing comes out of
+   the speakers.** This was not in the audit at all.
+3. **A standby's `playback_confirmed` became the Store's.** A standby receives no
+   audio, so that is not weak evidence — it is evidence of something that cannot
+   have happened, and playback confirmation is the only proof an announcement was
+   heard.
+4. **A promoted standby inherited its standby-era status**, which was never
+   proved while carrying the Store's audio.
+
+**Two of those survive purely in the database**, and an in-memory fix alone would
+have left them: the endpoint wrote `status='online'` and `last_seen` for a standby
+connection and filed a `connected` `ReceiverEvent` against the Store. The
+persisted rows are what an operator reads afterwards.
+
+**The fix** adds `standby_snapshots` keyed by `device_id` beside the per-Store
+dict, and routes on an optional `device_id` in the same shape
+`is_current_receiver_connection` already used. The Store aggregate is deliberately
+kept — the dashboard, the freshness sweep and the session logic are all built on
+"the Store's Receiver", and this was a health-attribution defect, not a reason to
+redesign that. `device_id=None` still means "the Store's Receiver", because a
+legacy Receiver on the shared Store token has no Device identity and any other
+default would take every un-enrolled Store off the air.
+
+A standby is **not** exempt from the contract; it has its own line of it. Ignoring
+standby acks would have been a smaller diff and would have discarded the
+monotonic-sequence and duplicate protection that makes the contract worth having.
+
+**16 tests**, written first and proven RED — 15 failed, and the one that passed
+was the legacy no-device path, which had to keep passing throughout.
+
+**Still not proven:** this is unit-level evidence on a fake socket. Two physical
+machines in one Store, a promotion, and a primary pulled mid-broadcast remain
+manual-acceptance items.
 
 ---
 
@@ -271,16 +350,27 @@ operator's declared `--expected-hq-host`. A public address is refused always.
 
 ## Gate status
 
-**The security gate does NOT pass**, and it must not be made to pass by editing a
-test.
+**The security gate passes, as of 2026-07-30.**
 
-One mandatory test is RED —
+It did not, for four days. One mandatory test was RED —
 [`test_no_secret_archives_in_tree.py`](../backend/tests/test_no_secret_archives_in_tree.py)
-— because a live JWT signing secret is sitting in an archive in the working tree.
-That is a true finding about the real state of the system. Deleting the file or
-weakening the assertion would turn a genuine exposure into a green tick.
+— because a live JWT signing secret was sitting in an archive in the working tree.
+That was a true finding about the real state of the system, and the rule held:
+**it was never made to pass by editing a test.** It went green when the archive
+was actually gone and the credentials inside it had actually been replaced.
 
-It goes green when the P0 remediation above is done. Nothing else is required.
+```
+test_no_secret_archives_in_tree     2 passed   (62 archives inspected by entry name)
+test_protected_database_isolation  17 passed   (baseline 9F155E1D…D993AE523)
+full backend suite               2238 passed, 3 skipped, 0 failed
+secret scan                      clean - 11 pattern hits, all triaged as
+                                 documentation placeholders or test fixtures
+```
+
+The order mattered. The archive was kept until both password changes were
+verified, because it held the only copy of the exposed password and deleting it
+first would have made the "does the old password still work?" check impossible to
+run.
 
 ## Re-running this audit
 

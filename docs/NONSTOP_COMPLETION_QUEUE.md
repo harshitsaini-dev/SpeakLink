@@ -34,6 +34,7 @@ persistent server verification    11 checks passed
 secret scan (tracked files)       clean
 git diff --check / git status     clean
 protected DB                      8A7E3413…B1A547CA, no WAL/SHM
+                                  (rebaselined 9F155E1D…D993AE523 on 2026-07-30)
 ```
 
 ---
@@ -271,33 +272,54 @@ Commits `9e84dca`, `4eb865f`, `9e6d83b`, and the audit-document commit.
 | P1: broadcaster uplink authorization | `FIXED` | ticket audience + double permission check; 14 tests |
 | P1: enrolment cap counted dead codes | `FIXED` | expiry term added; 3 tests |
 | P1: HQ start script orphaned -ArgumentList | `FIXED` | parser-verified; structural guard over 42 scripts |
-| **P0: live JWT_SECRET in echocast-live.zip** | **`OPERATOR CHECKPOINT`** | guard test RED by design; rotate + delete required |
-| P1: standby acks share the primary snapshot | `DEFERRED` | see below - must be fixed before any two-Device Store |
+| **P0: live JWT_SECRET in echocast-live.zip** | **`RESOLVED 2026-07-30`** | secret rotated, both ADMIN passwords changed, archive removed on approval; guard now `2 passed` |
+| P1: standby acks share the primary snapshot | `FIXED 2026-07-30` | commit `3c3d945`; 16 tests written RED first; **four** consequences, not the one recorded |
 | Audio metrics endpoint | `AUTOMATED PASS` | `GET /api/broadcast/audio-metrics`, VIEW_STATUS, 9 tests |
 | Load tests 2/5/10/20/40 | `COMPLETE` | [docs/LOAD_TEST_REPORT.md](LOAD_TEST_REPORT.md) - all five levels clean |
 | Fresh artifacts (HQ, Receiver, StoreSetup, Store kit) | `AUTOMATED PASS` | all four rebuilt from source and verified |
 | Playwright chromium | `AUTOMATED PASS` | 164 passed, run fresh |
 | Frontend production build | `AUTOMATED PASS` | Done, run fresh |
 
-### DEFERRED, and why it is written here rather than lost in a commit
+### RESOLVED: standby acknowledgements shared the primary's snapshot
 
-**Standby Device acknowledgements are applied to the primary's Store snapshot.**
-`server.py:1898-1902` passes only `store_id` to `apply_receiver_payload`, with no
-`device_id` and no standby branch, so a primary and a standby in one Store write
-to a single snapshot whose sequence check then rejects roughly half of each
-other's messages - including the primary's `playback_confirmed`.
+Fixed in commit `3c3d945`. Writing the tests found **four** consequences where
+this queue had recorded one, and the second is worse than the one recorded:
 
-It only manifests when a Store runs a primary AND a standby at the same time,
-which no Store does today. The correct fix keys health state by
-`(store_id, device_id)` and aggregates through the existing
-`store_aggregate_state` - a change to the live status model that deserves its own
-commit and its own tests.
+1. **Sequence lock-out.** A standby at a high `sequence` poisons the Store's
+   `last_sequence`, and the primary's next ack is refused. As recorded here.
+2. **A standby heartbeat kept a dead primary looking online.** Freshness is
+   decided by `last_received_at` on the Store snapshot, so a standby heartbeating
+   refreshed it and a switched-off primary never went OFFLINE. **A green Store on
+   the HQ dashboard and silence in the shop.** Not recorded here at all.
+3. **A standby's `playback_confirmed` became the Store's** - evidence of playback
+   from a Device that is sent no audio.
+4. **A promoted standby inherited its standby-era status**, proved without ever
+   carrying the Store's audio.
 
-**This must be fixed before any Store runs two Devices.**
+Two of those live in the database, not just in memory: the endpoint set
+`status='online'` and `last_seen` and filed a `connected` `ReceiverEvent` for a
+standby connection. An in-memory-only fix would have left the operator-visible
+half intact.
 
-### The gate does not pass, deliberately
+**Still not proven:** unit-level evidence on a fake socket. Two physical machines
+in one Store, a promotion, and a primary pulled mid-broadcast are
+manual-acceptance items. **Do not enable same-Store primary + standby operation
+until those pass.**
 
-One mandatory test is RED: `test_no_secret_archives_in_tree.py`, because the
-current live JWT signing secret is in an archive in the working tree. That is a
-true statement about the system. It goes green when the archive is removed and
-the credential rotated - not by editing the test.
+### The gate passes, and was never made to pass by editing a test
+
+`test_no_secret_archives_in_tree.py` stayed RED for four days because the
+statement it was making was true. It went green when the archive was actually
+gone and the credentials inside it had actually been replaced:
+
+```
+test_no_secret_archives_in_tree     2 passed
+test_protected_database_isolation  17 passed
+full backend suite               2238 passed, 3 skipped, 0 failed
+Playwright chromium               164 passed
+frontend production build         Done
+```
+
+The order mattered: the archive was kept until both password changes were
+verified, because it held the only copy of the exposed password and removing it
+first would have made "does the old password still work?" impossible to check.

@@ -104,13 +104,53 @@ Application rollback does **not** undo a schema migration.
    two read-only:
 
    ```powershell
-   python tools\compare_databases.py --left <current> --right <backup>
+   python tools\compare_databases.py <current> <backup>
    ```
+
+   **Positional paths, not `--left`/`--right`.** This page documented flags that
+   do not exist: the tool treats every argument as a path, so `--left` was read as
+   a filename and reported `UNREADABLE - file does not exist` while still printing
+   a confident-looking SUGGESTION about the two real files. Found on 2026-07-30
+   while using it during a real incident, which is the worst moment to discover a
+   runbook command that does not work.
 
    `compare_databases.py` opens both `mode=ro&immutable=1` and recommends; it
    does not decide, and it cannot write.
 4. Choosing which database HQ keeps for ever is an **operator decision with a
    typed confirmation**, not a script's decision. Read the comparison first.
+
+> **The SUGGESTION line ranks by operational history, not by correctness.** When
+> two databases hold the same counts it favours the older file. After a *security*
+> change that is exactly backwards: on 2026-07-30 it suggested keeping the
+> pre-change backup of both databases, which would have restored the exposed ADMIN
+> password and undone the remediation. The tool's closing words —
+> *"This tool does not choose. You do."* — are the operative part. **Never restore
+> a pre-remediation backup to fix an unrelated fault.** If you must, change the
+> password again immediately afterwards, and check
+> `test_the_remediated_admin_session_version_did_not_go_backwards` passes.
+
+## If an HQ password change went wrong
+
+`tools\change_hq_user_password.py` takes a consistent SQLite-backup-API copy
+*before* it writes anything, and verifies that copy's own `integrity_check`
+before proceeding. If a change left an account unusable, the copy is the way
+back.
+
+| Target | Backup location |
+| --- | --- |
+| `--target persistent` | `%LOCALAPPDATA%\EchoCast-AI\persistent-lan-server\backups\echocast-before-password-change-<timestamp>.db` |
+| `--target protected` | `%USERPROFILE%\echocast-database-backups\echocast_live-before-password-change-<timestamp>.db` |
+
+The protected target's backup is deliberately **outside the repository**, so it
+cannot be committed or swept into an archive — the failure that caused the
+2026-07-30 credential incident in the first place.
+
+**Prefer changing the password again over restoring.** A restore reinstates the
+*old* password, and if that password is the reason you changed it, the restore
+recreates the exposure. Restoring is for a damaged row, not a forgotten password.
+
+Before trusting any restore, compare it first (positional paths, see above) and
+confirm `session_version` did not go backwards.
 
 ## If the persistent root itself is damaged
 

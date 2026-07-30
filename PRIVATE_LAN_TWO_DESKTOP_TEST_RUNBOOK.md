@@ -257,6 +257,57 @@ and the Store would flicker between them.
 
 ---
 
+## Part E2 — A primary and a standby in one Store
+
+**Do this part only if the Store will ever run two Receiver computers.** It needs
+a *second* Store desktop enrolled to the *same* Store. It exists because the
+automated tests for this are unit-level, on a fake socket: they prove the routing,
+and they cannot prove two real machines.
+
+Commit `3c3d945` fixed four defects here. Each step below is one of them, and each
+one was invisible on the HQ page before the fix — which is the point.
+
+**E2-1.** Enrol a second desktop to the same Store (Part C again). In HQ, promote
+the *first* desktop to primary and leave the second as standby.
+
+**E2-2.** Start both Receivers. Confirm on the HQ page that both Devices appear,
+and that the Store shows **one** primary.
+
+**E2-3. A standby hears nothing.** Broadcast as in Part D. Sound must come out of
+the **primary's** speaker only. Stand in front of the standby and confirm silence
+— do not infer it from the screen.
+
+**E2-4. A standby cannot confirm playback the Store never had.** The HQ page must
+attribute playback confirmation to the primary Device. It must not report the
+Store as having played anything on the standby's account.
+
+**E2-5. The dangerous one — a standby cannot cover for a dead primary.** With both
+running and the standby healthy, **switch the primary computer off at the wall**.
+Leave the standby running and untouched.
+
+Watch the HQ page. Within the stale/offline window the Store must go **STALE and
+then OFFLINE**.
+
+> If the Store stays green while its primary is off, stop the acceptance run. That
+> is the pre-`3c3d945` behaviour: a green Store and silent speakers, which is worse
+> than an obviously broken one, because nobody investigates a green tick.
+
+**E2-6.** Confirm the standby is *still* reported as connected in its own right.
+Its own health must not have been lost in order to report the primary honestly.
+
+**E2-7. Promotion starts from honest ignorance.** With the primary still off,
+promote the standby in HQ. Expect it to show as needing readiness again rather
+than arriving already READY — whatever it proved as a standby, it proved without
+carrying the Store's audio.
+
+**E2-8.** Broadcast again. Sound must now come from the newly promoted computer.
+
+**E2-9.** Switch the original primary back on and let it reconnect as a standby.
+Confirm it does **not** take the audio back on its own, and that it does not knock
+the current primary off.
+
+---
+
 ## Part F — Autorun at logon
 
 **F1.** Install the task on the Store desktop.
@@ -330,6 +381,12 @@ size and hash as before the test, with no `-wal` or `-shm` beside it.
 ---
 
 ## What a completely green run does and does not prove
+
+> **If Part E2 was skipped, primary + standby is NOT accepted.** The automated
+> tests cover the routing on a fake socket only. A Store may run one Receiver on
+> the strength of Parts A-E; running two at once needs E2 signed off.
+
+### What a completely green run does and does not prove
 
 **Proved:** the packaged Receiver runs on a Windows desktop with no Python and
 no FFmpeg installed; it enrols over a private LAN; the credential is sealed per

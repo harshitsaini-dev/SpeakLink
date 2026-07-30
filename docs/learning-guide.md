@@ -493,3 +493,123 @@ one home. The installer checks what a filesystem can answer (is there a database
 is there a keys folder). Whether a *missing* key container is normal or an
 emergency depends on how many Devices are enrolled, so the runtime decides that,
 because only the runtime can count them.
+
+---
+
+## A pass list can be a lie by omission
+
+The credential remediation had 22 required proofs. My comparison script printed
+`[PASS]` twenty-two times and I nearly reported it as complete.
+
+Two of those proofs were *"Receiver Device rows unchanged"* and *"enrollment
+records unchanged"*. The script looked those tables up, failed to find them,
+caught the error, and printed **nothing at all** for them. Not a failure, not a
+skip — nothing. The output looked like full coverage because the eye counts
+`[PASS]` lines and cannot count absences.
+
+The tables genuinely do not exist in either database: they are created by
+`backend/migrations.py`, which has never run against those files. So the two
+proofs *do* hold — there is no Device row and no Receiver credential in either
+database to change. But that is a completely different statement from "I compared
+the rows and they matched", and only one of them is true.
+
+**Rule.** A check that cannot run must say so out loud. `SKIPPED - table absent`
+is information; silence is a false negative wearing the costume of a pass. If your
+loop has a `try/except: continue`, ask what the operator sees when it fires.
+
+The same shape appeared twice more in the same session:
+
+* A Store kit built from a Receiver package **three days old**, because I picked
+  "newest" by sorting on **name** — and `ff04aea` sorts above `3c3d945`. The build
+  script printed `package commit ff04aea` and `kit commit 3c3d945` on adjacent
+  lines and still declared success. Nothing was hidden; nothing was compared
+  either. **Sort by time, never by a name that contains a hash.**
+* A test suite that passed a CRLF bug because the fixture used `\n` and the real
+  file used `\r\n`. A fixture that does not resemble the file it stands in for
+  cannot catch anything about that file.
+
+## Hash the file, not just its size
+
+The protected database has a recorded baseline: size **and** SHA-256. The comment
+above it had always claimed the hash was the part that mattered. Nobody had seen it
+proved.
+
+Then the exposed ADMIN password was changed. The file stayed at **507904 bytes** —
+exactly what it had been through all three previous baselines. On the failing run:
+
+```
+assert PROTECTED_DATABASE.stat().st_size == PROTECTED_BASELINE_SIZE   <- PASSED
+assert digest == PROTECTED_BASELINE_SHA256                            <- FAILED
+```
+
+A password change rewrites one row in place. A size guard would have reported the
+database as untouched while a credential inside it moved.
+
+**Rule.** Size detects truncation and little else. If you care whether a file
+changed, hash it.
+
+There is a second half. The baseline moving is *expected* here, so it gets
+rebaselined — and a baseline that is rebaselined every time it fails is not a
+baseline. What makes it survivable is that the old value is appended to
+`BASELINE_HISTORY` with the reason, two tests refuse a value pasted over history
+instead of appended to it, and a *third* test now asserts the specific fact rather
+than the hash:
+
+```python
+assert row[0] >= 2, "this database predates the exposed-password remediation"
+```
+
+`session_version` only counts up. The hash guard would notice a restore from a
+pre-remediation backup, but only as "the hash moved" — which reads like any other
+schema change and invites another rebaseline. Guard the *fact*, not just the bytes.
+
+## Run the runbook before you need the runbook
+
+`docs/ROLLBACK_PLAN.md` told an operator to run:
+
+```powershell
+python tools\compare_databases.py --left <current> --right <backup>
+```
+
+The tool takes **positional** paths. It read `--left` as a filename, printed
+`UNREADABLE - file does not exist`, and then printed a confident-looking
+recommendation about the two real files underneath — so the command half-worked,
+which is worse than failing.
+
+It was found by using it during a real incident. That is the worst possible moment
+to discover that a documented command is wrong, and the only reason it was found at
+all is that the incident forced someone to actually type it.
+
+Worse: the tool's `SUGGESTION` ranks candidates by *operational history*, so with
+equal row counts it recommended keeping the **pre-change** backup — which would
+have restored the exposed password and undone the remediation. The tool ends with
+*"This tool does not choose. You do."* That line is not decoration; it is the
+safety mechanism, and the runbook now explains when to overrule the suggestion.
+
+**Rule.** A runbook command that has never been executed is a guess. Execute it,
+and read what it recommends as well as whether it runs.
+
+## The dangerous bug is the one that looks healthy
+
+A standby Receiver's acknowledgements were being written into its Store's health
+snapshot. The audit recorded one consequence: interleaved sequence numbers
+rejecting each other's messages. Writing tests found four, and the second was far
+worse than the recorded one:
+
+**A standby's heartbeat kept a switched-off primary reading as online.** Freshness
+is decided by `last_received_at` on the Store snapshot; the standby refreshed it
+every few seconds. HQ showed a green Store. Nothing came out of the speakers.
+
+An obviously broken Store gets investigated. A green one does not. That is what
+makes this class of defect expensive, and it is why the manual acceptance step for
+it is *"switch the primary off at the wall and watch HQ go OFFLINE"* rather than
+*"check both Devices appear"*.
+
+Two of the four consequences also lived in the **database**, not just in memory:
+the endpoint set `status='online'`, refreshed `last_seen`, and filed a `connected`
+event for a standby connection. An in-memory-only fix would have looked complete
+and left the half an operator actually reads.
+
+**Rule.** When you fix an attribution bug, follow the value all the way to
+whatever a human eventually looks at. Memory, database, dashboard, log. The fix is
+not done at the first layer that looks right.
