@@ -2416,3 +2416,104 @@ placeholder buttons, Store task/recovery tests, enrolment USED-state evidence,
 the audio/WebSocket/queue audit, the security audit document, load tests and
 the final Release Candidate artifacts remain `NOT STARTED` - see
 [docs/NONSTOP_COMPLETION_QUEUE.md](docs/NONSTOP_COMPLETION_QUEUE.md).
+
+---
+
+## 2026-07-30 (3) — StoreSetup has no placeholders left, and is proven end to end
+
+Commits: `9657558`, `11a95c6`, `bbab632`, `34f6a6e`.
+Branch `feature/persistent-hq-and-one-click-store-setup`. Not pushed.
+
+### The two defects that mattered most
+
+Both were in my own first draft of the Rerun screen, and both were found by
+**driving the window rather than reading it**.
+
+`_replace_identity` called `core.replace_device_identity(...,
+confirmation_word=core.CONFIRMATION_WORD)` — passing the *expected* word in as
+the answer. The core function compares it properly, and that comparison could
+never fail, because the caller supplied the correct value regardless of what the
+operator typed.
+
+The modal that was supposed to gate it was not a gate either. In an automated or
+headless session the dialog's default button fires on its own: `_confirm_dialog`
+returned `True` with **nothing typed**. Measured directly — a script that built
+the real app, called `_replace_identity()` and typed nothing printed
+`credential still exists: False`. It also blocked the Tk loop for 6–36 seconds
+per call, which is why the GUI suite had quietly gone from 1.2s to 37s.
+
+Either alone would have destroyed a Store's Device identity on a stray click.
+Together they made an unconfirmable destructive action look carefully guarded.
+
+The fix removes the modal entirely. The confirmation is an inline field, the
+operator's own text is handed to `store_setup_core` as data, and the GUI no
+longer knows the expected word for Replace Device Identity at all — so core's
+comparison is the single real gate.
+
+### A flake that only the parallel suite could find
+
+Every `tk.StringVar`/`BooleanVar` in the GUI was created with no master, binding
+to tkinter's module-global `_default_root`. One root in production works fine;
+across the repeated root creation an xdist worker does, `_default_root` can
+point at a destroyed interpreter and the *next* `StoreSetupApp()` fails inside
+`tk.Tk()`. It surfaced as an intermittent setup error on an unrelated test, in
+the full suite only, never in that file alone. Every variable is owned by its
+widget now, and a test greps for the pattern.
+
+### Proven, not asserted
+
+The end-to-end test drives Test Connection → redeem a real code → seal a real
+credential → select a verified package → write config → invoke the installer →
+wait for CONNECTED against the **actual FastAPI routes, enrolment service and
+credential store**. Only the PowerShell installer and the Receiver process are
+stood in for, and the Receiver's stand-in writes the same status file a real one
+writes through.
+
+**All 12 passed first run, so I mutated the code to prove they can fail:**
+loosening `wait_for_connected`'s CONNECTED check broke both timeout tests;
+removing `enrol()`'s already-enrolled guard broke the code-not-spent test;
+replacing the generic refusal with a real reason broke all three
+generic-failure tests. Sources restored, `git diff` clean.
+
+### The asymmetry that was closed
+
+The Store Scheduled Task's requirements were verified only by a PowerShell
+script reading an **already-installed** task — so none of them were checked by
+any automated run. The HQ side had 82 such tests; the Store side, which is what
+ships to 44 tills, had none. Now 49.
+
+### Same rule, two languages, one incomplete — for the third time
+
+`receiver_agent.remove_local_credential()` always warned that removing a
+credential does **not** revoke the Device at HQ.
+`Uninstall-EchoCastStoreReceiver.ps1 -RemoveCredential` never mentioned it,
+leaving a Device HQ still lists as enrolled that will never connect — a Store
+that looks fine on the dashboard and is silent. Both paths carry the sentence
+now, and a test holds them together.
+
+### Artifacts
+
+```
+EchoCastStoreSetup.exe   rebuilt from current source (the previous build was stale)
+  PE subsystem           2 (WINDOWS_GUI), read from the file
+  sha256                 079CC0FE7004D6A75075F74D1E173155A1CDEE2B08CD108B52B9DB458A503480
+  launched               real window "EchoCast Store Setup", 0 new conhost processes
+EchoCastReceiver package artifacts\EchoCastReceiver-1.0.0-7e6d704-20260730-124134
+```
+
+### Gate
+
+```
+full backend suite      2088 passed, 3 skipped, 0 FAILED, 0 errors   (was 1986)
+compileall               exit 0
+pip check                No broken requirements found
+```
+
+### Not claimed
+
+Playwright and the frontend production build were **not re-run** this sprint —
+no frontend code changed, and quoting an old result as if it were fresh would be
+worse than saying so. Enrollment USED-state evidence, the audio/WebSocket
+bounded-queue audit, `docs/SECURITY_AUDIT.md`, load tests and the final Release
+Candidate artifacts are all `NOT STARTED`. A real enrollment against a running
+HQ with a real code on real Store hardware remains an operator checkpoint.
