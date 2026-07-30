@@ -39,6 +39,7 @@ from tools.audio_receiver_pilot import hidden_child_process_options  # noqa: E40
 from tools.receiver_agent import (  # noqa: E402
     AgentError,
     AlreadyEnrolled,
+    CONFIRMATION_WORD,
     EnrolmentAmbiguous,
     EnrolmentOutcome,
     EnrolmentRefused,
@@ -46,12 +47,18 @@ from tools.receiver_agent import (  # noqa: E402
     EnrolmentUnreachable,
     InsecureBackendError,
     TerminalAuthentication,
+    default_config_path,
     default_log_directory,
     describe_status,
+    diagnose_report,
     enrol,
+    load_config,
     normalise_backend_url,
     read_status,
     receiver_status_path,
+    remove_local_credential,
+    save_config,
+    ReceiverConfig,
 )
 from tools.windows_audio_devices import (  # noqa: E402
     AudioDeviceError,
@@ -576,3 +583,269 @@ def detect_existing_installation(*, credential_path, protector) -> ExistingInsta
         store_id=status.get("store_id"),
         detail="this computer is already enrolled as a Receiver Device",
     )
+
+
+# ===========================================================================
+# Rerun workflow: Status, Repair, Restart, Stop, Diagnostics, Uninstall
+# ===========================================================================
+DEFAULT_TASK_NAME = "EchoCast Store Receiver"
+DEFAULT_INSTALL_ROOT_NAME = "receiver-app"
+
+
+def _manage_task_script() -> Path:
+    return REPOSITORY_ROOT / "scripts" / "Manage-EchoCastStoreReceiverTask.ps1"
+
+
+def _run_powershell_script(script: Path, arguments: "list[str]", *, run=None,
+                          timeout: float = 60.0) -> "subprocess.CompletedProcess":
+    """Every task/installer action goes through a named, tested .ps1 file with
+    real parameters - never a -Command string assembled from a task name or a
+    path, which is the injection shape this project refuses everywhere else."""
+    command = ["powershell.exe", "-NoProfile", "-NonInteractive",
+              "-ExecutionPolicy", "Bypass", "-File", str(script)] + list(arguments)
+    executor = run or subprocess.run
+    return executor(command, capture_output=True, text=True, timeout=timeout,
+                    **hidden_child_process_options())
+
+
+@dataclass(frozen=True, slots=True)
+class TaskState:
+    registered: bool
+    is_ours: "bool | None" = None
+    state: "str | None" = None
+    process_count: "int | None" = None
+    detail: str = ""
+
+
+def query_task_state(*, task_name: str = DEFAULT_TASK_NAME, run=None) -> TaskState:
+    """Ask the task manager script. Never assumes a registered task is ours."""
+    result = _run_powershell_script(_manage_task_script(),
+                                    ["-TaskName", task_name, "-Action", "Status"], run=run)
+    output = result.stdout
+    if "NOT_REGISTERED" in output:
+        return TaskState(registered=False, detail="no Store Receiver task is registered")
+    if "NOT_OURS" in output:
+        return TaskState(registered=True, is_ours=False,
+                         detail=f"a task named '{task_name}' exists but is not ours")
+    state = None
+    process_count = None
+    for line in output.splitlines():
+        if line.startswith("STATE="):
+            state = line.split("=", 1)[1].strip()
+        elif line.startswith("PROCESS_COUNT="):
+            try:
+                process_count = int(line.split("=", 1)[1].strip())
+            except ValueError:
+                process_count = None
+    return TaskState(registered=True, is_ours=True, state=state, process_count=process_count)
+
+
+@dataclass(frozen=True, slots=True)
+class StatusSnapshot:
+    """Everything Status may show. No field here can hold a secret."""
+
+    is_installed: bool
+    device_public_id: "str | None" = None
+    store_id: "int | None" = None
+    backend_origin: "str | None" = None
+    enrolled_at_utc: "str | None" = None
+    audio_sink: "str | None" = None
+    audio_output_device: "str | None" = None
+    task: "TaskState | None" = None
+    receiver_state: "str | None" = None
+    receiver_detail: str = ""
+    hq_reachable: "bool | None" = None
+
+
+def get_status_snapshot(*, credential_path, protector, config_path=None,
+                        status_path=None, task_name: str = DEFAULT_TASK_NAME,
+                        connection_opener=None) -> StatusSnapshot:
+    """Read-only. Never opens the credential's contents, never shows a task
+    XML, never prints an Authorization header."""
+    status = describe_status(credential_path, protector=protector)
+    if not status.get("enrolled"):
+        return StatusSnapshot(is_installed=False)
+
+    config = load_config(config_path or default_config_path())
+    receiver_status = read_status(status_path or receiver_status_path())
+    task = query_task_state(task_name=task_name)
+
+    hq_reachable = None
+    backend_url = (config.backend_url if config else None) or status.get("backend_origin")
+    if backend_url:
+        connection = test_hq_connection(backend_url, opener=connection_opener)
+        hq_reachable = connection.state in (ConnectionState.CONNECTED_TO_HQ,
+                                            ConnectionState.PRIVATE_LAN_WARNING)
+
+    return StatusSnapshot(
+        is_installed=True,
+        device_public_id=status.get("device_public_id"),
+        store_id=status.get("store_id"),
+        backend_origin=status.get("backend_origin"),
+        enrolled_at_utc=status.get("enrolled_at_utc"),
+        audio_sink=config.audio_sink if config else None,
+        audio_output_device=config.audio_output_device if config else None,
+        task=task,
+        receiver_state=receiver_status.get("state"),
+        receiver_detail=receiver_status.get("detail", ""),
+        hq_reachable=hq_reachable,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RepairResult:
+    ok: bool
+    detail: str
+
+
+def repair_installation(*, package_path, task_name: str = DEFAULT_TASK_NAME,
+                        run=None) -> RepairResult:
+    """Invoke the existing, tested Repair-EchoCastStoreReceiver.ps1. It already
+    preserves the credential, config, selected output and logs - not
+    reimplemented here."""
+    script = REPOSITORY_ROOT / "scripts" / "Repair-EchoCastStoreReceiver.ps1"
+    result = _run_powershell_script(script, ["-PackagePath", str(package_path),
+                                             "-TaskName", task_name], run=run,
+                                    timeout=180.0)
+    if result.returncode != 0:
+        return RepairResult(ok=False, detail=(result.stdout + result.stderr)[-2000:])
+    return RepairResult(ok=True, detail="repair completed")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskActionResult:
+    state: InstallState
+    detail: str
+
+
+def restart_receiver(*, task_name: str = DEFAULT_TASK_NAME, timeout_seconds: float = 30.0,
+                     run=None, sleep=time.sleep, clock=time.monotonic) -> TaskActionResult:
+    """Stop, then start, the verified task - never a broad process kill - and
+    wait for literal CONNECTED. A restarted process is not proof it worked."""
+    stop_result = stop_receiver(task_name=task_name, run=run)
+    if not stop_result.ok:
+        return TaskActionResult(state=InstallState.INSTALL_FAILED, detail=stop_result.detail)
+    started = _run_powershell_script(_manage_task_script(),
+                                     ["-TaskName", task_name, "-Action", "Start"], run=run)
+    if started.returncode != 0:
+        return TaskActionResult(state=InstallState.INSTALL_FAILED,
+                                detail=(started.stdout + started.stderr)[-1000:])
+    outcome = wait_for_connected(timeout_seconds=timeout_seconds, sleep=sleep, clock=clock)
+    return TaskActionResult(state=outcome.state, detail=outcome.detail)
+
+
+@dataclass(frozen=True, slots=True)
+class StopResult:
+    """Deliberately its own type, not a reuse of InstallState/TaskActionResult:
+    'the Receiver was stopped' and 'the Receiver is CONNECTED' are two
+    different facts, and folding one into the other's vocabulary is the exact
+    shape of overclaim this project keeps finding and removing (CONFIG_OK
+    counted as a start; a broadcast stop counted as the Receiver stopping)."""
+
+    ok: bool
+    detail: str
+
+
+def stop_receiver(*, task_name: str = DEFAULT_TASK_NAME, run=None) -> StopResult:
+    """Stop only the verified task. Never touches the credential or the task
+    registration itself."""
+    result = _run_powershell_script(_manage_task_script(),
+                                    ["-TaskName", task_name, "-Action", "Stop"], run=run)
+    if result.returncode != 0:
+        return StopResult(ok=False, detail=(result.stdout + result.stderr).strip()[-1000:])
+    return StopResult(ok=("STOPPED" in result.stdout), detail=result.stdout.strip())
+
+
+def change_audio_output(*, device, config_path=None, task_name: str = DEFAULT_TASK_NAME,
+                        run=None, timeout_seconds: float = 30.0) -> TaskActionResult:
+    """Save the newly confirmed selector, then restart so it takes effect.
+    Never saves before Test Sound + the heard confirmation - that gate lives
+    in the GUI, which only calls this after both have happened."""
+    path = Path(config_path) if config_path is not None else default_config_path()
+    existing = load_config(path) or ReceiverConfig()
+    updated = ReceiverConfig(
+        backend_url=existing.backend_url,
+        expected_hq_host=existing.expected_hq_host,
+        allow_insecure_private_lan=existing.allow_insecure_private_lan,
+        audio_sink="windows",
+        audio_output_device=device.verified_selector,
+        log_directory=existing.log_directory,
+        installed_version=existing.installed_version,
+        source_commit=existing.source_commit,
+    )
+    save_config(path, updated)
+    return restart_receiver(task_name=task_name, timeout_seconds=timeout_seconds, run=run)
+
+
+def build_redacted_diagnostics(*, credential_path, config_path=None, devices=None,
+                              backend=None, task_name: str = DEFAULT_TASK_NAME) -> str:
+    """Everything Redacted Diagnostics shows. Reuses diagnose_report()
+    verbatim and appends task/HQ facts - never a second, parallel redaction
+    implementation that could disagree with the first."""
+    report = diagnose_report(config_path=config_path or default_config_path(),
+                             credential_path=credential_path, devices=devices, backend=backend)
+    task = query_task_state(task_name=task_name)
+    return report + (
+        f"\n\nscheduled task    : {task_name}\n"
+        f"  registered      : {task.registered}\n"
+        f"  owned by us     : {task.is_ours}\n"
+        f"  state           : {task.state or '<unknown>'}\n"
+        f"  process count   : {task.process_count if task.process_count is not None else '<unknown>'}\n"
+    )
+
+
+_FORBIDDEN_EXPORT_PATTERNS = ("echocast_rcv_v", "Bearer ", "BEGIN PRIVATE KEY",
+                              "BEGIN RSA PRIVATE KEY")
+
+
+class UnsafeDiagnosticsExport(AgentError):
+    """The generated text matched a forbidden pattern. Refused, not filtered -
+    a report worth trusting is one that never had the secret in it, not one
+    where a regex tried to catch it after the fact."""
+
+
+def export_diagnostics(text: str, *, export_directory=None, now=None) -> Path:
+    from datetime import datetime, timezone
+
+    for pattern in _FORBIDDEN_EXPORT_PATTERNS:
+        if pattern in text:
+            raise UnsafeDiagnosticsExport(
+                f"the diagnostics text matched a forbidden pattern ({pattern!r}) and "
+                "was not written to disk."
+            )
+    directory = Path(export_directory) if export_directory is not None else default_log_directory()
+    directory.mkdir(parents=True, exist_ok=True)
+    moment = now or datetime.now(timezone.utc)
+    target = directory / f"diagnostics-{moment.strftime('%Y%m%d-%H%M%S')}.txt"
+    target.write_text(text, encoding="utf-8")
+    return target
+
+
+class UntrustedLogPath(AgentError):
+    """Refuses to open anything but the one known log directory."""
+
+
+def open_log_folder(path=None, *, opener=None) -> Path:
+    """Open exactly the known Receiver log directory. Never a path built from
+    user text - there is no user text here at all, only the fixed constant."""
+    target = Path(path) if path is not None else default_log_directory()
+    expected = default_log_directory()
+    if target.resolve() != expected.resolve():
+        raise UntrustedLogPath(f"refusing to open {target}: it is not the known log directory")
+    target.mkdir(parents=True, exist_ok=True)
+    if opener is not None:
+        opener(str(target))
+    else:
+        import os
+
+        os.startfile(str(target))  # noqa: S606 - a fixed, known directory only
+    return target
+
+
+def replace_device_identity(*, credential_path, confirmation_word: str) -> bool:
+    """Delete the local credential ONLY on an exact typed confirmation. Never
+    revokes the HQ Device - an administrator does that separately, and the
+    caller is told so before this runs."""
+    if confirmation_word.strip().lower() != CONFIRMATION_WORD:
+        return False
+    return remove_local_credential(credential_path, confirm=lambda _prompt: CONFIRMATION_WORD)
