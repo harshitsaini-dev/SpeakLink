@@ -286,3 +286,151 @@ test.describe('Reaching the page, and what it must not offer', () => {
     );
   });
 });
+
+test.describe('The enrolment record comes from the server, not the clock', () => {
+  const UNUSED_RECORD = {
+    id: 7,
+    store_id: 1,
+    state: 'UNUSED',
+    created_at: '2026-07-30T09:00:00+00:00',
+    expires_at: '2026-07-30T09:15:00+00:00',
+    used_at: null,
+    device_public_id: null,
+    progress: ['CODE_CREATED'],
+  };
+  const USED_RECORD = {
+    ...UNUSED_RECORD,
+    state: 'USED',
+    used_at: '2026-07-30T09:00:30+00:00',
+    device_public_id: STANDBY_DEVICE.public_id,
+    progress: ['CODE_CREATED', 'CODE_REDEEMED', 'DEVICE_CREATED', 'DEVICE_CONNECTED'],
+  };
+
+  async function openWithRecords(page, records, extra = {}) {
+    await signIn(page);
+    const state = await mockBackend(page, { enrolmentRecords: records, ...extra });
+    await page.goto(DEVICES_URL);
+    await expect(page.getByTestId(`device-row-${PRIMARY_DEVICE.public_id}`)).toBeVisible();
+    return state;
+  }
+
+  test('an UNUSED record keeps the countdown and shows only CODE_CREATED', async ({ page }) => {
+    await openWithRecords(page, [UNUSED_RECORD]);
+    await page.getByTestId('create-enrolment-code-btn').click();
+
+    await expect(page.getByTestId('enrolment-code-state')).toHaveText('UNUSED');
+    await expect(page.getByTestId('enrolment-code-countdown')).toBeVisible();
+    await expect(page.getByTestId('setup-stage-CODE_CREATED')).toHaveAttribute('data-reached', 'true');
+    await expect(page.getByTestId('setup-stage-CODE_REDEEMED')).toHaveAttribute('data-reached', 'false');
+  });
+
+  test('a USED record shows USED and removes the code from the page', async ({ page }) => {
+    await openWithRecords(page, [USED_RECORD]);
+    await page.getByTestId('create-enrolment-code-btn').click();
+
+    await expect(page.getByTestId('enrolment-code-state')).toHaveText('USED');
+    await expect(page.getByTestId('enrolment-code-used')).toBeVisible();
+    // The value is gone the moment it is spent.
+    await expect(page.getByTestId('issued-enrolment-code-value')).toHaveCount(0);
+    await expect(page.locator('body')).not.toContainText('ECHO-CODE-1');
+  });
+
+  test('a USED record links the Device it enrolled', async ({ page }) => {
+    await openWithRecords(page, [USED_RECORD]);
+    await page.getByTestId('create-enrolment-code-btn').click();
+    await expect(page.getByTestId('enrolled-device-public-id')).toHaveText(
+      STANDBY_DEVICE.public_id,
+    );
+  });
+
+  test('a USED record shows only the stages the server proved', async ({ page }) => {
+    await openWithRecords(page, [USED_RECORD]);
+    await page.getByTestId('create-enrolment-code-btn').click();
+
+    for (const stage of ['CODE_CREATED', 'CODE_REDEEMED', 'DEVICE_CREATED', 'DEVICE_CONNECTED']) {
+      await expect(page.getByTestId(`setup-stage-${stage}`)).toHaveAttribute('data-reached', 'true');
+    }
+    // Not proved, so not claimed - even though every earlier stage was reached.
+    await expect(page.getByTestId('setup-stage-PRIMARY_ASSIGNED')).toHaveAttribute(
+      'data-reached',
+      'false',
+    );
+  });
+
+  test('a code the server calls USED is never relabelled EXPIRED by the clock', async ({ page }) => {
+    // The exact misreport this endpoint exists to prevent: a code redeemed
+    // seconds into its life, viewed after the countdown has run out. It IS
+    // enrolled; showing EXPIRED would say the setup failed.
+    await openWithRecords(page, [USED_RECORD], { enrolmentCodeSeconds: 1 });
+    await page.getByTestId('create-enrolment-code-btn').click();
+    await expect(page.getByTestId('enrolment-code-state')).toHaveText('USED');
+    await page.waitForTimeout(1500);
+    await expect(page.getByTestId('enrolment-code-state')).toHaveText('USED');
+    await expect(page.getByTestId('enrolment-code-expired')).toHaveCount(0);
+  });
+
+  test('a failing status poll leaves the last known state rather than reverting', async ({ page }) => {
+    await openWithRecords(page, [USED_RECORD]);
+    await page.getByTestId('create-enrolment-code-btn').click();
+    await expect(page.getByTestId('enrolment-code-state')).toHaveText('USED');
+
+    // Break the endpoint after the page has already learned the truth.
+    await page.route('**/api/stores/*/enrollment-codes', (route) =>
+      route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"nope"}' }),
+    );
+    await page.waitForTimeout(3500);
+    await expect(page.getByTestId('enrolment-code-state')).toHaveText('USED');
+  });
+
+  test('the status response never carries a code or a hash', async ({ page }) => {
+    const bodies = [];
+    await signIn(page);
+    await mockBackend(page, { enrolmentRecords: [USED_RECORD] });
+    page.on('response', async (response) => {
+      if (response.url().includes('/enrollment-codes') && response.request().method() === 'GET') {
+        bodies.push(await response.text().catch(() => ''));
+      }
+    });
+    await page.goto(DEVICES_URL);
+    await expect(page.getByTestId(`device-row-${PRIMARY_DEVICE.public_id}`)).toBeVisible();
+    await page.getByTestId('create-enrolment-code-btn').click();
+    await expect(page.getByTestId('enrolment-code-state')).toHaveText('USED');
+
+    expect(bodies.length).toBeGreaterThan(0);
+    for (const body of bodies) {
+      expect(body).not.toContain('ECHO-CODE');
+      expect(body.toLowerCase()).not.toContain('code_hash');
+      expect(body).not.toContain('echocast_rcv_v');
+    }
+  });
+
+  test('no secret reaches the URL or browser storage', async ({ page }) => {
+    await openWithRecords(page, [USED_RECORD]);
+    await page.getByTestId('create-enrolment-code-btn').click();
+    await expect(page.getByTestId('enrolment-code-state')).toHaveText('USED');
+
+    expect(page.url()).not.toContain('ECHO-CODE');
+    const stored = await page.evaluate(() => {
+      const all = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
+        all.push(localStorage.getItem(localStorage.key(i)) || '');
+      }
+      for (let i = 0; i < sessionStorage.length; i += 1) {
+        all.push(sessionStorage.getItem(sessionStorage.key(i)) || '');
+      }
+      return all.join('|');
+    });
+    expect(stored).not.toContain('ECHO-CODE');
+    expect(stored).not.toContain('echocast_rcv_v');
+  });
+
+  test('the page still works when the status endpoint is unavailable', async ({ page }) => {
+    // A page that cannot read the evidence must fall back to the clock, not
+    // break. Nothing about the Device list depends on this poll.
+    await openWithRecords(page, [], { enrolmentCodeStatus: 503 });
+    await page.getByTestId('create-enrolment-code-btn').click();
+    await expect(page.getByTestId('enrolment-code-state')).toHaveText('UNUSED');
+    await expect(page.getByTestId('issued-enrolment-code-value')).toContainText('ECHO-CODE-1');
+    await expect(page.getByTestId('setup-progress')).toHaveCount(0);
+  });
+});
