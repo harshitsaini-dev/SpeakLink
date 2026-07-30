@@ -55,7 +55,9 @@ from tools.receiver_agent import (  # noqa: E402
     AlreadyRunning,
     InstanceLock,
     configure_logging,
+    read_status,
     redact,
+    write_status,
 )
 
 
@@ -524,32 +526,9 @@ def start_logging(profile: RuntimeProfile):
 # ===========================================================================
 # What state the runtime is in, written where a windowed process can be read
 # ===========================================================================
-def write_status(path, state: RuntimeState, *, detail: str = "") -> None:
-    """Replace the status file whole, and never let a secret into it.
-
-    Replaced rather than appended because a status file is a current fact, not
-    a history; the log is the history. Written through a temporary file and
-    renamed so a reader never sees half a document.
-    """
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "state": state.value if isinstance(state, RuntimeState) else str(state),
-        "detail": redact(detail),
-        "pid": os.getpid(),
-    }
-    temporary = target.with_name(target.name + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    temporary.replace(target)
-
-
-def read_status(path) -> dict:
-    """Unreadable is UNKNOWN, not FAIL. A checker that scores 'I could not
-    look' as 'it is broken' has already misled somebody in this repository."""
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+# write_status/read_status now live in tools.receiver_agent, imported above -
+# the Receiver Agent needs the identical shape of evidence file, and importing
+# beats a second copy that quietly drifts from this one.
 
 
 def spawn_child(command: list, env: dict):

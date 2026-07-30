@@ -356,6 +356,53 @@ def default_log_directory() -> Path:
     return _agent_state_directory() / "logs"
 
 
+# ===========================================================================
+# A status file any process here can be read through, not just watched
+# ===========================================================================
+def write_status(path, state, *, detail: str = "") -> None:
+    """Replace the status file whole, and never let a secret into it.
+
+    Originally hq_runtime's own helper, moved here so the Receiver Agent can
+    write the same shape of evidence: a windowed or backgrounded process has
+    nowhere to print, so whatever it is doing has to be readable from disk.
+    Replaced rather than appended, because a status file is a current fact,
+    not a history - the rotating log is the history. Written through a
+    temporary file and renamed so a reader never sees half a document.
+    """
+    from enum import Enum
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "state": state.value if isinstance(state, Enum) else str(state),
+        "detail": redact(detail),
+        "pid": os.getpid(),
+    }
+    temporary = target.with_name(target.name + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(target)
+
+
+def read_status(path) -> dict:
+    """Unreadable is UNKNOWN, not FAIL. A checker that scores 'I could not
+    look' as 'it is broken' has already misled somebody in this repository."""
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def receiver_status_path(state_directory: "Path | None" = None) -> Path:
+    """Where this computer's Receiver writes what it is doing right now.
+
+    Distinct from the rotating log: the log is history, this is 'what is true
+    at this instant', which is exactly what an installer waiting for a real
+    connection needs to read - not a process that merely exists.
+    """
+    base = Path(state_directory) if state_directory is not None else _agent_state_directory()
+    return base / "receiver-status.json"
+
+
 def configure_logging(
     directory=None,
     *,
@@ -1185,15 +1232,23 @@ class DeviceReceiverSession(AudioReceiverPilot):
     and untouched, which is what preserves the amplifier evidence path.
     """
 
-    def __init__(self, *, credential: str, connect=None, **kwargs) -> None:
+    def __init__(self, *, credential: str, connect=None, status_path=None, **kwargs) -> None:
         super().__init__(**kwargs)
         self._credential = credential
         self._connect = connect
+        # Optional: where to write "what is true right now". A Store technician
+        # waiting for the Device to come online cannot see this process's stdout
+        # (it is backgrounded, on purpose), so the evidence has to be on disk.
+        self._status_path = Path(status_path) if status_path is not None else None
 
     def __repr__(self) -> str:
         return f"DeviceReceiverSession(ws_url={self.ws_url!r}, credential=<redacted>)"
 
     __str__ = __repr__
+
+    def _write_status(self, state: str, *, detail: str = "") -> None:
+        if self._status_path is not None:
+            write_status(self._status_path, state, detail=detail)
 
     async def run(self) -> dict:
         connect = self._connect
@@ -1212,6 +1267,7 @@ class DeviceReceiverSession(AudioReceiverPilot):
         )
         self.report["connected"] = True
         self._record_state("CONNECTED")
+        self._write_status("CONNECTED", detail="the backend accepted this Device credential")
 
         heartbeat = asyncio.create_task(self._heartbeat_loop(connection))
         try:
@@ -1223,6 +1279,17 @@ class DeviceReceiverSession(AudioReceiverPilot):
             except asyncio.CancelledError:
                 pass
             await self._shutdown(connection)
+        # report["stopped"] means a BROADCAST session ended by an operator's
+        # stop command - it says nothing about whether THIS RECEIVER keeps
+        # running. The connection to HQ has ended either way; the outer
+        # supervise() loop decides whether to reconnect. Folding a broadcast
+        # stop into a top-level "STOPPED" Receiver state would have been the
+        # exact kind of overclaim this project keeps finding and removing.
+        self._write_status(
+            "DISCONNECTED",
+            detail=("the last broadcast session ended" if self.report.get("stopped")
+                    else "the connection to HQ ended"),
+        )
 
         self.report["ended_at_utc"] = datetime.now(timezone.utc).isoformat()
         if (
@@ -1573,6 +1640,10 @@ def _run_locked(arguments, *, ws_url: str, path: Path, log: logging.Logger,
             queue_capacity=arguments.queue_capacity,
             report_path=report_path,
             sink=sink,
+            # Written automatically, like the log directory - not a flag an
+            # installer has to know to pass. This is the only evidence a
+            # backgrounded process can offer of what it is doing right now.
+            status_path=receiver_status_path(),
         )
         started = time.monotonic()
         try:
