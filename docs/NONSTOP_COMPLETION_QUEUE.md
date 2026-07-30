@@ -257,3 +257,47 @@ Device revocation is a different thing and already exists on the Device.
 ### Still an operator checkpoint
 
 A real enrollment against a running HQ with a real code, on real Store hardware.
+
+
+---
+
+## Security audit, load tests and RC rebuild - 2026-07-30 (final)
+
+Commits `9e84dca`, `4eb865f`, `9e6d83b`, and the audit-document commit.
+
+| Item | Status | Evidence |
+|---|---|---|
+| Security audit (14 areas) | `COMPLETE` | [docs/SECURITY_AUDIT.md](SECURITY_AUDIT.md) - 398 file-visits, adversarial refutation pass |
+| P1: broadcaster uplink authorization | `FIXED` | ticket audience + double permission check; 14 tests |
+| P1: enrolment cap counted dead codes | `FIXED` | expiry term added; 3 tests |
+| P1: HQ start script orphaned -ArgumentList | `FIXED` | parser-verified; structural guard over 42 scripts |
+| **P0: live JWT_SECRET in speaklink-live.zip** | **`OPERATOR CHECKPOINT`** | guard test RED by design; rotate + delete required |
+| P1: standby acks share the primary snapshot | `DEFERRED` | see below - must be fixed before any two-Device Store |
+| Audio metrics endpoint | `AUTOMATED PASS` | `GET /api/broadcast/audio-metrics`, VIEW_STATUS, 9 tests |
+| Load tests 2/5/10/20/40 | `COMPLETE` | [docs/LOAD_TEST_REPORT.md](LOAD_TEST_REPORT.md) - all five levels clean |
+| Fresh artifacts (HQ, Receiver, StoreSetup, Store kit) | `AUTOMATED PASS` | all four rebuilt from source and verified |
+| Playwright chromium | `AUTOMATED PASS` | 164 passed, run fresh |
+| Frontend production build | `AUTOMATED PASS` | Done, run fresh |
+
+### DEFERRED, and why it is written here rather than lost in a commit
+
+**Standby Device acknowledgements are applied to the primary's Store snapshot.**
+`server.py:1898-1902` passes only `store_id` to `apply_receiver_payload`, with no
+`device_id` and no standby branch, so a primary and a standby in one Store write
+to a single snapshot whose sequence check then rejects roughly half of each
+other's messages - including the primary's `playback_confirmed`.
+
+It only manifests when a Store runs a primary AND a standby at the same time,
+which no Store does today. The correct fix keys health state by
+`(store_id, device_id)` and aggregates through the existing
+`store_aggregate_state` - a change to the live status model that deserves its own
+commit and its own tests.
+
+**This must be fixed before any Store runs two Devices.**
+
+### The gate does not pass, deliberately
+
+One mandatory test is RED: `test_no_secret_archives_in_tree.py`, because the
+current live JWT signing secret is in an archive in the working tree. That is a
+true statement about the system. It goes green when the archive is removed and
+the credential rotated - not by editing the test.
