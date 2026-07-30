@@ -1855,16 +1855,22 @@ async def ws_receiver(websocket: WebSocket):
 
         # Preserve the existing runtime health write, but only after the exact
         # accepted connection has been registered successfully.
-        db = SessionLocal()
-        try:
-            connected_store = db.query(Store).filter(Store.id == store_id).first()
-            if connected_store:
-                connected_store.last_seen = authenticated_at
-                connected_store.status = "online"
-                db.add(ReceiverEvent(store_id=store_id, event_type="connected"))
-                db.commit()
-        finally:
-            db.close()
+        #
+        # A standby is deliberately excluded. "Store online" means the computer
+        # carrying this Store's audio is answering, and a standby carries none of
+        # it: letting a spare machine set status='online' and refresh last_seen is
+        # how HQ ends up showing a green Store with silent speakers.
+        if is_primary:
+            db = SessionLocal()
+            try:
+                connected_store = db.query(Store).filter(Store.id == store_id).first()
+                if connected_store:
+                    connected_store.last_seen = authenticated_at
+                    connected_store.status = "online"
+                    db.add(ReceiverEvent(store_id=store_id, event_type="connected"))
+                    db.commit()
+            finally:
+                db.close()
 
         # If a session is currently live and this store is a target -> send PLAY immediately
         if (
@@ -1904,6 +1910,17 @@ async def ws_receiver(websocket: WebSocket):
                     device_id=identity.device_id,
                 ):
                     break
+                # A standby's silence is its own. Sweeping the Store's snapshot from
+                # a standby's idle timer would let the spare machine's liveness
+                # decide what HQ believes about the primary.
+                if connection_manager.is_registered_standby(identity.device_id):
+                    standby_state = connection_manager.evaluate_standby_freshness(
+                        identity.device_id
+                    )
+                    if standby_state.connection is ConnectionState.OFFLINE:
+                        await websocket.close(code=4408)
+                        break
+                    continue
                 before = connection_manager.get_receiver_snapshot(store_id)
                 after = connection_manager.evaluate_receiver_freshness(store_id)
                 if before is not None and after.connection is not before.connection:
@@ -1929,14 +1946,26 @@ async def ws_receiver(websocket: WebSocket):
                 data = json.loads(msg)
                 if not isinstance(data, dict):
                     raise ValueError("receiver acknowledgement must be an object")
+                is_standby_ack = connection_manager.is_registered_standby(
+                    identity.device_id
+                )
                 acknowledgement, _ = connection_manager.apply_receiver_payload(
                     store_id,
                     data,
                     received_at,
+                    device_id=identity.device_id,
                 )
             except (ReceiverContractError, ValidationError, ValueError, json.JSONDecodeError) as error:
                 code = _receiver_rejection_code(error)
                 await websocket.send_text(json.dumps({"type": "ack_rejected", "code": code}))
+                continue
+
+            # A standby's acknowledgement is not the Store's history. Persisting it
+            # would refresh the Store's last_seen and file the standby's readiness
+            # and playback claims against the Store, which is the same
+            # misattribution the in-memory routing above exists to prevent - and
+            # the persisted rows are what an operator reads afterwards.
+            if is_standby_ack:
                 continue
 
             _persist_receiver_ack(store_id, acknowledgement, received_at)

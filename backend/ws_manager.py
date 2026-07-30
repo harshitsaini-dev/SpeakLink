@@ -64,7 +64,20 @@ class WSManager:
             receiver_connection_inventory or ActiveReceiverConnectionInventory()
         )
         # Process-local immutable state; acknowledgements never mutate snapshots in place.
+        #
+        # store_id -> the PRIMARY's health. This stays the Store aggregate that the
+        # dashboard, the freshness sweep and the session logic are all built on.
         self.receiver_snapshots: Dict[int, ReceiverSnapshot] = {}
+        # device_id -> that standby's own health. A separate keyspace, because a
+        # standby's acknowledgements are not the Store's:
+        #   * sequence is per snapshot and must strictly increase, so a standby
+        #     sharing the Store's line locks the primary out arithmetically;
+        #   * freshness is decided by last_received_at, so a standby heartbeat
+        #     sharing it keeps a switched-off primary looking online - a green
+        #     Store and silent speakers;
+        #   * a standby is not in the fanout at all, so a playback confirmation
+        #     from one is evidence of something that cannot have happened.
+        self.standby_snapshots: Dict[int, ReceiverSnapshot] = {}
         self.stale_after = timedelta(seconds=STALE_AFTER_SECONDS)
         self.offline_after = timedelta(seconds=OFFLINE_AFTER_SECONDS)
         # hq_user_id -> WebSocket (dashboards) — multiple HQ dashboards allowed
@@ -111,6 +124,13 @@ class WSManager:
         if device_id is not None and not is_primary:
             await self._connect_standby(record, ws, event_time)
             return record
+
+        # This Device is arriving as the primary. If it was registered as a
+        # standby, that registration is now stale: the same machine cannot be both,
+        # and leaving it behind would show an operator a standby that does not
+        # exist and would let its old sequence line rejoin later.
+        if device_id is not None:
+            await self._release_standby_registration(device_id)
 
         async with self._receiver_lock:
             # Preserve the existing one-current-connection-per-Store policy.
@@ -229,6 +249,17 @@ class WSManager:
             self.standby_connection_ids[device_id] = record.connection_id
             self.standby_store_ids[device_id] = record.store_id
 
+            # Its own health line, on its own account. mark_connected accepts only
+            # OFFLINE or NETWORK_ERROR, so a reconnecting standby is walked through
+            # disconnected first rather than being asked for an illegal transition.
+            existing = self.standby_snapshots.get(device_id)
+            if existing is not None and existing.connection is not ConnectionState.OFFLINE:
+                existing = mark_disconnected(existing, event_time)
+            self.standby_snapshots[device_id] = mark_connected(
+                existing if existing is not None else ReceiverSnapshot(),
+                event_time,
+            )
+
         await self._notify_dashboards({
             "type": "receiver_status",
             "store_id": record.store_id,
@@ -236,6 +267,33 @@ class WSManager:
             "role": "standby",
             "status": "online",
         })
+
+    async def _release_standby_registration(self, device_id: int) -> None:
+        """Drop a Device's standby registration because it is becoming the primary.
+
+        The old standby socket is closed: it is a superseded connection from the
+        same machine, and the Device now has a primary socket instead. It is marked
+        superseded first so its own cleanup performs no Store health write - the
+        primary owns the Store's health, and this socket never did.
+        """
+        async with self._receiver_lock:
+            previous = self.standby_receivers.pop(device_id, None)
+            previous_connection_id = self.standby_connection_ids.pop(device_id, None)
+            self.standby_store_ids.pop(device_id, None)
+            # Whatever it proved as a standby, it proved without carrying the
+            # Store's audio. The promoted Device starts from honest ignorance.
+            self.standby_snapshots.pop(device_id, None)
+            if previous is None:
+                return
+            if previous_connection_id is not None:
+                self._superseded_connection_ids.add(previous_connection_id)
+            try:
+                await previous.close(code=4001)
+            except Exception:
+                pass
+            if previous_connection_id is not None:
+                self.receiver_connection_inventory.remove(previous_connection_id)
+                self._superseded_connection_ids.discard(previous_connection_id)
 
     def is_standby_connection(self, device_id: int, ws: WebSocket, connection_id: str) -> bool:
         return (
@@ -255,6 +313,9 @@ class WSManager:
         self.standby_receivers.pop(device_id, None)
         self.standby_connection_ids.pop(device_id, None)
         self.standby_store_ids.pop(device_id, None)
+        # A spare machine unplugged and taken away must not remain in memory as a
+        # standby for the lifetime of the process.
+        self.standby_snapshots.pop(device_id, None)
         self.receiver_connection_inventory.remove(connection_id)
         return True
 
@@ -344,12 +405,31 @@ class WSManager:
     def get_receiver_snapshot(self, store_id: int) -> ReceiverSnapshot | None:
         return self.receiver_snapshots.get(store_id)
 
+    def get_standby_snapshot(self, device_id: int) -> ReceiverSnapshot | None:
+        """One standby's own health. A separate keyspace from Store IDs on purpose -
+        Store 8 and Device 8 are different things and must not collide."""
+        return self.standby_snapshots.get(device_id)
+
+    def is_registered_standby(self, device_id: int | None) -> bool:
+        return device_id is not None and device_id in self.standby_connection_ids
+
     def apply_receiver_payload(
         self,
         store_id: int,
         payload: object,
         received_at: datetime | None = None,
+        device_id: int | None = None,
     ) -> tuple[ReceiverAcknowledgement, ReceiverSnapshot]:
+        """Apply one acknowledgement to the snapshot that actually sent it.
+
+        ``device_id`` is how a standby's acknowledgement is kept out of the Store's
+        health. It is optional and defaults to the Store, because a Receiver on the
+        shared Store token has no Device identity at all and must keep working
+        exactly as before - anything else would take every un-enrolled Store off
+        the air.
+        """
+        if self.is_registered_standby(device_id):
+            return self.apply_standby_payload(device_id, payload, received_at)
         snapshot = self.receiver_snapshots.get(store_id)
         if snapshot is None or store_id not in self.receivers:
             raise RuntimeError("receiver has no authenticated connection snapshot")
@@ -362,6 +442,32 @@ class WSManager:
         self.receiver_snapshots[store_id] = updated
         return acknowledgement, updated
 
+    def apply_standby_payload(
+        self,
+        device_id: int,
+        payload: object,
+        received_at: datetime | None = None,
+    ) -> tuple[ReceiverAcknowledgement, ReceiverSnapshot]:
+        """Apply one standby's acknowledgement to that standby's own snapshot.
+
+        The full contract still runs: a standby is not exempt from monotonic
+        sequences or duplicate detection, it simply has its own line of them.
+        Ignoring standby acknowledgements outright would have been a smaller change
+        and would have thrown away the replay protection that makes the contract
+        worth having.
+        """
+        snapshot = self.standby_snapshots.get(device_id)
+        if snapshot is None:
+            raise RuntimeError("standby has no authenticated connection snapshot")
+        acknowledgement = parse_receiver_ack(payload)
+        updated = apply_receiver_ack(
+            snapshot,
+            acknowledgement,
+            received_at or datetime.now(timezone.utc),
+        )
+        self.standby_snapshots[device_id] = updated
+        return acknowledgement, updated
+
     def evaluate_receiver_freshness(
         self,
         store_id: int,
@@ -372,6 +478,20 @@ class WSManager:
             raise KeyError(f"receiver snapshot unavailable for store {store_id}")
         updated = evaluate_freshness(snapshot, now or datetime.now(timezone.utc))
         self.receiver_snapshots[store_id] = updated
+        return updated
+
+    def evaluate_standby_freshness(
+        self,
+        device_id: int,
+        now: datetime | None = None,
+    ) -> ReceiverSnapshot:
+        """A standby that stops answering must be reportable as dead on its own
+        account, or the fix trades one blind spot for another."""
+        snapshot = self.standby_snapshots.get(device_id)
+        if snapshot is None:
+            raise KeyError(f"standby snapshot unavailable for device {device_id}")
+        updated = evaluate_freshness(snapshot, now or datetime.now(timezone.utc))
+        self.standby_snapshots[device_id] = updated
         return updated
 
     def prepare_receiver_session(self, store_id: int, session_id: int) -> None:
