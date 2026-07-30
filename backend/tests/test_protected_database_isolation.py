@@ -353,3 +353,39 @@ def test_no_sidecar_exists_beside_the_protected_database():
             f"{sidecar.name} exists. Something opened the protected database. "
             "Its main file can be byte-identical while this holds every change."
         )
+
+
+# ===========================================================================
+# 8. Even a read-only open must not create a sidecar
+# ===========================================================================
+def test_mode_ro_alone_is_not_enough_and_immutable_is_the_rule():
+    """LEARNED BY TRIPPING THE GUARD ABOVE WITH A VERIFICATION STEP.
+
+    Running ``PRAGMA integrity_check`` on the protected database through
+    ``file:...?mode=ro`` created ``-shm`` and ``-wal`` beside it. ``mode=ro``
+    stops WRITES to the main file; it does not stop SQLite building the
+    shared-memory index a WAL database needs, and creating that index is itself
+    a file creation. The main file stayed byte-identical and the WAL was zero
+    bytes - nothing was lost - but the sidecar guard fired, correctly, because
+    the shape it protects against is exactly "main file untouched, WAL beside it
+    holding what really happened".
+
+    ``immutable=1`` is the rule: it tells SQLite the file cannot change, so no
+    WAL and no shared-memory index are needed and neither is created. It is
+    already what tools/compare_databases.py and
+    tools.hq_runtime.count_enrolled_devices use - the pattern existed and the
+    verification step did not follow it.
+
+    This test asserts the rule is written down where the next person will look,
+    rather than only living in a commit message.
+    """
+    import re
+
+    guidance = Path(__file__).read_text(encoding="utf-8")
+    assert "immutable=1" in guidance
+
+    # And the two production readers of a protected/source database still use it.
+    for relative in ("tools/compare_databases.py", "tools/hq_runtime.py"):
+        source = (REPOSITORY_ROOT / relative).read_text(encoding="utf-8")
+        assert re.search(r"mode=ro&immutable=1", source), (
+            f"{relative} opens a database read-only without immutable=1")
