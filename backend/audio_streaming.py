@@ -66,6 +66,7 @@ class StoreAudioQueue:
         "_enqueued",
         "_dropped",
         "_delivered",
+        "_max_depth",
     )
 
     def __init__(self, *, store_id: int, capacity: int = DEFAULT_STORE_QUEUE_CAPACITY) -> None:
@@ -83,6 +84,10 @@ class StoreAudioQueue:
         self._enqueued = 0
         self._dropped = 0
         self._delivered = 0
+        # High-water mark, never reset by draining. A sampled depth of 0
+        # cannot distinguish a Store that never queued anything from one
+        # that filled up and recovered a moment before anybody looked.
+        self._max_depth = 0
 
     # -- introspection ----------------------------------------------------
     @property
@@ -102,6 +107,10 @@ class StoreAudioQueue:
         return self._dropped
 
     @property
+    def max_depth(self) -> int:
+        return self._max_depth
+
+    @property
     def delivered_count(self) -> int:
         return self._delivered
 
@@ -110,9 +119,19 @@ class StoreAudioQueue:
         return self._closed
 
     def metrics(self) -> dict[str, int]:
+        """Non-secret counters. Never any audio payload.
+
+        ``depth`` alone is close to useless for diagnosing a Store: it is
+        sampled, and a queue that filled up and drained reads as zero by the
+        time anybody looks. ``max_depth`` is the high-water mark, which is what
+        actually answers "was this Store ever close to dropping audio?" - and it
+        answers it for a Store that dropped nothing, which is precisely the
+        Store worth knowing about before it does.
+        """
         return {
             "capacity": self._capacity,
             "depth": len(self._items),
+            "max_depth": self._max_depth,
             "delivered": self._delivered,
             "dropped": self._dropped,
             "enqueued": self._enqueued,
@@ -135,10 +154,12 @@ class StoreAudioQueue:
             self._dropped += 1
             self._items.append(payload)
             self._available.set()
+            self._max_depth = max(self._max_depth, len(self._items))
             return False
 
         self._items.append(payload)
         self._available.set()
+        self._max_depth = max(self._max_depth, len(self._items))
         return True
 
     async def get(self) -> bytes:
