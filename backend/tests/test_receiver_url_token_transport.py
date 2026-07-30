@@ -128,13 +128,13 @@ def test_the_websocket_ticket_is_the_only_url_credential_and_is_single_use():
     travel in that URL. A single-use ticket that expires in seconds is a very
     different object from a Store credential that works for months.
     """
-    from ws_tickets import WebSocketTicketStore
+    from ws_tickets import AUDIENCE_HQ, WebSocketTicketStore
 
     store = WebSocketTicketStore()
-    ticket = store.issue(user_id="1")
-    assert store.redeem(ticket) == "1"
+    ticket = store.issue(user_id="1", audience=AUDIENCE_HQ)
+    assert store.redeem(ticket, audience=AUDIENCE_HQ) == "1"
     with pytest.raises(Exception):
-        store.redeem(ticket)
+        store.redeem(ticket, audience=AUDIENCE_HQ)
 
 
 def test_the_receiver_websocket_takes_its_credential_from_a_header():

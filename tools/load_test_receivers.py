@@ -296,7 +296,9 @@ async def _drive(paths, store_count: int, port: int, backend_pid: int, fixture: 
         ready_count = sum(1 for r in receivers if r.ready_ms is not None)
 
         # Stream the fixture through the broadcaster socket, 250 ms at a time.
-        ticket = _api_post(base_url, "/api/auth/ws-ticket", token)["ticket"]
+        # Scoped to the uplink: the ticket store refuses a dashboard ticket here.
+        ticket = _api_post(base_url, "/api/auth/ws-ticket", token,
+                           {"audience": "broadcaster"})["ticket"]
         raw = fixture.read_bytes()
         # Split into browser-sized chunks. The exact split does not matter to the
         # fan-out; the rate and the count do.

@@ -89,7 +89,9 @@ export default function BroadcastConsole() {
 
     (async () => {
       try {
-        const { data } = await api.post("/auth/ws-ticket");
+        // "hq" only. Asking for a broadcaster ticket to feed the dashboard
+        // would hand every viewer the credential that opens the microphone.
+        const { data } = await api.post("/auth/ws-ticket", { audience: "hq" });
         if (cancelled) return;
         socket = new WebSocket(`${wsUrl("/ws/hq")}?ticket=${encodeURIComponent(data.ticket)}`);
         hqWsRef.current = socket;
@@ -215,7 +217,9 @@ export default function BroadcastConsole() {
 
       // A fresh single-use ticket, so the audio uplink URL in the access log
       // cannot be replayed either.
-      const { data: uplink } = await api.post("/auth/ws-ticket");
+      const { data: uplink } = await api.post("/auth/ws-ticket", {
+        audience: "broadcaster",
+      });
       const bc = new HQBroadcaster({
         wsUrl: `${wsUrl("/ws/broadcaster")}?ticket=${encodeURIComponent(uplink.ticket)}`,
         onMeter: (l) => setMeter(l),

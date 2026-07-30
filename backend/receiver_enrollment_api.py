@@ -28,6 +28,7 @@ one-time delivery the caller asks for.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from sqlalchemy import text
@@ -136,18 +137,29 @@ def create_enrollment_code(
     """Mint one code for one Store. The raw value is returned exactly once."""
     _active_store(db, store_id)
 
+    # LIVE codes, which is what "outstanding" has always been documented to
+    # mean - see MAX_OUTSTANDING_CODES_PER_STORE's own comment about codes "in
+    # flight" and a "haystack of live credentials".
+    #
+    # The expiry term used to be missing, and nothing in this codebase ever
+    # prunes, deletes or marks an expired code: redeemed_at_epoch stays NULL for
+    # ever. So three abandoned codes locked a Store out of enrolment
+    # PERMANENTLY - an ordinary sequence across 44 Stores, where an admin clicks
+    # Generate during a failed setup visit and again a week later. The refusal
+    # even advised waiting for them to expire, which could never help.
     outstanding = (
         db.query(ReceiverEnrollmentCode)
         .filter(
             ReceiverEnrollmentCode.store_id == store_id,
             ReceiverEnrollmentCode.redeemed_at_epoch.is_(None),
+            ReceiverEnrollmentCode.expires_at_epoch > time.time(),
         )
         .count()
     )
     if outstanding >= MAX_OUTSTANDING_CODES_PER_STORE:
         raise TooManyOutstandingCodes(
-            f"this Store already has {outstanding} unused enrolment codes; "
-            "use or let them expire before creating another"
+            f"this Store already has {outstanding} live enrolment codes; "
+            "use one, or wait for them to expire, before creating another"
         )
 
     try:

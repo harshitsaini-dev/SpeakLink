@@ -37,6 +37,7 @@ from schemas import (
     ReceiverDeviceOut, CredentialRotationResponse,
     HQUserOut, HQUserCreate, HQUserUpdate, HQUserRoleUpdate,
     PasswordChangeIn, PasswordResetIn, PasswordResetOut,
+    WebSocketTicketRequest,
 )
 from receiver_rotation_service import (
     CredentialNotFoundError,
@@ -50,6 +51,7 @@ from rbac import (
     Role,
     effective_permissions,
     ensure_rbac_schema,
+    has_permission,
     may_manage_role,
     migrate_legacy_roles,
     parse_role,
@@ -142,7 +144,13 @@ from receiver_contract import (
     StoppedAcknowledgement,
     WrongSessionError,
 )
-from ws_tickets import TICKET_TTL_SECONDS, TicketRejected, WebSocketTicketStore
+from ws_tickets import (
+    AUDIENCE_BROADCASTER,
+    AUDIENCE_HQ,
+    TICKET_TTL_SECONDS,
+    TicketRejected,
+    WebSocketTicketStore,
+)
 from pathlib import Path
 
 from key_custody import (
@@ -526,18 +534,44 @@ def me(user: HQUser = Depends(get_current_user)):
     return UserOut.model_validate(user)
 
 
+#: The permission each socket requires. A ticket is only ever as strong as the
+#: right needed to mint it, so this table is the whole access-control decision.
+_TICKET_PERMISSIONS = {
+    AUDIENCE_HQ: Permission.VIEW_STATUS,
+    AUDIENCE_BROADCASTER: Permission.START_BROADCAST,
+}
+
+
 @api.post("/auth/ws-ticket")
-def issue_websocket_ticket(user: HQUser = Depends(get_current_user)):
-    """Mint a single-use handshake ticket for an HQ WebSocket.
+def issue_websocket_ticket(
+    payload: WebSocketTicketRequest,
+    user: HQUser = Depends(get_current_user),
+):
+    """Mint a single-use handshake ticket for ONE named HQ WebSocket.
 
     A browser cannot set an Authorization header on a WebSocket handshake, so
     something has to travel in the URL - and Uvicorn logs the URL in full. This
     endpoint is reached over the normal authenticated HTTP API, where the JWT
     stays in a header, and returns a credential that is worthless seconds later
     and after a single use.
+
+    THE TICKET IS SCOPED, AND THAT IS THE POINT. It used to carry only a user id,
+    so one ticket opened both the dashboard and the microphone uplink - and the
+    uplink checked nothing at all. A read-only VIEWER could therefore mint a
+    ticket here and push audio to the loudspeakers of every targeted Store, or
+    simply occupy the single uplink slot and deny it to the operator who was
+    allowed to use it.
+
+    The permission is checked per audience, and checked AGAIN at the handshake
+    against a freshly loaded account: a right verified only at mint time is a
+    right verified once, and an account can be demoted or disabled in the seconds
+    before it connects.
     """
-    ticket = ws_ticket_store.issue(user_id=str(user.id))
-    return {"ticket": ticket, "expires_in": TICKET_TTL_SECONDS}
+    required = _TICKET_PERMISSIONS[payload.audience]
+    require_permission(user, required)
+    ticket = ws_ticket_store.issue(user_id=str(user.id), audience=payload.audience)
+    return {"ticket": ticket, "expires_in": TICKET_TTL_SECONDS,
+            "audience": payload.audience}
 
 
 # ================ HQ USERS ================
@@ -1952,8 +1986,9 @@ async def ws_receiver(websocket: WebSocket):
 @app.websocket("/api/ws/hq")
 async def ws_hq(websocket: WebSocket, ticket: str = Query(...)):
     # A single-use ticket, not a reusable JWT: Uvicorn logs this URL in full.
+    # Pinned to this socket's audience, so an uplink ticket cannot open it.
     try:
-        user_id = ws_ticket_store.redeem(ticket)
+        user_id = ws_ticket_store.redeem(ticket, audience=AUDIENCE_HQ)
     except TicketRejected:
         await websocket.close(code=4401)
         return
@@ -1975,13 +2010,36 @@ async def ws_hq(websocket: WebSocket, ticket: str = Query(...)):
 
 @app.websocket("/api/ws/broadcaster")
 async def ws_broadcaster(websocket: WebSocket, ticket: str = Query(...)):
-    """HQ mic audio uplink. Only one active broadcaster allowed."""
+    """HQ mic audio uplink. Only one active broadcaster allowed.
+
+    THE MOST PRIVILEGED SOCKET IN THE SYSTEM, and it used to be the least
+    guarded: it redeemed a ticket, THREW THE USER ID AWAY, and accepted audio.
+    No permission, no role lookup, no re-read. Any authenticated account -
+    including a read-only VIEWER refused by every broadcast HTTP route - could
+    push arbitrary audio to the loudspeakers of every targeted Store, or occupy
+    this single slot and deny it to whoever was allowed to use it.
+
+    Two checks now, deliberately both: the ticket must have been minted FOR this
+    socket (so a dashboard ticket is refused), and the account it was minted for
+    must STILL hold START_BROADCAST when the handshake arrives. A permission
+    verified only at mint time is verified once, and an operator can be demoted
+    or disabled in the seconds between minting and connecting.
+    """
     # A single-use ticket, not a reusable JWT: Uvicorn logs this URL in full.
     try:
-        ws_ticket_store.redeem(ticket)
+        user_id = ws_ticket_store.redeem(ticket, audience=AUDIENCE_BROADCASTER)
     except TicketRejected:
         await websocket.close(code=4401)
         return
+
+    # Re-read the account rather than trusting the ticket. Closing with 4403
+    # rather than 4401 so an operator can tell "not allowed" from "bad ticket".
+    with SessionLocal() as db:
+        account = db.query(HQUser).filter(HQUser.id == int(user_id)).first() \
+            if str(user_id).isdigit() else None
+        if account is None or not has_permission(account, Permission.START_BROADCAST):
+            await websocket.close(code=4403)
+            return
 
     await websocket.accept()
     ok = await manager.set_broadcaster(websocket)

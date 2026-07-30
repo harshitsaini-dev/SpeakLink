@@ -718,7 +718,8 @@ def _drive_one_broadcast(base_url, access_token, store_id, database_path) -> dic
 
     ready = _wait_until(_ready, timeout=40)
 
-    ticket = _api(base_url, "POST", "/api/auth/ws-ticket", access_token)["ticket"]
+    ticket = _api(base_url, "POST", "/api/auth/ws-ticket", access_token,
+                  {"audience": "broadcaster"})["ticket"]
     seen: set[str] = set()
 
     def _await_acknowledgements() -> bool:

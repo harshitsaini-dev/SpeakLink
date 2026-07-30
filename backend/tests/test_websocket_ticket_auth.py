@@ -38,6 +38,7 @@ for candidate in (REPOSITORY_ROOT, BACKEND_ROOT):
         sys.path.insert(0, str(candidate))
 
 from ws_tickets import (  # noqa: E402
+    AUDIENCE_HQ,
     TICKET_TTL_SECONDS,
     WebSocketTicketStore,
     TicketRejected,
@@ -105,45 +106,45 @@ def test_no_websocket_route_declares_a_query_credential():
 # ---------------------------------------------------------------------------
 def test_a_ticket_can_be_redeemed_once():
     store = WebSocketTicketStore()
-    ticket = store.issue(user_id="1", now=BASE)
-    assert store.redeem(ticket, now=BASE) == "1"
+    ticket = store.issue(user_id="1", audience=AUDIENCE_HQ, now=BASE)
+    assert store.redeem(ticket, audience=AUDIENCE_HQ, now=BASE) == "1"
 
 
 def test_a_ticket_cannot_be_redeemed_twice():
     """Replaying a logged URL must not work, even within the TTL."""
     store = WebSocketTicketStore()
-    ticket = store.issue(user_id="1", now=BASE)
-    store.redeem(ticket, now=BASE)
+    ticket = store.issue(user_id="1", audience=AUDIENCE_HQ, now=BASE)
+    store.redeem(ticket, audience=AUDIENCE_HQ, now=BASE)
     with pytest.raises(TicketRejected):
-        store.redeem(ticket, now=BASE)
+        store.redeem(ticket, audience=AUDIENCE_HQ, now=BASE)
 
 
 def test_an_expired_ticket_is_refused():
     store = WebSocketTicketStore()
-    ticket = store.issue(user_id="1", now=BASE)
+    ticket = store.issue(user_id="1", audience=AUDIENCE_HQ, now=BASE)
     later = BASE + timedelta(seconds=TICKET_TTL_SECONDS + 1)
     with pytest.raises(TicketRejected):
-        store.redeem(ticket, now=later)
+        store.redeem(ticket, audience=AUDIENCE_HQ, now=later)
 
 
 def test_a_ticket_is_still_valid_at_the_edge_of_its_window():
     store = WebSocketTicketStore()
-    ticket = store.issue(user_id="1", now=BASE)
+    ticket = store.issue(user_id="1", audience=AUDIENCE_HQ, now=BASE)
     edge = BASE + timedelta(seconds=TICKET_TTL_SECONDS - 1)
-    assert store.redeem(ticket, now=edge) == "1"
+    assert store.redeem(ticket, audience=AUDIENCE_HQ, now=edge) == "1"
 
 
 def test_an_unknown_ticket_is_refused():
     store = WebSocketTicketStore()
     with pytest.raises(TicketRejected):
-        store.redeem("never-issued", now=BASE)
+        store.redeem("never-issued", audience=AUDIENCE_HQ, now=BASE)
 
 
 def test_an_empty_ticket_is_refused():
     store = WebSocketTicketStore()
     for value in ("", None):
         with pytest.raises(TicketRejected):
-            store.redeem(value, now=BASE)
+            store.redeem(value, audience=AUDIENCE_HQ, now=BASE)
 
 
 def test_the_ttl_is_short_enough_to_be_worth_little_if_logged():
@@ -166,7 +167,7 @@ def test_a_ticket_carries_no_readable_claims():
     """
     store = WebSocketTicketStore()
     identifier = "pilot-operator-distinctive-user-identifier-9f3a7c"
-    ticket = store.issue(user_id=identifier, now=BASE)
+    ticket = store.issue(user_id=identifier, audience=AUDIENCE_HQ, now=BASE)
 
     assert identifier not in ticket
     for fragment in ("pilot-operator", "distinctive", "9f3a7c"):
@@ -181,12 +182,12 @@ def test_no_ticket_in_a_large_batch_embeds_the_user_identifier():
     store = WebSocketTicketStore()
     identifier = "operator-b7d2e4a1"
     for _ in range(200):
-        assert identifier not in store.issue(user_id=identifier, now=BASE)
+        assert identifier not in store.issue(user_id=identifier, audience=AUDIENCE_HQ, now=BASE)
 
 
 def test_tickets_are_unique_and_unguessable_in_length():
     store = WebSocketTicketStore()
-    issued = {store.issue(user_id="1", now=BASE) for _ in range(200)}
+    issued = {store.issue(user_id="1", audience=AUDIENCE_HQ, now=BASE) for _ in range(200)}
     assert len(issued) == 200, "tickets collided"
     assert all(len(value) >= 32 for value in issued)
 
@@ -195,20 +196,20 @@ def test_expired_tickets_do_not_accumulate_forever():
     """The store is in-memory in a single worker; it must not grow unbounded."""
     store = WebSocketTicketStore()
     for _ in range(50):
-        store.issue(user_id="1", now=BASE)
+        store.issue(user_id="1", audience=AUDIENCE_HQ, now=BASE)
     assert store.outstanding(now=BASE) == 50
 
     later = BASE + timedelta(seconds=TICKET_TTL_SECONDS + 1)
-    store.issue(user_id="1", now=later)
+    store.issue(user_id="1", audience=AUDIENCE_HQ, now=later)
     assert store.outstanding(now=later) == 1, "expired tickets were never purged"
 
 
 def test_redeeming_returns_the_issuing_user():
     store = WebSocketTicketStore()
-    first = store.issue(user_id="7", now=BASE)
-    second = store.issue(user_id="9", now=BASE)
-    assert store.redeem(second, now=BASE) == "9"
-    assert store.redeem(first, now=BASE) == "7"
+    first = store.issue(user_id="7", audience=AUDIENCE_HQ, now=BASE)
+    second = store.issue(user_id="9", audience=AUDIENCE_HQ, now=BASE)
+    assert store.redeem(second, audience=AUDIENCE_HQ, now=BASE) == "9"
+    assert store.redeem(first, audience=AUDIENCE_HQ, now=BASE) == "7"
 
 
 # ---------------------------------------------------------------------------
@@ -216,13 +217,13 @@ def test_redeeming_returns_the_issuing_user():
 # ---------------------------------------------------------------------------
 def test_a_logged_handshake_url_reveals_no_reusable_credential():
     store = WebSocketTicketStore()
-    ticket = store.issue(user_id="1", now=BASE)
+    ticket = store.issue(user_id="1", audience=AUDIENCE_HQ, now=BASE)
     logged = f'"WebSocket /api/ws/hq?ticket={ticket}" [accepted]'
 
     # Whatever a log scraper finds, it cannot be replayed once the socket opened.
-    store.redeem(ticket, now=BASE)
+    store.redeem(ticket, audience=AUDIENCE_HQ, now=BASE)
     with pytest.raises(TicketRejected):
-        store.redeem(ticket, now=BASE)
+        store.redeem(ticket, audience=AUDIENCE_HQ, now=BASE)
 
     assert "eyJ" not in logged, "a JWT reached the log line"
     assert "Bearer" not in logged

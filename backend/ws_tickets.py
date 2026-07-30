@@ -30,6 +30,15 @@ TICKET_TTL_SECONDS = 20
 # mistaken for - or parsed as - a JWT.
 TICKET_BYTES = 32
 
+#: Which socket a ticket opens. A ticket is scoped to exactly one.
+#:
+#: Before this existed, one ticket opened both sockets: the dashboard ticket that
+#: every authenticated account could mint was also a microphone-uplink ticket, so
+#: a read-only VIEWER could push audio to every targeted Store's speakers.
+AUDIENCE_HQ = "hq"
+AUDIENCE_BROADCASTER = "broadcaster"
+VALID_AUDIENCES = frozenset({AUDIENCE_HQ, AUDIENCE_BROADCASTER})
+
 
 class TicketRejected(Exception):
     """The ticket was unknown, already used, or past its window.
@@ -45,20 +54,38 @@ class WebSocketTicketStore:
 
     def __init__(self, ttl_seconds: int = TICKET_TTL_SECONDS) -> None:
         self._ttl = timedelta(seconds=ttl_seconds)
-        self._tickets: dict[str, tuple[str, datetime]] = {}
+        self._tickets: dict[str, tuple[str, str, datetime]] = {}
 
-    def issue(self, user_id: str, now: datetime | None = None) -> str:
-        """Mint a ticket for one upcoming handshake."""
+    def issue(self, user_id: str, *, audience: str, now: datetime | None = None) -> str:
+        """Mint a ticket for one upcoming handshake on ONE named socket.
+
+        ``audience`` is required and has no default. A default would be the
+        original defect with extra steps: whichever value it fell back to would
+        be mintable by any authenticated caller, and a dashboard ticket was
+        previously a microphone-uplink ticket for exactly that reason.
+        """
+        if audience not in VALID_AUDIENCES:
+            # Refused rather than treated as a wildcard. An unrecognised
+            # audience is a programming mistake, and the failure mode of
+            # guessing here is a ticket that opens more than it should.
+            raise TicketRejected("unknown websocket audience")
         moment = now or datetime.now(timezone.utc)
         # Purge on write: the store never grows past the handful of tickets
         # issued inside one TTL window, without needing a background task.
         self._purge(moment)
         ticket = secrets.token_urlsafe(TICKET_BYTES)
-        self._tickets[ticket] = (str(user_id), moment + self._ttl)
+        self._tickets[ticket] = (str(user_id), audience, moment + self._ttl)
         return ticket
 
-    def redeem(self, ticket: str | None, now: datetime | None = None) -> str:
-        """Consume a ticket and return the user it was issued to."""
+    def redeem(self, ticket: str | None, *, audience: str,
+               now: datetime | None = None) -> str:
+        """Consume a ticket for ONE named socket and return its user id.
+
+        The ticket is spent by the ATTEMPT, including a mismatched audience.
+        Putting the pop before the audience check is deliberate: leaving a
+        mismatched ticket usable would turn the mismatch into a free oracle -
+        present it at one socket, lose nothing, present it at the other.
+        """
         moment = now or datetime.now(timezone.utc)
         if not ticket or not isinstance(ticket, str):
             raise TicketRejected("no ticket was presented")
@@ -69,7 +96,9 @@ class WebSocketTicketStore:
         if entry is None:
             raise TicketRejected("the ticket is unknown or has already been used")
 
-        user_id, expires_at = entry
+        user_id, ticket_audience, expires_at = entry
+        if ticket_audience != audience:
+            raise TicketRejected("the ticket was not issued for this socket")
         if moment >= expires_at:
             raise TicketRejected("the ticket has expired")
         return user_id
@@ -80,6 +109,9 @@ class WebSocketTicketStore:
         return len(self._tickets)
 
     def _purge(self, moment: datetime) -> None:
-        expired = [key for key, (_, expires_at) in self._tickets.items() if moment >= expires_at]
+        expired = [
+            key for key, (_user, _audience, expires_at) in self._tickets.items()
+            if moment >= expires_at
+        ]
         for key in expired:
             del self._tickets[key]

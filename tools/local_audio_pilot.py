@@ -429,7 +429,8 @@ def smoke(paths) -> dict:
         # A single-use handshake ticket, not the access token: uvicorn writes
         # the whole WebSocket URL to its access log, so a reusable credential
         # there would be logged in clear on every connection.
-        ticket = _api_post(base_url, "/api/auth/ws-ticket", access_token)["ticket"]
+        ticket = _api_post(base_url, "/api/auth/ws-ticket", access_token,
+                           {"audience": "broadcaster"})["ticket"]
         broadcaster_url = f"ws://127.0.0.1:{port}/api/ws/broadcaster?ticket={ticket}"
         seen_states: set[str] = set()
 

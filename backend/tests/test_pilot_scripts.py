@@ -9,6 +9,7 @@ executed, no process is started and no device is opened.
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import re
 
 import pytest
@@ -275,3 +276,62 @@ def test_the_pyinstaller_build_call_does_not_treat_its_own_stderr_as_fatal():
     assert "'Continue'" in window, (
         "the PyInstaller call runs under ErrorActionPreference=Stop and will "
         "abort on PyInstaller's own INFO/warning output")
+
+
+# ===========================================================================
+# A parameter must never become a command of its own
+# ===========================================================================
+def test_no_script_has_a_command_whose_name_is_a_parameter():
+    """FOUND BY THE SECURITY AUDIT, CONFIRMED WITH THE POWERSHELL PARSER.
+
+    Start-EchoCastPersistentLanServer.ps1 had a backtick line-continuation on
+    one line and a '#' comment on the next. The escaped newline joins them into
+    ONE logical line, so the comment swallowed everything after it - and the
+    parser reported `Start-Process` with three elements (`-FilePath $python`)
+    plus a SEPARATE command literally named `-ArgumentList`.
+
+    Zero parse errors, which is exactly why it survived: the file was valid
+    PowerShell that did something completely different from what it reads like.
+    At runtime it launched a bare interactive Python REPL in a visible window -
+    no uvicorn, no --host, no --workers 1, no log redirection - on the documented
+    operator path for starting the persistent HQ server.
+
+    The comment that broke it was explaining a PREVIOUS launcher bug about
+    quoting -ArgumentList values.
+
+    This guard is structural rather than textual: any CommandAst whose command
+    name begins with '-' is an orphaned parameter, whatever caused it.
+    """
+    import json
+    import subprocess
+
+    probe = r'''
+$results = @()
+foreach ($file in Get-ChildItem -LiteralPath $env:ECHOCAST_SCRIPTS_DIR -Filter *.ps1) {
+  $errors = $null; $tokens = $null
+  $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+  if ($null -eq $ast) { continue }
+  $cmds = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true)
+  foreach ($c in $cmds) {
+    $name = $c.GetCommandName()
+    if ($name -and $name.StartsWith('-')) {
+      $results += [pscustomobject]@{ file = $file.Name; line = $c.Extent.StartLineNumber; name = $name }
+    }
+  }
+}
+ConvertTo-Json -Compress -InputObject @($results)
+'''
+    # The directory travels in the ENVIRONMENT, not as a trailing argument to
+    # -Command: PowerShell tries to execute a trailing positional as a command,
+    # and a path with spaces in it then becomes a CommandNotFoundException. It is
+    # also the injection-free way to hand a path to a shell.
+    environment = dict(os.environ, ECHOCAST_SCRIPTS_DIR=str(SCRIPTS_DIRECTORY))
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", probe],
+        capture_output=True, text=True, timeout=240, env=environment,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    orphans = json.loads(completed.stdout.strip() or "[]")
+    assert orphans == [], (
+        "a parameter was parsed as its own command - almost certainly a '#' comment "
+        f"immediately after a backtick continuation: {orphans}")
