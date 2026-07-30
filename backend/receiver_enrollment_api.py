@@ -45,6 +45,7 @@ from receiver_enrollment_codes import (
     IssuedEnrollmentCode,
     ReceiverEnrollmentCode,
     issue_enrollment_code,
+    record_enrolled_device,
     redeem_enrollment_code,
 )
 from models import Store
@@ -199,7 +200,7 @@ def redeem_and_enroll(
     actor = actor_user_id if actor_user_id is not None else redeemed.created_by
     try:
         _active_store(db, redeemed.store_id)
-        return enroll_receiver_device(
+        result = enroll_receiver_device(
             engine,
             store_id=redeemed.store_id,
             display_name=device_name,
@@ -207,6 +208,17 @@ def redeem_and_enroll(
             hash_key=signing_key,
             hash_key_version=signing_version,
         )
+        # Which Device this code produced, recorded rather than inferred later
+        # from a store_id and a timestamp. Best-effort on purpose: the
+        # credential has already been issued, so failing here would strand a
+        # Device that HQ has already created. A missing link degrades reported
+        # progress; it must never undo a successful enrolment.
+        try:
+            record_enrolled_device(db, code_id=redeemed.code_id,
+                                   device_public_id=result.device_public_id)
+        except Exception:  # noqa: BLE001 - never fail an issued enrolment
+            db.rollback()
+        return result
     except ReceiverDeviceServiceError as failure:
         _release_claim(db, redeemed.code_id)
         raise EnrollmentRefused(str(failure)) from None

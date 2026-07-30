@@ -18,7 +18,8 @@ from typing import List, Optional, Set
 
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from starlette.middleware.cors import CORSMiddleware
-from sqlalchemy import func
+from sqlalchemy import func, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from pydantic import ValidationError
 
@@ -31,7 +32,7 @@ from schemas import (
     StoreCreate, StoreUpdate, StoreOut, StoresMetaOut,
     SessionCreate, SessionOut, SessionDetailOut, TargetOut,
     SystemLogOut,
-    EnrollmentCodeRequest, EnrollmentCodeResponse,
+    EnrollmentCodeRequest, EnrollmentCodeResponse, EnrollmentCodeStatusOut,
     DeviceEnrollmentRequest, DeviceEnrollmentResponse,
     ReceiverDeviceOut, CredentialRotationResponse,
     HQUserOut, HQUserCreate, HQUserUpdate, HQUserRoleUpdate,
@@ -111,7 +112,12 @@ from receiver_device_service import (
     MigrationNotReadyError,
     ReceiverDeviceServiceError,
 )
-from receiver_enrollment_codes import CODE_TTL_SECONDS
+from receiver_enrollment_codes import (
+    CODE_TTL_SECONDS,
+    ReceiverEnrollmentCode,
+    describe_state,
+    ensure_enrollment_device_link_schema,
+)
 from audio_protocol import build_prepare_message
 from auth import verify_password, hash_password, create_access_token, get_current_user
 from seed import seed_admin, seed_stores
@@ -357,6 +363,15 @@ def startup_event():
         ensure_store_lifecycle_schema(engine)
     except Exception:
         logger.warning("Store lifecycle column could not be prepared", exc_info=False)
+
+    # One nullable column recording which Device a redemption produced. Left
+    # NULL for every code redeemed before it existed, and NULL means "not
+    # recorded" rather than "no Device" - so an older row degrades the reported
+    # setup progress instead of asserting something false about it.
+    try:
+        ensure_enrollment_device_link_schema(engine)
+    except Exception:
+        logger.warning("Enrollment device-link column could not be prepared", exc_info=False)
 
     # Every hq_users migration, in one call, in the one order that works.
     #
@@ -903,6 +918,164 @@ def read_receiver_device_roles(
         return describe_store_devices(engine, store_id=store_id)
     except Exception:
         raise HTTPException(status_code=503, detail="Receiver Device roles are unavailable")
+
+
+@api.get("/stores/{store_id}/enrollment-codes",
+         response_model=List[EnrollmentCodeStatusOut])
+def list_receiver_enrollment_codes(
+    store_id: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
+):
+    """Enrollment records for one Store: state, timestamps, and what they proved.
+
+    Authenticated on purpose. The unauthenticated redemption endpoint stays a
+    single generic sentence precisely so it cannot be used as an oracle; this
+    is where an operator, signed in, gets the detail they need instead.
+
+    Carries no raw code and no verifier. The raw code left the server once, at
+    creation, and cannot be retrieved here or anywhere else - the database
+    holds a SHA-256 of it, and that is not something a page has any use for.
+    """
+    codes = (
+        db.query(ReceiverEnrollmentCode)
+        .filter(ReceiverEnrollmentCode.store_id == store_id)
+        .order_by(ReceiverEnrollmentCode.id.desc())
+        .all()
+    )
+    if not codes:
+        return []
+
+    # Resolved once for the whole list rather than per row: a page showing ten
+    # codes must not issue ten role queries.
+    try:
+        roles = describe_store_devices(engine, store_id=store_id)
+    except Exception:  # noqa: BLE001 - progress degrades, the list still renders
+        roles = []
+    # DeviceRole is a str Enum whose value is "PRIMARY". Comparing against
+    # "primary" silently matched nothing - the same case-mismatch that once made
+    # a role check in this repository quietly always-false.
+    primary_public_ids = {
+        row["public_id"] for row in roles
+        if str(row.get("role", "")).upper().endswith("PRIMARY")
+    }
+    # describe_store_devices deliberately publishes no internal row id, so the
+    # public id is mapped to a device id here instead. Reading a "device_id" key
+    # off that dict returned None for every Device, which made DEVICE_CONNECTED
+    # unreachable - and made the test asserting its absence pass for the wrong
+    # reason.
+    device_ids_by_public_id = _device_ids_by_public_id(store_id)
+    connected_device_ids = manager.connected_device_ids()
+
+    return [
+        EnrollmentCodeStatusOut(
+            id=row.id,
+            store_id=row.store_id,
+            state=describe_state(row),
+            created_at=_as_utc_text(row.created_at),
+            expires_at=_epoch_to_utc_text(row.expires_at_epoch),
+            used_at=(_epoch_to_utc_text(row.redeemed_at_epoch)
+                     if row.redeemed_at_epoch is not None else None),
+            device_public_id=row.device_public_id,
+            progress=_enrollment_progress(
+                row,
+                primary_public_ids=primary_public_ids,
+                device_ids_by_public_id=device_ids_by_public_id,
+                connected_device_ids=connected_device_ids,
+            ),
+        )
+        for row in codes
+    ]
+
+
+def _device_ids_by_public_id(store_id: int) -> dict:
+    """Public id -> internal Device id, for one Store.
+
+    Needed because connection state is keyed by the internal id while every API
+    surface speaks the public one. Read-only, and it returns an empty mapping
+    rather than raising: a failure here degrades reported setup progress and
+    must not stop the enrollment list from rendering.
+    """
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(
+                text("SELECT public_id, id FROM receiver_devices WHERE store_id = :store_id"),
+                {"store_id": store_id},
+            ).all()
+        return {row.public_id: row.id for row in rows}
+    except SQLAlchemyError:
+        # Deliberately NOT `except Exception`. A broad catch here swallowed a
+        # NameError from a missing `text` import and silently returned {}, which
+        # made DEVICE_CONNECTED unreachable and let a test asserting its absence
+        # pass for entirely the wrong reason. Only a real database fault degrades
+        # progress; a bug in this function must surface.
+        return {}
+
+
+def _as_utc_text(value) -> str:
+    """A stored naive datetime is UTC by this project's convention; say so
+    explicitly rather than shipping an ambiguous timestamp to 44 Stores."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc).isoformat()
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _epoch_to_utc_text(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+
+
+def _enrollment_progress(
+    row,
+    *,
+    primary_public_ids,
+    device_ids_by_public_id,
+    connected_device_ids,
+) -> List[str]:
+    """Stages this record can actually prove, each checked on its own evidence.
+
+    Every stage is backed by something stored or currently true. None is
+    inferred from elapsed time, and none is inferred from silence:
+
+    CODE_CREATED      the row exists
+    CODE_REDEEMED     redeemed_at_epoch is set
+    DEVICE_CREATED    device_public_id was recorded at redemption
+    DEVICE_CONNECTED  that Device holds a live socket RIGHT NOW
+    PRIMARY_ASSIGNED  that Device is this Store's primary (a stored fact)
+
+    NOT a pipeline that stops at the first gap, and a test caught me writing it
+    as one. DEVICE_CONNECTED is a LIVE fact and PRIMARY_ASSIGNED is a STORED
+    one, so they are independent: a Device can be this Store's primary and be
+    switched off right now. Gating the stored fact behind the live one hid a
+    promotion that had definitely happened, which is the same class of error as
+    inferring a stage that had not - reporting something other than what the
+    evidence says.
+
+    The two genuine dependencies are kept, because they are real: there is no
+    DEVICE_CREATED without a redemption, and no redemption without a code.
+
+    DEVICE_CONNECTED is deliberately about the present. ``receiver_events``
+    records a store_id and no device id, so "has this Device ever connected?"
+    cannot be answered from stored data - and a stage that cannot be proved is
+    one this list must not contain.
+    """
+    stages = ["CODE_CREATED"]
+    if row.redeemed_at_epoch is None:
+        return stages
+    stages.append("CODE_REDEEMED")
+
+    public_id = row.device_public_id
+    if not public_id:
+        # Redeemed before the link column existed, or the link write failed.
+        # Absent is absent; it is not evidence that no Device was created.
+        return stages
+    stages.append("DEVICE_CREATED")
+
+    device_id = device_ids_by_public_id.get(public_id)
+    if device_id is not None and device_id in connected_device_ids:
+        stages.append("DEVICE_CONNECTED")
+    if public_id in primary_public_ids:
+        stages.append("PRIMARY_ASSIGNED")
+    return stages
 
 
 @api.post("/receiver-devices/{public_id}/rotate-credential",

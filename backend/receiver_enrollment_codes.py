@@ -39,6 +39,77 @@ CODE_BYTES = 24
 # It is handed to one computer during setup, not mailed out. Minutes, not days.
 CODE_TTL_SECONDS = 900
 
+#: The states an enrollment record can honestly be in.
+#:
+#: There is deliberately no REVOKED. Nothing in this schema can revoke a code -
+#: no column, no service function, no route - so the label would be one with
+#: nothing behind it. Device revocation is a different thing entirely and
+#: already exists on the Device itself.
+STATE_UNUSED = "UNUSED"
+STATE_USED = "USED"
+STATE_EXPIRED = "EXPIRED"
+ENROLLMENT_STATES = (STATE_UNUSED, STATE_USED, STATE_EXPIRED)
+
+
+def ensure_enrollment_device_link_schema(engine) -> None:
+    """Record WHICH Device a redemption produced.
+
+    ``redeemed_at_epoch`` said a code had been spent but nothing said what it
+    created, so answering "which Device did this code enrol?" meant matching a
+    store_id against a timestamp - inference from elapsed time, which is exactly
+    what this evidence model refuses. A nullable column costs nothing: SQLite's
+    ADD COLUMN rewrites no rows and rebuilds no indexes.
+
+    Left NULL for every code redeemed before this existed. NULL means "not
+    recorded", never "no Device" - the endpoint reports a Device only when the
+    link is actually there.
+    """
+    with engine.begin() as connection:
+        columns = {
+            row[1] for row in
+            connection.exec_driver_sql("PRAGMA table_info(receiver_enrollment_codes)")
+        }
+        if "device_public_id" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE receiver_enrollment_codes "
+                "ADD COLUMN device_public_id VARCHAR(36)"
+            )
+
+
+def record_enrolled_device(db: Session, *, code_id: int, device_public_id: str) -> None:
+    """Attach the Device a redemption produced to the code that authorised it.
+
+    Best-effort by design: the credential has already been issued by the time
+    this runs, and failing the enrolment because an audit link could not be
+    written would strand a Device that HQ has already created. A missing link
+    degrades the reported progress; it must never undo a successful enrolment.
+    """
+    row = (
+        db.query(ReceiverEnrollmentCode)
+        .filter(ReceiverEnrollmentCode.id == code_id)
+        .first()
+    )
+    if row is None:
+        return
+    row.device_public_id = device_public_id
+    db.commit()
+
+
+def describe_state(row: ReceiverEnrollmentCode, *, now: float | None = None) -> str:
+    """USED wins over EXPIRED, always.
+
+    A code redeemed at second 30 of a 900-second life is USED for ever. Letting
+    the clock relabel it EXPIRED would report a Store that IS enrolled as one
+    whose setup failed - which is precisely the misreport the frontend could not
+    avoid while it had no evidence to read.
+    """
+    moment = time.time() if now is None else _as_epoch(now)
+    if row.redeemed_at_epoch is not None:
+        return STATE_USED
+    if moment >= row.expires_at_epoch:
+        return STATE_EXPIRED
+    return STATE_UNUSED
+
 
 class EnrollmentCodeError(Exception):
     """Base class, so a handler cannot forget one of the failure modes."""

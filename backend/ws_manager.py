@@ -380,6 +380,26 @@ class WSManager:
             return
         self.receiver_snapshots[store_id] = activate_session(snapshot, session_id)
 
+    def connected_device_ids(self) -> Set[int]:
+        """Which Devices hold a live socket RIGHT NOW - primary and standby.
+
+        Read-only, and deliberately about the present rather than the past.
+        "Has this Device ever connected?" would need a stored event carrying a
+        device id, and ``receiver_events`` records only a store_id - so
+        answering it from this data would be a guess. This answers the question
+        the data can actually support, and callers must not describe it as more.
+
+        Process-local, like every other connection fact here, which is exactly
+        why HQ runs one Uvicorn worker.
+        """
+        connected: Set[int] = set(self.standby_receivers)
+        inventory = getattr(self, "receiver_connection_inventory", None)
+        if inventory is not None:
+            for record in inventory.snapshot().records:
+                if record.device_id is not None:
+                    connected.add(record.device_id)
+        return connected
+
     def is_receiver_online(self, store_id: int) -> bool:
         snapshot = self.receiver_snapshots.get(store_id)
         return (

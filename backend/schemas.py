@@ -1,6 +1,6 @@
 """Pydantic schemas for SpeakLink API."""
 from datetime import datetime
-from typing import Optional, List
+from typing import ClassVar, Optional, List
 from pydantic import BaseModel, ConfigDict, Field
 
 # One source of truth for how long a human password must be. Four copies of a
@@ -94,6 +94,35 @@ class EnrollmentCodeResponse(BaseModel):
     code: str
     store_id: int
     expires_in_seconds: int
+
+
+class EnrollmentCodeStatusOut(BaseModel):
+    """What an authenticated HQ page may know about an enrollment record.
+
+    Every field here is either an identifier the API already exposes or a
+    timestamp. There is deliberately no ``code`` and no ``code_hash``: the raw
+    code leaves the server exactly once, at creation, and the verifier is not
+    something a page has any use for. A test asserts no field named like a
+    secret can be added later.
+
+    ``progress`` carries only stages backed by stored or current evidence -
+    never one inferred from how much time has passed. A Device that was created
+    is not a Device that ever connected, and this response must not blur them.
+    """
+
+    #: Kept as a class attribute rather than an Enum so a caller can check the
+    #: closed set without importing the service layer. REVOKED is absent on
+    #: purpose - nothing in this schema can revoke a code.
+    ALLOWED_STATES: ClassVar[tuple] = ("UNUSED", "USED", "EXPIRED")
+
+    id: int
+    store_id: int
+    state: str
+    created_at: str
+    expires_at: str
+    used_at: Optional[str] = None
+    device_public_id: Optional[str] = None
+    progress: List[str] = []
 
 
 class DeviceEnrollmentRequest(BaseModel):
