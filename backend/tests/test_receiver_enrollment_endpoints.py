@@ -76,15 +76,22 @@ def runtime(tmp_path_factory):
 
     try:
         db_module = importlib.import_module("db")
+        # The key container is created BEFORE the server is imported, because
+        # that is the order a real HQ starts in: the persistent profile exists,
+        # then the backend comes up against it. Since the backend now bootstraps
+        # a missing container at import, creating it afterwards raced with that
+        # and failed with KeyContainerExists.
+        from key_custody import FakeProtector, create_key_container
+
+        create_key_container(container, protector=FakeProtector())
+
         server = importlib.import_module("server")
         models = importlib.import_module("models")
         assert Path(db_module.DB_PATH) == database.resolve()
         server.startup_event()
 
-        from key_custody import FakeProtector, create_key_container
         from migrations import run_receiver_credential_phase_one
 
-        create_key_container(container, protector=FakeProtector())
         run_receiver_credential_phase_one(db_module.engine)
 
         with db_module.SessionLocal() as db:

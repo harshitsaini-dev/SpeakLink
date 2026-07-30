@@ -613,3 +613,93 @@ and left the half an operator actually reads.
 **Rule.** When you fix an attribution bug, follow the value all the way to
 whatever a human eventually looks at. Memory, database, dashboard, log. The fix is
 not done at the first layer that looks right.
+
+---
+
+## A rule with three owners and no implementation
+
+An earlier box in this guide says: *when you fix a rule, grep for the rule, not
+for the function*, because a duplicated policy drifts and each copy looks correct
+on its own.
+
+This is the inverse, and it is worse.
+
+Three places said the backend creates the Receiver HMAC key container on first
+start: `tools/hq_runtime.py`, `scripts/Test-SpeakLinkHQAutoStart.ps1`, and the
+tests written to match them. `backend/server.py` did not, and said so plainly in
+its own docstring — *"The container is never created here"*.
+
+Nobody was lying. Each statement was quoting the others. The runtime's comment
+justified removing a refusal; the PowerShell check's comment justified treating an
+absence as normal; the tests encoded both. Every reviewer who read any one of them
+found a confident, well-reasoned claim with no reason to doubt it.
+
+It survived a fourteen-area security audit, a full release-candidate gate, and a
+`git grep` for `create_key_container` that found the function defined and tested
+and never called from a production path. It was caught by the **first real
+installed start**, by a check that had been written to pass before that start and
+failed the moment there was something to check.
+
+**Rule.** A comment that says *another component does X* is a claim about code you
+are not looking at. Name the module that does it, so the next reader can check
+instead of believe. Better: write a test that asserts the caller exists.
+`test_the_server_module_calls_the_bootstrap_before_building_the_authenticator`
+walks the AST and fails if the call is missing or in the wrong place — that is the
+shape of assertion that would have caught this on the day it was written.
+
+**Corollary.** "Grep found the function, so it is implemented" is not the same as
+"grep found a caller on the path that runs in production". Search for the call
+site, and check which path it is on.
+
+## The convenient answer is the dangerous answer
+
+The bootstrap may only create a key when zero Devices are enrolled. So the whole
+design rests on one number, and the number has a failure mode: when the count
+cannot be established, the tempting answer is zero, and zero is the answer that
+mints a key over credentials that are still in use — 44 Stores re-enrolling.
+
+So "I could not count them" must never become "there are none". That much was
+already written down.
+
+What I got wrong was the opposite direction. I treated a **missing database file**
+as "could not establish" and refused. That refused 66 tests and would have refused
+a genuine first-ever start, because the backend is imported before it creates its
+own schema.
+
+The two are not the same claim:
+
+* **No file** — nothing can be enrolled in a file that does not exist. Zero, with
+  certainty. Not a guess.
+* **A file that will not open** — corrupt, locked, permission denied. Unknown, and
+  unknown must fail closed.
+
+**Rule.** When you write a fail-closed rule, enumerate the failure modes and ask
+of each one: *is this actually unknown, or is it a definite answer I have not
+distinguished?* Collapsing "certainly none" into "cannot tell" is as much a defect
+as collapsing "cannot tell" into "none" — it is just a safer-looking one, so it
+survives review and fails in production instead.
+
+## A default path is a live path
+
+The bootstrap is gated on environment variables. The first version gated on
+`SPEAKLINK_DB_PATH` alone.
+
+`conftest.py` always sets `SPEAKLINK_DB_PATH`. The container path falls back to
+`SERVICE_CONTAINER_PATH` — `C:\ProgramData\SpeakLink\keys\` — which is the
+machine's real service custody location. Every test database has zero Devices.
+
+So running the test suite would have minted a **real key container in the
+machine's service custody path**, which a later service-account HQ would have
+found, opened and treated as the one it was always meant to have. Silent, and
+indistinguishable from correct.
+
+It was caught by asking "what does this do when the variable is unset?" before
+running the suite, rather than after.
+
+**Rule.** A fallback constant that points at a real system location is not a
+default — it is a live target. Any code path that can write to it must require an
+explicit configuration to get there, and a test should assert that the constant is
+unreachable without one. The test here strips the docstring and walks the AST,
+because the docstring *explains* the constant and a text scan flags its own
+explanation. That is the fifth time prose has tripped a text scan in this
+repository.
