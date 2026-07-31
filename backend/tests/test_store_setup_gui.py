@@ -56,9 +56,19 @@ def app(tmp_path):
     application.destroy()
 
 
-def test_a_fresh_computer_opens_on_the_connection_screen(app):
+def test_a_fresh_computer_opens_on_the_welcome_screen(app):
+    """Welcome is Page 1 now: a beginner meets one sentence saying what the
+    program does before being asked for a server address."""
+    from tools.store_setup_gui import WelcomeScreen
+
+    assert isinstance(app._current, WelcomeScreen)
+
+
+def test_start_setup_leads_to_the_connection_screen(app):
     from tools.store_setup_gui import ConnectionScreen
 
+    app.go_to_connection()
+    app.update()
     assert isinstance(app._current, ConnectionScreen)
 
 
@@ -97,6 +107,8 @@ def test_the_connection_screen_defaults_to_the_documented_url(app):
 def test_test_connection_enables_next_only_on_success(app, monkeypatch):
     from tools import store_setup_core as core_module
 
+    app.go_to_connection()
+    app.update()
     screen = app._current
     monkeypatch.setattr(core_module, "test_hq_connection", lambda *a, **k: core_module.ConnectionResult(
         state=core_module.ConnectionState.CONNECTED_TO_HQ, detail="ok",
@@ -109,6 +121,8 @@ def test_test_connection_enables_next_only_on_success(app, monkeypatch):
 def test_test_connection_leaves_next_disabled_on_failure(app, monkeypatch):
     from tools import store_setup_core as core_module
 
+    app.go_to_connection()
+    app.update()
     screen = app._current
     monkeypatch.setattr(core_module, "test_hq_connection", lambda *a, **k: core_module.ConnectionResult(
         state=core_module.ConnectionState.CONNECTION_FAILED, detail="no"))

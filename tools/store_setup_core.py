@@ -67,6 +67,11 @@ from tools.receiver_agent import (  # noqa: E402
     save_config,
     ReceiverConfig,
 )
+from tools.receiver_credential_store import (  # noqa: E402
+    DeviceCredentialProtector,
+    default_credential_path,
+    load_credential,
+)
 from tools.windows_audio_devices import (  # noqa: E402
     AudioDeviceError,
     OutputDevice,
@@ -880,3 +885,116 @@ def replace_device_identity(*, credential_path, confirmation_word: str) -> bool:
     if confirmation_word.strip().lower() != CONFIRMATION_WORD:
         return False
     return remove_local_credential(credential_path, confirm=lambda _prompt: CONFIRMATION_WORD)
+
+
+# ===========================================================================
+# Asking the CURRENT HQ whether it still knows this Device
+# ===========================================================================
+class DeviceLookupUnavailable(Exception):
+    """HQ could not be asked. NEVER the same as "HQ said no".
+
+    The caller must map this to HQ_UNREACHABLE, not to a stale credential:
+    offering to delete an identity because a network was down is worse than
+    showing nothing at all.
+    """
+
+
+def lookup_device_at_hq(public_id, *, credential_path=None, protector=None,
+                        backend_url=None, connect=None, timeout=8.0):
+    """Return a Device record from the current HQ, or None if HQ rejects it.
+
+    THERE IS NO UNAUTHENTICATED "IS MY DEVICE VALID" ROUTE, and inventing one
+    would be an enumeration oracle: every /receiver-devices route requires a
+    signed-in HQ user, which a Store PC does not have and should never have.
+
+    So this uses the flow that already exists and is already the authority - the
+    Receiver's own WebSocket handshake, presenting the sealed Device credential
+    in an Authorization header exactly as receiver_agent does. HQ accepting that
+    connection IS the definition of "this Device is still valid here".
+
+    Three outcomes, kept distinct on purpose:
+      * a record   - HQ accepted the credential;
+      * None       - HQ answered and REFUSED the credential (stale or revoked);
+      * raises     - HQ could not be reached at all.
+    """
+    from tools.receiver_agent import receiver_websocket_url
+
+    path = Path(credential_path) if credential_path else default_credential_path()
+    guard = protector or DeviceCredentialProtector()
+    try:
+        record = load_credential(path, protector=guard)
+    except Exception as failure:
+        raise DeviceLookupUnavailable(
+            f"the local credential could not be opened ({failure.__class__.__name__})"
+        ) from None
+
+    secret = getattr(record, "credential", None) or getattr(record, "token", None)
+    if not secret:
+        raise DeviceLookupUnavailable("the local credential carries no usable secret")
+
+    base = backend_url or getattr(record, "backend_url", None)
+    if not base:
+        raise DeviceLookupUnavailable("no HQ address is recorded for this computer")
+
+    opener = connect or _default_ws_connect
+    try:
+        accepted, detail = opener(receiver_websocket_url(base), secret, timeout)
+    except DeviceLookupUnavailable:
+        raise
+    except Exception as failure:
+        raise DeviceLookupUnavailable(
+            f"HQ could not be reached ({failure.__class__.__name__})") from None
+
+    if not accepted:
+        # HQ answered and said no. That is a real verdict, not a network problem.
+        return None
+    return {
+        "store_id": detail.get("store_id"),
+        "store_name": detail.get("store_name"),
+        "store_code": detail.get("store_code"),
+        "zone": detail.get("zone"),
+        "device_name": detail.get("device_name"),
+        "store_archived": bool(detail.get("store_archived")),
+    }
+
+
+def _default_ws_connect(url, credential, timeout):
+    """One short handshake. The credential travels in a header, never in the URL.
+
+    A URL is written to proxy logs, browser history and process lists; this
+    project refuses credential-in-URL everywhere and this is not an exception.
+    """
+    import json as _json
+
+    try:
+        from websockets.sync.client import connect as ws_connect
+    except Exception as failure:
+        raise DeviceLookupUnavailable(
+            f"the WebSocket client is unavailable ({failure.__class__.__name__})"
+        ) from None
+
+    try:
+        with ws_connect(url, additional_headers={"Authorization": f"Bearer {credential}"},
+                        open_timeout=timeout, close_timeout=2) as socket:
+            try:
+                first = socket.recv(timeout=timeout)
+            except Exception:
+                # Connected and said nothing yet. The handshake succeeding is
+                # already HQ accepting the credential.
+                return True, {}
+            try:
+                payload = _json.loads(first)
+            except Exception:
+                return True, {}
+            return True, payload if isinstance(payload, dict) else {}
+    except Exception as failure:
+        name = failure.__class__.__name__
+        text = str(failure)
+        # 4401/4403 and an HTTP 401/403 on the upgrade are HQ REFUSING the
+        # credential. Anything else - DNS, refused connection, timeout - means
+        # HQ was never reached and must not be reported as a stale identity.
+        rejected = ("401" in text or "403" in text or "4401" in text or "4403" in text
+                    or "InvalidStatus" in name)
+        if rejected:
+            return False, {}
+        raise DeviceLookupUnavailable(f"HQ could not be reached ({name})") from None
