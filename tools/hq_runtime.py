@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import secrets
+import signal
 import subprocess
 import sys
 import time
@@ -403,12 +404,104 @@ def frontend_command(profile: RuntimeProfile) -> list:
     Chosen over `serve`, `nginx` or a Node static server because it adds no
     dependency to an HQ machine that already has this Python. It is a private
     LAN pilot serving static files to a handful of browsers, not a public CDN.
+
+    tools/spa_server rather than `-m http.server`: http.server maps a URL to a
+    file, and a React route is not a file. Opening the dashboard worked and
+    typing http://<hq>:3000/login - or pressing F5 anywhere - returned 404 from a
+    server that was working perfectly. spa_server serves index.html for a route
+    and still returns a genuine 404 for a missing asset, which matters: an
+    absent main.<hash>.js that returned HTML would surface as a syntax error
+    inside a page that looks fine, hiding a broken deployment.
     """
+    spa = _module_path("spa_server")
     return [
-        profile.python, "-m", "http.server", str(profile.frontend_port),
+        profile.python, str(spa), str(profile.frontend_port),
         "--bind", profile.hq_address,
         "--directory", str(profile.frontend_build),
     ]
+
+
+#: A child is only ever stopped when its command line carries one of these. The
+#: allowlist is the safety property: an HQ machine runs other Python, and this
+#: code must never be able to reach it. "spa_server" replaced "http.server" when
+#: the frontend gained its SPA fallback - a marker list that is not updated with
+#: the command it guards silently starts refusing to stop the real child.
+OWNED_CHILD_MARKERS = ("uvicorn", "spa_server", "http.server")
+
+
+def descendant_pids(pid: int) -> "list[int]":
+    """Every descendant of one process, deepest last, by parent link only.
+
+    Never by process name. An HQ desk runs other Python - VS Code alone had two
+    when this was measured - and matching on "python.exe" would stop them.
+    """
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        psutil = None
+
+    if psutil is not None:  # pragma: no cover - exercised where psutil exists
+        try:
+            return [child.pid for child in psutil.Process(pid).children(recursive=True)]
+        except Exception:
+            return []
+
+    # Windows without psutil: ask the OS for the parent map.
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-CimInstance Win32_Process | "
+             "Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress"],
+            capture_output=True, text=True, timeout=30,
+            **hidden_child_process_options(),
+        )
+        rows = json.loads(completed.stdout or "[]")
+    except Exception:
+        return []
+
+    by_parent = {}
+    for row in rows if isinstance(rows, list) else [rows]:
+        by_parent.setdefault(row.get("ParentProcessId"), []).append(row.get("ProcessId"))
+
+    found, frontier = [], [pid]
+    while frontier:
+        nxt = []
+        for current in frontier:
+            for child in by_parent.get(current, []):
+                if child and child not in found:
+                    found.append(child)
+                    nxt.append(child)
+        frontier = nxt
+    return found
+
+
+def _terminate_descendants(pid: int, *, log=None) -> int:
+    """Stop a child's own descendants, deepest first, before the child itself."""
+    stopped = 0
+    for descendant in reversed(descendant_pids(pid)):
+        try:
+            os.kill(descendant, signal.SIGTERM)
+            stopped += 1
+        except Exception:
+            if log:
+                log.warning("could not stop descendant pid %s", descendant)
+    return stopped
+
+
+def _module_path(name: str) -> Path:
+    """A tools module, whether this runtime is frozen or not.
+
+    Frozen, the supervisor's own modules live inside the bundle, but the backend
+    and frontend are started as CHILD processes using the machine's own Python -
+    so a child needs a real .py file on disk. The packaged HQ ships tools/ beside
+    the executable for exactly this reason.
+    """
+    packaged = _packaged_root()
+    if packaged is not None:
+        candidate = packaged / "tools" / f"{name}.py"
+        if candidate.exists():
+            return candidate
+    return REPOSITORY_ROOT / "tools" / f"{name}.py"
 
 
 def child_environment(profile: RuntimeProfile) -> dict:
@@ -516,10 +609,16 @@ def stop_children(children, *, log=None) -> int:
         if pid is None or child.poll() is not None:
             continue
         cmdline = " ".join(getattr(child, "args", []) or [])
-        if "uvicorn" not in cmdline and "http.server" not in cmdline:
+        if not any(marker in cmdline for marker in OWNED_CHILD_MARKERS):
             if log:
                 log.warning("refusing to stop pid %s: not one of ours", pid)
             continue
+        # Descendants first. The venv python re-execs the real interpreter, so
+        # the process actually holding port 3000 or 8000 is a GRANDCHILD -
+        # measured on the installed HQ, where Stop-ScheduledTask left all six
+        # descendants alive and both ports held. Terminating the direct child
+        # alone leaves the listener running and the next start fails to bind.
+        _terminate_descendants(pid, log=log)
         child.terminate()
         try:
             child.wait(timeout=10)
