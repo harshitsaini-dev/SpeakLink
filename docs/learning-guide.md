@@ -899,3 +899,67 @@ tested the *server* and the defect was in what the server had handed to the
 A verdict of "every automated gate passed" is only as good as the widest thing the
 gates cannot see — here, the entire browser half of the system. Say
 `READY_FOR_LOGIN_RETEST`, not `WORKING`, until somebody has loaded the page.
+
+---
+
+## The same identifier can mean different things in different databases
+
+A Store PC said "already enrolled — Store: 1" and was broken. The credential was
+genuine; it had been minted against a throwaway pilot database where Store 1 was
+"LAN pilot Store". In the live database Store 1 was an archived demo shop, and
+the shop the operator meant was id 14.
+
+Three databases, three meanings, one number. The local file recorded the number
+faithfully and the number meant nothing without the database that issued it.
+
+**Rule.** A numeric id is only meaningful beside the system that issued it. When
+an identifier crosses a boundary — a file on another machine, an export, a
+message — carry something stable with it: the name, a code, or the identity of
+the issuing system. And never show a bare id to a human as the primary label; a
+shop has a name, and "Store: 1" is unreadable to the person standing in it.
+
+**The corollary that matters more.** A credential proves *you once enrolled
+somewhere*. It does not prove the server still knows you. Those are different
+facts and collapsing them is how a broken machine reports success.
+
+## "Not reachable" is not "not valid"
+
+The tempting simplification: if HQ will not confirm the credential, treat it as
+stale and offer to re-enrol.
+
+That destroys a working identity every time the network is down. A credential
+cannot be judged by a server that never answered. HQ_UNREACHABLE is its own
+verdict, offers no destructive action, and says "we cannot tell".
+
+**Rule.** Before offering a destructive remedy, ask whether the evidence
+distinguishes *the thing is broken* from *I could not check*. If it does not,
+the remedy is not safe to offer yet.
+
+## Look at the artifact, not the build directory
+
+The StoreSetup package shipped with no Receiver, no FFmpeg and none of its
+scripts. Every gate passed: the wizard built, its hashes verified, its manifest
+was correct. Nothing asked whether the package contained the things the wizard
+needs at runtime.
+
+The check that found it was one line: list the built package and look for
+`EchoCastReceiver.exe`.
+
+**Rule.** A package verifier that only checks the files it put there cannot
+notice the files it forgot. Assert the *capability* — "the wizard can find a
+Receiver to install" — not just the integrity of what was copied.
+
+## Kill the tree, not the child
+
+Stopping the HQ scheduled task left all six descendants running and both ports
+bound. The reason was one level of indirection: the venv `python.exe` re-execs
+the real interpreter, so the process holding the port is a *grandchild*.
+
+Terminating the direct child left the listener alive, and the next start could
+not bind — which presents as "the port is in use" long after the thing that
+used it was supposedly stopped.
+
+**Rule.** When you stop a process you started, walk its descendants by parent
+link and stop them deepest-first. Never match on process name: an HQ desk runs
+other Python, and this machine had two VS Code processes that a name match would
+have killed.
