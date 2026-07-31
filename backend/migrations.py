@@ -426,3 +426,25 @@ def run_receiver_credential_phase_one(
             raise
 
     return MigrationResult(PHASE_ONE_VERSION, MIGRATION_STATE_LEGACY_ONLY, True)
+
+
+def mark_device_auth_ready_for_tests(engine) -> None:
+    """Put a TEST database into the post-migration state enrolment requires.
+
+    Enrolment refuses in ``legacy_only`` because the runtime cannot verify a
+    hashed Device credential there - that guard is why the live HQ stopped
+    issuing credentials nobody could ever use. Test fixtures that enrol therefore
+    have to represent an HQ whose migration has been completed.
+
+    The state is set directly here rather than by driving the real transition,
+    because a fixture's job is to construct a starting condition, not to re-test
+    the transition. The transition itself - with all its validation, its audit
+    event and its rollback - is covered by
+    ``backend/tests/test_hashed_fleet_transition.py``.
+
+    Named for tests on purpose: nothing in production may call this.
+    """
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE receiver_credential_migration_state "
+            "SET state = 'hash_only', legacy_verification_enabled = 0")

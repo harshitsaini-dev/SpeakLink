@@ -97,9 +97,12 @@ def runtime(tmp_path_factory):
         assert Path(db_module.DB_PATH) == database.resolve()
         server.startup_event()
 
-        from migrations import run_receiver_credential_phase_one
+        from migrations import (run_receiver_credential_phase_one,
+                        mark_device_auth_ready_for_tests)
 
         run_receiver_credential_phase_one(db_module.engine)
+
+        mark_device_auth_ready_for_tests(db_module.engine)
 
         with db_module.SessionLocal() as db:
             store = db.query(models.Store).order_by(models.Store.id).first()

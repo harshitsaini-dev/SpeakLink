@@ -176,6 +176,37 @@ def _release_claim(db: Session, code_id: int) -> None:
     db.commit()
 
 
+def _require_device_auth_capable_state(engine: Engine) -> None:
+    """Refuse enrolment when the migration state cannot verify what we would issue.
+
+    Reads the state directly rather than trusting a cached authenticator: the
+    question is what the DATABASE will do at verification time, and that is the
+    only place it is recorded.
+    """
+    from receiver_auth_reasons import (
+        AuthReason,
+        DeviceEnrolmentBlocked,
+        state_can_verify_device_credentials,
+    )
+
+    try:
+        with engine.connect() as connection:
+            row = connection.exec_driver_sql(
+                "SELECT state FROM receiver_credential_migration_state"
+            ).fetchone()
+    except Exception:
+        # Unreadable state is not permission to proceed. Issuing a credential we
+        # cannot confirm is verifiable is exactly how this fleet got stuck.
+        raise DeviceEnrolmentBlocked(AuthReason.MIGRATION_STATE_BLOCKS_DEVICE_AUTH) from None
+
+    state = row[0] if row else None
+    if not state_can_verify_device_credentials(state):
+        raise DeviceEnrolmentBlocked(
+            AuthReason.BACKFILL_REQUIRED if state == "legacy_only"
+            else AuthReason.MIGRATION_STATE_BLOCKS_DEVICE_AUTH
+        )
+
+
 def redeem_and_enroll(
     db: Session,
     engine: Engine,
@@ -199,6 +230,14 @@ def redeem_and_enroll(
             "key container could not be opened."
         )
     _require_phase_one(engine)
+    # BEFORE the code is claimed. HQ must not issue a credential it cannot
+    # verify: in legacy_only the runtime never computes a hashed identity at all,
+    # so every Device enrolled there was unusable from the moment it was created.
+    # Four such Devices exist on the live HQ and not one ever authenticated - and
+    # their rows then BLOCKED the supported backfill that would have opened the
+    # gate. A refusal here costs nothing; issuing costs a one-time code, a dead
+    # Device row, and a migration that can no longer run.
+    _require_device_auth_capable_state(engine)
 
     try:
         redeemed = redeem_enrollment_code(db, code)
