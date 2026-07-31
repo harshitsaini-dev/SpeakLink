@@ -3170,3 +3170,129 @@ anywhere — the path that failed on the installed machine.
 The installed HQ has not been restarted. This is verified against temporary
 SQLite databases and a subprocess, not against the live persistent profile under
 the Scheduled Task's account. That is the retest.
+
+---
+
+## 2026-07-31 — RC4 was healthy and nobody could sign in
+
+Runtime READY. Backend answering on `192.168.4.134:8000`. Frontend serving on
+`:3000`. The official auto-start verifier passed **34 checks**. And the login page
+failed every attempt with "Login failed".
+
+The browser console had the real story:
+
+```
+POST http://127.0.0.1:8000/api/auth/login    ERR_CONNECTION_REFUSED
+```
+
+The request never reached authentication. The message was not evidence of a wrong
+password.
+
+### Root cause: a build-time constant describing a runtime fact
+
+```js
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;   // frontend/src/lib/api.js
+REACT_APP_BACKEND_URL=http://127.0.0.1:8000              // frontend/.env
+```
+
+Create React App inlines every `REACT_APP_*` value at compile time, so the address
+was frozen into the bundle on the build machine. `127.0.0.1` means *the computer
+running the browser*, so every operator's dashboard called itself. The HQ machine's
+address is not knowable when the bundle is compiled — it is only knowable at the
+moment somebody opens the page, and at that moment the browser already knows it,
+because it just used it to fetch the page.
+
+### Why every gate passed
+
+Nothing in this repository looked inside the built bundle. The build is generated
+and gitignored, and every secret and content scan here walks **tracked files**.
+
+That is the same blind spot as the credential archive in the 2026-07-30 incident:
+*not in git* is not *not in the artifact*. Two different defects, one missing
+habit — inspect what ships, not what is committed.
+
+### The fix
+
+`frontend/src/lib/api.js` resolves the backend from `window.location`:
+
+* hostname from the page, so one bundle works from every machine on the LAN;
+* `https:` page → `https:`/`wss:`, `http:` page → `http:`/`ws:`, because an https
+  page loading an http API is blocked as mixed content and presents as a silent
+  network failure;
+* port from `REACT_APP_BACKEND_PORT`, defaulting to `8000`;
+* IPv6 hostnames bracketed — `window.location.hostname` returns them *without*
+  brackets and `http://::1:8000` is not a URL;
+* `REACT_APP_BACKEND_URL` still overrides, for a deployment where the API really
+  is elsewhere — **except** when it names a loopback address and the page did not
+  come from one. That combination has exactly one meaning: a development value
+  that escaped into a production build. Honouring it would be this same defect
+  arriving through configuration instead of through code.
+
+`REACT_APP_BACKEND_URL` is gone from `frontend/.env`, so the literal is not
+compiled into anything.
+
+### The second defect, which is what made the first expensive
+
+`Login.jsx` did `setErr(e2?.response?.data?.detail || "Login failed")`. With no
+response there is no `detail`, so a **transport failure** rendered as a
+**credential rejection**. An operator reads "Login failed" as "wrong password" and
+the next thing they do is reset one — which in this system is a deliberate,
+audited, offline act, and would not have helped.
+
+`frontend/src/lib/loginError.js` now separates them:
+
+| Condition | Message |
+| --- | --- |
+| no response at all | names the backend host, and says **the password has not been checked** |
+| 401 / 403 | incorrect username or password |
+| 429 | unchanged fixed wording — no count, threshold, unlock time, or whether the account exists |
+| 5xx | the backend answered with an error; the password has not been checked |
+
+### A guard that inspects the artifact
+
+`backend/tests/test_frontend_backend_url.py` reads the built assets: no loopback
+backend in any executable asset, none in a shipped source map, **and no hard-coded
+LAN address either** — because replacing the loopback constant with today's IP is
+the tempting fix that fails identically the day the HQ machine gets a new address.
+
+Proof it works, run against both artifacts:
+
+```
+RC4 (installed, broken) : main.a7a94de3.js -> 127.0.0.1:8000
+new build (fixed)       : none
+```
+
+The exact loopback URL is also kept out of source comments, because the source map
+ships: a package containing the string is indistinguishable, to a grep, from one
+that still calls it.
+
+### Evidence
+
+```
+RED    15 failed, 6 passed - frontend/src/lib/api.test.js against the old resolver
+RED    RC4's shipped bundle flagged by the artifact guard
+GREEN  32 passed - full frontend unit suite (21 resolver + 11 login-error)
+GREEN  102 passed - CORS, HQ runtime, package and artifact-guard tests
+GREEN  2302 passed, 3 skipped, 0 failed - full backend suite
+       yarn build Done; compileall 0; pip check clean; scans clean
+       protected database 9F155E1D...D993AE523 unchanged, no sidecars
+```
+
+### Playwright was NOT run, and why
+
+The live HQ is running on this machine — `python` listening on
+`192.168.4.134:3000` and `:8000`, Scheduled Task `Ready`. The Playwright config
+starts its own dev server on port 3000 and would either collide with the live
+frontend or reuse it. Neither is acceptable while a pilot is up, so the suite was
+left alone rather than forced.
+
+The login assertions were read instead of run: they check behaviour (an error is
+visible, no token is stored, the page stays on `/login`) and the 429 wording rule
+(contains "try again", no digits, no "lock", no "exist"). The new messages satisfy
+all of them, and the route interceptors match on path rather than host so the
+resolver change cannot affect them. **That is a reading, not a run** — the suite
+needs re-running once HQ is stopped.
+
+### Still not proven
+
+No browser has loaded the fixed bundle from the HQ LAN address. That is the retest.

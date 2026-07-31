@@ -807,3 +807,95 @@ It does not automatically mean *stop the whole system*. Ask what each option
 costs: refusing, continuing degraded, and acting. Then write down which you chose
 and why, next to the code — because the next reader's instinct will be the tidy
 answer.
+
+---
+
+## A build-time constant cannot describe a runtime fact
+
+```js
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;   // baked at compile time
+REACT_APP_BACKEND_URL=http://127.0.0.1:8000
+```
+
+Create React App inlines every `REACT_APP_*` value into the bundle when it
+compiles. So this froze one address into a file that would be opened from 44
+different computers — and the address it froze was `127.0.0.1`, which does not
+mean "the HQ machine". It means *the computer running the browser*. Every
+operator's dashboard called itself.
+
+The information was never missing. The browser had just fetched the page from the
+HQ machine, so `window.location.hostname` was the correct answer the whole time.
+The build simply had no business guessing it.
+
+**Rule.** Before putting a value in a build-time variable, ask when it is actually
+knowable. A port, a feature flag or a brand name is knowable at build time. A host
+address, a tenant, a user's timezone are knowable only when someone opens the
+page. Deriving from `window.location` also means one artefact for the whole fleet,
+which is a smaller thing to get wrong.
+
+**The tempting wrong fix** is to replace `127.0.0.1` with today's LAN IP. It works
+until the HQ machine gets a different address, and then fails identically with the
+same symptom. There is a test asserting no hard-coded LAN address, aimed squarely
+at the fix a hurried person would reach for.
+
+## Scan what ships, not what is committed
+
+Every gate passed. 34 auto-start checks, a full backend suite, a production build,
+a secret scan — and the shipped bundle told every browser to call its own loopback
+address.
+
+Nothing looked inside the build, because the build is generated and gitignored,
+and every scan in this project walks **tracked files**.
+
+That is the same blind spot that hid a live JWT secret in a gitignored ZIP the day
+before. Two unrelated defects, one missing habit.
+
+**Rule.** *Not in git* is not *not in the artifact*. A release gate must read the
+bytes that ship: the bundle, the package, the archive. Write the assertion against
+the built output and skip loudly when there is no build, so an unbuilt checkout is
+never mistaken for a passing one.
+
+**Corollary.** If a guard's failure message could be produced by a *comment* rather
+than by code, the guard cannot tell a fixed artefact from a broken one. The source
+map ships here, so the loopback URL is kept out of the comments too — and the
+comment says why, so nobody helpfully puts it back.
+
+## "Login failed" is a diagnosis, and it was the wrong one
+
+```js
+setErr(e2?.response?.data?.detail || "Login failed");
+```
+
+Correct for a rejected password. Wrong for everything else — and when the request
+never reaches the server there is no `response`, so a connection refused rendered
+as a credential rejection.
+
+The cost is not the wording. It is where the wording sends someone. An operator
+told "Login failed" reasonably concludes the password is wrong and starts
+resetting it — which in this system is a deliberate, audited, offline act
+involving a database backup. They would have done all of that, and it would not
+have worked, because the request was never leaving their machine.
+
+**Rule.** An error message is a routing decision: it tells someone which room to
+search. Separate *the server said no* from *the server never heard you*, and say
+which one happened. "Your password has not been checked" is one sentence and it
+closes off an entire wrong investigation.
+
+**The mechanical tell in axios**, and most HTTP clients: `err.response` exists
+only when a response came back. No response means the request did not arrive. That
+distinction is available at every call site and is usually thrown away by
+`|| "something failed"`.
+
+## Green does not mean working
+
+Runtime READY. Backend answering. Frontend serving. 34 checks green. Nobody could
+sign in.
+
+Every check was true. None of them was the thing that mattered, because they all
+tested the *server* and the defect was in what the server had handed to the
+*browser*. The first honest end-to-end signal was a person opening the page.
+
+**Rule.** Count what your green checks actually cover, and name the gap out loud.
+A verdict of "every automated gate passed" is only as good as the widest thing the
+gates cannot see — here, the entire browser half of the system. Say
+`READY_FOR_LOGIN_RETEST`, not `WORKING`, until somebody has loaded the page.
