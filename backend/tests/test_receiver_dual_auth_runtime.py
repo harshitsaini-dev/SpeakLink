@@ -401,7 +401,15 @@ def test_runtime_identity_is_immutable_non_secret_and_source_strict():
 def test_default_application_constructs_legacy_only_authenticator(isolated_runtime):
     default = isolated_runtime.server.default_receiver_runtime_authenticator
     assert isinstance(default, LegacyStoreTokenRuntimeAuthenticator)
-    assert isolated_runtime.server.app.state.receiver_runtime_authenticator is default
+    # The app now holds a ReceiverAuthMode wrapper rather than the legacy
+    # authenticator itself, because the choice is re-evaluated instead of frozen -
+    # a backend that started before the phase-one tables existed used to refuse
+    # every Device credential for its whole life. The BEHAVIOUR asserted here is
+    # unchanged: on a database without those tables, only legacy Store tokens are
+    # accepted, and the wrapper delegates to exactly this object.
+    mode = isolated_runtime.server.app.state.receiver_runtime_authenticator
+    assert mode.describe() == "legacy store tokens only"
+    assert mode.current is default
     result = default.authenticate(
         presented_token=isolated_runtime.tokens[11],
         authenticated_at=UTC_NOW,

@@ -161,6 +161,7 @@ from key_custody import (
     load_key_ring,
 )
 from key_custody_acl import SERVICE_CONTAINER_PATH
+from receiver_auth_mode import ReceiverAuthMode
 from receiver_key_bootstrap import bootstrap_from_environment
 from receiver_enrollment_api import (
     DeviceNotFound,
@@ -294,7 +295,7 @@ def build_receiver_runtime_authenticator():
     """
     key_ring = receiver_key_ring()
     if key_ring is None:
-        return default_receiver_runtime_authenticator
+        return None
     try:
         with engine.connect() as connection:
             present = {
@@ -304,7 +305,7 @@ def build_receiver_runtime_authenticator():
                 )
             }
         if not {"receiver_devices", "receiver_credentials"} <= present:
-            return default_receiver_runtime_authenticator
+            return None
         return DualRuntimeAuthenticator(
             device=MigrationAwareReceiverRuntimeAuthenticator(
                 engine, hash_keys=key_ring.as_mapping()
@@ -312,8 +313,10 @@ def build_receiver_runtime_authenticator():
             legacy=default_receiver_runtime_authenticator,
         )
     except Exception:
-        # Never let a probe failure take the Receivers offline.
-        return default_receiver_runtime_authenticator
+        # Never let a probe failure take the Receivers offline. None means
+        # "not device-capable yet"; ReceiverAuthMode keeps the legacy
+        # authenticator serving and tries again shortly.
+        return None
 
 
 # Before the authenticator is built, never after. build_receiver_runtime_
@@ -327,14 +330,25 @@ def build_receiver_runtime_authenticator():
 # the alternative is minting a key over credentials that are still in use: the
 # supervisor records the exit and reports it, which is louder than a server that
 # runs and quietly authenticates nobody.
+#: Re-evaluated rather than frozen. The choice used to be made once, here, and
+#: a backend that started before run_receiver_credential_phase_one created the
+#: Device tables served legacy-only Store tokens for its whole life - refusing
+#: every Device credential while enrolment kept succeeding. That is exactly what
+#: refused Device 3b1ff11f on the second PC. See backend/receiver_auth_mode.py.
+receiver_auth_mode = None
+
 _key_bootstrap_outcome = bootstrap_from_environment(
     container_path=receiver_key_container_path(),
     protector=receiver_key_protector(),
 )
 
+receiver_auth_mode = ReceiverAuthMode(
+    build=build_receiver_runtime_authenticator,
+    legacy=default_receiver_runtime_authenticator,
+)
 configure_receiver_runtime(
     app,
-    authenticator=build_receiver_runtime_authenticator(),
+    authenticator=receiver_auth_mode,
     connection_manager=manager,
 )
 
@@ -440,14 +454,13 @@ def startup_event():
     # Decided here rather than at import: whether Device credentials can be
     # verified depends on the database and the key container, and neither is
     # guaranteed to exist when this module is first imported.
-    authenticator = build_receiver_runtime_authenticator()
-    configure_receiver_runtime(app, authenticator=authenticator, connection_manager=manager)
-    logger.info(
-        "Receiver authentication: %s",
-        "device credentials + legacy store tokens"
-        if isinstance(authenticator, DualRuntimeAuthenticator)
-        else "legacy store tokens only",
-    )
+    # Refreshed, not rebuilt: the mode upgrades itself the moment the Device
+    # tables and key container exist, including when a migration runs under a
+    # backend that is already serving.
+    receiver_auth_mode.refresh()
+    configure_receiver_runtime(app, authenticator=receiver_auth_mode,
+                               connection_manager=manager)
+    logger.info("Receiver authentication: %s", receiver_auth_mode.describe())
 
     with SessionLocal() as db:
         seed_admin(db)

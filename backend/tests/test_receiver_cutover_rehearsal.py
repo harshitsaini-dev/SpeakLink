@@ -607,10 +607,15 @@ def test_full_loopback_forward_cutover_and_rollback(loopback_cutover, capsys, ca
         runtime.server_module.default_receiver_runtime_authenticator,
         LegacyStoreTokenRuntimeAuthenticator,
     )
-    assert (
-        runtime.server_module.app.state.receiver_runtime_authenticator
-        is runtime.server_module.default_receiver_runtime_authenticator
-    )
+    # The module-level app holds a ReceiverAuthMode wrapper rather than the
+    # legacy authenticator itself: the device/legacy choice is re-evaluated
+    # instead of frozen, because a backend that started before the phase-one
+    # tables existed used to refuse every Device credential for its whole life.
+    # The behaviour asserted here is unchanged - legacy-only, delegating to
+    # exactly that object.
+    _mode = runtime.server_module.app.state.receiver_runtime_authenticator
+    assert _mode.describe() == "legacy store tokens only"
+    assert _mode.current is runtime.server_module.default_receiver_runtime_authenticator
     assert runtime.application.state.receiver_runtime_authenticator is runtime.rehearsal.runtime_authenticator
     assert not any("cutover" in getattr(route, "path", "") for route in runtime.application.routes)
 
