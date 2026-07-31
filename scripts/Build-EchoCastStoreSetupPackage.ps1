@@ -24,6 +24,10 @@
 [CmdletBinding()]
 param(
     [string]$DistPath,
+    # A verified EchoCastReceiver-* package. Mandatory in practice: a StoreSetup
+    # package without the Receiver is a wizard that cannot install anything,
+    # which is exactly what shipped last time.
+    [Parameter(Mandatory)][string]$ReceiverPackagePath,
     [string]$OutputRoot,
     [string]$Version,
     [switch]$AllowDirtyTree
@@ -123,6 +127,72 @@ if (Test-Path $outputPath) { throw "$outputPath already exists. Old evidence is 
 New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
 
 Copy-Item (Join-Path $DistPath '*') $outputPath -Recurse -Force
+
+# ---------------------------------------------------------------------------
+# The Receiver payload and the scripts, BESIDE the executable
+# ---------------------------------------------------------------------------
+# The first version of this script copied only $DistPath, so the package was the
+# wizard and nothing else: no Receiver, no FFmpeg, none of the five PowerShell
+# scripts. The wizard cannot install a Receiver it does not have, and an operator
+# was told to hand-create _internal\artifacts and _internal\scripts - folders that
+# only existed because the frozen path calculation was wrong.
+#
+# Both halves are fixed together on purpose. tools/resource_paths resolves
+# BESIDE the executable; this puts the files exactly there. Neither is any use
+# alone.
+Write-Output '  --- Receiver payload ---'
+$receiverTarget = Join-Path $outputPath 'Receiver'
+# Created first. Copying a directory tree onto a path that does not exist yet
+# makes Copy-Item treat the destination as a leaf, and it fails with
+# "Container cannot be copied onto existing leaf item" on the first subfolder.
+New-Item -ItemType Directory -Force -Path $receiverTarget | Out-Null
+if (-not (Test-Path $ReceiverPackagePath)) {
+    Remove-Item $outputPath -Recurse -Force
+    throw "There is no Receiver package at $ReceiverPackagePath."
+}
+Copy-Item (Join-Path $ReceiverPackagePath '*') $receiverTarget -Recurse -Force
+foreach ($required in @('EchoCastReceiver.exe', 'EchoCastReceiverBackground.exe',
+                        'manifest.json', 'SHA256SUMS.txt')) {
+    if (-not (Test-Path (Join-Path $receiverTarget $required))) {
+        Remove-Item $outputPath -Recurse -Force
+        throw ("The Receiver package at $ReceiverPackagePath has no $required. " +
+               'The StoreSetup package was deleted rather than shipped incomplete.')
+    }
+}
+$ffmpeg = @(Get-ChildItem $receiverTarget -Recurse -File -Filter 'ffmpeg.exe')
+if ($ffmpeg.Count -eq 0) {
+    Remove-Item $outputPath -Recurse -Force
+    throw ('The Receiver package carries no ffmpeg.exe, so a Store PC would need ' +
+           'FFmpeg installed by hand. The StoreSetup package was deleted.')
+}
+Write-Output ("    Receiver files : " + @(Get-ChildItem $receiverTarget -Recurse -File).Count)
+Write-Output ("    ffmpeg         : " + $ffmpeg[0].FullName.Substring($outputPath.Length))
+
+Write-Output '  --- Store scripts ---'
+$scriptTarget = Join-Path $outputPath 'scripts'
+New-Item -ItemType Directory -Force -Path $scriptTarget | Out-Null
+# The same list tools/resource_paths.REQUIRED_SCRIPTS enforces at runtime. Kept
+# deliberately explicit rather than a wildcard: a wildcard would ship whatever
+# happened to be in scripts\ that day, including HQ-only scripts a Store must
+# never run.
+$requiredScripts = @(
+    'Install-EchoCastStoreReceiver.ps1',
+    'Repair-EchoCastStoreReceiver.ps1',
+    'Test-EchoCastStoreReceiver.ps1',
+    'Uninstall-EchoCastStoreReceiver.ps1',
+    'Manage-EchoCastStoreReceiverTask.ps1',
+    'EchoCastProcessTree.ps1'
+)
+foreach ($name in $requiredScripts) {
+    $source = Join-Path $scriptRoot $name
+    if (-not (Test-Path $source)) {
+        Remove-Item $outputPath -Recurse -Force
+        throw ("scripts\$name is missing from the repository, so the package would " +
+               'ship a wizard that cannot install. The package was deleted.')
+    }
+    Copy-Item $source (Join-Path $scriptTarget $name) -Force
+}
+Write-Output ("    scripts copied : " + $requiredScripts.Count)
 
 $quickStart = @"
 EchoCast Store Setup - quick start
@@ -226,7 +296,11 @@ $manifest = [ordered]@{
         sha256 = (Get-FileHash $setupExe -Algorithm SHA256).Hash.ToLower()
     }
     contains = @('EchoCastStoreSetup.exe', '_internal/ (PyInstaller runtime)',
+                 'Receiver/ (EchoCastReceiver.exe, EchoCastReceiverBackground.exe, FFmpeg)',
+                 'scripts/ (install, repair, test, uninstall, task, process-tree)',
                  'QUICK-START.txt')
+    receiver_source = (Split-Path -Leaf $ReceiverPackagePath)
+    self_contained = $true
     excludes = @('any database', '.env', 'jwt-secret', 'hmac-keys',
                  'any Receiver credential', 'logs', 'recordings',
                  'node_modules', '.venv')
