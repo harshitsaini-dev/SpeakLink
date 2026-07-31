@@ -65,9 +65,41 @@ class _TransitionPolicy:
     reason_code: str
     runtime_action: RuntimeAction
     require_hash_readiness: bool
+    #: Which fleet shape this transition is allowed to validate.
+    #:
+    #: "backfilled" is the original assumption: one Device and one credential per
+    #: Store, produced by the legacy backfill. "hashed_fleet" is a fleet that was
+    #: enrolled directly and therefore has FEWER Devices than Stores - which the
+    #: backfilled checks can never accept, and which is exactly the shape the
+    #: live HQ is in.
+    fleet: str = "backfilled"
 
 
 _ALLOWED_TRANSITIONS = {
+    # legacy_only -> hash_only, for a fleet that was enrolled directly.
+    #
+    # WHY THIS EXISTS. The live HQ sits in legacy_only while holding four
+    # hashed Device credentials, so the runtime never computes a hashed identity
+    # and refuses every one of them. The documented way out is
+    # backfill -> backfilled -> dual_verify, and it cannot be taken: the backfill
+    # demands zero Devices, zero credentials and zero audit events, and
+    # dual_verify additionally demands one backfilled Device PER STORE. A fleet
+    # of 4 Devices across 44 Stores satisfies neither, and forcing it to would
+    # mean deleting the Devices and the audit history to recreate them.
+    #
+    # hash_only is hash-capable and is NOT subject to the backfilled-fleet check
+    # (receiver_auth_service runs that only for backfilled and dual_verify), so
+    # it is reachable for this fleet without destroying anything.
+    #
+    # Disabling legacy verification is safe here and is checked, not assumed:
+    # LEGACY_CONNECTIONS_MUST_BE_ZERO plus a scan for any legacy Receiver usage.
+    ("legacy_only", "hash_only"): _TransitionPolicy(
+        0,
+        "enable_hash_only_for_hashed_fleet",
+        RuntimeAction.LEGACY_CONNECTIONS_MUST_BE_ZERO,
+        False,
+        fleet="hashed_fleet",
+    ),
     ("backfilled", "dual_verify"): _TransitionPolicy(
         1, "enable_dual_verification", RuntimeAction.NONE, True
     ),
@@ -593,6 +625,67 @@ def _notify(step_hook: Callable[[str], None] | None, step: str) -> None:
         step_hook(step)
 
 
+
+def _validate_hashed_fleet(
+    connection: Connection,
+    stores,
+    credential_rows,
+    active_device_rows,
+    hash_keys,
+    now: datetime,
+) -> _ReadinessCounts:
+    """Validate a directly-enrolled fleet, without assuming a backfill happened.
+
+    The backfilled checks ask "is there exactly one Device per Store, mapped to
+    that Store's raw token". A directly-enrolled fleet answers no to that and is
+    still perfectly valid, so this asks the questions that actually matter before
+    legacy verification is switched off:
+
+    * every credential is in the hashed format this state will verify;
+    * every hash_key_version is present in the ACTIVE key ring, so no credential
+      becomes unverifiable the moment the state changes;
+    * every Device belongs to a Store that exists and is active;
+    * no legacy Receiver has ever connected, because turning legacy verification
+      off would disconnect one that had.
+
+    It deliberately does NOT require a Device per Store. Stores without a Receiver
+    are simply Stores nobody has set up yet.
+    """
+    if not credential_rows:
+        raise TransitionReadinessError()
+
+    store_by_id = {row.id: row for row in stores}
+
+    hashed = 0
+    for row in credential_rows:
+        if row.token_format != NEW_TOKEN_FORMAT:
+            # A legacy row here would be silently orphaned by hash_only.
+            raise TransitionReadinessError()
+        if row.hash_key_version not in hash_keys:
+            # Switching state would make this credential permanently unverifiable.
+            raise TransitionReadinessError()
+        hashed += 1
+
+    for row in active_device_rows:
+        store = store_by_id.get(row.store_id)
+        if store is None or not bool(store.is_active):
+            raise TransitionReadinessError()
+
+    # Any Receiver traffic at all means a legacy Receiver may be in service, and
+    # this transition disables the transport it uses.
+    legacy_usage = connection.exec_driver_sql(
+        "SELECT COUNT(*) FROM receiver_events"
+    ).scalar_one()
+    if legacy_usage:
+        raise TransitionReadinessError()
+
+    return _ReadinessCounts(
+        store_count=len(stores),
+        active_store_count=sum(1 for row in stores if bool(row.is_active)),
+        active_device_count=len(active_device_rows),
+        usable_credential_count=hashed,
+    )
+
 def transition_receiver_migration_state(
     engine: Engine,
     *,
@@ -640,11 +733,12 @@ def transition_receiver_migration_state(
             _validate_raw_readiness(stores)
             credential_rows = _credential_rows(connection)
             active_device_rows = _active_device_rows(connection)
-            _validate_backfilled_mapping(
-                stores, credential_rows, validated_keys, transitioned_at
-            )
-            if policy.require_hash_readiness:
-                counts = _validate_hash_readiness(
+            if policy.fleet == "hashed_fleet":
+                # A directly-enrolled fleet is validated on its own terms. The
+                # backfilled mapping check assumes one Device per Store and would
+                # reject this fleet for a shape it was never meant to have.
+                counts = _validate_hashed_fleet(
+                    connection,
                     stores,
                     credential_rows,
                     active_device_rows,
@@ -652,9 +746,21 @@ def transition_receiver_migration_state(
                     transitioned_at,
                 )
             else:
-                counts = _basic_counts(
-                    stores, credential_rows, active_device_rows, transitioned_at
+                _validate_backfilled_mapping(
+                    stores, credential_rows, validated_keys, transitioned_at
                 )
+                if policy.require_hash_readiness:
+                    counts = _validate_hash_readiness(
+                        stores,
+                        credential_rows,
+                        active_device_rows,
+                        validated_keys,
+                        transitioned_at,
+                    )
+                else:
+                    counts = _basic_counts(
+                        stores, credential_rows, active_device_rows, transitioned_at
+                    )
             _validate_connection_summary(policy, active_connections, transitioned_at)
 
             protected_before = {
