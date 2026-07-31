@@ -47,7 +47,8 @@ os.environ.setdefault(
 from auth import hash_password  # noqa: E402
 from db import Base  # noqa: E402
 from key_custody import FakeProtector, create_key_container, load_key_ring  # noqa: E402
-from migrations import run_receiver_credential_phase_one  # noqa: E402
+from migrations import (run_receiver_credential_phase_one,
+                        mark_device_auth_ready_for_tests)  # noqa: E402
 from models import HQUser, ReceiverEnrollmentCode, Store  # noqa: E402
 # Referenced through the module on purpose. test_receiver_enrollment_endpoints
 # pops this module from sys.modules to build an isolated runtime, which creates
@@ -85,6 +86,8 @@ class Runtime:
             self.actor_id = db.query(HQUser).one().id
 
         run_receiver_credential_phase_one(self.engine)
+
+        mark_device_auth_ready_for_tests(self.engine)
 
         container = tmp_path / "keys.bin"
         create_key_container(container, protector=FakeProtector())
