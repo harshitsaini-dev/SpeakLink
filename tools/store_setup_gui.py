@@ -80,8 +80,13 @@ class StoreSetupApp(tk.Tk):
                  assessment=None, state_root=None):
         super().__init__()
         self.title(WINDOW_TITLE)
-        self.geometry("560x420")
-        self.resizable(False, False)
+        self.geometry("620x560")
+        # Resizable, with a floor. Fixed at 560x420 the Audio Output page
+        # could not show a long device list AND its buttons, and an operator
+        # had no way to make the window bigger. The minimum keeps the footer
+        # reachable at 125% and 150% Windows scaling.
+        self.resizable(True, True)
+        self.minsize(560, 460)
 
         self.credential_path = Path(credential_path) if credential_path else default_credential_path()
         self.protector = protector or DeviceCredentialProtector()
@@ -375,43 +380,228 @@ class EnrolmentScreen(ttk.Frame):
 
 
 class AudioScreen(ttk.Frame):
-    """Screen 3 - Audio Output. Nothing here selects a device automatically."""
+    """Screen 3 - Audio Output. Nothing here selects a device automatically.
 
-    def __init__(self, parent, app: StoreSetupApp):
+    THE LIST SCROLLS AND THE BUTTONS DO NOT.
+
+    Every radio button used to be packed straight into this frame. The second PC
+    has many Windows endpoints - several Realtek entries and several Bluetooth
+    headsets - so the list grew past the bottom of the window, there was no
+    scrollbar, and Test Sound and Next were pushed off-screen. The operator could
+    see devices they could not reach and buttons they could not press.
+
+    So the device rows live inside a Canvas with its own scrollbar, and the
+    footer is a sibling of that Canvas rather than a child of it. That structure
+    is the fix: no length of device list can push a button out of the window.
+    """
+
+    #: Beginner ordering. A hands-free headset profile is a telephone microphone
+    #: with a speaker attached and sounds awful for announcements, so it sorts
+    #: below real playback endpoints - but it is still listed, because it is
+    #: sometimes genuinely all a shop has.
+    KIND_ORDER = {"WIRED": 0, "USB": 0, "HDMI": 2, "BLUETOOTH": 3, "OTHER": 4}
+
+    def __init__(self, parent, app: "StoreSetupApp"):
         super().__init__(parent)
         self.app = app
+        self.outputs = []
+        self._row_widgets = []
 
         ttk.Label(self, text="Choose the Store's audio output",
-                 font=("Segoe UI", 14, "bold")).pack(pady=12)
+                  font=("Segoe UI", 14, "bold")).pack(pady=(12, 4))
+        ttk.Label(self, text="Wired or USB audio is recommended for Store speakers.",
+                  foreground="#555").pack(pady=(0, 8))
 
-        try:
-            self.outputs = core.list_classified_outputs()
-        except Exception as failure:  # noqa: BLE001 - shown, not swallowed
-            self.outputs = []
-            ttk.Label(self, text=f"Could not list audio devices: {failure}",
-                     wraplength=480).pack(pady=8)
+        # --- the scrolling area -------------------------------------------
+        # Packed BEFORE the footer and with expand=True, so when the window is
+        # short it is the list that loses height, never the buttons.
+        list_holder = ttk.Frame(self)
+        list_holder.pack(fill="both", expand=True, padx=24)
 
-        self.selected = tk.StringVar(master=self)
-        for classified in self.outputs:
-            label = f"[{classified.kind.value}] {classified.device.name}"
-            ttk.Radiobutton(self, text=label, variable=self.selected,
-                           value=classified.device.selector).pack(anchor="w", padx=24)
+        self.list_canvas = tk.Canvas(list_holder, borderwidth=0, highlightthickness=0,
+                                     height=180)
+        self.scrollbar = ttk.Scrollbar(list_holder, orient="vertical",
+                                       command=self.list_canvas.yview)
+        self.list_frame = ttk.Frame(self.list_canvas)
+        self._window = self.list_canvas.create_window((0, 0), window=self.list_frame,
+                                                      anchor="nw")
+        self.list_canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.scrollbar.pack(side="right", fill="y")
+        self.list_canvas.pack(side="left", fill="both", expand=True)
 
+        self.list_frame.bind(
+            "<Configure>",
+            lambda _e: self.list_canvas.configure(
+                scrollregion=self.list_canvas.bbox("all")))
+        self.list_canvas.bind(
+            "<Configure>",
+            lambda e: self.list_canvas.itemconfigure(self._window, width=e.width))
+
+        # Wheel and keys bound to the CANVAS, on enter/leave - never bind_all.
+        # A global binding would steal the wheel from every other screen in the
+        # application, including any future scrolling one.
+        for widget in (self.list_canvas, self.list_frame):
+            widget.bind("<Enter>", self._bind_wheel)
+            widget.bind("<Leave>", self._unbind_wheel)
+        self.list_canvas.bind("<Prior>", lambda _e: self._page(-1))
+        self.list_canvas.bind("<Next>", lambda _e: self._page(1))
+        self.list_canvas.bind("<Home>", lambda _e: self.list_canvas.yview_moveto(0.0))
+        self.list_canvas.bind("<End>", lambda _e: self.list_canvas.yview_moveto(1.0))
+        self.list_canvas.configure(takefocus=True)
+
+        self.selected = tk.StringVar(master=self, value="")
         self.status_var = tk.StringVar(master=self, value="")
-        ttk.Label(self, textvariable=self.status_var, wraplength=480).pack(pady=8, padx=24)
+        ttk.Label(self, textvariable=self.status_var, wraplength=470,
+                  justify="left").pack(pady=6, padx=24)
 
+        # --- the footer, OUTSIDE the scrolling area -----------------------
         self.heard_var = tk.BooleanVar(master=self, value=False)
         self.heard_check = ttk.Checkbutton(
             self, text="I heard the test sound from the intended Store output",
             variable=self.heard_var, state="disabled", command=self._on_heard_toggle)
-        self.heard_check.pack(pady=6, padx=24, anchor="w")
+        self.heard_check.pack(pady=4, padx=24, anchor="w")
 
         button_row = ttk.Frame(self)
-        button_row.pack(pady=12)
-        ttk.Button(button_row, text="Test Sound", command=self._test_sound).pack(side="left", padx=6)
+        button_row.pack(pady=10)
+        ttk.Button(button_row, text="Refresh Audio Devices",
+                   command=self._refresh).pack(side="left", padx=5)
+        self.test_button = ttk.Button(button_row, text="Test Sound",
+                                      command=self._test_sound)
+        self.test_button.pack(side="left", padx=5)
         self.next_button = ttk.Button(button_row, text="Next", state="disabled",
                                       command=lambda: app.go_to_install())
-        self.next_button.pack(side="left", padx=6)
+        self.next_button.pack(side="left", padx=5)
+
+        self._refresh()
+
+    # -- scrolling ---------------------------------------------------------
+    def _bind_wheel(self, _event=None) -> None:
+        self.list_canvas.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+        self.list_canvas.bind_all("<Button-4>", self._on_mousewheel, add="+")
+        self.list_canvas.bind_all("<Button-5>", self._on_mousewheel, add="+")
+
+    def _unbind_wheel(self, _event=None) -> None:
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            try:
+                self.list_canvas.unbind_all(sequence)
+            except Exception:
+                pass
+
+    def _on_mousewheel(self, event) -> None:
+        """Windows sends a signed delta; X11 sends button 4/5. Both handled so a
+        trackpad works the same as a wheel."""
+        delta = getattr(event, "delta", 0)
+        if delta:
+            steps = -1 * int(delta / 120) or (-1 if delta > 0 else 1)
+        else:
+            steps = -1 if getattr(event, "num", 5) == 4 else 1
+        self.list_canvas.yview_scroll(steps, "units")
+
+    def _page(self, direction: int) -> None:
+        self.list_canvas.yview_scroll(direction, "pages")
+
+    # -- the device list ---------------------------------------------------
+    def _order_key(self, classified):
+        kind = classified.kind.value
+        handsfree = "hands-free" in classified.device.name.lower() or \
+                    "handsfree" in classified.device.name.lower()
+        return (self.KIND_ORDER.get(kind, 4) + (1 if handsfree else 0),
+                classified.device.name.lower(), classified.device.index)
+
+    @staticmethod
+    def _friendly(name: str) -> str:
+        """A Windows endpoint name a person can read.
+
+        Some endpoints report a raw driver resource string such as
+        ``@System32\\drivers\\bthhfenum.sys,-10102;%1 Hands-Free``. The part
+        after the last ``;`` is the human half, and showing the rest as the
+        primary label tells an operator nothing about which speaker it is.
+        """
+        text = (name or "").strip()
+        if text.startswith("@") and ";" in text:
+            text = text.rsplit(";", 1)[-1].strip() or text
+        return text or "Unnamed output"
+
+    def _labels(self):
+        """One readable row per endpoint, with duplicates disambiguated.
+
+        Two endpoints really can share a friendly name and be different devices,
+        so they are never collapsed - a suffix is added instead.
+        """
+        counts = {}
+        for classified in self.outputs:
+            key = self._friendly(classified.device.name)
+            counts[key] = counts.get(key, 0) + 1
+
+        seen = {}
+        labels = []
+        for classified in self.outputs:
+            friendly = self._friendly(classified.device.name)
+            text = f"[{classified.kind.value}] {friendly}"
+            if counts[friendly] > 1:
+                seen[friendly] = seen.get(friendly, 0) + 1
+                text = f"{text} - endpoint {seen[friendly]}"
+            labels.append(text)
+        return labels
+
+    def _refresh(self) -> None:
+        """Rebuild the list, keeping a still-present selection.
+
+        Every old row is destroyed first. Leaving them and adding more is how a
+        Refresh button doubles a list and quietly leaks widgets and bindings.
+        """
+        previous = self.selected.get()
+        for widget in self._row_widgets:
+            widget.destroy()
+        self._row_widgets = []
+
+        try:
+            self.outputs = sorted(core.list_classified_outputs(), key=self._order_key)
+        except Exception as failure:  # noqa: BLE001 - shown, not swallowed
+            self.outputs = []
+            self.status_var.set(f"Could not list audio devices: {failure}")
+
+        if not self.outputs:
+            empty = ttk.Label(self.list_frame, text=(
+                "No playback device was found on this computer. Plug in the "
+                "Store speakers, then press Refresh Audio Devices."
+            ), wraplength=420, justify="left")
+            empty.pack(anchor="w", pady=6)
+            self._row_widgets.append(empty)
+            self.selected.set("")
+            self.status_var.set("No playback device was found on this computer.")
+            self._update_next()
+            return
+
+        for classified, label in zip(self.outputs, self._labels()):
+            row = ttk.Radiobutton(self.list_frame, text=label, variable=self.selected,
+                                  value=classified.device.selector,
+                                  command=self._on_selection_changed)
+            row.pack(anchor="w", pady=1, fill="x")
+            self._row_widgets.append(row)
+
+        # A selector that no longer exists must not stay selected: it would test
+        # and then install against a device that has been unplugged.
+        available = {c.device.selector for c in self.outputs}
+        self.selected.set(previous if previous in available else "")
+        if previous and previous not in available:
+            self.status_var.set("The previously selected output is no longer "
+                                "available. Choose a device.")
+        self._on_selection_changed()
+
+    def _on_selection_changed(self) -> None:
+        """A different speaker invalidates the previous confirmation.
+
+        The operator confirmed hearing THAT device. Carrying the tick over to a
+        new one would let an untested speaker inherit a human confirmation.
+        """
+        self.heard_var.set(False)
+        self.heard_check.config(state="disabled")
+        self._update_next()
+
+    def _update_next(self) -> None:
+        ready = bool(self.selected.get()) and bool(self.heard_var.get())
+        self.next_button.config(state="normal" if ready else "disabled")
 
     def _selected_device(self):
         selector = self.selected.get()
