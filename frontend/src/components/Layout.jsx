@@ -27,9 +27,9 @@ export default function Layout() {
   const handleLogout = () => { logout(); navigate("/login"); };
 
   return (
-    <div className="min-h-screen flex bg-slate-50">
+    <div className="h-screen flex bg-slate-50 overflow-hidden">
       {/* Sidebar */}
-      <aside className={`${open ? "translate-x-0" : "-translate-x-full"} md:translate-x-0 fixed md:static z-40 w-64 h-screen bg-slate-900 text-slate-100 flex flex-col transition-transform`}>
+      <aside className={`${open ? "translate-x-0" : "-translate-x-full"} md:translate-x-0 fixed md:sticky md:top-0 z-40 w-64 h-screen shrink-0 bg-slate-900 text-slate-100 flex flex-col transition-transform`}>
         <div className="h-16 px-5 flex items-center gap-2 border-b border-slate-800">
           <Radio className="text-red-500" size={22} />
           <div>
@@ -37,7 +37,7 @@ export default function Layout() {
             <div className="text-[10px] uppercase tracking-[0.2em] text-slate-400 mt-0.5">Live Broadcast</div>
           </div>
         </div>
-        <nav className="flex-1 px-3 py-4 space-y-1">
+        <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-4 space-y-1">
           {NAV.filter((n) => !n.roles || n.roles.includes(user?.role)).map((n) => (
             <NavLink
               key={n.to}
@@ -74,8 +74,8 @@ export default function Layout() {
       {open && <div className="fixed inset-0 bg-black/40 z-30 md:hidden" onClick={() => setOpen(false)} />}
 
       {/* Main */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6">
+      <div className="flex-1 flex flex-col min-w-0 h-screen">
+        <header className="h-16 shrink-0 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6">
           <button
             data-testid="sidebar-toggle-btn"
             className="md:hidden p-2 rounded-md hover:bg-slate-100"
@@ -86,7 +86,7 @@ export default function Layout() {
           <div className="text-xs uppercase tracking-[0.15em] text-slate-500">HQ Broadcast Console Â· v1.0</div>
           <div className="text-xs text-slate-500 hidden sm:block">Windows 11 Â· Local Server Â· SQLite</div>
         </header>
-        <main className="flex-1 p-4 md:p-6 overflow-x-hidden">
+        <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 md:p-6">
           <Outlet />
         </main>
       </div>
