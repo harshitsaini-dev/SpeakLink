@@ -35,6 +35,13 @@ for _candidate in (REPOSITORY_ROOT, REPOSITORY_ROOT / "backend"):
     if str(_candidate) not in sys.path:
         sys.path.insert(0, str(_candidate))
 
+# Packaged resources are resolved through the shared resolver, never through
+# REPOSITORY_ROOT. Frozen, REPOSITORY_ROOT is PyInstaller's private _internal
+# directory - which is why the packaged wizard went looking for
+# _internalrtifacts and _internal\scripts and an operator was told to
+# hand-create them. See tools/resource_paths.
+from tools import resource_paths  # noqa: E402
+
 from tools.audio_receiver_pilot import hidden_child_process_options  # noqa: E402
 from tools.receiver_agent import (  # noqa: E402
     AgentError,
@@ -465,7 +472,14 @@ def locate_verified_receiver_package(artifacts_root=None) -> Path:
     newest-last for a fixed version/commit width, and are re-verified here
     rather than trusted by name alone.
     """
-    root = Path(artifacts_root) if artifacts_root is not None else REPOSITORY_ROOT / "artifacts"
+    if artifacts_root is not None:
+        root = Path(artifacts_root)
+    elif resource_paths.receiver_root().is_dir():
+        # A built package ships the verified Receiver beside the executable as
+        # Receiver/, so there is nothing to search and nothing to choose.
+        return resource_paths.receiver_root()
+    else:
+        root = REPOSITORY_ROOT / "artifacts"
     if not root.exists():
         raise NoVerifiedReceiverPackage(
             f"there is no artifacts directory at {root}. Build a Receiver package "
@@ -521,7 +535,7 @@ def run_receiver_installer(arguments: "list[str]", *, script_path: "Path | None"
     it, hidden, exactly the way the HQ auto-start scripts are called from
     Python elsewhere in this project.
     """
-    script = script_path or (REPOSITORY_ROOT / "scripts" / "Install-SpeakLinkStoreReceiver.ps1")
+    script = script_path or resource_paths.script("Install-SpeakLinkStoreReceiver.ps1", required=False)
     command = ["powershell.exe", "-NoProfile", "-NonInteractive",
               "-ExecutionPolicy", "Bypass", "-File", str(script)] + arguments
     executor = run or subprocess.run
@@ -593,7 +607,7 @@ DEFAULT_INSTALL_ROOT_NAME = "receiver-app"
 
 
 def _manage_task_script() -> Path:
-    return REPOSITORY_ROOT / "scripts" / "Manage-SpeakLinkStoreReceiverTask.ps1"
+    return resource_paths.script("Manage-SpeakLinkStoreReceiverTask.ps1", required=False)
 
 
 def _run_powershell_script(script: Path, arguments: "list[str]", *, run=None,
@@ -703,7 +717,7 @@ def repair_installation(*, package_path, task_name: str = DEFAULT_TASK_NAME,
     """Invoke the existing, tested Repair-SpeakLinkStoreReceiver.ps1. It already
     preserves the credential, config, selected output and logs - not
     reimplemented here."""
-    script = REPOSITORY_ROOT / "scripts" / "Repair-SpeakLinkStoreReceiver.ps1"
+    script = resource_paths.script("Repair-SpeakLinkStoreReceiver.ps1", required=False)
     result = _run_powershell_script(script, ["-PackagePath", str(package_path),
                                              "-TaskName", task_name], run=run,
                                     timeout=180.0)
@@ -852,7 +866,7 @@ def uninstall_receiver(*, task_name: str = DEFAULT_TASK_NAME, run=None) -> Unins
     """Invoke the existing, tested Uninstall-SpeakLinkStoreReceiver.ps1. It
     already preserves the credential, config and logs by default and never
     revokes the HQ Device - not reimplemented here."""
-    script = REPOSITORY_ROOT / "scripts" / "Uninstall-SpeakLinkStoreReceiver.ps1"
+    script = resource_paths.script("Uninstall-SpeakLinkStoreReceiver.ps1", required=False)
     result = _run_powershell_script(script, ["-TaskName", task_name], run=run, timeout=120.0)
     if result.returncode != 0:
         return UninstallResult(ok=False, detail=(result.stdout + result.stderr)[-1500:])
