@@ -315,3 +315,66 @@ def test_the_safe_dict_is_safe_to_export():
     for forbidden in ("credential", "token", "secret", "password", "hmac", "jwt"):
         assert forbidden not in serialised
     assert detail["device_public_id"] == STALE_DEVICE
+
+
+# ===========================================================================
+# 8. Enrolled, accepted, but never installed
+# ===========================================================================
+def test_an_enrolled_but_uninstalled_device_can_resume():
+    """The second PC reached the Audio Output page, hit the FFmpeg fault and
+    stopped. Its one-time code is already spent and its Device is VALID.
+    Anything that offers removal here throws away a good identity and needs HQ
+    to issue another code for nothing."""
+    result = assess(local_status={"enrolled": True, "device_public_id": "ee6160cb",
+                                  "store_id": 31},
+                    hq_address=HQ, device_lookup=lambda _pid: CURRENT_RECORD,
+                    service_check=reachable, receiver_installed=False)
+
+    assert result.verdict is EnrolmentVerdict.CURRENT_ENROLLED_SETUP_INCOMPLETE
+    assert result.can_resume is True
+    assert result.should_replace is False, "a valid Device was offered for removal"
+    assert result.receiver_installed is False
+
+
+def test_the_resume_message_says_no_new_code_is_needed():
+    result = assess(local_status={"enrolled": True, "device_public_id": "ee6160cb",
+                                  "store_id": 31},
+                    hq_address=HQ, device_lookup=lambda _pid: CURRENT_RECORD,
+                    service_check=reachable, receiver_installed=False)
+
+    assert "not need another enrolment code" in result.message.lower()
+    assert "Bindapur" in result.message
+
+
+def test_resuming_still_reports_hq_authentication():
+    result = assess(local_status={"enrolled": True, "device_public_id": "ee6160cb",
+                                  "store_id": 31},
+                    hq_address=HQ, device_lookup=lambda _pid: CURRENT_RECORD,
+                    service_check=reachable, receiver_installed=False)
+
+    assert result.hq_authenticated is True
+    assert result.store_name == "Bindapur"
+    assert result.store_code == "BP"
+    assert result.zone == "Zone 3"
+
+
+def test_an_installed_device_is_current_not_resumable():
+    result = assess(local_status={"enrolled": True, "device_public_id": "ee6160cb",
+                                  "store_id": 31},
+                    hq_address=HQ, device_lookup=lambda _pid: CURRENT_RECORD,
+                    service_check=reachable, receiver_installed=True)
+
+    assert result.verdict is EnrolmentVerdict.CURRENT
+    assert result.can_resume is False
+
+
+def test_a_rejected_credential_still_routes_to_recovery_even_when_uninstalled():
+    """Not installed is not the same as not valid. A credential HQ refuses is
+    still stale, whatever the install state."""
+    result = assess(local_status=ENROLLED_LOCALLY, hq_address=HQ,
+                    device_lookup=lambda _pid: None, service_check=reachable,
+                    receiver_installed=False)
+
+    assert result.verdict is EnrolmentVerdict.OLD_ENROLMENT_DETECTED
+    assert result.should_replace is True
+    assert result.can_resume is False

@@ -56,6 +56,11 @@ class EnrolmentVerdict(str, Enum):
     ARCHIVED_STORE = "ARCHIVED_STORE"
     #: HQ could not be reached, so the credential could not be judged either way.
     HQ_UNREACHABLE = "HQ_UNREACHABLE"
+    #: HQ accepts the credential, but the Receiver was never installed. The
+    #: second PC reached the Audio Output page and stopped there: the enrolment
+    #: code is already spent and the identity is GOOD. Routing this to stale
+    #: recovery would destroy a valid Device and burn a second code for nothing.
+    CURRENT_ENROLLED_SETUP_INCOMPLETE = "CURRENT_ENROLLED_SETUP_INCOMPLETE"
 
 
 @dataclass(frozen=True)
@@ -76,6 +81,9 @@ class EnrolmentAssessment:
     message: str = ""
     can_repair: bool = False
     should_replace: bool = False
+    #: Setup can carry on from where it stopped, with no new enrolment code.
+    can_resume: bool = False
+    receiver_installed: bool = True
 
     def to_safe_dict(self) -> dict:
         """Diagnostic-safe. Every field here is an identifier or a state name."""
@@ -93,6 +101,8 @@ class EnrolmentAssessment:
             "hq_address": self.hq_address,
             "can_repair": self.can_repair,
             "should_replace": self.should_replace,
+            "can_resume": self.can_resume,
+            "receiver_installed": self.receiver_installed,
         }
 
 
@@ -116,7 +126,7 @@ def service_is_answering(hq_address: str, *, opener=None, timeout: float = 5.0) 
 
 
 def assess(*, local_status: dict, hq_address: str, device_lookup=None,
-           service_check=None) -> EnrolmentAssessment:
+           service_check=None, receiver_installed=None) -> EnrolmentAssessment:
     """Decide what this PC's enrolment actually is.
 
     ``device_lookup(public_id)`` asks the CURRENT HQ about the Device and returns
@@ -175,15 +185,36 @@ def assess(*, local_status: dict, hq_address: str, device_lookup=None,
                      "enrolled again."),
         )
 
-    return EnrolmentAssessment(
-        verdict=EnrolmentVerdict.CURRENT,
+    installed = True if receiver_installed is None else bool(receiver_installed)
+    shared = dict(
         local_enrolled=True, hq_reachable=True, hq_authenticated=True,
         device_public_id=public_id, store_id=record.get("store_id", store_id),
         store_name=record.get("store_name"), store_code=record.get("store_code"),
         zone=record.get("zone"), device_name=record.get("device_name"),
-        hq_address=hq_address, can_repair=True,
+        hq_address=hq_address, receiver_installed=installed,
+    )
+
+    if not installed:
+        # ENROLLED BUT NOT INSTALLED. The identity is good and the one-time code
+        # is already spent, so the only correct action is to carry on. Offering
+        # removal here would destroy a valid Device and require HQ to issue
+        # another code for no reason - which is exactly what happened to the
+        # second PC when it stopped on the Audio Output page.
+        return EnrolmentAssessment(
+            verdict=EnrolmentVerdict.CURRENT_ENROLLED_SETUP_INCOMPLETE,
+            can_resume=True,
+            message=(f"Setup is not finished for {record.get('store_name')} "
+                     f"({record.get('store_code')}). This computer is already "
+                     "enrolled with HQ - carry on from where you stopped. You do "
+                     "NOT need another enrolment code."),
+            **shared,
+        )
+
+    return EnrolmentAssessment(
+        verdict=EnrolmentVerdict.CURRENT, can_repair=True,
         message=(f"This computer is set up for "
                  f"{record.get('store_name')} ({record.get('store_code')})."),
+        **shared,
     )
 
 

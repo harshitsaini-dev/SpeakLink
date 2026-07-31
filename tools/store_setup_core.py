@@ -324,13 +324,20 @@ def play_test_tone(
     except Exception as failure:  # noqa: BLE001 - reported, not swallowed
         return TestSoundResult(state=TestSoundState.DEVICE_ERROR, detail=str(failure))
 
-    import shutil
-
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
+    # THE ABSOLUTE PACKAGED BINARY, never shutil.which("ffmpeg").
+    #
+    # This line used to be a PATH lookup, and on the second PC it produced
+    # "ffmpeg was not found on PATH" on the Audio Output page - while the package
+    # it was running from contained Receiver\ffmpeg.exe the whole time. A Store
+    # desktop has no FFmpeg on PATH and must never be asked to acquire one.
+    #
+    # An absolute path also cannot be shadowed by some other FFmpeg that happens
+    # to be installed, so a Store runs the version this package was tested with.
+    try:
+        ffmpeg = str(resource_paths.resolve_packaged_ffmpeg())
+    except resource_paths.PackagedFfmpegMissing as failure:
         sink.close()
-        return TestSoundResult(state=TestSoundState.DEVICE_ERROR,
-                               detail="ffmpeg was not found on PATH")
+        return TestSoundResult(state=TestSoundState.DEVICE_ERROR, detail=str(failure))
 
     command = [
         ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",

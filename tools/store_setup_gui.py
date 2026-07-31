@@ -121,6 +121,12 @@ class StoreSetupApp(tk.Tk):
         if assessment is not None and assessment.verdict in (
                 EnrolmentVerdict.OLD_ENROLMENT_DETECTED, EnrolmentVerdict.ARCHIVED_STORE):
             self._show(OldEnrolmentScreen(self._container, self, assessment))
+        elif (assessment is not None
+                and assessment.verdict is EnrolmentVerdict.CURRENT_ENROLLED_SETUP_INCOMPLETE):
+            # Enrolled and accepted, but never installed. The one-time code is
+            # already spent, so this must NOT go anywhere near stale recovery -
+            # that would destroy a valid Device and need a second code.
+            self._show(ResumeSetupScreen(self._container, self, assessment))
         elif existing.is_installed or (assessment is not None and assessment.local_enrolled):
             self._show(RerunScreen(self._container, self, existing,
                                    assessment=assessment))
@@ -1096,6 +1102,54 @@ def _package_version() -> str:
     except Exception:
         return ""
 
+
+
+class ResumeSetupScreen(ttk.Frame):
+    """Enrolled with HQ, but the Receiver was never installed.
+
+    The second PC reached the Audio Output page, hit the FFmpeg fault and
+    stopped. Its enrolment code was already spent and its Device is valid at HQ.
+    Showing "old enrolment - remove it" there would have thrown away a good
+    identity and required HQ to issue another code for nothing.
+    """
+
+    def __init__(self, parent, app: "StoreSetupApp", assessment):
+        super().__init__(parent)
+        self.app = app
+        self.assessment = assessment
+
+        ttk.Label(self, text="Setup is not finished",
+                  font=("Segoe UI", 14, "bold")).pack(pady=(16, 6))
+        ttk.Label(self, text=(
+            "This computer is already registered with HQ. Only the last steps "
+            "are left - choosing the speaker and installing the Receiver.\n\n"
+            "You do NOT need another enrolment code."
+        ), wraplength=470, justify="left").pack(pady=4, padx=24)
+
+        detail = ttk.LabelFrame(self, text="This computer")
+        detail.pack(fill="x", padx=24, pady=12)
+        rows = [
+            ("Store", f"{assessment.store_name} ({assessment.store_code})"),
+            ("Zone", assessment.zone or "not recorded"),
+            ("Device name", assessment.device_name or "not recorded"),
+            ("Device ID", assessment.device_public_id or "unknown"),
+            ("HQ", assessment.hq_address or "unknown"),
+            ("HQ accepted this computer", "Yes"),
+            ("Receiver installed", "No - this is what is left to do"),
+        ]
+        for index, (label, value) in enumerate(rows):
+            ttk.Label(detail, text=label + ":").grid(row=index, column=0,
+                                                     sticky="w", padx=8, pady=1)
+            ttk.Label(detail, text=value).grid(row=index, column=1,
+                                               sticky="w", padx=8, pady=1)
+
+        ttk.Button(self, text="Continue Setup",
+                   command=self._continue).pack(pady=14)
+
+    def _continue(self) -> None:
+        # Straight to Audio Output. The credential on disk is untouched and no
+        # code is requested or redeemed.
+        self.app.go_to_audio()
 
 
 def main(argv=None) -> int:

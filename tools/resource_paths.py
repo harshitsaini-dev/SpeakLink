@@ -179,6 +179,98 @@ def missing_resources() -> "list[str]":
     return missing
 
 
+# ===========================================================================
+# FFmpeg: the packaged file, by absolute path
+# ===========================================================================
+#: Where the build script puts FFmpeg inside a StoreSetup package. The Receiver
+#: payload carries its own FFmpeg beside its executables.
+PACKAGED_FFMPEG = (RECEIVER_DIRECTORY, "ffmpeg.exe")
+
+
+class PackagedFfmpegMissing(ResourceNotFound):
+    """The bundled FFmpeg is absent or unusable.
+
+    A distinct type because the remedy is completely different from a missing
+    script: the operator must not be told to install FFmpeg or edit PATH. The
+    package is incomplete and a verified one is needed from HQ.
+    """
+
+
+def resolve_packaged_ffmpeg(*, allow_path_fallback=None):
+    """The absolute path to the FFmpeg this package shipped with.
+
+    WHY NOT ``shutil.which("ffmpeg")``
+
+    That is what StoreSetup did, and on the second PC it produced
+    "ffmpeg was not found on PATH" on the Audio Output page - while the package
+    it was running from contained ``Receiver\\ffmpeg.exe`` all along. A Store
+    desktop has no FFmpeg on PATH and no reason to acquire one.
+
+    WHY NOT PREPEND TO PATH EITHER
+
+    ``receiver_agent.prefer_packaged_ffmpeg`` does that, and it works, but it is
+    a process-wide mutation that makes every later ``which`` call depend on
+    import order. An absolute path handed to ``subprocess`` cannot be shadowed by
+    anything, in any order, and it is obvious in a log line which binary ran.
+
+    PACKAGED MODE FAILS CLOSED. A frozen build with no bundled FFmpeg raises
+    rather than searching the machine: silently using some other FFmpeg means a
+    Store runs a version nobody tested, and the amplifier evidence this project
+    has was produced with the bundled one.
+
+    A checkout falls back to PATH, because that is where a developer's FFmpeg
+    genuinely lives and there is no package to be incomplete.
+    """
+    candidate = resource_root().joinpath(*PACKAGED_FFMPEG)
+    if candidate.is_file():
+        return candidate.resolve()
+
+    packaged = allow_path_fallback is False or (
+        allow_path_fallback is None and is_frozen())
+    if packaged:
+        raise PackagedFfmpegMissing(
+            f"the bundled FFmpeg is missing from {candidate}. This SpeakLink setup "
+            "package is incomplete - use a verified package from HQ. Do NOT install "
+            "FFmpeg on this computer; the package is meant to carry its own."
+        )
+
+    # Development only, and said so out loud by the caller if it matters.
+    import shutil
+
+    found = shutil.which("ffmpeg")
+    if not found:
+        raise PackagedFfmpegMissing(
+            f"no bundled FFmpeg at {candidate} and none on PATH. In a checkout, "
+            "build a Receiver package first."
+        )
+    return Path(found).resolve()
+
+
+def packaged_ffmpeg_is_verified() -> bool:
+    """Is the bundled FFmpeg the file the package recorded?
+
+    The package ships SHA256SUMS.txt; this confirms the binary about to be run
+    is the one that was hashed at build time, so a corrupted or swapped FFmpeg
+    is refused rather than executed.
+    """
+    import hashlib
+
+    root = resource_root()
+    sums = root / "SHA256SUMS.txt"
+    candidate = root.joinpath(*PACKAGED_FFMPEG)
+    if not sums.is_file() or not candidate.is_file():
+        return False
+    wanted = "/".join(PACKAGED_FFMPEG)
+    for line in sums.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        expected, _, name = line.partition("  ")
+        if name.strip() == wanted:
+            actual = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            return actual.lower() == expected.strip().lower()
+    return False
+
+
 def describe() -> dict:
     """Safe diagnostic detail. No secret can appear here - these are paths."""
     return {
