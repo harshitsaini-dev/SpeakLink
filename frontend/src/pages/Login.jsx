@@ -2,6 +2,7 @@ import React from "react";
 import { useNavigate } from "react-router-dom";
 import { Radio, LogIn } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { loginErrorMessage } from "@/lib/loginError";
 
 const BG_IMAGE =
   "https://images.unsplash.com/photo-1621947081720-86970823b77a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1NzZ8MHwxfHNlYXJjaHwxfHxzb3VuZCUyMHdhdmUlMjBhYnN0cmFjdCUyMGJhY2tncm91bmR8ZW58MHx8fHwxNzgzNDIzMzQ1fDA&ixlib=rb-4.1.0&q=85";
@@ -26,16 +27,11 @@ export default function Login() {
       await login(u.trim(), p);
       nav("/console");
     } catch (e2) {
-      // 429 covers both "too fast" and "this account is temporarily locked".
-      // The backend deliberately answers the same way for both, because saying
-      // which one applied would say whether the account exists. The wording is
-      // fixed here rather than echoed, so no future server detail can leak a
-      // count, a threshold or an unlock time into the page.
-      if (e2?.response?.status === 429) {
-        setErr("Too many sign-in attempts. Please wait a while and try again.");
-      } else {
-        setErr(e2?.response?.data?.detail || "Login failed");
-      }
+      // Every case, including the one that used to be invisible: a request that
+      // never reached the server at all. This said "Login failed" for a refused
+      // connection, which reads as "wrong password" and sends an operator to
+      // reset a credential that was never checked. See lib/loginError.
+      setErr(loginErrorMessage(e2));
     } finally { setBusy(false); }
   };
 
