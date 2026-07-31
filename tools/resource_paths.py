@@ -152,6 +152,20 @@ def missing_resources() -> "list[str]":
     missing = []
     receiver = receiver_root()
     if not receiver.is_dir():
+        # A source checkout has no Receiver/ beside it - the payload lives in
+        # artifacts/ and is chosen by locate_verified_receiver_package(). Only a
+        # PACKAGE is required to carry one, so a checkout is not "incomplete".
+        #
+        # Gated on the resource root BEING the repository, not merely on "not
+        # frozen": an explicit ECHOCAST_RESOURCE_ROOT names a package to inspect,
+        # and letting the checkout's own artifacts/ excuse a missing payload
+        # there would make the completeness check unable to fail.
+        checkout = (not is_frozen()
+                    and resource_root() == repository_root()
+                    and (repository_root() / "artifacts").is_dir())
+        if checkout:
+            return [name for name in REQUIRED_SCRIPTS
+                    if not (scripts_root() / name).exists()]
         missing.append(f"{RECEIVER_DIRECTORY}/")
     else:
         for name in REQUIRED_RECEIVER_FILES:

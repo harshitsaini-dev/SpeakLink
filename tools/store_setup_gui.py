@@ -19,11 +19,50 @@ for _candidate in (REPOSITORY_ROOT, REPOSITORY_ROOT / "backend"):
     if str(_candidate) not in sys.path:
         sys.path.insert(0, str(_candidate))
 
+from tools import resource_paths  # noqa: E402
 from tools import store_setup_core as core  # noqa: E402
 from tools.receiver_credential_store import (  # noqa: E402
     DeviceCredentialProtector,
     default_credential_path,
 )
+from tools.store_enrolment_state import (  # noqa: E402
+    STALE_LOCAL_FILES,
+    EnrolmentVerdict,
+    assess,
+    replace_local_enrolment,
+)
+from tkinter import messagebox  # noqa: E402
+
+
+def core_stale_files():
+    """The two files a replacement removes. Named through one export so the GUI
+    and the tests cannot disagree about what "only the local identity" means."""
+    return STALE_LOCAL_FILES
+
+
+def confirm_removal(parent) -> bool:
+    """A normal Yes/No dialog - no confirmation word.
+
+    Making a beginner type REMOVE trains people to type it without reading, and
+    this project has already shipped a "confirmation" that fired its own default
+    button in a headless run. This is a genuine two-button question, and it is
+    indirected through a module-level function so a test can answer it without a
+    real dialog.
+    """
+    return bool(messagebox.askyesno(
+        "Remove old enrolment",
+        "Remove this old Store-PC enrolment and continue?",
+        parent=parent, default="no"))
+
+
+def stop_receiver_task() -> None:
+    """Stop only the EchoCast Store Receiver, never anything else on the PC."""
+    try:
+        core.stop_receiver()
+    except Exception:
+        # A Receiver that is already stopped, or a task that was never
+        # installed, is not a reason to refuse to clean up a stale identity.
+        pass
 
 DEFAULT_HQ_URL = "http://192.168.4.134:8000"
 WINDOW_TITLE = "EchoCast Store Setup"
@@ -37,7 +76,8 @@ class StoreSetupApp(tk.Tk):
     rather than the real DPAPI store on this machine.
     """
 
-    def __init__(self, *, credential_path=None, protector=None):
+    def __init__(self, *, credential_path=None, protector=None,
+                 assessment=None, state_root=None):
         super().__init__()
         self.title(WINDOW_TITLE)
         self.geometry("560x420")
@@ -59,12 +99,62 @@ class StoreSetupApp(tk.Tk):
         self._container.pack(fill="both", expand=True)
         self._current: "ttk.Frame | None" = None
 
+        self.state_root = Path(state_root) if state_root else self.credential_path.parent
+
+        # A package that cannot install is reported ONCE, in words, before the
+        # operator invests any time in it - rather than failing halfway through
+        # an installation with a path nobody can act on.
+        self.package_missing = resource_paths.missing_resources()
+
         existing = core.detect_existing_installation(
             credential_path=self.credential_path, protector=self.protector)
-        if existing.is_installed:
-            self._show(RerunScreen(self._container, self, existing))
+        self.existing = existing
+
+        # THE ROUTING THAT WAS MISSING. A sealed credential proves only that this
+        # computer once enrolled SOMEWHERE. Which screen opens depends on what the
+        # CURRENT HQ says about it, not on the file existing.
+        self.assessment = assessment
+        if assessment is None and existing.is_installed:
+            assessment = self._assess_existing(existing)
+            self.assessment = assessment
+
+        if assessment is not None and assessment.verdict in (
+                EnrolmentVerdict.OLD_ENROLMENT_DETECTED, EnrolmentVerdict.ARCHIVED_STORE):
+            self._show(OldEnrolmentScreen(self._container, self, assessment))
+        elif existing.is_installed or (assessment is not None and assessment.local_enrolled):
+            self._show(RerunScreen(self._container, self, existing,
+                                   assessment=assessment))
         else:
-            self._show(ConnectionScreen(self._container, self))
+            self._show(WelcomeScreen(self._container, self))
+
+    def _assess_existing(self, existing):
+        """Ask the current HQ about this credential, without blocking start-up.
+
+        A failure here yields HQ_UNREACHABLE, never OLD_ENROLMENT_DETECTED: a
+        credential cannot be judged stale by a server that never answered, and
+        offering to delete an identity because the network is down is the one
+        outcome worse than showing nothing.
+        """
+        status = {"enrolled": True,
+                  "device_public_id": existing.device_public_id,
+                  "store_id": existing.store_id}
+        try:
+            return assess(local_status=status,
+                          hq_address=self.state_data.get("backend_url", DEFAULT_HQ_URL),
+                          device_lookup=core.lookup_device_at_hq)
+        except Exception:
+            return assess(local_status=status,
+                          hq_address=self.state_data.get("backend_url", DEFAULT_HQ_URL),
+                          service_check=lambda _a: False)
+
+    def go_to_welcome(self) -> None:
+        self.existing = core.detect_existing_installation(
+            credential_path=self.credential_path, protector=self.protector)
+        self.assessment = None
+        self._show(WelcomeScreen(self._container, self))
+
+    def go_to_result(self, checks: dict) -> None:
+        self._show(ResultScreen(self._container, self, checks=checks))
 
     def _show(self, frame: ttk.Frame) -> None:
         if self._current is not None:
@@ -108,7 +198,12 @@ def _run_in_background(target, on_done) -> None:
         if thread.is_alive():
             root.after(100, lambda: poll(root))
         elif "error" in outcome:
-            raise outcome["error"]
+            # Handed to the callback, NOT re-raised. Raising inside an `after`
+            # callback goes to Tk's error handler, which prints to stderr - and
+            # the packaged wizard is built with disable_windowed_traceback=True
+            # and has no stderr, so the operator would see the screen freeze on
+            # "INSTALLING..." with the reason nowhere at all.
+            on_done(outcome["error"])
         else:
             on_done(outcome["result"])
     return poll
@@ -419,17 +514,35 @@ class RerunScreen(ttk.Frame):
     self.status_var rather than only a Windows return code.
     """
 
-    def __init__(self, parent, app: StoreSetupApp, existing: "core.ExistingInstallation"):
+    def __init__(self, parent, app: StoreSetupApp, existing: "core.ExistingInstallation",
+                 *, assessment=None):
         super().__init__(parent)
         self.app = app
         self.existing = existing
 
-        ttk.Label(self, text="This computer is already enrolled",
-                 font=("Segoe UI", 14, "bold")).pack(pady=12)
-        ttk.Label(self, text=(
-            f"Device: {existing.device_public_id}\n"
-            f"Store: {existing.store_id}\n\n{existing.detail}"
-        ), wraplength=480, justify="left").pack(pady=8, padx=24)
+        self.assessment = assessment
+
+        # A shop has a NAME. "Store: 1" is what made the original report
+        # unreadable to the person standing in the shop, and the number means
+        # nothing without the database that issued it.
+        if assessment is not None and assessment.store_name:
+            heading = f"{assessment.store_name} ({assessment.store_code})"
+            body = (f"Zone: {assessment.zone}\n"
+                    f"Device name: {assessment.device_name or 'not recorded'}\n"
+                    f"Device ID: {existing.device_public_id}\n"
+                    f"HQ: {assessment.hq_address}\n\n{assessment.message}")
+        elif assessment is not None and assessment.verdict is EnrolmentVerdict.HQ_UNREACHABLE:
+            heading = "This computer has an EchoCast setup"
+            body = (f"Device ID: {existing.device_public_id}\n"
+                    f"HQ: {assessment.hq_address}\n\n{assessment.message}")
+        else:
+            heading = "This computer is already enrolled"
+            body = (f"Device: {existing.device_public_id}\n"
+                    f"Store: {existing.store_id}\n\n{existing.detail}")
+
+        ttk.Label(self, text=heading, font=("Segoe UI", 14, "bold")).pack(pady=12)
+        ttk.Label(self, text=body, wraplength=480,
+                  justify="left").pack(pady=8, padx=24)
 
         self.status_var = tk.StringVar(master=self, value="")
         ttk.Label(self, textvariable=self.status_var, wraplength=480,
@@ -738,6 +851,251 @@ class _AudioOutputDialog(tk.Toplevel):
 
         poll = _run_in_background(work, done)
         poll(self)
+
+
+class WelcomeScreen(ttk.Frame):
+    """Page 1. What this is, in the words a shop assistant uses."""
+
+    def __init__(self, parent, app: "StoreSetupApp"):
+        super().__init__(parent)
+        self.app = app
+
+        ttk.Label(self, text="EchoCast Store Receiver Setup",
+                  font=("Segoe UI", 15, "bold")).pack(pady=(18, 6))
+        ttk.Label(self, text=(
+            "This installs this Store computer so it can receive live "
+            "announcements from HQ."
+        ), wraplength=470, justify="left").pack(pady=6, padx=24)
+
+        version = _package_version()
+        if version:
+            ttk.Label(self, text=f"Package version: {version}",
+                      foreground="#555").pack(pady=(0, 8))
+
+        # An incomplete package is said out loud HERE, before the operator spends
+        # any time on it. The wizard cannot install a Receiver it does not have,
+        # and that is exactly what shipped once.
+        if app.package_missing:
+            listed = ", ".join(app.package_missing[:4])
+            ttk.Label(self, text=(
+                "This copy of EchoCast Store Setup is INCOMPLETE and cannot "
+                "install anything.\nMissing: " + listed +
+                "\nAsk HQ for the full package."
+            ), wraplength=470, justify="left", foreground="#a00").pack(pady=8, padx=24)
+
+        buttons = ttk.Frame(self)
+        buttons.pack(pady=14)
+        start = ttk.Button(buttons, text="Start Setup", width=26,
+                           command=app.go_to_connection)
+        start.grid(row=0, column=0, padx=6)
+        if app.package_missing:
+            start.config(state="disabled")
+
+        # Offered only for an installation the CURRENT HQ still accepts. A stale
+        # identity never reaches this screen, and a working one should not be
+        # dragged through the whole wizard to look at its own status.
+        current = (app.assessment is not None
+                   and app.assessment.verdict is EnrolmentVerdict.CURRENT)
+        if app.existing.is_installed and current:
+            ttk.Button(buttons, text="Open Receiver Status", width=26,
+                       command=self._open_status).grid(row=0, column=1, padx=6)
+
+    def _open_status(self) -> None:
+        self.app._show(RerunScreen(self.app._container, self.app, self.app.existing,
+                                   assessment=self.app.assessment))
+
+
+class OldEnrolmentScreen(ttk.Frame):
+    """The second-PC case, made recoverable in one click.
+
+    A Store PC reported "already enrolled - Store: 1" while being unable to
+    receive anything: the credential had been minted against a throwaway pilot
+    database where Store 1 was "LAN pilot Store". This screen says that in words,
+    shows the identifiers an operator needs to recognise their own machine, and
+    offers exactly one action.
+    """
+
+    def __init__(self, parent, app: "StoreSetupApp", assessment):
+        super().__init__(parent)
+        self.app = app
+        self.assessment = assessment
+
+        archived = assessment.verdict is EnrolmentVerdict.ARCHIVED_STORE
+        heading = ("This Device belongs to an archived Store"
+                   if archived else "Old EchoCast enrolment detected")
+        explanation = (
+            "This Device belongs to a Store that has been retired at HQ, so this "
+            "computer must be enrolled again."
+            if archived else
+            "This computer was enrolled to an earlier EchoCast pilot server.\n"
+            "The current HQ does not recognise this Device, so it cannot receive "
+            "announcements until it is set up again."
+        )
+
+        ttk.Label(self, text=heading, font=("Segoe UI", 14, "bold")).pack(pady=(16, 6))
+        ttk.Label(self, text=explanation, wraplength=470,
+                  justify="left").pack(pady=4, padx=24)
+
+        # Identifiers, not secrets. The operator has to be able to tell that this
+        # is their machine; the sealed credential never appears here or anywhere.
+        detail = ttk.LabelFrame(self, text="Details for HQ")
+        detail.pack(fill="x", padx=24, pady=12)
+        rows = [
+            ("Old Device ID", assessment.device_public_id or "unknown"),
+            ("Old Store number",
+             str(assessment.store_id) if assessment.store_id is not None else "unknown"),
+            ("Current HQ address", assessment.hq_address or "unknown"),
+            ("HQ reachable", "Yes" if assessment.hq_reachable else "No"),
+            ("Device recognised by HQ", "Yes" if assessment.hq_authenticated else "No"),
+        ]
+        if archived and assessment.store_name:
+            rows.insert(2, ("Archived Store",
+                            f"{assessment.store_name} ({assessment.store_code})"))
+        for index, (label, value) in enumerate(rows):
+            ttk.Label(detail, text=label + ":").grid(row=index, column=0,
+                                                     sticky="w", padx=8, pady=1)
+            ttk.Label(detail, text=value).grid(row=index, column=1,
+                                               sticky="w", padx=8, pady=1)
+        ttk.Label(detail, text=("The old Store number is only useful to HQ. It does "
+                                "not name a shop in the current system."),
+                  wraplength=430, foreground="#555",
+                  justify="left").grid(row=len(rows), column=0, columnspan=2,
+                                       sticky="w", padx=8, pady=(4, 6))
+
+        self.status_var = tk.StringVar(master=self, value="")
+        ttk.Label(self, textvariable=self.status_var, wraplength=470,
+                  justify="left").pack(pady=4, padx=24)
+
+        self.remove_button = ttk.Button(
+            self, text="Remove Old Enrolment and Set Up Again",
+            command=self._remove_old_enrolment)
+        self.remove_button.pack(pady=10)
+
+        ttk.Label(self, text=(
+            "This removes only this computer's old setup. Your HQ Stores, and the "
+            "log files on this computer, are not changed."
+        ), wraplength=470, foreground="#555", justify="left").pack(padx=24)
+
+    def _remove_old_enrolment(self) -> None:
+        if not confirm_removal(self):
+            self.status_var.set("Nothing was changed.")
+            return
+        self.remove_button.config(state="disabled")
+        self.status_var.set("Removing the old setup...")
+        state_root = self.app.state_root
+        assessment = self.assessment
+
+        def work():
+            # Stopped first: a running Receiver holding the old credential would
+            # keep trying to authenticate against an HQ that already rejected it.
+            stop_receiver_task()
+            return replace_local_enrolment(state_root=state_root,
+                                           assessment=assessment)
+
+        def done(result):
+            if isinstance(result, Exception):
+                self.remove_button.config(state="normal")
+                self.status_var.set(f"Could not remove the old setup: {result}")
+                return
+            if not getattr(result, "ok", False):
+                self.remove_button.config(state="normal")
+                self.status_var.set(f"Could not remove the old setup: {result.detail}")
+                return
+            self.app.go_to_welcome()
+
+        poll = _run_in_background(work, done)
+        poll(self)
+
+
+class ResultScreen(ttk.Frame):
+    """Page 6. Eight facts, never one green tick.
+
+    Collapsing these is how "the process started" became "the Store is playing
+    announcements" - the original defect this whole project was built to stop.
+    """
+
+    ROWS = (
+        "Files installed",
+        "Scheduled Task installed",
+        "Receiver process running",
+        "HQ reachable",
+        "Device authenticated",
+        "WebSocket connected",
+        "Receiver ready",
+        "Test sound heard by operator",
+    )
+
+    def __init__(self, parent, app: "StoreSetupApp", *, checks: dict):
+        super().__init__(parent)
+        self.app = app
+
+        ttk.Label(self, text="Setup result",
+                  font=("Segoe UI", 14, "bold")).pack(pady=(16, 4))
+        ttk.Label(self, text=("Each line is checked separately. A line that is not "
+                              "confirmed is not a failure of the others."),
+                  wraplength=470, justify="left",
+                  foreground="#555").pack(pady=(0, 8), padx=24)
+
+        grid = ttk.Frame(self)
+        grid.pack(fill="x", padx=28)
+        for index, name in enumerate(self.ROWS):
+            passed = bool(checks.get(name))
+            ttk.Label(grid, text=name).grid(row=index, column=0, sticky="w", pady=2)
+            ttk.Label(grid, text="OK" if passed else "Not confirmed",
+                      foreground="#0a0" if passed else "#a60").grid(
+                row=index, column=1, sticky="w", padx=14)
+
+        # Deliberately absent: any sentence claiming the speakers work. An
+        # operator hearing a chime is evidence a human heard something. It is not
+        # SPEAKER_VERIFIED, which needs EchoGuard acoustic evidence.
+        ttk.Label(self, text=("'Test sound heard by operator' records what a person "
+                              "heard. It is not acoustic verification."),
+                  wraplength=470, justify="left",
+                  foreground="#555").pack(pady=10, padx=24)
+
+        buttons = ttk.Frame(self)
+        buttons.pack(pady=12)
+        ttk.Button(buttons, text="Open Status", width=22,
+                   command=self._open_status).grid(row=0, column=0, padx=5)
+        ttk.Button(buttons, text="Export Redacted Diagnostics", width=26,
+                   command=self._export).grid(row=0, column=1, padx=5)
+        ttk.Button(buttons, text="Close", width=14,
+                   command=self.app.destroy).grid(row=0, column=2, padx=5)
+
+        self.status_var = tk.StringVar(master=self, value="")
+        ttk.Label(self, textvariable=self.status_var, wraplength=470,
+                  justify="left").pack(padx=24)
+
+    def _open_status(self) -> None:
+        existing = core.detect_existing_installation(
+            credential_path=self.app.credential_path, protector=self.app.protector)
+        self.app._show(RerunScreen(self.app._container, self.app, existing,
+                                   assessment=self.app.assessment))
+
+    def _export(self) -> None:
+        def work():
+            return core.export_diagnostics()
+
+        def done(result):
+            if isinstance(result, Exception):
+                self.status_var.set(f"Could not export diagnostics: {result}")
+            else:
+                self.status_var.set(f"Diagnostics written to: {result}")
+
+        poll = _run_in_background(work, done)
+        poll(self)
+
+
+def _package_version() -> str:
+    """The version from the packaged manifest, or empty in a checkout."""
+    import json
+
+    manifest = resource_paths.resource_root() / "manifest.json"
+    try:
+        return str(json.loads(manifest.read_text(encoding="utf-8")).get("version", ""))
+    except Exception:
+        return ""
+
 
 
 def main(argv=None) -> int:
