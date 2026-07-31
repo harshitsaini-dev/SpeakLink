@@ -3296,3 +3296,69 @@ needs re-running once HQ is stopped.
 ### Still not proven
 
 No browser has loaded the fixed bundle from the HQ LAN address. That is the retest.
+
+---
+
+## 2026-07-31 — Clean catalog, and a StoreSetup package that contains a Receiver
+
+### One sentence that explains the second-PC confusion
+
+**"Store 1" meant three different shops in three databases.**
+
+| Database | Store id 1 was |
+| --- | --- |
+| LAN pilot `20260729-115328` | `LAN-1` "LAN pilot Store" — what the second PC holds |
+| local-pilot | `UN` "Uttam Nagar Old" — what the operator remembered |
+| Live HQ (before purge) | `MUM-001` "Mumbai Andheri Flagship", archived |
+
+Device `1f5a6c77-…` was created `2026-07-29T06:48:06` in that LAN pilot by user
+`lan-pilot-ufkzyp`. **It is not in the current HQ**, so there is nothing to
+retire server-side — the fix is entirely local to that PC.
+
+The remembered LAN-pilot user existed only inside an isolated pilot database.
+Not renamed, not deleted, never migrated: each pilot run minted a throwaway
+SUPER_ADMIN. Nothing was recreated.
+
+### The purge
+
+Classification came back cleanly separable, which is what made deletion safe:
+all 17 sessions and all 175 targets referenced only legacy Stores, all 3014
+events only stores 7 and 8, zero mixed, zero unknown.
+
+```
+before  57 stores · 17 sessions · 175 targets · 3014 events · 216 logs
+after   44 stores ·  0 sessions ·   0 targets ·    0 events · 216 logs
+codes exactly equal store_catalog.py · zones 9 · integrity ok · fk 0
+users admin + owneradmin preserved · Device ee6160cb… preserved on store 31 (BP)
+second run: NO_CHANGES_REQUIRED
+```
+
+Logs kept in full: a log line's identity cannot be proved from its text, and
+losing operational history to tidy a catalog is a bad trade.
+
+### The packaging defect, measured
+
+The shipped StoreSetup package contained **no Receiver, no FFmpeg and none of
+the five scripts** — verified against the built artifact. Two halves:
+
+* `store_setup_core` used `Path(__file__).resolve().parents[1]`, which frozen is
+  `_internal`, so it looked for `_internalrtifacts` and `_internal\scripts`
+  and an operator was told to hand-create them;
+* the build script copied only `dist\`.
+
+`hq_runtime` had already solved half of this with `_packaged_root()`. The rule
+lived in one module and not the other. `tools/resource_paths` is that idea
+generalised and tested across source, one-folder, one-file and installed.
+
+### A defect measured while stopping HQ
+
+`Stop-ScheduledTask` left **all six** descendants alive with both ports bound.
+The listeners are *grandchildren* — the venv python re-execs the real
+interpreter — so stopping direct children is not enough. Descendants are now
+stopped deepest-first, resolved by parent link and never by process name; two
+unrelated VS Code pythons survived the manual stop that proved it.
+
+### Verdict
+
+`READY_FOR_ONE_STORE_GUI_RETEST`. The wizard pages that present the new
+enrolment states are not yet built, and no Store PC has run this package.
