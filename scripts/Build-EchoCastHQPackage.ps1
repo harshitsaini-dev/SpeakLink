@@ -172,6 +172,18 @@ if (-not (Test-Path (Join-Path $backendTarget 'requirements.txt'))) {
     Write-Output '  note: backend\requirements.txt was not found to package'
 }
 
+# 3b. tools/, because the frontend is now served by tools/spa_server.py as a
+#     CHILD process run by the machine's own Python. `-m http.server` needed no
+#     file on disk; a real module does, and a packaged HQ that cannot find it
+#     serves no dashboard at all.
+$toolsTarget = Join-Path $outputPath 'tools'
+New-Item -ItemType Directory -Force -Path $toolsTarget | Out-Null
+foreach ($name in @('spa_server.py')) {
+    $source = Join-Path $repositoryRoot "tools\$name"
+    if (-not (Test-Path $source)) { throw "tools\$name is missing; the package would serve no dashboard." }
+    Copy-Item $source (Join-Path $toolsTarget $name) -Force
+}
+
 # 4. The four task scripts, at the top level where an operator will look.
 foreach ($name in $taskScripts) {
     Copy-Item (Join-Path $scriptRoot $name) (Join-Path $outputPath $name) -Force
