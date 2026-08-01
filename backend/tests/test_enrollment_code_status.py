@@ -293,14 +293,20 @@ def test_a_viewer_cannot_read_enrollment_records(fresh):
         require_permission(viewer, Permission.MANAGE_DEVICES)
 
 
-def test_the_route_is_guarded_by_the_manage_devices_permission():
-    """Read the route's own dependency default rather than trusting a comment."""
+def test_the_route_is_guarded_by_a_read_permission():
+    """Read the route's own dependency default rather than trusting a comment.
+
+    Split from the coarse MANAGE_DEVICES flag into the fine-grained
+    menu.receivers.view code as part of the per-user permissions work - a
+    read-only enrolment-status list is a view right, not a Device-security
+    action, and per-user overrides can now grant one without the other.
+    """
     import inspect
 
     import server
 
     source = inspect.getsource(server.list_receiver_enrollment_codes)
-    assert "require(Permission.MANAGE_DEVICES)" in source
+    assert 'require("menu.receivers.view")' in source
 
 
 def test_the_status_endpoint_requires_the_manage_devices_permission():

@@ -37,6 +37,7 @@ from schemas import (
     ReceiverDeviceOut, CredentialRotationResponse,
     HQUserOut, HQUserCreate, HQUserUpdate, HQUserRoleUpdate,
     PasswordChangeIn, PasswordResetIn, PasswordResetOut,
+    PermissionOverridesUpdate,
     WebSocketTicketRequest,
 )
 from receiver_rotation_service import (
@@ -56,6 +57,15 @@ from rbac import (
     migrate_legacy_roles,
     parse_role,
     require_permission,
+)
+from permission_catalog import (
+    OwnerOverrideRefused,
+    UnknownPermissionCode,
+    describe_user_permissions,
+    ensure_permission_schema,
+    has_permission_code,
+    resolve_effective_permissions,
+    set_permission_overrides,
 )
 from enrolment_refusal import classify_enrolment_refusal
 from deletion_safety import (
@@ -353,23 +363,51 @@ configure_receiver_runtime(
 )
 
 
-def require(permission: Permission):
+#: Coarse role-matrix permissions that were never split into their own route
+#: (broadcast controls, and the three read-only dashboards) map straight onto
+#: one fine-grained code, so their existing `Depends(require(Permission.X))`
+#: call sites keep working unmodified and still gain per-user override
+#: support through the same resolver. The MANAGE_* fallbacks exist only as a
+#: defensive net in case a future route reintroduces a coarse Depends() by
+#: mistake - every real MANAGE_STORES/MANAGE_DEVICES/MANAGE_USERS call site was
+#: converted to its specific fine-grained code (see permission_catalog.py).
+_COARSE_TO_FINE: dict[Permission, str] = {
+    Permission.VIEW_STATUS: "menu.broadcast.view",
+    Permission.VIEW_HISTORY: "menu.history.view",
+    Permission.VIEW_LOGS: "menu.logs.view",
+    Permission.START_BROADCAST: "broadcast.start",
+    Permission.STOP_BROADCAST: "broadcast.stop",
+    Permission.EMERGENCY_STOP: "broadcast.emergency_stop",
+    Permission.MANAGE_STORES: "stores.update",
+    Permission.MANAGE_DEVICES: "devices.rotate",
+    Permission.MANAGE_USERS: "users.update",
+}
+
+
+def require(permission):
     """A dependency that admits only accounts holding one permission.
+
+    Accepts either a legacy coarse ``rbac.Permission`` (mapped onto its
+    fine-grained code via ``_COARSE_TO_FINE``) or a fine-grained permission
+    code string directly (``"stores.update"``, ``"devices.rotate"``, ...).
+    Either way, the actual decision - role default plus this account's
+    ALLOW/DENY overrides - is made in exactly one place:
+    ``permission_catalog.resolve_effective_permissions``. No route compares a
+    role string itself.
 
     Written as a factory so every route names its permission at the point of
     definition. A route with no `require(...)` is authenticated-only, and that
     now has to be a visible choice rather than an omission - a test walks the
     routing table and fails on any authenticated route without one.
     """
+    code = _COARSE_TO_FINE[permission] if isinstance(permission, Permission) else permission
 
     def guard(user: HQUser = Depends(get_current_user)) -> HQUser:
-        try:
-            require_permission(user, permission)
-        except PermissionDenied as refusal:
+        if not has_permission_code(engine, user, code):
             # 403, not 404: the caller is authenticated and the resource exists.
             # The message is identical for every permission, so a refusal never
             # maps out what the system can do.
-            raise HTTPException(status_code=403, detail=str(refusal))
+            raise HTTPException(status_code=403, detail=RBAC_REFUSED)
         return user
 
     return guard
@@ -429,6 +467,14 @@ def startup_event():
         ensure_enrollment_device_link_schema(engine)
     except Exception:
         logger.warning("Enrollment device-link column could not be prepared", exc_info=False)
+
+    # Additive tables plus a reseed of the derived permission catalog/role
+    # matrix from code - never touches user_permission_overrides or
+    # permission_audit_events, which hold operator decisions and history.
+    try:
+        ensure_permission_schema(engine)
+    except Exception:
+        logger.warning("Permission catalog could not be prepared", exc_info=False)
 
     # Every hq_users migration, in one call, in the one order that works.
     #
@@ -582,6 +628,22 @@ def me(user: HQUser = Depends(get_current_user)):
     return UserOut.model_validate(user)
 
 
+@api.get("/auth/permissions")
+def my_permissions(user: HQUser = Depends(get_current_user)):
+    """The authoritative source for what THIS signed-in account may do.
+
+    Frontend menu hiding is never the security boundary - every protected
+    operation is enforced again, independently, by the specific
+    `require(...)` guard on that endpoint. This exists so the frontend has one
+    place to ask "what can I actually do" instead of re-deriving it from the
+    role string.
+    """
+    return {
+        "role": parse_role(user.role).value if parse_role(user.role) else None,
+        "permissions": sorted(resolve_effective_permissions(engine, user)),
+    }
+
+
 #: The permission each socket requires. A ticket is only ever as strong as the
 #: right needed to mint it, so this table is the whole access-control decision.
 _TICKET_PERMISSIONS = {
@@ -670,12 +732,12 @@ def _user_lifecycle_call(action, **kwargs) -> dict:
 
 
 @api.get("/users", response_model=List[HQUserOut])
-def list_hq_users(user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+def list_hq_users(user: HQUser = Depends(require("menu.users.view"))):
     return [HQUserOut(**record) for record in list_users(engine)]
 
 
 @api.get("/users/{user_id}", response_model=HQUserOut)
-def read_hq_user(user_id: int, user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+def read_hq_user(user_id: int, user: HQUser = Depends(require("menu.users.view"))):
     return HQUserOut(**_user_or_404(user_id))
 
 
@@ -683,7 +745,7 @@ def read_hq_user(user_id: int, user: HQUser = Depends(require(Permission.MANAGE_
 def create_hq_user(
     payload: HQUserCreate,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require(Permission.MANAGE_USERS)),
+    user: HQUser = Depends(require("users.create")),
 ):
     _require_may_manage(user, payload.role)
     created = _user_lifecycle_call(
@@ -704,7 +766,7 @@ def update_hq_user(
     user_id: int,
     payload: HQUserUpdate,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require(Permission.MANAGE_USERS)),
+    user: HQUser = Depends(require("users.update")),
 ):
     existing = _user_or_404(user_id)
     _require_may_manage(user, existing["role"])
@@ -720,7 +782,7 @@ def set_hq_user_role(
     user_id: int,
     payload: HQUserRoleUpdate,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require(Permission.MANAGE_USERS)),
+    user: HQUser = Depends(require("users.update")),
 ):
     existing = _user_or_404(user_id)
     # Both ends: you may not manage the account as it is now, and you may not
@@ -746,25 +808,25 @@ def _lifecycle_endpoint(action, verb: str, level: str = "warn"):
 
 @api.post("/users/{user_id}/disable", response_model=HQUserOut)
 def disable_hq_user(user_id: int, db: Session = Depends(get_db),
-                    user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+                    user: HQUser = Depends(require("users.disable"))):
     return _lifecycle_endpoint(disable_user, "disabled")(user_id, db, user)
 
 
 @api.post("/users/{user_id}/enable", response_model=HQUserOut)
 def enable_hq_user(user_id: int, db: Session = Depends(get_db),
-                   user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+                   user: HQUser = Depends(require("users.update"))):
     return _lifecycle_endpoint(enable_user, "enabled", level="info")(user_id, db, user)
 
 
 @api.post("/users/{user_id}/archive", response_model=HQUserOut)
 def archive_hq_user(user_id: int, db: Session = Depends(get_db),
-                    user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+                    user: HQUser = Depends(require("users.disable"))):
     return _lifecycle_endpoint(archive_user, "archived")(user_id, db, user)
 
 
 @api.post("/users/{user_id}/restore", response_model=HQUserOut)
 def restore_hq_user(user_id: int, db: Session = Depends(get_db),
-                    user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+                    user: HQUser = Depends(require("users.update"))):
     return _lifecycle_endpoint(restore_user, "restored")(user_id, db, user)
 
 
@@ -832,7 +894,7 @@ ENROLMENT_REFUSED = "That enrolment code cannot be used."
 def create_receiver_enrollment_code(
     payload: EnrollmentCodeRequest,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
+    user: HQUser = Depends(require("devices.enrollment.create")),
 ):
     """Mint a one-time code for one Store. Shown once, never stored raw."""
     try:
@@ -924,7 +986,7 @@ def enroll_receiver(
 def list_receiver_devices(
     store_id: int,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
+    user: HQUser = Depends(require("menu.receivers.view")),
 ):
     try:
         return [ReceiverDeviceOut(**row) for row in list_devices(engine, store_id=store_id)]
@@ -936,7 +998,7 @@ def list_receiver_devices(
 def read_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
+    user: HQUser = Depends(require("menu.receivers.view")),
 ):
     try:
         return ReceiverDeviceOut(**read_device(engine, public_id=public_id))
@@ -950,7 +1012,7 @@ def read_receiver_device(
 def disable_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
+    user: HQUser = Depends(require("devices.disable")),
 ):
     """Stop this one computer. Its Store and every other Device keep working."""
     try:
@@ -967,7 +1029,7 @@ def disable_receiver_device(
 def promote_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
+    user: HQUser = Depends(require("devices.primary.assign")),
 ):
     """Make this one computer the Store's primary - the one that plays audio.
 
@@ -993,7 +1055,7 @@ def promote_receiver_device(
 def read_receiver_device_roles(
     store_id: int,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
+    user: HQUser = Depends(require("menu.receivers.view")),
 ):
     """Every Device of one Store with its primary/standby role. No credentials."""
     try:
@@ -1007,7 +1069,7 @@ def read_receiver_device_roles(
 def list_receiver_enrollment_codes(
     store_id: int,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
+    user: HQUser = Depends(require("menu.receivers.view")),
 ):
     """Enrollment records for one Store: state, timestamps, and what they proved.
 
@@ -1165,7 +1227,7 @@ def _enrollment_progress(
 def rotate_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
+    user: HQUser = Depends(require("devices.rotate")),
 ):
     """Issue one new credential for one Device and retire the old one at once.
 
@@ -1217,7 +1279,7 @@ def rotate_receiver_device(
 def revoke_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require(Permission.MANAGE_DEVICES)),
+    user: HQUser = Depends(require("devices.revoke")),
 ):
     """Retire this one computer permanently."""
     try:
@@ -1240,7 +1302,7 @@ def list_stores(
     include_inactive: bool = False,
     include_archived: bool = False,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require(Permission.VIEW_STATUS)),
+    user: HQUser = Depends(require("menu.stores.view")),
 ):
     query = db.query(Store)
     if not include_inactive:
@@ -1271,7 +1333,7 @@ def list_stores(
 
 
 @api.post("/stores", response_model=StoreOut, status_code=201)
-def create_store(payload: StoreCreate, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.MANAGE_STORES))):
+def create_store(payload: StoreCreate, db: Session = Depends(get_db), user: HQUser = Depends(require("stores.create"))):
     if db.query(Store).filter(Store.store_code == payload.store_code).first():
         raise HTTPException(status_code=409, detail="store_code already exists")
     s = Store(**payload.model_dump(), receiver_token=uuid.uuid4().hex)
@@ -1283,7 +1345,7 @@ def create_store(payload: StoreCreate, db: Session = Depends(get_db), user: HQUs
 
 
 @api.put("/stores/{store_id}", response_model=StoreOut)
-def update_store(store_id: int, payload: StoreUpdate, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.MANAGE_STORES))):
+def update_store(store_id: int, payload: StoreUpdate, db: Session = Depends(get_db), user: HQUser = Depends(require("stores.update"))):
     """Edit a Store's details. Never its state, and never its credentials."""
     s = db.query(Store).filter(Store.id == store_id).first()
     if not s:
@@ -1350,19 +1412,19 @@ def _lifecycle_action(transition, store_id: int, user: HQUser, *, use_live_guard
 
 
 @api.post("/stores/{store_id}/disable", response_model=StoreOut)
-def disable_store_endpoint(store_id: int, user: HQUser = Depends(require(Permission.MANAGE_STORES))):
+def disable_store_endpoint(store_id: int, user: HQUser = Depends(require("stores.archive"))):
     """Switch a Store off. Reversible; its history is untouched."""
     return _lifecycle_action(disable_store, store_id, user)
 
 
 @api.post("/stores/{store_id}/enable", response_model=StoreOut)
-def enable_store_endpoint(store_id: int, user: HQUser = Depends(require(Permission.MANAGE_STORES))):
+def enable_store_endpoint(store_id: int, user: HQUser = Depends(require("stores.update"))):
     """Switch a Store back on. An archived Store is not reachable from here."""
     return _lifecycle_action(enable_store, store_id, user, use_live_guard=False)
 
 
 @api.post("/stores/{store_id}/archive", response_model=StoreOut)
-def archive_store_endpoint(store_id: int, user: HQUser = Depends(require(Permission.MANAGE_STORES))):
+def archive_store_endpoint(store_id: int, user: HQUser = Depends(require("stores.archive"))):
     """Retire a Store. Nothing is deleted - the row, its Devices, its sessions
     and its events all stay readable."""
     return _lifecycle_action(archive_store, store_id, user)
@@ -1375,7 +1437,7 @@ def restore_store_endpoint(store_id: int, user: HQUser = Depends(require_super_a
 
 
 @api.delete("/stores/{store_id}")
-def delete_store(store_id: int, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.MANAGE_STORES))):
+def delete_store(store_id: int, db: Session = Depends(get_db), user: HQUser = Depends(require("stores.archive"))):
     """Delete means archive. A Store owns Devices, sessions, targets and events;
     removing the row would destroy the only record of what was announced where."""
     _lifecycle_action(archive_store, store_id, user)
@@ -1384,7 +1446,7 @@ def delete_store(store_id: int, db: Session = Depends(get_db), user: HQUser = De
 
 @api.get("/stores/{store_id}/dependencies")
 def read_store_dependencies(store_id: int,
-                            user: HQUser = Depends(require(Permission.MANAGE_STORES))):
+                            user: HQUser = Depends(require("menu.stores.view"))):
     """What still refers to this Store, so the UI can show it before offering
     a delete that would be refused anyway."""
     summary = store_dependencies(engine, store_id=store_id)
@@ -1398,7 +1460,7 @@ def read_store_dependencies(store_id: int,
 @api.delete("/stores/{store_id}/permanently")
 def hard_delete_store(store_id: int, confirm: str,
                       db: Session = Depends(get_db),
-                      user: HQUser = Depends(require(Permission.MANAGE_STORES))):
+                      user: HQUser = Depends(require("stores.archive"))):
     """Remove a never-used Store for real. Refuses anything with history.
 
     Separate from DELETE /stores/{id}, which archives. Two verbs that do very
@@ -1419,7 +1481,7 @@ def hard_delete_store(store_id: int, confirm: str,
 
 @api.get("/users/{user_id}/dependencies")
 def read_user_dependencies(user_id: int,
-                           user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+                           user: HQUser = Depends(require("menu.users.view"))):
     summary = user_dependencies(engine, user_id=user_id)
     if not summary.exists:
         raise HTTPException(status_code=404, detail="No such HQ User")
@@ -1428,10 +1490,69 @@ def read_user_dependencies(user_id: int,
             "explanation": summary.explain()}
 
 
+# ---- per-user permission overrides -----------------------------------------
+#
+# Reserved for OWNER, the same way restoring an archived Store is
+# (`require_super_admin`) - not `require("users.permissions.manage")`, on
+# purpose. `users.permissions.manage` is a role-default flag ADMIN never gets;
+# gating these two routes on `require_super_admin` instead means the check is
+# "is this account literally OWNER right now", independent of the override
+# system these very routes edit. An override can never grant an ADMIN a path
+# to grant themselves more.
+@api.get("/users/{user_id}/permissions")
+def read_user_permission_overrides(user_id: int, user: HQUser = Depends(require_super_admin)):
+    existing = _user_or_404(user_id)
+    role = parse_role(existing["role"])
+    if role is None:
+        raise HTTPException(status_code=400, detail="That account has no recognised role.")
+    return {
+        "user_id": user_id,
+        "role": role.value,
+        "permissions": describe_user_permissions(engine, user_id=user_id, role=role),
+    }
+
+
+@api.put("/users/{user_id}/permissions")
+def write_user_permission_overrides(
+    user_id: int,
+    payload: PermissionOverridesUpdate,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require_super_admin),
+):
+    existing = _user_or_404(user_id)
+    role = parse_role(existing["role"])
+    if role is None:
+        raise HTTPException(status_code=400, detail="That account has no recognised role.")
+    try:
+        audit_rows = set_permission_overrides(
+            engine,
+            actor=user,
+            target_user_id=user_id,
+            target_role=role,
+            changes=[change.model_dump() for change in payload.changes],
+        )
+    except OwnerOverrideRefused as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    except UnknownPermissionCode as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+    # The audit table already has the durable, queryable record; this log line
+    # only carries the count and actor, never a permission-by-permission diff,
+    # so scanning system_logs cannot substitute for querying the audit table.
+    _write_log(
+        db, "warn",
+        f"user_permissions_changed target_id={user_id} changes={len(audit_rows)} by={user.username}",
+    )
+    return {
+        "user_id": user_id,
+        "role": role.value,
+        "permissions": describe_user_permissions(engine, user_id=user_id, role=role),
+    }
+
+
 @api.delete("/users/{user_id}/permanently")
 def hard_delete_user(user_id: int, confirm: str,
                      db: Session = Depends(get_db),
-                     user: HQUser = Depends(require(Permission.MANAGE_USERS))):
+                     user: HQUser = Depends(require("users.disable"))):
     """Remove an account that never did anything. Archive is still the default.
 
     The role check inside delete_user_if_unused refuses an OWNER outright, and
@@ -1450,7 +1571,7 @@ def hard_delete_user(user_id: int, confirm: str,
 
 
 @api.post("/stores/{store_id}/regenerate-token", response_model=StoreOut)
-def regenerate_token(store_id: int, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.MANAGE_STORES))):
+def regenerate_token(store_id: int, db: Session = Depends(get_db), user: HQUser = Depends(require("stores.update"))):
     s = db.query(Store).filter(Store.id == store_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="Store not found")
@@ -1462,7 +1583,7 @@ def regenerate_token(store_id: int, db: Session = Depends(get_db), user: HQUser 
 
 
 @api.get("/stores/meta/regions-cities", response_model=StoresMetaOut)
-def stores_meta(db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.VIEW_STATUS))):
+def stores_meta(db: Session = Depends(get_db), user: HQUser = Depends(require("menu.stores.view"))):
     regions = [r[0] for r in db.query(Store.region).distinct().order_by(Store.region).all() if r[0]]
     cities = [c[0] for c in db.query(Store.city).distinct().order_by(Store.city).all() if c[0]]
     return StoresMetaOut(regions=regions, cities=cities)
