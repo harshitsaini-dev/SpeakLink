@@ -198,6 +198,19 @@ def set_user_scope(engine: Engine, *, user_id: int, entries: list[dict],
                 value = (entry.get("scope_value") or "").strip()
                 if not value:
                     raise InvalidScopeEntry(f"A {scope_type} scope entry needs a scope_value.")
+                column = "city" if scope_type == "CITY" else "region"
+                # Canonical-value guard: a City/Zone that matches zero Stores
+                # right now (a typo, or a retired name) must never be saved -
+                # it would silently resolve to nothing later, which looks
+                # identical to "no assignments" only from the wrong side.
+                known = connection.execute(
+                    text(f"SELECT 1 FROM stores WHERE {column} = :value LIMIT 1"),
+                    {"value": value},
+                ).first()
+                if not known:
+                    raise InvalidScopeEntry(
+                        f"No Store currently has {scope_type.title()} = {value!r}."
+                    )
                 validated.append({"scope_type": scope_type, "store_id": None, "scope_value": value})
 
         after = {

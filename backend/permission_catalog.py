@@ -118,8 +118,11 @@ DEFAULT_ROLE_PERMISSIONS: dict[Role, frozenset[str]] = {
     ),
     # Broadcast Console, its three controls, History and Receiver Status -
     # nothing that edits a Store, a Device's security, or a User.
+    # menu.stores.view is included because Receiver Status (GET /api/stores)
+    # requires it - without this, every BROADCASTER without a manually added
+    # per-user override got a 403 there and the page silently rendered blank.
     Role.BROADCASTER: _BROADCAST_CODES | frozenset({
-        "menu.history.view", "menu.receivers.view",
+        "menu.history.view", "menu.receivers.view", "menu.stores.view",
     }),
     # Read-only, and only over the operational surfaces - not User Management,
     # matching the existing frontend nav restriction (`roles: ["OWNER", "ADMIN"]`

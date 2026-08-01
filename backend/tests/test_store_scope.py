@@ -339,6 +339,110 @@ def test_system_logs_are_not_store_scoped_by_design(client):
     assert len(scoped_logs.json()) == len(unscoped_logs.json())
 
 
+# ===========================================================================
+# Live defect: a BROADCASTER with REGION + CITY + STORE scope must see the
+# UNION of all three, and Receiver Status must never render blank because
+# the account genuinely lacks permission to call the endpoint it needs.
+# ===========================================================================
+def test_a_fresh_broadcaster_can_load_stores_by_role_default_alone(client):
+    """Reproduces the real defect: Role.BROADCASTER's default permissions did
+    not include menu.stores.view, so GET /api/stores - the only endpoint
+    Receiver Status calls - 403'd for every BROADCASTER that had no manually
+    added per-user override. ReceiverStatus.jsx has no error handling, so
+    that 403 rendered as a silently blank page, not an explanation."""
+    owner = sign_in(client)
+    user_id = make_user(client, owner, "quinn", "BROADCASTER")
+    headers = sign_in(client, "quinn")
+
+    resp = client.get("/api/stores", headers=headers)
+    assert resp.status_code == 200, resp.text
+
+
+def test_broadcaster_with_region_city_and_store_scope_sees_the_full_union(client):
+    owner = sign_in(client)
+    stores = client.get("/api/stores", headers=owner).json()
+    target_region = stores[0]["region"]
+    target_city = stores[0]["city"]
+    explicit_store = next(s for s in stores if s["city"] != target_city or s["region"] != target_region)
+    if explicit_store is None:  # pragma: no cover - defensive, catalog dependent
+        pytest.skip("catalog has no Store outside the target city/region to use as the explicit case")
+
+    expected_ids = {explicit_store["id"]} | {
+        s["id"] for s in stores if s["city"] == target_city or s["region"] == target_region
+    }
+
+    user_id = make_user(client, owner, "priya", "BROADCASTER")
+    set_scope(client.server_module.engine, user_id=user_id, entries=[
+        {"scope_type": "REGION", "scope_value": target_region},
+        {"scope_type": "CITY", "scope_value": target_city},
+        {"scope_type": "STORE", "store_id": explicit_store["id"]},
+    ])
+    headers = sign_in(client, "priya")
+
+    visible = client.get("/api/stores", headers=headers).json()
+    assert visible != []
+    assert {s["id"] for s in visible} == expected_ids
+
+
+def test_explicit_store_assignment_survives_even_if_city_and_zone_resolve_to_nothing(client):
+    """A CITY/REGION value that (hypothetically, pre-validation) matched zero
+    Stores must never cancel a valid explicit STORE assignment - UNION, not
+    intersection, and never a silent all-or-nothing collapse."""
+    owner = sign_in(client)
+    stores = client.get("/api/stores", headers=owner).json()
+    target = stores[0]
+
+    user_id = make_user(client, owner, "ravi", "BROADCASTER")
+    engine = client.server_module.engine
+    # Bypass API-level validation to simulate a pre-existing zero-match
+    # CITY/REGION row, exactly as Phase 5 validation is meant to prevent
+    # going forward - a row like this must not already exist for new saves,
+    # but old data must still degrade safely.
+    from sqlalchemy import text
+    with engine.begin() as connection:
+        now = "2026-08-01T00:00:00+00:00"
+        connection.execute(text(
+            "INSERT INTO user_store_scope (user_id, scope_type, store_id, scope_value, created_at) "
+            "VALUES (:uid, 'CITY', NULL, 'Nonexistent City', :now)"
+        ), {"uid": user_id, "now": now})
+        connection.execute(text(
+            "INSERT INTO user_store_scope (user_id, scope_type, store_id, scope_value, created_at) "
+            "VALUES (:uid, 'STORE', :sid, NULL, :now)"
+        ), {"uid": user_id, "sid": target["id"], "now": now})
+
+    headers = sign_in(client, "ravi")
+    visible = client.get("/api/stores", headers=headers).json()
+    assert target["id"] in {s["id"] for s in visible}
+
+
+def test_saving_an_unknown_city_is_rejected(client):
+    owner = sign_in(client)
+    user_id = make_user(client, owner, "sam", "ADMIN")
+
+    resp = client.put(f"/api/users/{user_id}/store-scope", headers=owner,
+                      json={"entries": [{"scope_type": "CITY", "scope_value": "UN ZNOE"}]})
+    assert resp.status_code == 400, resp.text
+
+
+def test_saving_an_unknown_zone_is_rejected(client):
+    owner = sign_in(client)
+    user_id = make_user(client, owner, "tara", "ADMIN")
+
+    resp = client.put(f"/api/users/{user_id}/store-scope", headers=owner,
+                      json={"entries": [{"scope_type": "REGION", "scope_value": "Nowhere Zone"}]})
+    assert resp.status_code == 400, resp.text
+
+
+def test_saving_a_known_city_still_succeeds(client):
+    owner = sign_in(client)
+    stores = client.get("/api/stores", headers=owner).json()
+    user_id = make_user(client, owner, "uma", "ADMIN")
+
+    resp = client.put(f"/api/users/{user_id}/store-scope", headers=owner,
+                      json={"entries": [{"scope_type": "CITY", "scope_value": stores[0]["city"]}]})
+    assert resp.status_code == 200, resp.text
+
+
 def test_only_owner_can_change_store_scope(client):
     owner = sign_in(client)
     user_id = make_user(client, owner, "kelly", "ADMIN")
