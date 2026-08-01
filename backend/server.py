@@ -38,6 +38,7 @@ from schemas import (
     HQUserOut, HQUserCreate, HQUserUpdate, HQUserRoleUpdate,
     PasswordChangeIn, PasswordResetIn, PasswordResetOut,
     PermissionOverridesUpdate,
+    StoreScopeUpdate,
     WebSocketTicketRequest,
 )
 from receiver_rotation_service import (
@@ -67,11 +68,20 @@ from permission_catalog import (
     resolve_effective_permissions,
     set_permission_overrides,
 )
+from store_scope import (
+    InvalidScopeEntry,
+    ensure_store_scope_schema,
+    list_user_scope,
+    resolve_store_scope,
+    set_user_scope,
+)
 from enrolment_refusal import classify_enrolment_refusal
 from deletion_safety import (
     DeletionRefused,
+    delete_device_if_unused,
     delete_store_if_unused,
     delete_user_if_unused,
+    device_dependencies,
     store_dependencies,
     user_dependencies,
 )
@@ -178,11 +188,14 @@ from receiver_enrollment_api import (
     EnrollmentRefused,
     EnrollmentUnavailable,
     TooManyOutstandingCodes,
+    archive_device,
     create_enrollment_code,
     disable_device,
+    ensure_device_archive_schema,
     list_devices,
     read_device,
     redeem_and_enroll,
+    restore_device,
     revoke_device,
 )
 from login_guard import (
@@ -413,6 +426,21 @@ def require(permission):
     return guard
 
 
+def _require_store_in_scope(user: HQUser, store_id: int) -> None:
+    """Refuse a Store outside this account's assigned Store/City/Zone scope.
+
+    A permission (``stores.update``) answers "may this account edit a Store
+    at all"; scope answers "which one". Both are checked, independently -
+    holding the permission never bypasses scope, and being in scope never
+    substitutes for the permission. ``None`` means unrestricted (OWNER, or
+    an account with no scope rows), so this is a silent no-op for the common
+    unscoped case.
+    """
+    scope = resolve_store_scope(engine, user)
+    if scope is not None and store_id not in scope:
+        raise HTTPException(status_code=403, detail=RBAC_REFUSED)
+
+
 #: One refusal message, taken from the exception itself so the two can never
 #: drift apart. Identical for every permission and every role: a refusal that
 #: named what was missing would map out the system for whoever probed it.
@@ -475,6 +503,21 @@ def startup_event():
         ensure_permission_schema(engine)
     except Exception:
         logger.warning("Permission catalog could not be prepared", exc_info=False)
+
+    # One nullable column so a Device can be archived/restored the same way a
+    # Store or a User already is, without touching the fixed status CHECK.
+    try:
+        ensure_device_archive_schema(engine)
+    except Exception:
+        logger.warning("Receiver Device archive column could not be prepared", exc_info=False)
+
+    # Additive table for per-user Store/City/Zone scope. An account with no
+    # rows here is unrestricted, so this is safe to run on every boot even
+    # before anybody has assigned a scope.
+    try:
+        ensure_store_scope_schema(engine)
+    except Exception:
+        logger.warning("Store scope table could not be prepared", exc_info=False)
 
     # Every hq_users migration, in one call, in the one order that works.
     #
@@ -897,6 +940,7 @@ def create_receiver_enrollment_code(
     user: HQUser = Depends(require("devices.enrollment.create")),
 ):
     """Mint a one-time code for one Store. Shown once, never stored raw."""
+    _require_store_in_scope(user, payload.store_id)
     try:
         issued = create_enrollment_code(db, store_id=payload.store_id, actor_user_id=user.id)
     except TooManyOutstandingCodes as refusal:
@@ -988,6 +1032,7 @@ def list_receiver_devices(
     db: Session = Depends(get_db),
     user: HQUser = Depends(require("menu.receivers.view")),
 ):
+    _require_store_in_scope(user, store_id)
     try:
         return [ReceiverDeviceOut(**row) for row in list_devices(engine, store_id=store_id)]
     except EnrollmentUnavailable as unavailable:
@@ -1025,6 +1070,75 @@ def disable_receiver_device(
     return ReceiverDeviceOut(**device)
 
 
+@api.post("/receiver-devices/{public_id}/archive", response_model=ReceiverDeviceOut)
+def archive_receiver_device(
+    public_id: str,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("devices.disable")),
+):
+    """Retire this Device from the active list. Reversible - its credential
+    history and every enrolment/audit event are untouched."""
+    try:
+        device = archive_device(engine, public_id=public_id)
+    except DeviceNotFound:
+        raise HTTPException(status_code=404, detail="Receiver Device not found")
+    except EnrollmentUnavailable as unavailable:
+        raise HTTPException(status_code=503, detail=str(unavailable))
+    _write_log(db, "warn", f"receiver_device_archived device={public_id} by={user.username}")
+    return ReceiverDeviceOut(**device)
+
+
+@api.post("/receiver-devices/{public_id}/restore", response_model=ReceiverDeviceOut)
+def restore_receiver_device(
+    public_id: str,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("devices.disable")),
+):
+    """Bring an archived Device back to disabled, never straight to active."""
+    try:
+        device = restore_device(engine, public_id=public_id)
+    except DeviceNotFound:
+        raise HTTPException(status_code=404, detail="Receiver Device not found")
+    except EnrollmentUnavailable as unavailable:
+        raise HTTPException(status_code=503, detail=str(unavailable))
+    _write_log(db, "info", f"receiver_device_restored device={public_id} by={user.username}")
+    return ReceiverDeviceOut(**device)
+
+
+@api.get("/receiver-devices/{public_id}/dependencies")
+def read_receiver_device_dependencies(
+    public_id: str,
+    user: HQUser = Depends(require("menu.receivers.view")),
+):
+    """What still refers to this Device, so the UI can show it before offering
+    a permanent delete that would be refused anyway."""
+    summary = device_dependencies(engine, public_id=public_id)
+    if not summary.exists:
+        raise HTTPException(status_code=404, detail="Receiver Device not found")
+    return {"counts": summary.counts, "unchecked": summary.unchecked,
+            "total": summary.total, "deletable": summary.deletable,
+            "explanation": summary.explain()}
+
+
+@api.delete("/receiver-devices/{public_id}/permanently")
+def hard_delete_receiver_device(
+    public_id: str, confirm: str,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("devices.revoke")),
+):
+    """Remove a never-enrolled-into Device for real. Refuses anything with an
+    issued credential or a recorded event - which is every real Device, since
+    enrolment is what creates one. Separate from /disable, /archive and
+    /revoke, which all keep the row and its history."""
+    try:
+        removed = delete_device_if_unused(engine, public_id=public_id, typed_confirmation=confirm)
+    except DeletionRefused as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    _write_log(db, "warn",
+               f"RECEIVER_DEVICE_DELETED device={removed['public_id']} by={user.username}")
+    return {"ok": True, "deleted": removed}
+
+
 @api.post("/receiver-devices/{public_id}/promote", response_model=List[ReceiverDeviceOut])
 def promote_receiver_device(
     public_id: str,
@@ -1058,6 +1172,7 @@ def read_receiver_device_roles(
     user: HQUser = Depends(require("menu.receivers.view")),
 ):
     """Every Device of one Store with its primary/standby role. No credentials."""
+    _require_store_in_scope(user, store_id)
     try:
         return describe_store_devices(engine, store_id=store_id)
     except Exception:
@@ -1081,6 +1196,7 @@ def list_receiver_enrollment_codes(
     creation, and cannot be retrieved here or anywhere else - the database
     holds a SHA-256 of it, and that is not something a page has any use for.
     """
+    _require_store_in_scope(user, store_id)
     codes = (
         db.query(ReceiverEnrollmentCode)
         .filter(ReceiverEnrollmentCode.store_id == store_id)
@@ -1323,6 +1439,11 @@ def list_stores(
     if q:
         like = f"%{q}%"
         query = query.filter((Store.store_name.ilike(like)) | (Store.store_code.ilike(like)))
+    # Per-user Store/City/Zone scope. None means unrestricted (OWNER, or an
+    # account with no scope rows) - the common case, so this is a no-op then.
+    scope = resolve_store_scope(engine, user)
+    if scope is not None:
+        query = query.filter(Store.id.in_(scope) if scope else Store.id.in_([-1]))
     # Reflect actual online status from live WS state
     stores = query.order_by(Store.store_code).all()
     online_ids = manager.online_store_ids()
@@ -1350,6 +1471,7 @@ def update_store(store_id: int, payload: StoreUpdate, db: Session = Depends(get_
     s = db.query(Store).filter(Store.id == store_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="Store not found")
+    _require_store_in_scope(user, store_id)
 
     fields = payload.model_dump(exclude_unset=True)
     validators = {
@@ -1414,12 +1536,14 @@ def _lifecycle_action(transition, store_id: int, user: HQUser, *, use_live_guard
 @api.post("/stores/{store_id}/disable", response_model=StoreOut)
 def disable_store_endpoint(store_id: int, user: HQUser = Depends(require("stores.archive"))):
     """Switch a Store off. Reversible; its history is untouched."""
+    _require_store_in_scope(user, store_id)
     return _lifecycle_action(disable_store, store_id, user)
 
 
 @api.post("/stores/{store_id}/enable", response_model=StoreOut)
 def enable_store_endpoint(store_id: int, user: HQUser = Depends(require("stores.update"))):
     """Switch a Store back on. An archived Store is not reachable from here."""
+    _require_store_in_scope(user, store_id)
     return _lifecycle_action(enable_store, store_id, user, use_live_guard=False)
 
 
@@ -1427,6 +1551,7 @@ def enable_store_endpoint(store_id: int, user: HQUser = Depends(require("stores.
 def archive_store_endpoint(store_id: int, user: HQUser = Depends(require("stores.archive"))):
     """Retire a Store. Nothing is deleted - the row, its Devices, its sessions
     and its events all stay readable."""
+    _require_store_in_scope(user, store_id)
     return _lifecycle_action(archive_store, store_id, user)
 
 
@@ -1440,6 +1565,7 @@ def restore_store_endpoint(store_id: int, user: HQUser = Depends(require_super_a
 def delete_store(store_id: int, db: Session = Depends(get_db), user: HQUser = Depends(require("stores.archive"))):
     """Delete means archive. A Store owns Devices, sessions, targets and events;
     removing the row would destroy the only record of what was announced where."""
+    _require_store_in_scope(user, store_id)
     _lifecycle_action(archive_store, store_id, user)
     return {"ok": True, "archived": True}
 
@@ -1449,6 +1575,7 @@ def read_store_dependencies(store_id: int,
                             user: HQUser = Depends(require("menu.stores.view"))):
     """What still refers to this Store, so the UI can show it before offering
     a delete that would be refused anyway."""
+    _require_store_in_scope(user, store_id)
     summary = store_dependencies(engine, store_id=store_id)
     if not summary.exists:
         raise HTTPException(status_code=404, detail="Store not found")
@@ -1467,6 +1594,7 @@ def hard_delete_store(store_id: int, confirm: str,
     different things must not be the same endpoint with a flag - somebody
     eventually passes the flag by accident.
     """
+    _require_store_in_scope(user, store_id)
     try:
         removed = delete_store_if_unused(engine, store_id=store_id,
                                          typed_confirmation=confirm)
@@ -1549,6 +1677,38 @@ def write_user_permission_overrides(
     }
 
 
+# ---- per-user Store/City/Zone scope -----------------------------------------
+#
+# Same reservation as the permission overrides above, and for the same
+# reason: require_super_admin, not a permission check, so an override or a
+# scope assignment can never grant an ADMIN a path to grant themselves more.
+@api.get("/users/{user_id}/store-scope")
+def read_user_store_scope(user_id: int, user: HQUser = Depends(require_super_admin)):
+    _user_or_404(user_id)
+    return {"user_id": user_id, "entries": list_user_scope(engine, user_id=user_id)}
+
+
+@api.put("/users/{user_id}/store-scope")
+def write_user_store_scope(
+    user_id: int,
+    payload: StoreScopeUpdate,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require_super_admin),
+):
+    _user_or_404(user_id)
+    try:
+        set_user_scope(engine, user_id=user_id,
+                       entries=[entry.model_dump() for entry in payload.entries])
+    except InvalidScopeEntry as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+    _write_log(
+        db, "warn",
+        f"user_store_scope_changed target_id={user_id} entries={len(payload.entries)} "
+        f"by={user.username}",
+    )
+    return {"user_id": user_id, "entries": list_user_scope(engine, user_id=user_id)}
+
+
 @api.delete("/users/{user_id}/permanently")
 def hard_delete_user(user_id: int, confirm: str,
                      db: Session = Depends(get_db),
@@ -1575,6 +1735,7 @@ def regenerate_token(store_id: int, db: Session = Depends(get_db), user: HQUser 
     s = db.query(Store).filter(Store.id == store_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="Store not found")
+    _require_store_in_scope(user, store_id)
     s.receiver_token = uuid.uuid4().hex
     db.commit()
     db.refresh(s)
@@ -1590,31 +1751,48 @@ def stores_meta(db: Session = Depends(get_db), user: HQUser = Depends(require("m
 
 
 # ================ BROADCAST ================
-def _resolve_targets(db: Session, payload: SessionCreate) -> List[Store]:
+def _resolve_targets(db: Session, payload: SessionCreate, user: HQUser) -> List[Store]:
     q = db.query(Store).filter(Store.is_active.is_(True))
     mode = payload.target_mode
     if mode == "all":
-        return q.all()
-    if mode == "selected":
+        targets = q.all()
+    elif mode == "selected":
         if not payload.store_ids:
             raise HTTPException(status_code=400, detail="store_ids required for target_mode=selected")
-        return q.filter(Store.id.in_(payload.store_ids)).all()
-    if mode == "region":
+        targets = q.filter(Store.id.in_(payload.store_ids)).all()
+    elif mode == "region":
         if not payload.region:
             raise HTTPException(status_code=400, detail="region required")
-        return q.filter(Store.region == payload.region).all()
-    if mode == "city":
+        targets = q.filter(Store.region == payload.region).all()
+    elif mode == "city":
         if not payload.city:
             raise HTTPException(status_code=400, detail="city required")
-        return q.filter(Store.city == payload.city).all()
-    if mode == "online_only":
-        return q.filter(Store.is_online_store.is_(True)).all()
-    raise HTTPException(status_code=400, detail="Invalid target_mode")
+        targets = q.filter(Store.city == payload.city).all()
+    elif mode == "online_only":
+        targets = q.filter(Store.is_online_store.is_(True)).all()
+    else:
+        raise HTTPException(status_code=400, detail="Invalid target_mode")
+
+    # Per-user Store/City/Zone scope. None means unrestricted. For an
+    # explicit "selected" list, a Store outside scope is refused rather than
+    # silently dropped - the caller asked for it by id, so a silent narrowing
+    # would broadcast to fewer Stores than the confirmation dialog showed.
+    # Every other mode narrows silently, because narrowing IS what scope means
+    # for "all my Stores"/"my Zone"/"my city".
+    scope = resolve_store_scope(engine, user)
+    if scope is not None:
+        if mode == "selected":
+            out_of_scope = [t.id for t in targets if t.id not in scope]
+            if out_of_scope:
+                raise HTTPException(status_code=403, detail=RBAC_REFUSED)
+        else:
+            targets = [t for t in targets if t.id in scope]
+    return targets
 
 
 @api.post("/broadcast/sessions", response_model=SessionOut, status_code=201)
 def create_session(payload: SessionCreate, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.START_BROADCAST))):
-    targets = _resolve_targets(db, payload)
+    targets = _resolve_targets(db, payload, user)
     if not targets:
         raise HTTPException(status_code=400, detail="No stores match the selection criteria")
     online_ids = manager.online_store_ids()

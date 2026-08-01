@@ -91,6 +91,18 @@ class PermissionOverridesUpdate(BaseModel):
     changes: List[PermissionOverrideChange] = Field(min_length=1)
 
 
+class StoreScopeEntry(BaseModel):
+    scope_type: str = Field(pattern="^(STORE|CITY|REGION)$")
+    store_id: Optional[int] = None
+    scope_value: Optional[str] = None
+
+
+class StoreScopeUpdate(BaseModel):
+    #: An empty list is meaningful: it clears every assignment for this
+    #: account, returning it to unrestricted.
+    entries: List[StoreScopeEntry] = Field(default_factory=list)
+
+
 class PasswordChangeIn(BaseModel):
     current_password: str = Field(min_length=1, max_length=PASSWORD_MAX_LENGTH)
     new_password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
@@ -216,6 +228,7 @@ class ReceiverDeviceOut(BaseModel):
     disabled_at: str | None = None
     created_at: str
     updated_at: str
+    archived_at: str | None = None
 
 
 class StoreBase(BaseModel):
