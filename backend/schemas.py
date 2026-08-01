@@ -1,12 +1,31 @@
 """Pydantic schemas for EchoCast Live API."""
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import ClassVar, Optional, List
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 # One source of truth for how long a human password must be. Four copies of a
 # number is four chances for them to disagree, and the disagreement shows up as
 # a browser accepting what the server then rejects.
 from password_policy import PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH
+
+
+def _utc_iso(value: Optional[datetime]) -> Optional[str]:
+    """Serialize a datetime as an unambiguous UTC ISO-8601 string.
+
+    SQLite drops tzinfo on round-trip, so a value read back from the database
+    is a naive datetime that is UTC by this project's storage convention (see
+    ``_as_utc_text`` in server.py). Pydantic's default ``model_dump(mode="json")``
+    serializes a naive datetime with NO trailing offset - e.g.
+    "2026-08-01T05:30:00.123456" - which a browser's ``new Date(...)`` then
+    parses as LOCAL time, not UTC. On an IST browser that silently shifts every
+    timestamp by exactly UTC+05:30, which is the broadcast-timer defect this
+    guards against. Every timestamp leaving this API must carry an explicit
+    "Z" so a client can never guess wrong.
+    """
+    if value is None:
+        return None
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return aware.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class LoginRequest(BaseModel):
@@ -265,6 +284,10 @@ class TargetOut(BaseModel):
     stopped_at: Optional[datetime] = None
     error_message: Optional[str] = None
 
+    @field_serializer("command_sent_at", "started_playing_at", "stopped_at", when_used="json")
+    def _serialize_utc(self, value: Optional[datetime]) -> Optional[str]:
+        return _utc_iso(value)
+
 
 class SessionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -280,6 +303,10 @@ class SessionOut(BaseModel):
     offline_store_count: int
     notes: Optional[str]
     created_at: datetime
+
+    @field_serializer("started_at", "ended_at", "created_at", when_used="json")
+    def _serialize_utc(self, value: Optional[datetime]) -> Optional[str]:
+        return _utc_iso(value)
 
 
 class SessionDetailOut(SessionOut):
@@ -301,3 +328,7 @@ class SystemLogOut(BaseModel):
     level: str
     message: str
     created_at: datetime
+
+    @field_serializer("created_at", when_used="json")
+    def _serialize_utc(self, value: datetime) -> Optional[str]:
+        return _utc_iso(value)

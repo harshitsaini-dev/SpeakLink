@@ -1,13 +1,14 @@
 import React from "react";
 import { api } from "@/lib/api";
 import StatusBadge from "@/components/StatusBadge";
+import { formatIst, parseUtcMs, elapsedSeconds } from "@/lib/time";
 import { RefreshCw } from "lucide-react";
 
-const fmt = (s) => s ? new Date(s).toLocaleString() : "—";
+const fmt = (s) => formatIst(s);
 const dur = (a, b) => {
   if (!a) return "—";
-  const end = b ? new Date(b).getTime() : Date.now();
-  const s = Math.max(0, Math.floor((end - new Date(a).getTime()) / 1000));
+  const endMs = b ? parseUtcMs(b) : Date.now();
+  const s = elapsedSeconds(a, endMs ?? Date.now());
   const m = Math.floor(s / 60); const r = s % 60;
   return `${m}m ${String(r).padStart(2, "0")}s`;
 };
