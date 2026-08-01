@@ -78,6 +78,7 @@ const OPERATOR = { id: 1, username: 'pilot-operator', role: 'admin' };
 const ALL_PERMISSION_CODES = [
   'menu.broadcast.view', 'broadcast.start', 'broadcast.stop', 'broadcast.emergency_stop',
   'menu.stores.view', 'stores.create', 'stores.update', 'stores.archive',
+  'stores.delete_permanently',
   'menu.receivers.view', 'devices.enrollment.create', 'devices.primary.assign',
   'devices.rotate', 'devices.disable', 'devices.revoke', 'devices.archive',
   'devices.delete_permanently',
@@ -88,7 +89,8 @@ const ALL_PERMISSION_CODES = [
 const DEFAULT_ROLE_PERMISSIONS = {
   OWNER: ALL_PERMISSION_CODES,
   ADMIN: ALL_PERMISSION_CODES.filter(
-    (c) => c !== 'users.permissions.manage' && c !== 'devices.delete_permanently'),
+    (c) => c !== 'users.permissions.manage' && c !== 'devices.delete_permanently'
+      && c !== 'stores.delete_permanently'),
   BROADCASTER: ['menu.broadcast.view', 'broadcast.start', 'broadcast.stop',
                 'broadcast.emergency_stop', 'menu.history.view', 'menu.receivers.view',
                 'menu.stores.view'],
@@ -449,6 +451,42 @@ async function mockBackend(page, options = {}) {
       return route.fulfill(json({ ok: true, deleted: { id, store_code: store.store_code } }));
     }
 
+    // History-preserving permanent delete: a tombstone, never a row removal.
+    // Mirrors backend/store_deletion.py - the Store disappears from the
+    // ordinary list (its lifecycle_state becomes 'deleted') but the row and
+    // every dependency count stay exactly as they were.
+    const storeTombstone = path.match(/^\/stores\/(\d+)\/delete-permanently$/);
+    if (method === 'POST' && storeTombstone) {
+      const id = Number(storeTombstone[1]);
+      const store = state.stores.find((s) => s.id === id);
+      if (!store) return route.fulfill(json({ detail: 'Store not found' }, 404));
+      const payload = request.postDataJSON();
+      if (!payload.acknowledged) {
+        return route.fulfill(json({
+          detail: "The 'this Store cannot be restored' acknowledgement is required." }, 400));
+      }
+      if (payload.confirm !== store.store_code) {
+        return route.fulfill(json({
+          detail: `The typed confirmation did not match. Type the Store code exactly: ${store.store_code}` }, 409));
+      }
+      if (store.lifecycle_state === 'deleted') {
+        return route.fulfill(json({ detail: 'This Store was already permanently deleted.' }, 409));
+      }
+      // A new object, never a mutation of the shared fixture - state.stores
+      // defaults to the module-level STORES array by reference, and
+      // mutating one of its elements in place would leak into every other
+      // test that reuses that fixture.
+      const tombstoned = { ...store, lifecycle_state: 'deleted', is_active: false };
+      state.stores = state.stores.map((s) => (s.id === id ? tombstoned : s));
+      state.transitions.push({ action: 'tombstone', id });
+      return route.fulfill(json({
+        ok: true, store_id: id, store_code: store.store_code, store_name: store.store_name,
+        dependency_counts: { broadcast_targets: 0, receiver_devices: 0,
+                             receiver_events: 0, receiver_enrollment_codes: 0 },
+        device_public_ids: [], credentials_revoked: 0, enrollment_codes_revoked: 0,
+      }));
+    }
+
     if (method === 'GET' && path === '/stores') {
       if (state.storesListStatus !== 200) {
         return route.fulfill(json({ detail: 'Receiver Status could not be loaded.' }, state.storesListStatus));
@@ -456,9 +494,12 @@ async function mockBackend(page, options = {}) {
       // The real backend hides archived Stores unless asked. Mirror that, so a
       // test cannot pass here and fail against the server.
       const includeArchived = url.searchParams.get('include_archived') === 'true';
+      // A tombstoned (permanently deleted) Store never comes back here,
+      // unconditionally - unlike archived, no flag reveals it operationally.
+      const notDeleted = state.stores.filter((s) => s.lifecycle_state !== 'deleted');
       const visible = includeArchived
-        ? state.stores
-        : state.stores.filter((s) => (s.lifecycle_state || 'active') !== 'archived');
+        ? notDeleted
+        : notDeleted.filter((s) => (s.lifecycle_state || 'active') !== 'archived');
       return route.fulfill(json(visible));
     }
 

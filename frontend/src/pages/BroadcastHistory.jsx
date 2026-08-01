@@ -88,7 +88,7 @@ export default function BroadcastHistory() {
               <table className="w-full text-sm">
                 <thead className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
                   <tr>
-                    <th className="px-2 py-1.5">Store ID</th>
+                    <th className="px-2 py-1.5">Store</th>
                     <th className="px-2 py-1.5">Play Status</th>
                     <th className="px-2 py-1.5">Started</th>
                     <th className="px-2 py-1.5">Stopped</th>
@@ -97,8 +97,23 @@ export default function BroadcastHistory() {
                 </thead>
                 <tbody>
                   {(open.targets || []).map((t) => (
-                    <tr key={t.id} className="border-b border-slate-100">
-                      <td className="px-2 py-1.5 font-mono text-xs">{t.store_id}</td>
+                    <tr key={t.id} className="border-b border-slate-100" data-testid={`history-target-${t.store_id}`}>
+                      <td className="px-2 py-1.5 text-xs">
+                        {t.store_name ? (
+                          <>
+                            <span className="font-medium">{t.store_name}</span>
+                            {t.store_code && <span className="font-mono text-slate-500"> ({t.store_code})</span>}
+                            {t.store_deleted && (
+                              <span data-testid={`history-target-deleted-badge-${t.store_id}`}
+                                    className="ml-1 inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-red-50 text-red-700 border border-red-200">
+                                Deleted
+                              </span>
+                            )}
+                          </>
+                        ) : (
+                          <span className="font-mono">{t.store_id}</span>
+                        )}
+                      </td>
                       <td className="px-2 py-1.5"><StatusBadge status={t.play_status}/></td>
                       <td className="px-2 py-1.5 text-xs">{fmt(t.started_playing_at)}</td>
                       <td className="px-2 py-1.5 text-xs">{fmt(t.stopped_at)}</td>
