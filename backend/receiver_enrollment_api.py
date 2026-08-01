@@ -88,6 +88,10 @@ class EnrollmentUnavailable(EnrollmentApiError):
     """
 
 
+class DeviceNotRestorable(EnrollmentApiError):
+    """Irreversible. Distinct from 'not archived', which is merely a no-op."""
+
+
 class DeviceNotFound(EnrollmentApiError):
     """No Device with that public id."""
 
@@ -321,13 +325,27 @@ def _device_row(row) -> dict:
     return {column: getattr(row, column) for column in _DEVICE_COLUMNS}
 
 
-def list_devices(engine: Engine, *, store_id: int) -> list[dict]:
+def list_devices(engine: Engine, *, store_id: int,
+                 include_deleted: bool = False) -> list[dict]:
+    """Every Device for this Store.
+
+    Permanently deleted Devices are excluded by default. Unlike archived -
+    which is reversible and deliberately still listed so its history stays
+    reachable - a deleted Device is gone from the product, and its row
+    survives only so credential/event history that names it stays readable.
+    """
     _require_phase_one(engine)
+    from sqlalchemy import inspect
+    has_deleted = "deleted_at" in {
+        c["name"] for c in inspect(engine).get_columns("receiver_devices")}
+    where = "WHERE store_id = :store_id"
+    if has_deleted and not include_deleted:
+        where += " AND deleted_at IS NULL"
     with engine.connect() as connection:
         rows = connection.execute(
             text(
                 f"SELECT {', '.join(_DEVICE_COLUMNS)} FROM receiver_devices "
-                "WHERE store_id = :store_id ORDER BY id"
+                f"{where} ORDER BY id"
             ),
             {"store_id": store_id},
         ).all()
@@ -451,10 +469,27 @@ def archive_device(engine: Engine, *, public_id: str) -> dict:
     return read_device(engine, public_id=public_id)
 
 
+def _refuse_if_permanently_deleted(engine: Engine, public_id: str) -> None:
+    """A permanently deleted Device is never restorable. Checked here so both
+    restore and any future re-enable path inherit the refusal."""
+    from sqlalchemy import inspect
+    if "deleted_at" not in {c["name"] for c in
+                            inspect(engine).get_columns("receiver_devices")}:
+        return
+    with engine.connect() as connection:
+        deleted = connection.execute(
+            text("SELECT deleted_at FROM receiver_devices WHERE public_id = :p"),
+            {"p": public_id}).scalar()
+    if deleted:
+        raise DeviceNotRestorable(
+            "This Device was permanently deleted and can never be restored.")
+
+
 def restore_device(engine: Engine, *, public_id: str) -> dict:
     """Bring an archived Device back to DISABLED, never straight to active -
     the same rule Store/User restore already follow. An operator re-enables it
     deliberately, the same way they would any other disabled Device."""
+    _refuse_if_permanently_deleted(engine, public_id)
     from datetime import datetime, timezone
 
     _require_phase_one(engine)

@@ -90,6 +90,12 @@ from store_deletion import (
     list_store_deletion_events,
     permanently_delete_store_with_history,
 )
+from device_deletion import (
+    DeviceDeletionRefused,
+    ensure_device_deletion_schema,
+    list_device_deletion_events,
+    permanently_delete_device_with_history,
+)
 from user_deletion import (
     UserDeletionRefused,
     ensure_user_deletion_schema,
@@ -196,6 +202,7 @@ from receiver_auth_mode import ReceiverAuthMode
 from receiver_key_bootstrap import bootstrap_from_environment
 from receiver_enrollment_api import (
     DeviceNotFound,
+    DeviceNotRestorable,
     EnrollmentRefused,
     EnrollmentUnavailable,
     TooManyOutstandingCodes,
@@ -536,6 +543,11 @@ def startup_event():
         ensure_user_deletion_schema(engine)
     except Exception:
         logger.warning("User deletion table could not be prepared", exc_info=False)
+
+    try:
+        ensure_device_deletion_schema(engine)
+    except Exception:
+        logger.warning("Device deletion table could not be prepared", exc_info=False)
 
     # Every hq_users migration, in one call, in the one order that works.
     #
@@ -1115,6 +1127,10 @@ def restore_receiver_device(
     """Bring an archived Device back to disabled, never straight to active."""
     try:
         device = restore_device(engine, public_id=public_id)
+    except DeviceNotRestorable as refusal:
+        # 409, not 404: the Device is right there, and the refusal is about
+        # what it has become rather than whether it exists.
+        raise HTTPException(status_code=409, detail=str(refusal))
     except DeviceNotFound:
         raise HTTPException(status_code=404, detail="Receiver Device not found")
     except EnrollmentUnavailable as unavailable:
@@ -1136,6 +1152,60 @@ def read_receiver_device_dependencies(
     return {"counts": summary.counts, "unchecked": summary.unchecked,
             "total": summary.total, "deletable": summary.deletable,
             "explanation": summary.explain()}
+
+
+class DeviceTombstoneRequest(BaseModel):
+    confirm: str
+    acknowledged: bool = False
+
+
+@api.post("/receiver-devices/{public_id}/delete-permanently")
+def tombstone_receiver_device(public_id: str, payload: DeviceTombstoneRequest,
+                              db: Session = Depends(get_db),
+                              user: HQUser = Depends(require("devices.delete_permanently"))):
+    """Permanently remove a Receiver Device from operational EchoCast even
+    though it has credential and event history.
+
+    The row is never deleted - see device_deletion.py - so every credential,
+    credential event and Receiver event that refers to it stays readable.
+    Its credentials are revoked, its primary assignment cleared, and its
+    status becomes 'retired', which the Receiver authentication path already
+    refuses. It can never be restored and its public_id can never be reused.
+    """
+    if not payload.acknowledged:
+        raise HTTPException(
+            status_code=400,
+            detail="The 'this Device cannot be restored' acknowledgement is required.",
+        )
+    try:
+        result = permanently_delete_device_with_history(
+            engine, public_id=public_id, typed_confirmation=payload.confirm,
+            actor_user_id=user.id,
+        )
+    except DeviceDeletionRefused as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    _write_log(
+        db, "warn",
+        f"DEVICE_PERMANENTLY_DELETED device={result.public_id} "
+        f"store_id={result.store_id} credentials_revoked={result.credentials_revoked} "
+        f"was_primary={result.was_primary} by={user.username}",
+    )
+    return {
+        "ok": True,
+        "public_id": result.public_id,
+        "store_id": result.store_id,
+        "display_name": result.display_name,
+        "deleted_at": result.deleted_at,
+        "credentials_revoked": result.credentials_revoked,
+        "was_primary": result.was_primary,
+    }
+
+
+@api.get("/receiver-devices/{public_id}/deletion-events")
+def read_device_deletion_events(public_id: str,
+                                user: HQUser = Depends(require("menu.receivers.view"))):
+    """Audit trail for a tombstoned Device. Never a credential or a hash."""
+    return {"events": list_device_deletion_events(engine, public_id=public_id)}
 
 
 @api.delete("/receiver-devices/{public_id}/permanently")

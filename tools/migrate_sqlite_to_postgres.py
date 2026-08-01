@@ -64,6 +64,7 @@ TABLE_ORDER = [
     "permission_audit_events",
     "store_deletion_events",
     "user_deletion_events",
+    "device_deletion_events",
     "receiver_enrollment_codes",
     "broadcast_sessions",
     "receiver_events",
@@ -84,7 +85,7 @@ TABLE_ORDER = [
 #: to repair.
 SEQUENCE_TABLES = [
     "stores", "hq_users", "system_logs", "permission_audit_events",
-    "store_deletion_events", "user_deletion_events",
+    "store_deletion_events", "user_deletion_events", "device_deletion_events",
     "receiver_enrollment_codes", "broadcast_sessions",
     "receiver_events", "receiver_devices", "user_permission_overrides",
     "user_store_scope", "store_scope_audit_events", "broadcast_targets",
