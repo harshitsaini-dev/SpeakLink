@@ -1188,3 +1188,55 @@ empty stub - so existing specs keep testing what they were written to test,
 and a spec that deliberately wants a denied permission does so by overriding
 the mock explicitly, the same way `usersStatus: 403` already worked for
 other refusals in this file.
+
+## Learning Box 27 — A blank page and a wrong-union bug look identical from the outside
+
+**What happened.** An operator scoped a BROADCASTER to Zone + City + an
+explicit Store, and Receiver Status rendered completely empty. The natural
+read of that report is "the UNION logic is broken - the explicit Store
+assignment got cancelled by the City/Zone resolving to nothing." That
+would have been a defect in `resolve_store_scope()`. It wasn't: reading
+that function line by line showed it already unions STORE ∪ CITY-matched ∪
+REGION-matched correctly, with no path where a zero-match entry cancels a
+real one.
+
+The actual defect was one layer up: `Role.BROADCASTER`'s default
+permission set never included `menu.stores.view`, and `GET /api/stores` -
+the only endpoint Receiver Status calls - hard-requires exactly that
+permission. Every fresh BROADCASTER without a hand-added override got a
+403, and the page had no `try/catch` around that fetch, so the error and
+"zero Stores in scope" rendered as the exact same blank whitespace. The
+one clue that separated the two hypotheses: reading the *live* database
+read-only showed only one scope row actually persisted, and a
+`menu.stores.view` ALLOW override already sitting on that account -
+someone had already patched around the symptom by hand without finding
+the role-default cause.
+
+**The general shape.** "A restricted/scoped view is empty" has at least
+three unrelated causes that produce identical symptoms: (1) the
+authorization check failed outright (403/401) before scope was ever
+evaluated, (2) the scope/filter logic is genuinely wrong, (3) the scope is
+correct and genuinely resolves to nothing. Only one of the three is a
+UNION bug. A frontend with no error handling on the fetch collapses all
+three into the same blank render, which is exactly what makes root-causing
+by symptom-shape alone unreliable.
+
+**What to do about it.** Before touching filter/union logic in response to
+"empty result," write down what a 403, a 200-with-`[]`, and a network
+failure each look like in the UI. If they're indistinguishable today, fix
+that first (explicit error state, explicit "zero in scope" empty-state) -
+it's cheap, and it turns the next report of this shape into a
+self-diagnosing one instead of a guessing game. Then check the permission
+the endpoint actually requires against the role's default matrix before
+assuming the bug is in the query.
+
+**Also worth remembering.** When a live database's real path isn't where
+you expect (a repo-local dev copy vs. the actual installed
+`persistent-lan-server/data/speaklink.db`), a read-only `sqlite3` query
+against the wrong file can still leave stray `-wal`/`-shm` sidecar files
+behind next to that dev copy - harmless to the real system, but enough to
+fail every test in the suite that asserts "the protected database has no
+sidecar files," across files that have nothing to do with the change
+being tested. If a wide swath of unrelated tests suddenly fail together,
+check for exactly that kind of session-local residue before suspecting
+the code.
