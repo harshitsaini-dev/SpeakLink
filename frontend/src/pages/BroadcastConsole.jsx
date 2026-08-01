@@ -1,6 +1,7 @@
 import React from "react";
 import { Mic, MicOff, Play, Square, AlertOctagon, Search, RefreshCcw, Users, Wifi, WifiOff, Radio } from "lucide-react";
 import { api } from "@/lib/api";
+import { useAuth } from "@/contexts/AuthContext";
 import { useBroadcast } from "@/contexts/BroadcastContext";
 import { elapsedSeconds } from "@/lib/time";
 import StatusBadge from "@/components/StatusBadge";
@@ -44,6 +45,7 @@ function fmtDur(sec) {
 }
 
 export default function BroadcastConsole() {
+  const { can } = useAuth();
   const {
     current, load: loadBroadcast, isLive, meter, broadcasterStatus,
     error, setError, startBroadcast: startBroadcastAudio,
@@ -222,14 +224,20 @@ export default function BroadcastConsole() {
         {/* Emergency stop */}
         <div className="border border-red-200 bg-red-50 rounded-md shadow-sm p-4 flex flex-col justify-between">
           <div className="text-xs font-bold uppercase tracking-[0.15em] text-red-900 flex items-center gap-1"><AlertOctagon size={14}/> Safety Control</div>
-          <button
-            data-testid="emergency-stop-btn"
-            disabled={busy}
-            onClick={emergencyStop}
-            className="h-24 mt-3 w-full text-lg sm:text-2xl font-bold bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:bg-red-300 text-white rounded-lg shadow-md border border-red-800 uppercase tracking-widest flex items-center justify-center gap-3 transition-all"
-          >
-            <AlertOctagon size={26} /> Emergency Stop
-          </button>
+          {can("broadcast.emergency_stop") ? (
+            <button
+              data-testid="emergency-stop-btn"
+              disabled={busy}
+              onClick={emergencyStop}
+              className="h-24 mt-3 w-full text-lg sm:text-2xl font-bold bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:bg-red-300 text-white rounded-lg shadow-md border border-red-800 uppercase tracking-widest flex items-center justify-center gap-3 transition-all"
+            >
+              <AlertOctagon size={26} /> Emergency Stop
+            </button>
+          ) : (
+            <p className="mt-3 text-xs text-red-800">
+              Your account cannot Emergency Stop. Ask an administrator.
+            </p>
+          )}
         </div>
       </div>
 
@@ -304,19 +312,23 @@ export default function BroadcastConsole() {
             )}
 
             {!isLive ? (
-              <button
-                data-testid="start-broadcast-btn"
-                onClick={() => setConfirmOpen(true)}
-                disabled={busy || targetIds.length === 0 || !campaign.trim() || (targetMode === "region" && !region) || (targetMode === "city" && !city)}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-semibold text-white bg-blue-700 hover:bg-blue-800 disabled:bg-slate-400"
-              >
-                <Play size={16}/> Start Live Broadcast
-              </button>
+              can("broadcast.start") && (
+                <button
+                  data-testid="start-broadcast-btn"
+                  onClick={() => setConfirmOpen(true)}
+                  disabled={busy || targetIds.length === 0 || !campaign.trim() || (targetMode === "region" && !region) || (targetMode === "city" && !city)}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-semibold text-white bg-blue-700 hover:bg-blue-800 disabled:bg-slate-400"
+                >
+                  <Play size={16}/> Start Live Broadcast
+                </button>
+              )
             ) : (
-              <button data-testid="stop-broadcast-btn" onClick={stopBroadcast} disabled={busy}
-                      className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-semibold text-white bg-slate-800 hover:bg-slate-900">
-                <Square size={16}/> Stop Broadcast
-              </button>
+              can("broadcast.stop") && (
+                <button data-testid="stop-broadcast-btn" onClick={stopBroadcast} disabled={busy}
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-semibold text-white bg-slate-800 hover:bg-slate-900">
+                  <Square size={16}/> Stop Broadcast
+                </button>
+              )
             )}
 
             <button data-testid="refresh-btn" onClick={load}
