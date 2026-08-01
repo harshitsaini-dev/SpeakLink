@@ -71,6 +71,33 @@ const DEVICES = [PRIMARY_DEVICE, STANDBY_DEVICE];
 const FAKE_TOKEN = 'test-token-not-a-real-jwt';
 const OPERATOR = { id: 1, username: 'pilot-operator', role: 'admin' };
 
+// Mirrors backend/permission_catalog.py's DEFAULT_ROLE_PERMISSIONS exactly -
+// GET /auth/permissions is what AuthContext.can() is built from, and every
+// action button in the app is now gated by it, so a mock that returns nothing
+// here would silently hide every button in every existing spec.
+const ALL_PERMISSION_CODES = [
+  'menu.broadcast.view', 'broadcast.start', 'broadcast.stop', 'broadcast.emergency_stop',
+  'menu.stores.view', 'stores.create', 'stores.update', 'stores.archive',
+  'menu.receivers.view', 'devices.enrollment.create', 'devices.primary.assign',
+  'devices.rotate', 'devices.disable', 'devices.revoke', 'devices.archive',
+  'devices.delete_permanently',
+  'menu.history.view',
+  'menu.logs.view',
+  'menu.users.view', 'users.create', 'users.update', 'users.disable', 'users.permissions.manage',
+];
+const DEFAULT_ROLE_PERMISSIONS = {
+  OWNER: ALL_PERMISSION_CODES,
+  ADMIN: ALL_PERMISSION_CODES.filter(
+    (c) => c !== 'users.permissions.manage' && c !== 'devices.delete_permanently'),
+  BROADCASTER: ['menu.broadcast.view', 'broadcast.start', 'broadcast.stop',
+                'broadcast.emergency_stop', 'menu.history.view', 'menu.receivers.view'],
+  VIEWER: ['menu.broadcast.view', 'menu.stores.view', 'menu.receivers.view',
+           'menu.history.view', 'menu.logs.view'],
+};
+function defaultPermissionsFor(role) {
+  return DEFAULT_ROLE_PERMISSIONS[String(role || '').toUpperCase()] || [];
+}
+
 //: HQ accounts, in all three lifecycle states. Deliberately carries no
 //: password_hash and no session_version: if the real API ever started sending
 //: either, a test written against this fixture would not notice, so the fixture
@@ -123,6 +150,17 @@ async function mockBackend(page, options = {}) {
     // Who is signed in. Defaults to the existing operator so every spec written
     // before User management keeps the behaviour it was written against.
     operator: options.operator || OPERATOR,
+    // Explicit override for a test proving a per-user DENY/ALLOW - defaults
+    // to the role's real default matrix, exactly like the backend resolver
+    // does when there is no override row.
+    permissions: options.permissions || defaultPermissionsFor((options.operator || OPERATOR).role),
+    // Simulates the backend's independent enforcement (permission or Store
+    // scope) refusing a request the frontend UI would otherwise have allowed
+    // through - e.g. a hand-crafted fetch bypassing a hidden button. 200
+    // means "let the mock's normal logic decide", matching every other
+    // *Status option in this file.
+    storeUpdateStatus: options.storeUpdateStatus || 200,
+    sessionCreateStatus: options.sessionCreateStatus || 200,
     users: options.users || HQ_USERS.map((row) => ({ ...row })),
     usersStatus: options.usersStatus || 200,
     //: How many broadcast sessions each account is recorded as having started.
@@ -169,6 +207,11 @@ async function mockBackend(page, options = {}) {
 
     if (method === 'GET' && path === '/auth/me') {
       return route.fulfill(json(state.operator));
+    }
+
+    if (method === 'GET' && path === '/auth/permissions') {
+      return route.fulfill(json({ role: String(state.operator.role || '').toUpperCase(),
+                                  permissions: state.permissions }));
     }
 
     // ---- HQ Users ---------------------------------------------------------
@@ -250,6 +293,55 @@ async function mockBackend(page, options = {}) {
         state.users = state.users.filter((c) => c.id !== id);
         state.userActions.push({ action: 'delete', id });
         return route.fulfill(json({ ok: true, deleted: { id, username: row.username } }));
+      }
+
+      // Rights editor: GET/PUT /users/{id}/permissions. Minimal shape - just
+      // enough for the SUPER ADMIN-only visibility and round-trip to be
+      // provable in a real browser; the resolver logic itself is proven in
+      // the backend suite, not re-implemented here.
+      const rightsMatch = path.match(/^\/users\/(\d+)\/permissions$/);
+      if (rightsMatch) {
+        const id = Number(rightsMatch[1]);
+        const row = state.users.find((candidate) => candidate.id === id);
+        if (!row) return route.fulfill(json({ detail: 'No such HQ User' }, 404));
+        if (row.role === 'OWNER') {
+          return route.fulfill(json({ detail: 'OWNER permissions cannot be overridden.' }, 409));
+        }
+        state.userRightsOverrides = state.userRightsOverrides || {};
+        const overrides = state.userRightsOverrides[id] || {};
+        if (method === 'PUT') {
+          const body = JSON.parse(request.postData() || '{}');
+          for (const change of body.changes || []) overrides[change.code] = change.effect;
+          state.userRightsOverrides[id] = overrides;
+        }
+        const roleDefaults = defaultPermissionsFor(row.role);
+        const catalogLabels = {
+          'stores.update': ['Stores', 'Edit Store'],
+          'stores.create': ['Stores', 'Create Store'],
+          'broadcast.start': ['Broadcast', 'Start Broadcast'],
+        };
+        const permissions = ALL_PERMISSION_CODES.map((code) => {
+          const roleAllowed = roleDefaults.includes(code);
+          const override = overrides[code] || 'INHERIT';
+          const effective = override === 'ALLOW' ? true : override === 'DENY' ? false : roleAllowed;
+          const [group, label] = catalogLabels[code] || [code.split('.')[0], code];
+          return { code, group, label, role_allowed: roleAllowed, override, effective };
+        });
+        return route.fulfill(json({ user_id: id, role: row.role, permissions }));
+      }
+
+      // Scope editor: GET/PUT /users/{id}/store-scope.
+      const scopeMatch = path.match(/^\/users\/(\d+)\/store-scope$/);
+      if (scopeMatch) {
+        const id = Number(scopeMatch[1]);
+        const row = state.users.find((candidate) => candidate.id === id);
+        if (!row) return route.fulfill(json({ detail: 'No such HQ User' }, 404));
+        state.userScope = state.userScope || {};
+        if (method === 'PUT') {
+          const body = JSON.parse(request.postData() || '{}');
+          state.userScope[id] = body.entries || [];
+        }
+        return route.fulfill(json({ user_id: id, entries: state.userScope[id] || [] }));
       }
 
       const match = path.match(/^\/users\/(\d+)(?:\/([a-z-]+))?$/);
@@ -366,6 +458,12 @@ async function mockBackend(page, options = {}) {
     }
 
     if (method === 'PUT' && /^\/stores\/\d+$/.test(path)) {
+      if (state.storeUpdateStatus !== 200) {
+        return route.fulfill(json(
+          { detail: 'You do not have permission to perform this action.' },
+          state.storeUpdateStatus,
+        ));
+      }
       const id = Number(path.split('/')[2]);
       const payload = request.postDataJSON();
       if ('receiver_token' in payload || 'is_active' in payload) {
@@ -426,6 +524,12 @@ async function mockBackend(page, options = {}) {
     }
 
     if (method === 'POST' && path === '/broadcast/sessions') {
+      if (state.sessionCreateStatus !== 200) {
+        return route.fulfill(json(
+          { detail: 'You do not have permission to perform this action.' },
+          state.sessionCreateStatus,
+        ));
+      }
       const payload = request.postDataJSON();
       state.startCalls.push(payload);
       return route.fulfill(json({ id: state.sessionId, campaign_name: payload.campaign_name, status: 'pending' }));
@@ -509,6 +613,43 @@ async function mockBackend(page, options = {}) {
           : device,
       );
       return route.fulfill(json(state.devices));
+    }
+
+    if (method === 'POST' && /^\/receiver-devices\/[^/]+\/archive$/.test(path)) {
+      const publicId = path.split('/')[2];
+      const now = '2026-08-01T12:00:00+00:00';
+      state.devices = state.devices.map((device) =>
+        device.public_id === publicId
+          ? { ...device, status: 'disabled', archived_at: now, role: 'STANDBY' }
+          : device,
+      );
+      return route.fulfill(json(state.devices.find((d) => d.public_id === publicId)));
+    }
+
+    if (method === 'POST' && /^\/receiver-devices\/[^/]+\/restore$/.test(path)) {
+      const publicId = path.split('/')[2];
+      state.devices = state.devices.map((device) =>
+        device.public_id === publicId ? { ...device, archived_at: null } : device,
+      );
+      return route.fulfill(json(state.devices.find((d) => d.public_id === publicId)));
+    }
+
+    if (method === 'GET' && /^\/receiver-devices\/[^/]+\/dependencies$/.test(path)) {
+      const publicId = path.split('/')[2];
+      return route.fulfill(json({
+        counts: {}, unchecked: [], total: 0, deletable: true,
+        explanation: 'Nothing refers to this record, so it can be removed.',
+      }));
+    }
+
+    if (method === 'DELETE' && /^\/receiver-devices\/[^/]+\/permanently$/.test(path)) {
+      const publicId = path.split('/')[2];
+      const confirm = url.searchParams.get('confirm');
+      if (confirm !== publicId) {
+        return route.fulfill(json({ detail: 'The typed confirmation did not match.' }, 409));
+      }
+      state.devices = state.devices.filter((device) => device.public_id !== publicId);
+      return route.fulfill(json({ ok: true, deleted: { public_id: publicId } }));
     }
 
     // Anything unmocked is a bug in the test, not something to paper over.
