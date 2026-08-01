@@ -121,6 +121,8 @@ EXPECTED: dict[str, object] = {
     "restore_receiver_device": "devices.archive",
     "read_receiver_device_dependencies": "menu.receivers.view",
     "hard_delete_receiver_device": "devices.delete_permanently",
+    "tombstone_receiver_device": "devices.delete_permanently",
+    "read_device_deletion_events": "menu.receivers.view",
     "revoke_receiver_device": "devices.revoke",
     "promote_receiver_device": "devices.primary.assign",
     "rotate_receiver_device": "devices.rotate",
