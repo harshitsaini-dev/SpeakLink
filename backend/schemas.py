@@ -81,6 +81,16 @@ class HQUserRoleUpdate(BaseModel):
     role: str
 
 
+class PermissionOverrideChange(BaseModel):
+    code: str
+    #: "INHERIT" deletes the override row rather than storing a redundant one.
+    effect: str = Field(pattern="^(INHERIT|ALLOW|DENY)$")
+
+
+class PermissionOverridesUpdate(BaseModel):
+    changes: List[PermissionOverrideChange] = Field(min_length=1)
+
+
 class PasswordChangeIn(BaseModel):
     current_password: str = Field(min_length=1, max_length=PASSWORD_MAX_LENGTH)
     new_password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
