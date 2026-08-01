@@ -67,6 +67,8 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
     PermissionDefinition("stores.create", "Stores", "Create Store"),
     PermissionDefinition("stores.update", "Stores", "Edit Store"),
     PermissionDefinition("stores.archive", "Stores", "Disable / Archive Store"),
+    PermissionDefinition("stores.delete_permanently", "Stores",
+                        "Permanently Delete Store (history-preserving tombstone)"),
 
     PermissionDefinition("menu.receivers.view", "Receivers", "View Receiver Status"),
     PermissionDefinition("devices.enrollment.create", "Receivers", "Create Enrolment Code"),
@@ -114,7 +116,8 @@ _VIEW_ONLY_CODES = frozenset({
 DEFAULT_ROLE_PERMISSIONS: dict[Role, frozenset[str]] = {
     Role.OWNER: _ALL_CODES,
     Role.ADMIN: _ALL_CODES - frozenset(
-        {"users.permissions.manage", "devices.delete_permanently"}
+        {"users.permissions.manage", "devices.delete_permanently",
+         "stores.delete_permanently"}
     ),
     # Broadcast Console, its three controls, History and Receiver Status -
     # nothing that edits a Store, a Device's security, or a User.

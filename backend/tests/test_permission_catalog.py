@@ -100,9 +100,15 @@ def test_admin_default_permissions_exclude_permissions_manage_and_permanent_dele
     admin = DEFAULT_ROLE_PERMISSIONS[Role.ADMIN]
     assert "users.permissions.manage" not in admin
     assert "devices.delete_permanently" not in admin
-    # ADMIN may still archive a Device - only permanent deletion is reserved.
+    assert "stores.delete_permanently" not in admin
+    # ADMIN may still archive a Store or a Device - only permanent deletion
+    # is reserved.
     assert "devices.archive" in admin
-    assert admin == PERMISSION_CODES - {"users.permissions.manage", "devices.delete_permanently"}
+    assert "stores.archive" in admin
+    assert admin == PERMISSION_CODES - {
+        "users.permissions.manage", "devices.delete_permanently",
+        "stores.delete_permanently",
+    }
 
 
 def test_devices_delete_permanently_defaults_to_super_admin_only():
@@ -111,6 +117,14 @@ def test_devices_delete_permanently_defaults_to_super_admin_only():
             assert "devices.delete_permanently" in codes
         else:
             assert "devices.delete_permanently" not in codes
+
+
+def test_stores_delete_permanently_defaults_to_super_admin_only():
+    for role, codes in DEFAULT_ROLE_PERMISSIONS.items():
+        if role is Role.OWNER:
+            assert "stores.delete_permanently" in codes
+        else:
+            assert "stores.delete_permanently" not in codes
 
 
 def test_devices_archive_is_allowed_for_owner_and_admin_only():

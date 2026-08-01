@@ -21,7 +21,7 @@ from starlette.middleware.cors import CORSMiddleware
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from db import engine, get_db, SessionLocal
 from models import (
@@ -84,6 +84,11 @@ from deletion_safety import (
     device_dependencies,
     store_dependencies,
     user_dependencies,
+)
+from store_deletion import (
+    StoreDeletionRefused,
+    list_store_deletion_events,
+    permanently_delete_store_with_history,
 )
 from user_schema import UserSchemaError, ensure_user_auth_schema
 from user_lifecycle import (
@@ -1430,6 +1435,13 @@ def list_stores(
         query = query.filter(
             (Store.lifecycle_state.is_(None)) | (Store.lifecycle_state != "archived")
         )
+    # A permanently deleted Store never comes back, unconditionally - unlike
+    # archived, there is no flag that reveals it here. Its history stays
+    # readable through the rows that still reference it (Broadcast History,
+    # Receiver events), never through this operational list.
+    query = query.filter(
+        (Store.lifecycle_state.is_(None)) | (Store.lifecycle_state != "deleted")
+    )
     if city:
         query = query.filter(Store.city == city)
     if region:
@@ -1469,7 +1481,7 @@ def create_store(payload: StoreCreate, db: Session = Depends(get_db), user: HQUs
 def update_store(store_id: int, payload: StoreUpdate, db: Session = Depends(get_db), user: HQUser = Depends(require("stores.update"))):
     """Edit a Store's details. Never its state, and never its credentials."""
     s = db.query(Store).filter(Store.id == store_id).first()
-    if not s:
+    if not s or s.lifecycle_state == "deleted":
         raise HTTPException(status_code=404, detail="Store not found")
     _require_store_in_scope(user, store_id)
 
@@ -1607,6 +1619,68 @@ def hard_delete_store(store_id: int, confirm: str,
     return {"ok": True, "deleted": removed}
 
 
+class StoreTombstoneRequest(BaseModel):
+    confirm: str
+    acknowledged: bool = False
+
+
+@api.post("/stores/{store_id}/delete-permanently")
+def tombstone_store(store_id: int, payload: StoreTombstoneRequest,
+                    db: Session = Depends(get_db),
+                    user: HQUser = Depends(require("stores.delete_permanently"))):
+    """Permanently remove a Store from operational SpeakLink even though it has
+    history. The row is never deleted - see store_deletion.py - so every
+    Broadcast Target, Receiver event, Device and enrollment code that refers
+    to it stays exactly as readable as it was.
+
+    stores.delete_permanently defaults to SUPER ADMIN/OWNER only. This is
+    deliberately a different, stronger action than DELETE /stores/{id}
+    /permanently, which only ever removes a Store nothing has ever
+    referenced.
+    """
+    if not payload.acknowledged:
+        raise HTTPException(
+            status_code=400,
+            detail="The 'this Store cannot be restored' acknowledgement is required.",
+        )
+    try:
+        result = permanently_delete_store_with_history(
+            engine, store_id=store_id, typed_confirmation=payload.confirm,
+            actor_user_id=user.id, live_store_ids=_live_store_ids(),
+        )
+    except StoreDeletionRefused as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    _write_log(
+        db, "warn",
+        f"STORE_PERMANENTLY_DELETED store_id={result.store_id} "
+        f"code={result.store_code} history_counts={result.dependency_counts} "
+        f"devices={len(result.device_public_ids)} "
+        f"credentials_revoked={result.credentials_revoked} "
+        f"enrollment_codes_revoked={result.enrollment_codes_revoked} "
+        f"by={user.username}",
+    )
+    return {
+        "ok": True,
+        "store_id": result.store_id,
+        "store_code": result.store_code,
+        "store_name": result.store_name,
+        "deleted_at": result.deleted_at,
+        "dependency_counts": result.dependency_counts,
+        "device_public_ids": result.device_public_ids,
+        "credentials_revoked": result.credentials_revoked,
+        "enrollment_codes_revoked": result.enrollment_codes_revoked,
+    }
+
+
+@api.get("/stores/{store_id}/deletion-events")
+def read_store_deletion_events(store_id: int,
+                               user: HQUser = Depends(require("menu.stores.view"))):
+    """Audit trail for a tombstoned Store - who deleted it, when, and what it
+    affected. Reachable on a deleted Store's history even though the Store
+    itself is gone from every operational list."""
+    return {"events": list_store_deletion_events(engine, store_id=store_id)}
+
+
 @api.get("/users/{user_id}/dependencies")
 def read_user_dependencies(user_id: int,
                            user: HQUser = Depends(require("menu.users.view"))):
@@ -1738,7 +1812,7 @@ def hard_delete_user(user_id: int, confirm: str,
 @api.post("/stores/{store_id}/regenerate-token", response_model=StoreOut)
 def regenerate_token(store_id: int, db: Session = Depends(get_db), user: HQUser = Depends(require("stores.update"))):
     s = db.query(Store).filter(Store.id == store_id).first()
-    if not s:
+    if not s or s.lifecycle_state == "deleted":
         raise HTTPException(status_code=404, detail="Store not found")
     _require_store_in_scope(user, store_id)
     s.receiver_token = uuid.uuid4().hex
@@ -1750,8 +1824,11 @@ def regenerate_token(store_id: int, db: Session = Depends(get_db), user: HQUser 
 
 @api.get("/stores/meta/regions-cities", response_model=StoresMetaOut)
 def stores_meta(db: Session = Depends(get_db), user: HQUser = Depends(require("menu.stores.view"))):
-    regions = [r[0] for r in db.query(Store.region).distinct().order_by(Store.region).all() if r[0]]
-    cities = [c[0] for c in db.query(Store.city).distinct().order_by(Store.city).all() if c[0]]
+    not_deleted = (Store.lifecycle_state.is_(None)) | (Store.lifecycle_state != "deleted")
+    regions = [r[0] for r in db.query(Store.region).filter(not_deleted)
+              .distinct().order_by(Store.region).all() if r[0]]
+    cities = [c[0] for c in db.query(Store.city).filter(not_deleted)
+             .distinct().order_by(Store.city).all() if c[0]]
     return StoresMetaOut(regions=regions, cities=cities)
 
 
@@ -2053,7 +2130,15 @@ def session_detail(sid: int, db: Session = Depends(get_db), user: HQUser = Depen
             setattr(session, key, value)
     targets = targets_query.all()
     out = SessionDetailOut.model_validate(session)
-    out.targets = [TargetOut.model_validate(t) for t in targets]
+    enriched = []
+    for t in targets:
+        target_out = TargetOut.model_validate(t)
+        if t.store is not None:
+            target_out.store_code = t.store.store_code
+            target_out.store_name = t.store.store_name
+            target_out.store_deleted = t.store.lifecycle_state == "deleted"
+        enriched.append(target_out)
+    out.targets = enriched
     return out
 
 

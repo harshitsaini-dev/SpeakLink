@@ -109,11 +109,23 @@ def resolve_store_scope(engine: Engine, user) -> frozenset[int] | None:
         store_ids: set[int] = set()
         for row in rows:
             if row.scope_type == "STORE":
-                store_ids.add(row.store_id)
+                # A permanently deleted Store grants no scope - it must stay
+                # absent from every operational surface, including this one,
+                # even though the assignment row itself is left alone (it is
+                # historical evidence of what was once assigned, not a live
+                # grant).
+                still_exists = connection.execute(
+                    text("SELECT 1 FROM stores WHERE id = :id AND "
+                         "(lifecycle_state IS NULL OR lifecycle_state != 'deleted')"),
+                    {"id": row.store_id},
+                ).first()
+                if still_exists:
+                    store_ids.add(row.store_id)
             else:
                 column = "city" if row.scope_type == "CITY" else "region"
                 matched = connection.execute(
-                    text(f"SELECT id FROM stores WHERE {column} = :value"),
+                    text(f"SELECT id FROM stores WHERE {column} = :value AND "
+                         "(lifecycle_state IS NULL OR lifecycle_state != 'deleted')"),
                     {"value": row.scope_value},
                 ).all()
                 store_ids.update(r[0] for r in matched)
@@ -189,7 +201,9 @@ def set_user_scope(engine: Engine, *, user_id: int, entries: list[dict],
                 if not store_id:
                     raise InvalidScopeEntry("A STORE scope entry needs a store_id.")
                 found = connection.execute(
-                    text("SELECT 1 FROM stores WHERE id = :id"), {"id": store_id}
+                    text("SELECT 1 FROM stores WHERE id = :id AND "
+                         "(lifecycle_state IS NULL OR lifecycle_state != 'deleted')"),
+                    {"id": store_id}
                 ).first()
                 if not found:
                     raise InvalidScopeEntry(f"No Store with id {store_id}.")
@@ -204,7 +218,8 @@ def set_user_scope(engine: Engine, *, user_id: int, entries: list[dict],
                 # it would silently resolve to nothing later, which looks
                 # identical to "no assignments" only from the wrong side.
                 known = connection.execute(
-                    text(f"SELECT 1 FROM stores WHERE {column} = :value LIMIT 1"),
+                    text(f"SELECT 1 FROM stores WHERE {column} = :value AND "
+                         "(lifecycle_state IS NULL OR lifecycle_state != 'deleted') LIMIT 1"),
                     {"value": value},
                 ).first()
                 if not known:
