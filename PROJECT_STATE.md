@@ -4102,8 +4102,29 @@ unrelated-looking `TypeError`. 70 failures, 250 errors.
 
 The serious part was not the noise: this suite creates, migrates and
 permanently deletes Stores, and it had been pointed at the live
-production database. Only the absence of a reachable connection
-prevented destructive writes.
+production database.
+
+**CORRECTION (verified the following day against the real Supabase
+project).** An earlier version of this entry claimed "only the absence of
+a reachable connection prevented destructive writes". That claim was
+WRONG, and the evidence is now in the Supabase project itself: it
+contains eight tables created 2026-08-01 14:17:35 UTC, holding 44 seeded
+Stores, one `hq_users` row named `founder` - the exact ADMIN_USERNAME the
+test fixtures use, and a name that appears nowhere in the live SQLite
+database - and 268 `system_logs` rows spanning 14:17:36 to 14:25:45 UTC,
+beginning with "EchoCast Live server started" and "login_succeeded
+user=founder".
+
+Only the eight ORM (`Base.metadata`) tables exist there; all eleven
+raw-SQL tables are absent, which is exactly what happens when
+`Base.metadata.create_all()` succeeds on PostgreSQL and then
+`run_receiver_credential_phase_one`'s SQLite-only DDL (`AUTOINCREMENT`,
+`GLOB`) fails against it.
+
+So the writes DID happen: the suite connected to the production database
+and seeded it. Nothing of value was destroyed only because the project
+was new and empty at the time - not because anything stopped it. The
+guard below is what actually prevents a recurrence.
 
 `backend/tests/conftest.py` now forces `APP_ENV=development` and blanks
 `DATABASE_URL` before any test module is imported, in every worker.
