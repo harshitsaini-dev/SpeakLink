@@ -619,6 +619,36 @@ because only the runtime can count them.
 
 ---
 
+## Learning Box 24 — A test that reads your own source string is a contract, not a formality
+
+**What happened.** Adding per-user permission overrides meant splitting one
+coarse `MANAGE_DEVICES` flag into five independent actions
+(`devices.enrollment.create`, `.rotate`, `.disable`, `.revoke`,
+`devices.primary.assign`) plus a `menu.receivers.view` read right. The change
+itself was correct and every behavioural test passed. The full suite still
+failed, on a test that had nothing to do with permissions on its surface:
+`test_the_route_is_guarded_by_the_manage_devices_permission` asserted
+`'require(Permission.MANAGE_DEVICES)' in inspect.getsource(...)` - a literal
+string match against the route's own source code.
+
+**The general shape.** A test that reads a route's source text to confirm its
+guard is not a brittle accident; it is a *pin*, deliberately placed so a
+permission change on that route cannot ship unnoticed (see Learning Box 1 in
+`RECEIVER_STATUS_CONTRACT` history and `test_rbac_endpoint_matrix.py`'s own
+stated purpose). When it fails, the question is never "how do I make this
+pass again" - it is "does the NEW guard say what I meant." Here the answer was
+yes: a read-only enrolment-status list moving from a Device-security flag to a
+view-only one is exactly the improvement the whole feature was for.
+
+**What to do about it.** Update the pinned string to the new, deliberately
+different value, and say why in the test itself - not just in the commit
+message, which nobody reads while triaging a red suite six months from now.
+The rewritten assertion (`'require("menu.receivers.view")' in source`) is
+worth exactly as much as the old one: it will catch the *next* accidental
+change to this specific route, whatever it turns out to be.
+
+---
+
 ## A pass list can be a lie by omission
 
 The credential remediation had 22 required proofs. My comparison script printed

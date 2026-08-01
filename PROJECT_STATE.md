@@ -3461,3 +3461,145 @@ unrelated VS Code pythons survived the manual stop that proved it.
 
 `READY_FOR_ONE_STORE_GUI_RETEST`. The wizard pages that present the new
 enrolment states are not yet built, and no Store PC has run this package.
+
+## Per-user permissions / RBAC
+
+Branch: `feature/user-permissions-rbac`. `rbac.py` already had a coarse,
+ten-permission role matrix (`MANAGE_STORES`, `MANAGE_DEVICES`,
+`MANAGE_USERS`, ...) and a central `require(Permission.X)` dependency - the
+right shape, the wrong grain: "view a Store" and "edit a Store" were the same
+flag, so there was no way to let someone see the Store list without also
+letting them archive one.
+
+### Permission catalog
+
+`backend/permission_catalog.py` is the single source of truth: 20 codes
+across six groups (Broadcast, Stores, Receivers, History, Logs, Users),
+each a `menu.*.view` right or a specific action
+(`stores.create`/`update`/`archive`, `devices.enrollment.create`/
+`primary.assign`/`rotate`/`disable`/`revoke`, `broadcast.start`/`stop`/
+`emergency_stop`, `users.create`/`update`/`disable`/`permissions.manage`).
+
+### Default role matrix
+
+- **OWNER** - every code.
+- **ADMIN** - every code except `users.permissions.manage`, mirroring how
+  `rbac.py` already withheld `MANAGE_SECURITY` from ADMIN.
+- **BROADCASTER** - `menu.broadcast.view`, `broadcast.start/stop/
+  emergency_stop`, `menu.history.view`, `menu.receivers.view`. No Store
+  modification, no Device security changes, no User management.
+- **VIEWER** - every `menu.*.view` code except `menu.users.view`, matching the
+  existing frontend nav restriction (`roles: ["OWNER", "ADMIN"]` on the Users
+  link) and the fact VIEWER never held `MANAGE_USERS`.
+
+### Effective permission algorithm
+
+`resolve_effective_permissions(engine, user)`: an inactive account or an
+unparsable role returns empty (fail closed, same as `rbac.effective_
+permissions`). Otherwise: start from the role's default codes
+(`role_permissions` table, reseeded from the code matrix on every boot),
+then apply this user's `user_permission_overrides` rows - `ALLOW` adds a
+code, `DENY` removes it. Only one override row can exist per
+`(user_id, permission_code)` (unique constraint), so "DENY beats ALLOW" is
+really "an override, whichever effect it carries, beats the role default."
+`INHERIT` is not a stored value - it is the absence of a row, applied by
+deleting it rather than storing a redundant one.
+
+### Database migration
+
+`ensure_permission_schema(engine)`, additive and idempotent, called from
+`startup_event` alongside the other schema helpers:
+
+- `permissions(code PK, permission_group, label)`
+- `role_permissions(role, permission_code PK, FK -> permissions)`
+- `user_permission_overrides(id PK, user_id FK -> hq_users, permission_code
+  FK -> permissions, effect CHECK IN ('ALLOW','DENY'), created_at,
+  updated_at, UNIQUE(user_id, permission_code))`
+- `permission_audit_events(id PK, actor_user_id FK, target_user_id FK,
+  permission_code, old_value, new_value, created_at)`
+
+`permissions` and `role_permissions` are DERIVED configuration - the code is
+the source of truth - so they are safely deleted and reseeded on every boot.
+`user_permission_overrides` and `permission_audit_events` hold operator
+decisions and history and are never touched by seeding.
+
+### Backend endpoints protected
+
+Every one of the ~29 existing `require(Permission.MANAGE_STORES/
+MANAGE_DEVICES/MANAGE_USERS)` call sites was converted to its specific
+fine-grained code (e.g. `create_store` -> `require("stores.create")`,
+`update_store` -> `require("stores.update")`, `rotate_receiver_device` ->
+`require("devices.rotate")`). The `require()` factory itself now accepts
+either a legacy `rbac.Permission` (mapped through `_COARSE_TO_FINE` onto its
+matching fine-grained code - broadcast start/stop/emergency-stop and the two
+remaining view-only dashboards) or a fine-grained string directly, and every
+route's actual decision still runs through exactly one function,
+`permission_catalog.resolve_effective_permissions`. No route compares a role
+string. `tests/test_rbac_endpoint_matrix.py` pins the guard on every route by
+reading the running app's own routing table.
+
+New: `GET /auth/permissions` (any signed-in account - its own effective
+role + codes), `GET/PUT /users/{id}/permissions` (OWNER only, via the same
+`require_super_admin` dependency `reset-hq-user-password` already used -
+not `require("users.permissions.manage")`, deliberately, so an override can
+never grant an ADMIN a path to grant themselves more).
+
+### Owner lockout protections
+
+`set_permission_overrides` refuses outright (`OwnerOverrideRefused`, HTTP
+409) if the target account's role is OWNER - not just "the last one": OWNER's
+rights are never narrowed by an override, full stop, because OWNER is the
+account of last resort and there is no per-permission equivalent of the
+existing last-OWNER lifecycle guard to fall back on. Only OWNER may reach
+the endpoints that write overrides at all, enforced independently of the
+override system itself.
+
+### Frontend
+
+`AuthContext` fetches `/auth/permissions` on login and on `/auth/me`
+rehydration, exposing `can(code)`. `frontend/src/lib/menuPermissions.js` is
+the one map from route path to menu permission, used by both `Layout.jsx`
+(hides the sidebar link) and `ProtectedRoute.jsx` (redirects a direct URL
+visit to the first route the account can actually reach) - menu hiding is a
+courtesy; the backend enforces the same rule again, independently, on every
+request. `UserManagement.jsx` gained a "Rights" button (OWNER only, hidden
+for OWNER targets) opening a rights editor: Role / Override (Inherit/Allow/
+Deny select) / Effective per permission, grouped by Broadcast/Stores/
+Receivers/History/Logs/Users, with Save Changes/Cancel and explicit loading/
+success/error states. Changing rights calls only `PUT /users/{id}/
+permissions` - never a password or role endpoint.
+
+### Audit
+
+Every override write - including reverting to INHERIT - appends one
+`permission_audit_events` row: actor, target, permission code, old value,
+new value, UTC timestamp. No password, JWT, Receiver credential or HMAC key
+ever reaches that table or the accompanying `system_logs` line (which
+carries only a change count, never a per-permission diff).
+
+### Tests
+
+`backend/tests/test_permission_catalog.py` (20 new): default role matrices
+(pure, against the in-code matrix), ALLOW-overrides-role-DENY and
+DENY-overrides-role-ALLOW and INHERIT-reverts, menu-view-without-action-right
+independence for Stores and Broadcast, Emergency Stop as its own permission,
+Device rotate/revoke/enrollment independence, OWNER-only override management,
+OWNER-cannot-be-overridden (both the signed-in OWNER and a second OWNER
+account), a disabled account losing all effective permissions, the audit row
+shape, and the absence of secrets in the audit table and API responses.
+`frontend/src/lib/menuPermissions.test.js` (4 new): the route->permission
+map, and the redirect target for VIEWER/BROADCASTER-shaped permission sets.
+Two existing tests that asserted an exact coarse-permission string in a
+route's source (`test_rbac_endpoint_matrix.py`,
+`test_enrollment_code_status.py`) were updated to the new fine-grained codes -
+the guard genuinely changed, on purpose, to something more precise.
+
+Full backend suite: **2518 passed, 3 skipped, 0 failed**, including the 20 new
+permission tests, with 2 existing route-guard tests updated in place to the
+new fine-grained codes rather than added. `compileall`, `pip check` and
+`git diff --check` clean. `yarn build` compiled successfully.
+
+No full Playwright/E2E menu-visibility run was performed in this session -
+the frontend unit tests above cover the routing decision itself
+(`menuPermissions.js`), but a real browser walk of "VIEWER cannot see the
+Users link, and cannot reach `/users` by typing the URL" was not exercised.
