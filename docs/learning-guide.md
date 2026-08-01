@@ -1274,3 +1274,138 @@ shared object before suspecting timing. Grep the mock file for the
 fixture's own name (`STORES`, `DEVICES`, `HQ_USERS`) inside any handler
 that both reads and writes; a `.find()` immediately followed by an
 in-place property assignment on the result is the pattern to fix.
+
+## Learning Box 29 — Importing a module can break 99 tests that never import it
+
+**What happened.** Adding PostgreSQL support needed a portable
+declaration of the eleven tables this codebase only ever created with raw
+SQLite `CREATE TABLE` strings. Those declarations use string foreign keys
+(`ForeignKeyConstraint(["store_id"], ["stores.id"])`), and a string FK
+only resolves by looking up that table name inside its own `Table`'s
+`MetaData`. The obvious fix was to build the new module's `metadata` as
+`models.Base.metadata` - the one that already has `stores` and `hq_users`
+on it. That worked perfectly for the thing being built, and broke 99
+unrelated tests.
+
+`Base.metadata` is a single, shared, mutable, process-global object.
+Declaring a `Table` "onto" it is a permanent side effect of *importing
+the module*. pytest collects every test file in a worker up front, so the
+moment any file imported the new module, every other test's ordinary
+`Base.metadata.create_all(...)` - which correctly expects to create only
+the eight ORM tables - started also trying to create `receiver_devices`,
+colliding with `migrations.py`'s own raw `CREATE TABLE receiver_devices`
+and failing with `table receiver_devices already exists`. 8 failures and
+99 errors, in files that never mention PostgreSQL, from a module none of
+them import directly.
+
+**The general shape.** In SQLAlchemy specifically, `MetaData` is a
+registry, and `Table(...)` is a registration, not a value. But the shape
+generalizes: any module-level statement that mutates a shared global
+registry (a declarative base, a plugin registry, a signal table, a
+`register()` call at import time) turns "I imported this module" into "I
+changed global state for the whole process." Test frameworks that import
+everything before running anything make that blast radius maximal.
+
+**What to do about it.** When a new module needs to *reference* a shared
+registry's contents but not *join* it, copy rather than share -
+SQLAlchemy provides `Table.to_metadata(other)` for exactly this, so the
+FK graph resolves inside a private `MetaData` while the real one is left
+untouched. The general rule: if declaring something at import time
+changes what an unrelated caller's existing function does, that is not a
+declaration, it is a side effect - build it in a private namespace and
+copy in what you need. The regression test to write is the blunt one:
+assert the shared registry does *not* contain your new names after your
+module is imported.
+
+## Learning Box 30 — `os.environ.setdefault` at import time is a race nobody sees
+
+**What happened.** Immediately after fixing Learning Box 29, the full suite
+failed again - ~100 errors, in the same unrelated files, with the same
+"table already exists" shape. The cause was different, and much quieter.
+
+Every test module in this suite opens with the same incantation:
+
+```python
+os.environ.setdefault("ECHOCAST_DB_PATH",
+                      str(Path(tempfile.gettempdir()) / "echocast-tests-default-engine.db"))
+```
+
+because `db.py` reads that variable **once**, at import, to build the
+module-level engine. `setdefault` means the FIRST module imported in a
+worker decides the value for every test in that worker; every other
+module's identical line is then a no-op. That only works because every
+module passes the *same* value - the convention is load-bearing, and
+nothing enforces it.
+
+The new test module was written with a path of its own choosing, inside
+`backend/tests/`. Whenever it won the import race, the whole worker's
+shared engine pointed at a file **inside the repository** rather than a
+per-run temp file - so two xdist workers opened the same on-disk SQLite
+database simultaneously, and roughly a hundred tests that had nothing to
+do with PostgreSQL started failing on each other's tables.
+
+The tell: every failing test passed alone, and every *pairwise*
+combination passed too. Pairwise passing is what makes this different
+from ordinary shared-state pollution - the corruption needed enough
+modules in one worker for the import order to matter, so small
+reproductions kept coming back green and looked like exoneration.
+
+**The general shape.** `setdefault` on process-global state expresses "I
+don't mind who wins" - but that is only safe when every participant would
+set the *same* value. The moment one participant supplies a different
+value, `setdefault` silently converts a configuration difference into an
+order-dependent one: correct on some runs, catastrophic on others, with
+nothing in the failure output pointing at the module that caused it.
+
+**What to do about it.** Copy the convention exactly, character for
+character, when adding a file to a suite that opens with a shared
+`setdefault` preamble - and if you are ever tempted to change the value,
+that is a signal the value belongs in one imported constant rather than
+duplicated across thirty files. When a mass failure passes alone AND
+passes pairwise, stop bisecting by pairs; look instead for import-time
+global state whose value depends on collection order.
+
+## Learning Box 31 — A `.env` file is a loaded gun pointed at your test suite
+
+**What happened.** Mid-session, `backend/.env` appeared containing
+`APP_ENV=production` and a real Supabase `DATABASE_URL`, password and all.
+That is an entirely reasonable place for someone to believe production
+settings belong - it is the conventional name, and the file is correctly
+gitignored, so nothing about it feels wrong.
+
+`server.py` calls `load_dotenv(backend/.env)` at import. Every process
+that imports the backend therefore inherited production settings -
+including the whole test suite. `db.py` resolved the shared engine to
+PostgreSQL, `db.DB_PATH` became `None` (correct for PostgreSQL; it is a
+SQLite-only concept), and roughly thirty test modules that assert
+`Path(db.DB_PATH) == their_own_temp_file` failed with
+`TypeError: argument should be a str ... not 'NoneType'` - a message that
+points at `pathlib`, names no environment variable, and appears in files
+that have nothing to do with databases. 70 failures, 250 errors.
+
+The noise was the small problem. The real one: **a test run had been
+configured to connect to the live production database.** This suite
+creates, migrates, and permanently deletes Stores. Nothing but the
+absence of a reachable connection stood between that `.env` file and
+destructive writes against real data.
+
+**The general shape.** Any mechanism that injects configuration
+implicitly at import time - dotenv, a profile file, a machine-level
+environment variable - is invisible at the call site and applies to every
+process equally. Test suites are the most dangerous consumers of that,
+because they are the processes most likely to do destructive things while
+believing they are isolated.
+
+**What to do about it.** A test suite should assert its own environment,
+not inherit it. `conftest.py` runs before any test module in every worker,
+which makes it the only correct place: force `APP_ENV=development` and
+blank `DATABASE_URL` there, so no local file can ever aim the suite at
+production. Two details matter. First, **blank rather than delete** -
+`load_dotenv` defaults to `override=False`, so it only fills in names that
+are *absent*; deleting the variable simply lets the `.env` put it back a
+moment later, while an empty string is "present" to dotenv and "not
+configured" to the application's own config loader. Second, write the
+regression test that asserts the fail-safe itself (`DB_DIALECT ==
+"sqlite"`, `DB_PATH is not None`), because the property you actually care
+about - "tests cannot reach production" - is otherwise only ever tested by
+accident.

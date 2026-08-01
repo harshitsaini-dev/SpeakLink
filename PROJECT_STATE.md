@@ -3962,3 +3962,164 @@ Console's live target selector was not separately re-tested against a
 tombstoned Store beyond the existing `is_active` filter it already
 honors (a deleted Store has `is_active=False`, the same filter every
 other inactive Store already goes through).
+
+## RC12 installed on the live Windows HQ
+
+Installed 2026-08-01 from
+`artifacts/EchoCastHQ-0.1.0-rc12-7d1cc5b-20260801-174322`, runtime
+SHA-256 `4363436F3410DD5C74AD6DAF002399612CD13F188FDCADDCAB93ECE811056D33`,
+package verifier 31/31.
+
+Pre-install backup:
+`backups/echocast-20260801-pre-rc12-install.db`, 692,224 bytes, SHA-256
+`3D09ABCE8E16744EB30A430CD3DC562797FDF9D6182704230FDA9BF3FF645892`,
+`integrity_check=ok`, `foreign_key_check=[]`.
+
+Every count identical before and after: 45 Stores, 3 Users, 5 Receiver
+Devices, 6 Receiver credentials, 3 primary assignments, 13 broadcast
+sessions, 102 broadcast targets. Bindapur (Store 31, `BP`) and its
+primary Device `3b1ff11f-0b18-4f56-b911-30f036cbddd9` unchanged. Receiver
+HMAC key file SHA-256 identical before and after
+(`748A99F2...DB057B`). Runtime `READY`; `/api/`, `/`, `/login`,
+`/console` all 200; missing asset 404. Bindapur reconnected naturally
+after the restart with no action taken on the Store PC.
+
+**Not performed, and deliberately not claimed:** the signed-in GUI
+acceptance phases (Scope dropdown check, scoped-BROADCASTER test,
+disposable-Store permanent-delete pilot, short Bindapur regression
+broadcast). Those require real operator credentials the assistant does
+not hold. RC12's install is verified safe and data-preserving; its
+*feature acceptance* is still pending those manual steps, so no
+`PLAYBACK_CONFIRMED` or `SPEAKER_VERIFIED` claim is made for this round.
+
+### A pre-existing serial-mode test-suite defect, found here
+
+`pytest.ini` configures this suite as `-n 2 --dist loadscope` (two xdist
+worker processes). Run instead as a single process (`-n 0`), four tests
+in `test_receiver_enrollment_service.py` fail. Proven pre-existing and
+unrelated to any RC11/RC12 change: the same four fail with every file
+touched in those rounds excluded, and the file passes 32/32 in
+isolation. Some module leaves process-global state behind that only
+collides when every test file shares one interpreter. Not fixed in this
+round - recorded here so the next person does not mistake it for a
+regression.
+
+## Dual database: SQLite development, PostgreSQL (Supabase) production
+
+Branch `feature/supabase-postgres-production`, from RC12's `7d1cc5b`.
+Only the production DATABASE moves. The Windows HQ remains the
+application and WebSocket server; Receiver audio still flows HQ FastAPI
+-> Windows Receiver Agent -> Store speakers and never touches Supabase.
+Supabase Auth, Realtime, Storage, Edge Functions and the JS client are
+not used at all - this is managed PostgreSQL only.
+
+### The configuration rule
+
+One authoritative function, `backend/db_config.py::load_database_config`:
+
+* `APP_ENV` unset or `development` -> local SQLite, exactly as before. No
+  `DATABASE_URL` needed, no internet connection, no configuration step.
+* `APP_ENV=production` -> `DATABASE_URL` is **required** and must be a
+  `postgresql://` URL. Missing, blank, or a sqlite URL is a hard startup
+  refusal. Production never falls back to a local SQLite file - a file
+  that would look like it works while silently diverging from the real
+  production database.
+
+The URL is normalized to force the psycopg 3 driver and to require
+`sslmode=require` if the operator's string omitted it. No Supabase
+project id, hostname, username or password appears anywhere in source.
+
+### Secret storage
+
+`keys/database-url.txt` in the persistent root - the same
+outside-Git, outside-the-package shape `jwt-secret.txt` already uses.
+Unlike `jwt-secret.txt` it is **never auto-created**: with
+`app_env=production` set and the file missing, `tools/hq_runtime.py`
+refuses to start. It is read once per HQ start and handed to the backend
+child only through its environment, never a command line (a command line
+is visible in the process list to every user on the machine). Never
+logged. `backend/.env.example` documents variable NAMES only.
+
+### Schema
+
+`models.py`'s ORM tables were already dialect-portable and needed no
+change beyond declaring the two tombstone columns (`deleted_at`,
+`deleted_by`) that previously existed only via a raw SQLite `ALTER
+TABLE` - and so would have been silently missing from PostgreSQL.
+`backend/postgres_schema.py` re-declares the eleven tables that were
+only ever created by raw SQLite `CREATE TABLE` strings
+(`receiver_devices`, `receiver_credentials`, `receiver_credential_events`,
+`receiver_store_primary_device`, `permissions`, `role_permissions`,
+`user_permission_overrides`, `permission_audit_events`,
+`user_store_scope`, `store_scope_audit_events`, `store_deletion_events`)
+as portable SQLAlchemy Core `Table` objects. SQLite keeps using its
+existing raw-SQL `ensure_*_schema` functions unchanged - this module is
+never called against SQLite.
+
+### Migration tool
+
+`tools/migrate_sqlite_to_postgres.py`, with `--dry-run`, `--verify` and
+`--force`. `DATABASE_URL` from the environment only, never a CLI
+argument. SQLite source opened read-only (`file:...?mode=ro`) and never
+written under any flag. Refuses a destination that already has rows
+unless `--force`. Primary-key ids preserved exactly (history references
+them by number), then every SERIAL sequence advanced past the highest
+migrated id so the next application INSERT cannot collide.
+
+FK-safe order computed from the real schema graph via SQLAlchemy's own
+`sort_tables`, never hand-guessed, and asserted against the live schema
+by a test that fails the moment a new FK is added without updating it.
+
+### Totals
+
+Backend: see the run recorded at commit time - includes 15 new
+`test_database_config.py` tests, 8 new always-run
+`test_postgres_schema.py` tests, and 4 new `test_hq_runtime.py`
+production-config tests. Frontend unit: 56 passed (unchanged - no
+frontend change this round).
+
+### Honest status of the PostgreSQL tests
+
+Three `test_postgres_schema.py` tests exercise **real** PostgreSQL
+behavior (CREATE TABLE succeeding, an FK actually being enforced, a
+repaired sequence actually allowing the next INSERT). They are gated
+behind `TEST_POSTGRES_URL` and **are currently SKIPPED** - no PostgreSQL
+server and no Supabase project is reachable from this machine yet. They
+have never run. Everything proven so far about PostgreSQL is proven at
+the schema-graph level (portable DDL, FK ordering, sequence-table
+selection), not against a live server.
+
+### A `.env` incident, and the guard added because of it
+
+Mid-round, a `backend/.env` appeared containing `APP_ENV=production` and
+a real Supabase `DATABASE_URL` (password included). It was correctly
+gitignored and never tracked, so no credential could reach Git - but
+`server.py` calls `load_dotenv(backend/.env)` at import, so the entire
+test suite inherited production settings: the shared engine resolved to
+PostgreSQL, `db.DB_PATH` became `None`, and ~30 modules asserting
+`Path(db.DB_PATH) == their_temp_file` failed with an
+unrelated-looking `TypeError`. 70 failures, 250 errors.
+
+The serious part was not the noise: this suite creates, migrates and
+permanently deletes Stores, and it had been pointed at the live
+production database. Only the absence of a reachable connection
+prevented destructive writes.
+
+`backend/tests/conftest.py` now forces `APP_ENV=development` and blanks
+`DATABASE_URL` before any test module is imported, in every worker.
+Blanked rather than deleted, deliberately: `load_dotenv` defaults to
+`override=False`, so a deleted variable is simply re-filled from `.env`
+a moment later, while an empty string is "present" to dotenv and "not
+configured" to `load_database_config`. A regression test asserts the
+fail-safe directly (`DB_DIALECT == "sqlite"`, `DB_PATH is not None`).
+
+`backend/.env.example` was rewritten to say plainly that production
+settings must NOT go in `backend/.env`, and to point at
+`keys/database-url.txt` instead.
+
+### Not done, deliberately
+
+No real data has been migrated to Supabase. The live RC12 installation
+and the live SQLite database are untouched by this round. The three
+real-PostgreSQL tests remain SKIPPED - they have never executed against
+a live server.
