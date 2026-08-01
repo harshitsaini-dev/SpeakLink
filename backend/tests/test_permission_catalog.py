@@ -105,10 +105,11 @@ def test_admin_default_permissions_exclude_permissions_manage_and_permanent_dele
     # is reserved.
     assert "devices.archive" in admin
     assert "stores.archive" in admin
-    assert admin == PERMISSION_CODES - {
-        "users.permissions.manage", "devices.delete_permanently",
-        "stores.delete_permanently",
-    }
+    # Every irreversibly destructive code is reserved, plus rights management.
+    from permission_catalog import DESTRUCTIVE_CODES
+    assert admin == PERMISSION_CODES - {"users.permissions.manage"} - DESTRUCTIVE_CODES
+    for destructive in DESTRUCTIVE_CODES:
+        assert destructive not in admin, destructive
 
 
 def test_devices_delete_permanently_defaults_to_super_admin_only():

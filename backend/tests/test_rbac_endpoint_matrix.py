@@ -103,6 +103,8 @@ EXPECTED: dict[str, object] = {
     "tombstone_store": "stores.delete_permanently",
     "read_store_deletion_events": "menu.stores.view",
     "read_user_dependencies": "menu.users.view",
+    "tombstone_user": "users.delete_permanently",
+    "read_user_deletion_events": "menu.users.view",
     "hard_delete_user": "users.disable",
 
     # Receiver Devices: credentials, enrolment, promotion, revocation - each

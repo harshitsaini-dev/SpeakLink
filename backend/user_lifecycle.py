@@ -58,7 +58,12 @@ from rbac import Role
 ACTIVE = "active"
 DISABLED = "disabled"
 ARCHIVED = "archived"
-KNOWN_STATES = (ACTIVE, DISABLED, ARCHIVED)
+#: Irreversible. Deliberately absent from every transition's allowed_from
+#: below, so enable/disable/restore already refuse a deleted account through
+#: the existing state machine rather than through a new special case. See
+#: user_deletion.py.
+DELETED = "deleted"
+KNOWN_STATES = (ACTIVE, DISABLED, ARCHIVED, DELETED)
 
 MAX_USERNAME_LENGTH = 100
 MAX_DISPLAY_NAME_LENGTH = 200
@@ -194,15 +199,23 @@ def _select(connection, where: str = "", parameters: dict | None = None):
     )
 
 
-def list_users(engine: Engine) -> list[dict]:
+def list_users(engine: Engine, *, include_deleted: bool = False) -> list[dict]:
     """Every account in every state.
 
     Archived accounts are included on purpose. Hiding them makes it look as
     though a username is free when it is not, and makes a retired colleague's
     history look like it was written by nobody.
+
+    PERMANENTLY DELETED accounts are the one exception and are excluded by
+    default. Unlike archived, that state is irreversible and the account is
+    gone from the product - it is kept in the table only so history that
+    names it stays readable. ``include_deleted=True`` is for the audit
+    surfaces that deliberately want to see it.
     """
+    where = ("ORDER BY id" if include_deleted else
+             "WHERE lifecycle_state IS NULL OR lifecycle_state <> 'deleted' ORDER BY id")
     with engine.connect() as connection:
-        return [_row_to_record(row) for row in _select(connection, "ORDER BY id").all()]
+        return [_row_to_record(row) for row in _select(connection, where).all()]
 
 
 def read_user(engine: Engine, *, user_id: int) -> dict:
