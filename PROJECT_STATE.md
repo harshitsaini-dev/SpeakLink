@@ -1129,6 +1129,105 @@ Status: **not started**. `RECEIVER_HOSTING_KEY_STORAGE_ADR.md` remains
 identity, DPAPI secret container, ACL layout or TLS configuration has been
 written or executed.
 
+## Guarded live RC8 install and hashed-fleet transition
+
+The live HQ was upgraded RC7 -> RC8 (commit `bb36964`) and its Receiver
+credential migration state was moved `legacy_only -> hash_only` using the
+supported `transition_receiver_migration_state` service - not a raw `UPDATE`.
+Both a pre-install and a pre-transition SQLite backup were taken and verified
+(`integrity_check: ok`, `foreign_key_check: 0`); the two backups are
+byte-identical, proving the RC8 install itself wrote nothing to the database.
+
+All 44 Stores, all 4 Devices, all 4 credential hashes (SHA-256 digest-compared
+against the backup), and Device `3b1ff11f` (active, Store 31/Bindapur) were
+preserved exactly. Exactly one `migration_state_changed` audit event was
+added. The Receiver HMAC key file hash is unchanged. HQ reached RuntimeState
+READY both before and after the transition, and `/api/`, `/`, `/login`, and
+`/console` all answered 200.
+
+**First real broadcast result:** a Bindapur-only broadcast reached
+`PLAYBACK_CONFIRMED` with 1/1 stores online, 1/1 receiver confirmed, 0 errors -
+the first real Receiver authentication and playback confirmation against the
+hashed-fleet credential path. This is what surfaced the timer/mojibake/
+lifecycle defects documented below; it does not by itself establish
+`SPEAKER_VERIFIED` or production readiness.
+
+## HQ frontend/session stability and UI polish
+
+Branch: `fix/broadcast-session-stability-and-ui-polish`. Five defects found
+during the first real broadcast, all fixed test-first:
+
+1. **Broadcast timer / System Logs showed a ~05:30 (UTC+05:30) offset.** Root
+   cause: SQLite drops `tzinfo` on round-trip, so `BroadcastSession.started_at`
+   came back from the ORM as a naive Python `datetime`; Pydantic's default
+   JSON serialization of a naive datetime omits any offset, and a browser's
+   `new Date(...)` parses an offset-less string as **local time**. On an IST
+   browser that is exactly UTC+05:30. Fixed by attaching an explicit UTC
+   `tzinfo` at the API serialization boundary (`backend/schemas.py`'s
+   `_utc_iso`, applied via Pydantic `field_serializer` on every timestamp
+   field in `SessionOut`/`TargetOut`/`SystemLogOut`) and by routing every
+   frontend timestamp parse through one function
+   (`frontend/src/lib/time.js#parseUtcMs`) that treats an offset-less string
+   as UTC rather than local, plus `elapsedSeconds()` (epoch-based, never a
+   formatted-string re-parse) and `formatIst()` (explicit Asia/Kolkata display
+   for this deployment). See Learning Box 20.
+2. **Header mojibake, "HQ Broadcast Console Â· v1.0".** The `Â` was pasted
+   directly into the JSX source as a double-decode artifact, not a build/
+   charset defect. Fixed at the source in `Layout.jsx`; the "Windows 11 ·
+   Local Server · SQLite" environment banner was removed entirely, leaving
+   the top-right header area clean. See Learning Box 22.
+3. **Favicon.** `favicon_io.zip` (not committed) was inspected and found to
+   contain the standard favicon.io set; `favicon.ico`, `favicon-16x16.png`,
+   `favicon-32x32.png`, `apple-touch-icon.png`, `android-chrome-192x192.png`,
+   `android-chrome-512x512.png`, and `site.webmanifest` were copied into
+   `frontend/public/`, and `index.html` gained the corresponding `<link>`
+   tags via `%PUBLIC_URL%` (no absolute developer-machine path). Confirmed
+   present in the production `yarn build` output. Browsers cache favicons
+   aggressively: after deploying, a hard refresh (Ctrl+Shift+R, or clear
+   site data for the HQ origin) is required to see the new icon - a normal
+   refresh alone may keep showing the old/missing one.
+4. **F5/Refresh during a live broadcast silently reloaded the page and
+   stopped the broadcast, with no warning.** Fixed with a native
+   `beforeunload` handler installed only while `current.live` is true
+   (`frontend/src/lib/beforeUnloadGuard.js`), removed immediately on normal
+   Stop or Emergency Stop. Browsers ignore any custom message here and show
+   their own fixed confirmation text, so no specific wording is promised.
+5. **Microphone level meter went to zero after navigating away from
+   Broadcast Console and back, while the broadcast was still LIVE.** Root
+   cause: the `HQBroadcaster` instance (owning the `MediaStream`,
+   `AudioContext`, `AnalyserNode`, `MediaRecorder`, and broadcaster
+   `WebSocket`) lived in `BroadcastConsole`'s own component state, which React
+   discards on route unmount. The audio pipeline itself kept running - only
+   the reference to it was lost. Fixed by moving ownership into a new
+   `BroadcastProvider` (`frontend/src/contexts/BroadcastContext.js`) mounted
+   once, above the router's `<Outlet/>` (wrapping `<Layout/>` in `App.js`),
+   holding the `HQBroadcaster` in a `useRef` so it survives every route
+   change; `BroadcastConsole` is now a consumer, not an owner. No second
+   capture is ever created on remount. See Learning Box 21.
+
+Two existing backend tests (`test_the_frontend_websocket_urls_carry_only_a_
+ticket`, `test_the_frontend_asks_for_the_audience_it_needs`) asserted their
+ticket-handshake evidence against `BroadcastConsole.jsx`; both were updated to
+read `BroadcastContext.js`, where that logic now correctly lives after the
+ownership move in fix 5 - the assertions themselves are unchanged.
+
+New tests: `frontend/src/lib/time.test.js` (10, including a UTC+05:30
+regression guard and a known-UTC-to-IST display case),
+`frontend/src/lib/beforeUnloadGuard.test.js` (7, framework-free against a
+fake event target), `frontend/src/components/Layout.header.test.js` (3,
+reads the real source file), and `backend/tests/test_timestamp_serialization.
+py` (4, asserting the literal API JSON string carries an explicit UTC marker
+and that `datetime.fromisoformat` on the API's own `started_at` parses as
+timezone-aware). Full frontend suite: 52 passed. Full backend suite: 2495
+passed, 3 skipped (baseline 2493 + 2 updated - net +2 new: the 4 timestamp
+tests minus the 2 pre-existing tests whose target file changed). `compileall`,
+`pip check`, and `git diff --check` all clean. `yarn build` compiled
+successfully with the favicon and header fix present in the output.
+
+Verdict: **READY_FOR_RC9_PILOT_RETEST**. RC9 has not been installed on the
+live HQ; the live HQ remains on RC8/`hash_only` from the guarded transition
+above. `SPEAKER_VERIFIED` is still not claimed.
+
 ## Database safety
 
 The real database is `backend/speaklink_live.db` unless `SPEAKLINK_DB_PATH` is
