@@ -1,5 +1,6 @@
 import React from "react";
 import { api } from "@/lib/api";
+import { formatIst } from "@/lib/time";
 import { RefreshCw } from "lucide-react";
 
 const LEVEL_COLOR = { info: "text-slate-700", warn: "text-amber-700", error: "text-red-700" };
@@ -41,7 +42,7 @@ export default function SystemLogs() {
           <tbody className="font-mono text-xs">
             {logs.map((l) => (
               <tr key={l.id} className="border-b border-slate-100 even:bg-slate-50/50">
-                <td className="px-3 py-1.5 text-slate-500">{new Date(l.created_at).toLocaleString()}</td>
+                <td className="px-3 py-1.5 text-slate-500">{formatIst(l.created_at)}</td>
                 <td className={`px-3 py-1.5 uppercase font-bold ${LEVEL_COLOR[l.level] || ""}`}>{l.level}</td>
                 <td className="px-3 py-1.5 text-slate-800">{l.message}</td>
               </tr>
