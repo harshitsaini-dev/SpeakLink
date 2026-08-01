@@ -1074,7 +1074,7 @@ def disable_receiver_device(
 def archive_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require("devices.disable")),
+    user: HQUser = Depends(require("devices.archive")),
 ):
     """Retire this Device from the active list. Reversible - its credential
     history and every enrolment/audit event are untouched."""
@@ -1092,7 +1092,7 @@ def archive_receiver_device(
 def restore_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require("devices.disable")),
+    user: HQUser = Depends(require("devices.archive")),
 ):
     """Bring an archived Device back to disabled, never straight to active."""
     try:
@@ -1124,7 +1124,7 @@ def read_receiver_device_dependencies(
 def hard_delete_receiver_device(
     public_id: str, confirm: str,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require("devices.revoke")),
+    user: HQUser = Depends(require("devices.delete_permanently")),
 ):
     """Remove a never-enrolled-into Device for real. Refuses anything with an
     issued credential or a recorded event - which is every real Device, since
@@ -1697,13 +1697,18 @@ def write_user_store_scope(
 ):
     _user_or_404(user_id)
     try:
-        set_user_scope(engine, user_id=user_id,
-                       entries=[entry.model_dump() for entry in payload.entries])
+        audit_rows = set_user_scope(
+            engine, user_id=user_id,
+            entries=[entry.model_dump() for entry in payload.entries],
+            actor_id=user.id,
+        )
     except InvalidScopeEntry as refusal:
         raise HTTPException(status_code=400, detail=str(refusal))
+    # The audit table has the durable per-entry record; this line only
+    # carries the change count, never a scope-by-scope diff.
     _write_log(
         db, "warn",
-        f"user_store_scope_changed target_id={user_id} entries={len(payload.entries)} "
+        f"user_store_scope_changed target_id={user_id} changes={len(audit_rows)} "
         f"by={user.username}",
     )
     return {"user_id": user_id, "entries": list_user_scope(engine, user_id=user_id)}
@@ -1959,20 +1964,73 @@ def current_broadcast(db: Session = Depends(get_db), user: HQUser = Depends(requ
     if not session:
         return {"live": False}
     targets = db.query(BroadcastTarget).filter(BroadcastTarget.session_id == session.id).all()
+    # A scoped user must not learn about targets outside their assigned
+    # Stores - not even that a live session is reaching them. This never
+    # changes what IS live, only what THIS response reveals about it.
+    scope = resolve_store_scope(engine, user)
+    if scope is not None:
+        targets = [t for t in targets if t.store_id in scope]
+    online_ids = manager.online_store_ids()
+    ready_ids = manager.ready_store_ids()
+    if scope is not None:
+        online_ids = {i for i in online_ids if i in scope}
+        ready_ids = {i for i in ready_ids if i in scope}
     return {
         "live": True,
         "session": SessionOut.model_validate(session).model_dump(mode="json"),
         "targets": [TargetOut.model_validate(t).model_dump(mode="json") for t in targets],
-        "online_receivers": list(manager.online_store_ids()),
+        "online_receivers": list(online_ids),
         # READY comes only from an explicit receiver_ready acknowledgement.
         # Being connected is never enough, so these two lists are separate.
-        "ready_receivers": list(manager.ready_store_ids()),
+        "ready_receivers": list(ready_ids),
+    }
+
+
+def _scoped_session_target_counts(db: Session, session: BroadcastSession, scope) -> dict:
+    """Recompute selected/online/offline counts from only the in-scope
+    targets of one session, so a scoped user's history view cannot infer how
+    many Stores outside their scope a campaign actually reached."""
+    if scope is None:
+        return {
+            "selected_store_count": session.selected_store_count,
+            "online_store_count": session.online_store_count,
+            "offline_store_count": session.offline_store_count,
+        }
+    targets = db.query(BroadcastTarget).filter(
+        BroadcastTarget.session_id == session.id, BroadcastTarget.store_id.in_(scope)
+    ).all()
+    online_ids = manager.online_store_ids()
+    online = sum(1 for t in targets if t.store_id in online_ids)
+    return {
+        "selected_store_count": len(targets),
+        "online_store_count": online,
+        "offline_store_count": len(targets) - online,
     }
 
 
 @api.get("/broadcast/history", response_model=List[SessionOut])
 def broadcast_history(limit: int = 50, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.VIEW_HISTORY))):
-    return db.query(BroadcastSession).order_by(BroadcastSession.id.desc()).limit(limit).all()
+    sessions = db.query(BroadcastSession).order_by(BroadcastSession.id.desc()).limit(limit).all()
+    scope = resolve_store_scope(engine, user)
+    if scope is None:
+        return sessions
+    # A scoped user sees only campaigns that reached at least one of their
+    # Stores, and the counts on it are recomputed to that subset - never the
+    # real totals, which would leak how many out-of-scope Stores were also
+    # targeted.
+    visible = []
+    for session in sessions:
+        in_scope_targets = db.query(BroadcastTarget.id).filter(
+            BroadcastTarget.session_id == session.id, BroadcastTarget.store_id.in_(scope)
+        ).first()
+        if not in_scope_targets:
+            continue
+        counts = _scoped_session_target_counts(db, session, scope)
+        for key, value in counts.items():
+            setattr(session, f"_scoped_{key}", value)
+            setattr(session, key, value)
+        visible.append(session)
+    return visible
 
 
 @api.get("/broadcast/sessions/{sid}", response_model=SessionDetailOut)
@@ -1980,7 +2038,20 @@ def session_detail(sid: int, db: Session = Depends(get_db), user: HQUser = Depen
     session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    targets = db.query(BroadcastTarget).filter(BroadcastTarget.session_id == sid).all()
+    scope = resolve_store_scope(engine, user)
+    targets_query = db.query(BroadcastTarget).filter(BroadcastTarget.session_id == sid)
+    if scope is not None:
+        # No in-scope targets means this campaign never reached this
+        # account's Stores at all - treated the same as "not found", so a
+        # scoped user cannot distinguish "no session" from "a session that
+        # only targeted Stores I cannot see".
+        if not targets_query.filter(BroadcastTarget.store_id.in_(scope)).first():
+            raise HTTPException(status_code=404, detail="Session not found")
+        targets_query = targets_query.filter(BroadcastTarget.store_id.in_(scope))
+        counts = _scoped_session_target_counts(db, session, scope)
+        for key, value in counts.items():
+            setattr(session, key, value)
+    targets = targets_query.all()
     out = SessionDetailOut.model_validate(session)
     out.targets = [TargetOut.model_validate(t) for t in targets]
     return out
