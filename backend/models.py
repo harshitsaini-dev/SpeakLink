@@ -73,6 +73,13 @@ class HQUser(Base):
                              nullable=True)
     disabled_at = Column(DateTime, nullable=True)
     archived_at = Column(DateTime, nullable=True)
+    #: Irreversible tombstone (user_deletion.py). Declared here rather than
+    #: only ALTERed in for the same reason Store.deleted_at is: PostgreSQL's
+    #: schema comes from this class's metadata, so a column that exists only
+    #: via a raw SQLite ALTER TABLE would be silently missing there - and the
+    #: User tombstone would fail on production the first time it ran.
+    deleted_at = Column(String(40), nullable=True)
+    deleted_by = Column(Integer, nullable=True)
 
 
 class ReceiverEnrollmentCode(Base):
