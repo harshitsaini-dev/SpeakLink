@@ -50,88 +50,101 @@ from rbac import Permission  # noqa: E402
 #: ``SUPER_ADMIN`` marks the handful reserved for the account that also owns
 #: security settings. ``None`` marks routes that are authenticated but need no
 #: particular permission - knowing who you are is the whole check.
+#:
+#: Values are now fine-grained permission_catalog codes (strings) for every
+#: route that was split into its own right during the permissions/RBAC work -
+#: which is most of them. A few coarse `rbac.Permission` guards remain exactly
+#: where the coarse and fine-grained meaning are identical (broadcast
+#: start/stop/emergency-stop, and the two remaining VIEW_STATUS call sites,
+#: which are broadcast-context now that the Store ones were split out) - see
+#: `server._COARSE_TO_FINE`.
 EXPECTED: dict[str, object] = {
     # Identity. Any signed-in account may ask who it is and open its own socket.
     "logout": None,
     "me": None,
+    "my_permissions": None,
     "issue_websocket_ticket": None,
     # Changing your own password needs no permission beyond being signed in.
     # Read-only does not mean unable to secure your own account - and the
     # current password is required, so knowing who you are is not enough.
     "change_own_password": None,
 
-    # HQ Users. MANAGE_USERS covers the lifecycle; which accounts a given role
-    # may touch is a second, narrower check inside each endpoint
-    # (_require_may_manage), because ADMIN holds MANAGE_USERS but must not be
-    # able to disable a SUPER_ADMIN or promote itself into one.
-    "list_hq_users": Permission.MANAGE_USERS,
-    "read_hq_user": Permission.MANAGE_USERS,
-    "create_hq_user": Permission.MANAGE_USERS,
-    "update_hq_user": Permission.MANAGE_USERS,
-    "set_hq_user_role": Permission.MANAGE_USERS,
-    "disable_hq_user": Permission.MANAGE_USERS,
-    "enable_hq_user": Permission.MANAGE_USERS,
-    "archive_hq_user": Permission.MANAGE_USERS,
-    "restore_hq_user": Permission.MANAGE_USERS,
+    # HQ Users. Split from one MANAGE_USERS flag into distinct actions so an
+    # override can, for example, let an ADMIN view Users without letting them
+    # create one. Which accounts a given role may touch is still a second,
+    # narrower check inside each endpoint (_require_may_manage), because ADMIN
+    # holds users.update but must not be able to disable an OWNER or promote
+    # itself into one.
+    "list_hq_users": "menu.users.view",
+    "read_hq_user": "menu.users.view",
+    "create_hq_user": "users.create",
+    "update_hq_user": "users.update",
+    "set_hq_user_role": "users.update",
+    "disable_hq_user": "users.disable",
+    "enable_hq_user": "users.update",
+    "archive_hq_user": "users.disable",
+    "restore_hq_user": "users.update",
     # Setting somebody else's password is reserved, like restoring an archived
     # Store: it is the action an attacker who took an ADMIN account would use
-    # to take a SUPER_ADMIN one.
+    # to take an OWNER one.
     "reset_hq_user_password": "OWNER",
+    # Per-user permission overrides: OWNER only, and enforced by the same
+    # require_super_admin gate as reset_hq_user_password - independent of the
+    # override system these routes edit, so an override can never grant an
+    # ADMIN a path to grant themselves more.
+    "read_user_permission_overrides": "OWNER",
+    "write_user_permission_overrides": "OWNER",
 
     # Dependency summaries, and the dependency-guarded hard deletes.
-    #
-    # MANAGE_STORES / MANAGE_USERS is the right gate rather than OWNER: the
-    # protection lives in what the operation refuses - anything with Devices,
-    # targets, events, enrolment codes or recorded history - and
-    # _require_may_manage still stops an ADMIN reaching an OWNER account. A role
-    # cannot buy its way past a referential check.
-    "read_store_dependencies": Permission.MANAGE_STORES,
-    "hard_delete_store": Permission.MANAGE_STORES,
-    "read_user_dependencies": Permission.MANAGE_USERS,
-    "hard_delete_user": Permission.MANAGE_USERS,
+    "read_store_dependencies": "menu.stores.view",
+    "hard_delete_store": "stores.archive",
+    "read_user_dependencies": "menu.users.view",
+    "hard_delete_user": "users.disable",
 
-    # Receiver Devices: credentials, enrolment, promotion, revocation.
-    # Bounded-queue health an on-call person needs at 7am. Integers only, no
-    # payload and no credential, so VIEW_STATUS rather than a MANAGE_* right.
-    "read_audio_metrics": Permission.VIEW_STATUS,
-    "create_receiver_enrollment_code": Permission.MANAGE_DEVICES,
-    # Enrollment records are Device administration: a read-only account must not
-    # be able to enumerate which Stores have pending or spent enrolments.
-    "list_receiver_enrollment_codes": Permission.MANAGE_DEVICES,
-    "list_receiver_devices": Permission.MANAGE_DEVICES,
-    "read_receiver_device": Permission.MANAGE_DEVICES,
-    "read_receiver_device_roles": Permission.MANAGE_DEVICES,
-    "disable_receiver_device": Permission.MANAGE_DEVICES,
-    "revoke_receiver_device": Permission.MANAGE_DEVICES,
-    "promote_receiver_device": Permission.MANAGE_DEVICES,
-    "rotate_receiver_device": Permission.MANAGE_DEVICES,
+    # Receiver Devices: credentials, enrolment, promotion, revocation - each
+    # its own action so, for example, an override can permit disabling a
+    # Device without permitting credential rotation.
+    "read_audio_metrics": "menu.broadcast.view",
+    "create_receiver_enrollment_code": "devices.enrollment.create",
+    "list_receiver_enrollment_codes": "menu.receivers.view",
+    "list_receiver_devices": "menu.receivers.view",
+    "read_receiver_device": "menu.receivers.view",
+    "read_receiver_device_roles": "menu.receivers.view",
+    "disable_receiver_device": "devices.disable",
+    "revoke_receiver_device": "devices.revoke",
+    "promote_receiver_device": "devices.primary.assign",
+    "rotate_receiver_device": "devices.rotate",
 
-    # Stores. Reading the list is how a VIEWER sees which shops are online, so
-    # it is VIEW_STATUS; everything that changes one is MANAGE_STORES.
-    "list_stores": Permission.VIEW_STATUS,
-    "stores_meta": Permission.VIEW_STATUS,
-    "create_store": Permission.MANAGE_STORES,
-    "update_store": Permission.MANAGE_STORES,
-    "disable_store_endpoint": Permission.MANAGE_STORES,
-    "enable_store_endpoint": Permission.MANAGE_STORES,
-    "archive_store_endpoint": Permission.MANAGE_STORES,
-    "delete_store": Permission.MANAGE_STORES,
-    "regenerate_token": Permission.MANAGE_STORES,
+    # Stores. Reading the list is how a VIEWER sees which shops are online;
+    # create/update/archive are now separate actions.
+    "list_stores": "menu.stores.view",
+    "stores_meta": "menu.stores.view",
+    "create_store": "stores.create",
+    "update_store": "stores.update",
+    "disable_store_endpoint": "stores.archive",
+    "enable_store_endpoint": "stores.update",
+    "archive_store_endpoint": "stores.archive",
+    "delete_store": "stores.archive",
+    "regenerate_token": "stores.update",
     # Un-retiring a Store needs the account that also owns security settings.
     "restore_store_endpoint": "OWNER",
 
     # Broadcasting. Starting and stopping are separate permissions so a role
     # can be allowed to stop a runaway announcement without being able to begin
-    # one.
-    "create_session": Permission.START_BROADCAST,
-    "start_session": Permission.START_BROADCAST,
-    "stop_session": Permission.STOP_BROADCAST,
-    "emergency_stop": Permission.EMERGENCY_STOP,
-    "current_broadcast": Permission.VIEW_STATUS,
-    "broadcast_history": Permission.VIEW_HISTORY,
-    "session_detail": Permission.VIEW_HISTORY,
+    # one. Their route source still says `Permission.START_BROADCAST` etc (the
+    # coarse and fine-grained meaning are identical), but require() resolves
+    # to the fine-grained code before this test ever observes it - see
+    # server._COARSE_TO_FINE - so the expectations here are the codes actually
+    # enforced.
+    "create_session": "broadcast.start",
+    "start_session": "broadcast.start",
+    "stop_session": "broadcast.stop",
+    "emergency_stop": "broadcast.emergency_stop",
+    "current_broadcast": "menu.broadcast.view",
+    "broadcast_history": "menu.history.view",
+    "session_detail": "menu.history.view",
 
-    "list_logs": Permission.VIEW_LOGS,
+    "list_logs": "menu.logs.view",
 }
 
 #: Routes that take no HTTP session, each for a stated reason.
@@ -179,9 +192,14 @@ def _guard_of(endpoint) -> str | None:
         name = getattr(default.dependency, "__name__", "")
         if name == "guard":
             # require(...) returns a closure; read the permission it captured.
+            # require() now stores the already-resolved fine-grained CODE
+            # (`code`), not the raw argument, precisely so this test observes
+            # the same string the resolver actually checks - whether the
+            # route was written as require("stores.update") or as the legacy
+            # require(Permission.START_BROADCAST).
             closure = inspect.getclosurevars(default.dependency)
-            permission = closure.nonlocals.get("permission")
-            return permission.value if permission is not None else "guard"
+            code = closure.nonlocals.get("code")
+            return code if code is not None else "guard"
         if name == "require_super_admin":
             return "OWNER"
         if name == "get_current_user":
@@ -197,13 +215,14 @@ def test_each_route_is_guarded_by_the_expected_permission(function_name: str):
 
     expected = EXPECTED[function_name]
     actual = _guard_of(endpoint)
-    if expected is None:
+    expected_code = expected.value if isinstance(expected, Permission) else expected
+    if expected_code is None:
         assert actual is None, f"{function_name} expected authenticated-only, got {actual}"
-    elif expected == "OWNER":
-        assert actual == "OWNER", f"{function_name} expected SUPER_ADMIN, got {actual}"
+    elif expected_code == "OWNER":
+        assert actual == "OWNER", f"{function_name} expected OWNER, got {actual}"
     else:
-        assert actual == expected.value, (
-            f"{function_name} is guarded by {actual}, expected {expected.value}"
+        assert actual == expected_code, (
+            f"{function_name} is guarded by {actual}, expected {expected_code}"
         )
 
 
@@ -251,4 +270,4 @@ def test_reading_stores_is_not_a_device_permission():
     from VIEWER and BROADCASTER alike, and nothing failed.
     """
     _, endpoint = _endpoints()["list_stores"]
-    assert _guard_of(endpoint) == Permission.VIEW_STATUS.value
+    assert _guard_of(endpoint) == "menu.stores.view"
