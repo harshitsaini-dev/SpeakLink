@@ -83,8 +83,7 @@ export default function Layout() {
           >
             {open ? <X size={20} /> : <Menu size={20} />}
           </button>
-          <div className="text-xs uppercase tracking-[0.15em] text-slate-500">HQ Broadcast Console Â· v1.0</div>
-          <div className="text-xs text-slate-500 hidden sm:block">Windows 11 Â· Local Server Â· SQLite</div>
+          <div className="text-xs uppercase tracking-[0.15em] text-slate-500">HQ Broadcast Console · v1.0</div>
         </header>
         <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 md:p-6">
           <Outlet />
