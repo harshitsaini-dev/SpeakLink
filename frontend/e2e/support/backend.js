@@ -90,7 +90,8 @@ const DEFAULT_ROLE_PERMISSIONS = {
   ADMIN: ALL_PERMISSION_CODES.filter(
     (c) => c !== 'users.permissions.manage' && c !== 'devices.delete_permanently'),
   BROADCASTER: ['menu.broadcast.view', 'broadcast.start', 'broadcast.stop',
-                'broadcast.emergency_stop', 'menu.history.view', 'menu.receivers.view'],
+                'broadcast.emergency_stop', 'menu.history.view', 'menu.receivers.view',
+                'menu.stores.view'],
   VIEWER: ['menu.broadcast.view', 'menu.stores.view', 'menu.receivers.view',
            'menu.history.view', 'menu.logs.view'],
 };
@@ -160,6 +161,7 @@ async function mockBackend(page, options = {}) {
     // means "let the mock's normal logic decide", matching every other
     // *Status option in this file.
     storeUpdateStatus: options.storeUpdateStatus || 200,
+    storesListStatus: options.storesListStatus || 200,
     sessionCreateStatus: options.sessionCreateStatus || 200,
     users: options.users || HQ_USERS.map((row) => ({ ...row })),
     usersStatus: options.usersStatus || 200,
@@ -448,6 +450,9 @@ async function mockBackend(page, options = {}) {
     }
 
     if (method === 'GET' && path === '/stores') {
+      if (state.storesListStatus !== 200) {
+        return route.fulfill(json({ detail: 'Receiver Status could not be loaded.' }, state.storesListStatus));
+      }
       // The real backend hides archived Stores unless asked. Mirror that, so a
       // test cannot pass here and fail against the server.
       const includeArchived = url.searchParams.get('include_archived') === 'true';
