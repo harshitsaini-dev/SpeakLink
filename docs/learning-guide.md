@@ -1116,3 +1116,38 @@ used it was supposedly stopped.
 link and stop them deepest-first. Never match on process name: an HQ desk runs
 other Python, and this machine had two VS Code processes that a name match would
 have killed.
+
+---
+
+## Learning Box 25 — A full test suite and a build in the same breath race each other
+
+**What happened.** The full backend suite came back with six failures, all in
+`test_hq_runtime.py`, all with the same message: "There is no production
+frontend at `frontend/build`. Run `yarn build` in frontend first." That test
+reads the real `frontend/build` directory on disk - not a fixture-isolated
+copy - because the thing it verifies (the runtime refuses to start without a
+production build) can only be proven against the real path the runtime
+itself will check.
+
+The build genuinely existed a minute earlier and existed again a minute
+later. What happened in between: a `yarn build` was kicked off in the
+frontend directory while the ~3-minute backend suite was still running.
+`yarn build` deletes `build/` and rewrites it from scratch rather than
+patching it in place, so for a window in the middle of that rebuild the
+directory legitimately did not exist - and the backend suite's xdist workers
+happened to reach `test_hq_runtime.py` during exactly that window.
+
+**The general shape.** Any test that reads real, shared filesystem state
+(not a fixture's own temp directory) is implicitly racing every other
+process that touches that same path. A full suite run and a build of the
+same repo look independent - different languages, different tools - but
+they are not independent if one's test reads what the other's build writes.
+
+**What to do about it.** Before treating a failure as a regression, ask
+whether anything else was touching the same real path at the same time. Re-
+run the specific failing file in isolation, immediately, with nothing else
+running: if it passes clean, the first failure was a timing artifact, not a
+defect, and the fix is "don't run the two commands concurrently" - not a code
+change. Confirmed here by re-running `test_hq_runtime.py` alone against the
+now-complete build (26 passed) and then re-running the full suite with
+nothing else touching `frontend/build` (green, 2538 passed).

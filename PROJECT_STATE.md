@@ -3603,3 +3603,68 @@ No full Playwright/E2E menu-visibility run was performed in this session -
 the frontend unit tests above cover the routing decision itself
 (`menuPermissions.js`), but a real browser walk of "VIEWER cannot see the
 Users link, and cannot reach `/users` by typing the URL" was not exercised.
+
+## Follow-up: Device lifecycle, role display, favicon, Store/City/Zone scope
+
+Four smaller, separately requested changes on the same branch.
+
+**Receiver Device archive/restore/permanent-delete.** Revoke already existed
+(permanent by design). Added the reversible pair Store/HQUser already have:
+a nullable `receiver_devices.archived_at` column (status keeps its fixed
+`active`/`disabled`/`retired` CHECK; archiving does not add a fourth value),
+`POST /receiver-devices/{id}/archive` and `/restore`, plus
+`GET .../dependencies` and `DELETE .../permanently` following
+`deletion_safety.py`'s exact Store/User pattern - refused unless
+`receiver_credentials`/`receiver_credential_events` show zero rows, which is
+every real enrolled Device, since enrolment is what creates one. Both new
+schema helpers are self-healing: called from `_require_phase_one` itself, not
+only from `startup_event`, so a caller that ran Phase One directly (a test
+fixture, a maintenance script) still gets the column.
+
+**OWNER displayed as SUPER ADMIN.** Display-only. `rbac.py`'s own history -
+`LEGACY_ROLE_ALIASES`, the earlier SUPER_ADMIN -> OWNER rename - is why the
+stored value, the API, and every backend comparison stay `"OWNER"`; renaming
+it again would need a second migration and touch every test asserting
+`role == "OWNER"` for no behavioural gain. `frontend/src/pages/
+UserManagement.jsx`'s `roleLabel()` renames only what a person reads: the
+role badge, the role dropdowns, the owner-protection note, and the rights
+editor's Base Role line.
+
+**Favicon, actually replaced this time.** The operator's real updated icon
+set was in `~/Downloads/favicon_io.zip`, not the placeholder original still
+sitting in the repository root - verified by SHA-256 that all seven files
+in Downloads genuinely differed from what was committed, then replaced them
+in `frontend/public/` and confirmed the new `favicon.ico` hash matches
+exactly in the production `yarn build` output.
+
+**Per-user Store/City/Zone scope.** `backend/store_scope.py`: a new
+`user_store_scope` table (STORE/CITY/REGION rows, additive, an account with
+zero rows is unrestricted so nothing already working changes). OWNER is
+always unrestricted - the ADMIN or BROADCASTER may now be limited to a
+single Store, a city, or a Zone, and `_require_store_in_scope` enforces it
+independently of the permission on every Store-by-id route and every
+Store-id-keyed Device route. `_resolve_targets` applies it to broadcast
+target resolution: an explicit `target_mode=selected` Store outside scope is
+refused (the caller asked for it by id), while `all`/`region`/`city`/
+`online_only` narrow silently, because narrowing to "my Stores" is the whole
+point of those modes. `GET/PUT /users/{id}/store-scope` is OWNER-only via
+`require_super_admin` - the same reservation as permission overrides, so a
+scope assignment can never grant an ADMIN a path to grant themselves more.
+`UserManagement.jsx` gained a "Scope" action (OWNER only, ADMIN/BROADCASTER
+targets only) listing current assignments with add/remove and Save Changes.
+
+New tests: `test_receiver_device_archive_and_delete.py` (6),
+`test_store_scope.py` (8) - unscoped-sees-everything, Store-scoped
+list/edit, City-scoped broadcast start plus explicit-selected-outside-scope
+refusal, Zone-scoped `all`-mode silent narrowing, Device-endpoint scoping,
+OWNER-never-scoped, and clearing every entry returning to unrestricted.
+`test_rbac_endpoint_matrix.py` gained the 6 new routes (device archive/
+restore/dependencies/permanent-delete, store-scope read/write).
+
+Full backend suite: **2538 passed, 3 skipped, 0 failed**. `compileall`,
+`pip check` and `git diff --check` clean. Frontend: 56 passed, `yarn build`
+compiled successfully with the new favicon and role label in the output.
+
+Not done in this pass: a UI affordance to view a Device's `archived_at`
+timestamp anywhere other than the raw API response, and no Playwright/E2E
+walk of the new Scope/Rights editors in a real browser.
