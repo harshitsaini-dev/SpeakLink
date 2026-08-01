@@ -200,17 +200,167 @@ pg_required = pytest.mark.skipif(
 )
 
 
+#: Schemas that belong to the PostgreSQL host (Supabase), not to SpeakLink.
+#: Nothing in this file may ever create, alter or drop anything inside them.
+#: Listed explicitly so the guard below is a decision rather than a hope.
+PROTECTED_SCHEMAS = frozenset({
+    "public", "auth", "storage", "realtime", "vault", "extensions",
+    "graphql", "graphql_public", "pgbouncer", "pg_catalog",
+    "information_schema", "cron", "net", "supabase_functions",
+})
+
+
 @pytest.fixture()
 def pg_engine():
-    from sqlalchemy import create_engine, text
+    """A real PostgreSQL engine confined to a freshly generated schema.
 
-    engine = create_engine(TEST_POSTGRES_URL)
-    yield engine
-    # Clean up everything this test run created, in reverse FK order.
-    with engine.begin() as connection:
-        for table in reversed(migration_tool.TABLE_ORDER):
-            connection.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
-    engine.dispose()
+    WHY NOT JUST USE public
+
+    An earlier version of this fixture ran
+    ``DROP TABLE IF EXISTS <name> CASCADE`` with UNQUALIFIED table names.
+    Unqualified names resolve through ``search_path``, which normally ends
+    at ``public`` - so a single missed or lost ``search_path`` (a pooled
+    reconnect, a pooler that resets session state) turns a test cleanup
+    into "drop the production Stores table". Against a Supabase project
+    that is not a hypothetical.
+
+    So every object this fixture touches lives in one generated schema
+    whose name cannot collide with anything real, and cleanup drops
+    exactly that one schema. Three independent properties make that
+    provable rather than assumed:
+
+    1. the schema name is generated per test and asserted not to be any
+       protected/host-owned schema before a single statement runs;
+    2. ``search_path`` is set on EVERY new DBAPI connection through a
+       ``connect`` event listener, so a pooled reconnect cannot silently
+       fall back to ``public``;
+    3. the fixture asserts ``current_schema()`` actually equals the
+       generated schema, on a real connection, BEFORE yielding - if
+       isolation did not take effect, the test errors instead of running
+       destructively somewhere else.
+    """
+    from sqlalchemy import create_engine, event, text
+    from db_config import load_database_config
+
+    schema = f"speaklink_test_{uuid.uuid4().hex[:16]}"
+    assert schema not in PROTECTED_SCHEMAS
+    assert schema.startswith("speaklink_test_")
+
+    # Normalized through the SAME loader production uses, so these tests
+    # exercise the real driver (psycopg 3) and the real TLS requirement
+    # rather than whatever SQLAlchemy would have guessed from a bare
+    # postgresql:// scheme (psycopg2, which is not installed).
+    url = load_database_config(app_env="production",
+                               database_url=TEST_POSTGRES_URL).url
+
+    admin_engine = create_engine(url)
+    with admin_engine.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+
+    # Confining the connection to the test schema took three attempts, and
+    # the two that failed are worth recording because both LOOKED correct.
+    #
+    # 1. A `connect` listener issuing `SET search_path TO <schema>`.
+    #    `SET` is TRANSACTIONAL in PostgreSQL, and SQLAlchemy's pool
+    #    defaults to `reset_on_return="rollback"` - so the first time a
+    #    connection returned to the pool, the ROLLBACK silently reverted
+    #    search_path and everything afterwards ran against `public`.
+    #    Nineteen tables and five rows were created in the production
+    #    `public` schema before the isolation test below caught it.
+    #
+    # 2. The libpq connection option `-csearch_path=<schema>`, which is
+    #    applied at connection establishment and cannot be rolled back.
+    #    Correct in general - but Supabase's Session Pooler (Supavisor)
+    #    does not pass the `options` startup parameter through, so
+    #    current_schema() was still `public`.
+    #
+    # 3. What is used here: issue the `SET` with the DBAPI connection
+    #    temporarily in AUTOCOMMIT. Outside a transaction the setting
+    #    applies to the session itself, so a later ROLLBACK has nothing to
+    #    revert, and it needs no cooperation from the pooler.
+    #
+    # The assertions below verify the result rather than trusting the
+    # mechanism - including explicitly across a rollback, which is exactly
+    # what attempt 1 failed.
+    engine = create_engine(url)
+
+    @event.listens_for(engine, "connect")
+    def _confine_to_test_schema(dbapi_connection, connection_record):
+        previous = dbapi_connection.autocommit
+        dbapi_connection.autocommit = True
+        try:
+            cursor = dbapi_connection.cursor()
+            cursor.execute(f'SET search_path TO "{schema}"')
+            cursor.close()
+        finally:
+            dbapi_connection.autocommit = previous
+
+    # The verification lives INSIDE the try, so that a failed isolation
+    # check still drops the schema it just created. An earlier version
+    # asserted before the try and leaked one empty schema per failure.
+    try:
+        # Prove the confinement took effect - and specifically that it
+        # SURVIVES a rollback, which is exactly what attempt 1 did not.
+        with engine.connect() as connection:
+            actual = connection.execute(text("SELECT current_schema()")).scalar_one()
+            assert actual == schema, (
+                f"isolation failed: current_schema() is {actual!r}, not {schema!r}. "
+                "Refusing to run destructive statements outside the test schema."
+            )
+            connection.rollback()
+            after_rollback = connection.execute(
+                text("SELECT current_schema()")).scalar_one()
+            assert after_rollback == schema, (
+                f"isolation did not survive a rollback: {after_rollback!r}. "
+                "Refusing to run destructive statements outside the test schema."
+            )
+
+        yield engine
+    finally:
+        engine.dispose()
+        # Exactly one schema, by its generated name. Never a bare table name,
+        # never public, never a host-owned schema.
+        assert schema not in PROTECTED_SCHEMAS
+        with admin_engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        admin_engine.dispose()
+
+
+@pg_required
+def test_the_test_schema_is_isolated_and_public_is_never_touched(pg_engine):
+    """The safety property every other real-PostgreSQL test depends on.
+
+    If this fails, nothing else in this file may be trusted to have run
+    where it believed it was running - which, against a hosted database,
+    is the difference between a test and an incident."""
+    from sqlalchemy import text
+
+    postgres_schema.create_all(pg_engine)
+
+    with pg_engine.connect() as c:
+        schema = c.execute(text("SELECT current_schema()")).scalar_one()
+        assert schema.startswith("speaklink_test_")
+        assert schema not in PROTECTED_SCHEMAS
+
+        # The tables really landed in the generated schema...
+        here = c.execute(text(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = :s"
+        ), {"s": schema}).scalar_one()
+        assert here >= len(migration_tool.TABLE_ORDER)
+
+        # ...and NOT in public, which must still hold no SpeakLink table.
+        for name in ("stores", "hq_users", "receiver_devices"):
+            in_public = c.execute(text(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_name = :t"
+            ), {"t": name}).scalar_one()
+            assert in_public == 0, f"public.{name} exists - isolation leaked"
+
+        # Supabase-managed schemas are still intact and untouched.
+        for managed in ("auth", "storage"):
+            assert c.execute(text(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = :s"
+            ), {"s": managed}).scalar_one() > 0
 
 
 @pg_required
@@ -234,8 +384,8 @@ def test_foreign_key_is_actually_enforced_on_real_postgresql(pg_engine):
     with pg_engine.begin() as connection:
         connection.execute(text(
             "INSERT INTO stores (store_code, store_name, city, region, "
-            "receiver_token, is_active, created_at, updated_at) "
-            "VALUES ('T1', 'Test', 'City', 'Zone', :tok, true, now(), now())"
+            "is_online_store, receiver_token, is_active, status, created_at, updated_at) "
+            "VALUES ('T1', 'Test', 'City', 'Zone', false, :tok, true, 'offline', now(), now())"
         ), {"tok": uuid.uuid4().hex})
 
     with pytest.raises(IntegrityError):
@@ -257,14 +407,15 @@ def test_sequence_repair_lets_a_new_row_insert_after_migrated_ids(pg_engine):
         # Simulate a migrated row with an explicit, preserved high id.
         connection.execute(text(
             "INSERT INTO stores (id, store_code, store_name, city, region, "
-            "receiver_token, is_active, created_at, updated_at) "
-            "VALUES (500, 'MIG', 'Migrated Store', 'City', 'Zone', :tok, true, now(), now())"
+            "is_online_store, receiver_token, is_active, status, created_at, updated_at) "
+            "VALUES (500, 'MIG', 'Migrated Store', 'City', 'Zone', false, :tok, true, "
+            "'offline', now(), now())"
         ), {"tok": uuid.uuid4().hex})
         migration_tool._repair_sequences(connection)
         new_id = connection.execute(text(
             "INSERT INTO stores (store_code, store_name, city, region, "
-            "receiver_token, is_active, created_at, updated_at) "
-            "VALUES ('NEW', 'New Store', 'City', 'Zone', :tok, true, now(), now()) "
-            "RETURNING id"
+            "is_online_store, receiver_token, is_active, status, created_at, updated_at) "
+            "VALUES ('NEW', 'New Store', 'City', 'Zone', false, :tok, true, "
+            "'offline', now(), now()) RETURNING id"
         ), {"tok": uuid.uuid4().hex}).scalar_one()
     assert new_id > 500
