@@ -4141,6 +4141,68 @@ settings must NOT go in `backend/.env`, and to point at
 ### Not done, deliberately
 
 No real data has been migrated to Supabase. The live RC12 installation
-and the live SQLite database are untouched by this round. The three
-real-PostgreSQL tests remain SKIPPED - they have never executed against
-a live server.
+and the live SQLite database are untouched by this round.
+
+## Real PostgreSQL compatibility, actually proven
+
+The first Supabase project is treated as **disposable test
+infrastructure**, not the future production database - it was polluted
+by the `.env` incident above, so it is used to prove compatibility and
+then discarded. The production project will be created fresh.
+
+**PostgreSQL 17.6**, TLS confirmed active client-side via libpq
+`PQsslInUse` (note: `pg_stat_ssl` reports `False` through Supabase's
+Session Pooler because it describes the pooler-to-Postgres hop, not the
+client connection - the client-side check is the authoritative one).
+
+### Test isolation, and the incident that shaped it
+
+Every real-PostgreSQL test runs inside a generated `speaklink_test_*`
+schema and drops exactly that schema afterwards. Getting that right took
+three attempts, two of which looked correct and were not:
+
+1. a `connect` listener issuing `SET search_path` - `SET` is
+   transactional, SQLAlchemy's pool defaults to
+   `reset_on_return="rollback"`, so the setting was silently reverted on
+   the first pool return. **All nineteen tables and five rows were
+   created in `public`** while the tests reported green;
+2. the libpq option `-csearch_path=` - non-transactional and correct in
+   general, but Supavisor does not pass `options` through;
+3. the `SET` issued with the DBAPI connection temporarily in
+   **autocommit** - session state, nothing for a rollback to revert, no
+   cooperation needed from the pooler. This is what is used.
+
+The leak was caught by
+`test_the_test_schema_is_isolated_and_public_is_never_touched`, which
+asserts the boundary from inside a test rather than only in the fixture.
+The leaked tables were dropped by name (SpeakLink-owned tables only) and
+`public` is empty again. See Learning Box 32.
+
+### Totals
+
+`test_postgres_schema.py` 12 passed (including the 3 that had never
+executed: real CREATE TABLE, real FK enforcement, real sequence repair)
+and `test_postgres_integration.py` 14 passed - 26 real-PostgreSQL tests
+covering user creation and unique-username enforcement, Store CRUD and
+lifecycle, tombstone fields with history preserved, RBAC roles and
+overrides with their CHECK constraints, Store/City/Zone scope and its
+shape constraint, Device enrolment, credential uniqueness and the
+revocation rule, at-most-one-primary-per-Store, `ON DELETE RESTRICT`
+protecting a Store that owns Devices, broadcast session/target/event
+writes, and UTC timestamp round-tripping in both DateTime and string
+columns.
+
+Residue after the run: 0 tables in `public`, 0 leftover test schemas.
+`auth` (23), `storage` (8), `realtime` (3), `vault` (2) and `extensions`
+(2) all untouched throughout.
+
+Offline behaviour is unchanged: without `TEST_POSTGRES_URL` these 18
+tests skip and the ordinary suite needs no PostgreSQL and no network.
+
+### Incompatibilities found
+
+None in the schema itself. Two test-only defects were found and fixed:
+raw INSERTs omitted `is_online_store`/`status`, which have Python-side
+ORM defaults but no server defaults - harmless for the migration tool,
+which copies every column explicitly, but a real difference between
+ORM-mediated and raw-SQL writes.

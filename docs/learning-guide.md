@@ -1409,3 +1409,62 @@ regression test that asserts the fail-safe itself (`DB_DIALECT ==
 "sqlite"`, `DB_PATH is not None`), because the property you actually care
 about - "tests cannot reach production" - is otherwise only ever tested by
 accident.
+
+## Learning Box 32 — `SET` is transactional, so pooled connections silently lose it
+
+**What happened.** The real-PostgreSQL tests had to be confined to a
+throwaway schema so their `DROP` statements could never reach `public`.
+The obvious implementation:
+
+```python
+@event.listens_for(engine, "connect")
+def _confine(dbapi_connection, record):
+    cur = dbapi_connection.cursor()
+    cur.execute(f'SET search_path TO "{schema}"')
+```
+
+The fixture then asserted `current_schema() == schema` and the assertion
+**passed**. The tests ran. They reported green.
+
+They had created all nineteen tables, and five rows, in `public` - the
+production schema of a hosted database.
+
+`SET` in PostgreSQL is **transactional**. SQLAlchemy's connection pool
+defaults to `reset_on_return="rollback"`, so the first time a connection
+went back to the pool the ROLLBACK reverted `search_path` to the default,
+and every statement after that resolved unqualified names through
+`public`. The fixture's assertion had run on the very first checkout,
+before any rollback - so it verified the one moment the setting was
+still alive.
+
+The second attempt, the libpq option `-csearch_path=<schema>`, is
+genuinely non-transactional and correct in general - but Supabase's
+Session Pooler (Supavisor) does not pass the `options` startup parameter
+through, so it silently did nothing. What finally worked was issuing the
+same `SET` with the DBAPI connection temporarily in **autocommit**: run
+outside a transaction it becomes session state, so there is nothing for a
+later ROLLBACK to revert, and it needs no cooperation from the pooler.
+
+**The general shape.** Session-scoped settings (`search_path`,
+`statement_timeout`, `role`, `SET CONSTRAINTS`) interact with two
+invisible mechanisms at once: transaction boundaries, which can revert
+them, and connection pools, which recycle sessions between unrelated
+units of work. A setting that is correct at the instant you check it can
+be gone by the next statement, and pooling makes "the next statement"
+belong to a different test.
+
+**What to do about it.** Verify the *property*, not the mechanism, and
+verify it where it is actually used - across a rollback and after a
+pool round-trip, not once at setup. When the property is a safety
+boundary, assert it inside the tests themselves
+(`test_the_test_schema_is_isolated_and_public_is_never_touched`) rather
+than only in the fixture: a fixture assertion proves the setup was right,
+while a test assertion proves the setup was *still* right when the
+destructive statement ran. That test is what caught this; the fixture's
+own assertion is what missed it.
+
+**And the meta-lesson.** Green tests are not evidence of isolation. These
+tests passed while writing to the wrong schema, because nothing they
+asserted was about *where* they were writing. If a test suite's safety
+depends on a boundary, something must assert the boundary - otherwise the
+suite will report success from the wrong side of it.
