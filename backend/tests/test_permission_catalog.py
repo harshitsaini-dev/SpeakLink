@@ -96,10 +96,28 @@ def test_owner_default_permissions_are_the_entire_catalog():
     assert DEFAULT_ROLE_PERMISSIONS[Role.OWNER] == PERMISSION_CODES
 
 
-def test_admin_default_permissions_exclude_only_permissions_manage():
+def test_admin_default_permissions_exclude_permissions_manage_and_permanent_delete():
     admin = DEFAULT_ROLE_PERMISSIONS[Role.ADMIN]
     assert "users.permissions.manage" not in admin
-    assert admin == PERMISSION_CODES - {"users.permissions.manage"}
+    assert "devices.delete_permanently" not in admin
+    # ADMIN may still archive a Device - only permanent deletion is reserved.
+    assert "devices.archive" in admin
+    assert admin == PERMISSION_CODES - {"users.permissions.manage", "devices.delete_permanently"}
+
+
+def test_devices_delete_permanently_defaults_to_super_admin_only():
+    for role, codes in DEFAULT_ROLE_PERMISSIONS.items():
+        if role is Role.OWNER:
+            assert "devices.delete_permanently" in codes
+        else:
+            assert "devices.delete_permanently" not in codes
+
+
+def test_devices_archive_is_allowed_for_owner_and_admin_only():
+    assert "devices.archive" in DEFAULT_ROLE_PERMISSIONS[Role.OWNER]
+    assert "devices.archive" in DEFAULT_ROLE_PERMISSIONS[Role.ADMIN]
+    assert "devices.archive" not in DEFAULT_ROLE_PERMISSIONS[Role.BROADCASTER]
+    assert "devices.archive" not in DEFAULT_ROLE_PERMISSIONS[Role.VIEWER]
 
 
 def test_broadcaster_default_permissions_are_exactly_broadcast_and_read_only():

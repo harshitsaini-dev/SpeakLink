@@ -74,6 +74,8 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
     PermissionDefinition("devices.rotate", "Receivers", "Rotate Device Credential"),
     PermissionDefinition("devices.disable", "Receivers", "Disable Device"),
     PermissionDefinition("devices.revoke", "Receivers", "Revoke Device"),
+    PermissionDefinition("devices.archive", "Receivers", "Archive Device"),
+    PermissionDefinition("devices.delete_permanently", "Receivers", "Permanently Delete Device"),
 
     PermissionDefinition("menu.history.view", "History", "View Broadcast History"),
 
@@ -102,13 +104,18 @@ _VIEW_ONLY_CODES = frozenset({
 #: are decided; overrides are layered on top of it in
 #: ``resolve_effective_permissions``, never merged into it.
 #:
-#: ADMIN deliberately gets everything except ``users.permissions.manage`` -
-#: the same reasoning ``rbac.ROLE_PERMISSIONS`` already applies to
-#: ``MANAGE_SECURITY``: running the estate is a different kind of trust than
-#: deciding who else gets to run it.
+#: ADMIN deliberately gets everything except ``users.permissions.manage`` and
+#: ``devices.delete_permanently`` - the same reasoning ``rbac.ROLE_PERMISSIONS``
+#: already applies to ``MANAGE_SECURITY``: running the estate is a different
+#: kind of trust than deciding who else gets to run it, or than permanently
+#: destroying a Device's row (as opposed to archiving it, which ADMIN may).
+#: Permanent deletion is effectively SUPER ADMIN-only until a separately
+#: reviewed policy changes that.
 DEFAULT_ROLE_PERMISSIONS: dict[Role, frozenset[str]] = {
     Role.OWNER: _ALL_CODES,
-    Role.ADMIN: _ALL_CODES - frozenset({"users.permissions.manage"}),
+    Role.ADMIN: _ALL_CODES - frozenset(
+        {"users.permissions.manage", "devices.delete_permanently"}
+    ),
     # Broadcast Console, its three controls, History and Receiver Status -
     # nothing that edits a Store, a Device's security, or a User.
     Role.BROADCASTER: _BROADCAST_CODES | frozenset({
