@@ -150,19 +150,46 @@ def device_dependencies(engine: Engine, *, public_id: str) -> DependencySummary:
     return summary
 
 
+#: Statuses a Device must be in before it can even be considered for
+#: permanent deletion. An ACTIVE or merely DISABLED Device is still in
+#: ordinary operational rotation - "disabled" alone does not mean "retired",
+#: it can be re-enabled with no ceremony - so only a Device that was
+#: deliberately taken out of service for good (archived, or revoked/
+#: retired) is eligible. This is checked BEFORE the dependency count, not
+#: instead of it: an archived-but-still-credentialed Device is still refused.
+_DELETABLE_STATUSES = frozenset({"disabled", "retired"})
+
+
 def delete_device_if_unused(engine: Engine, *, public_id: str,
                            typed_confirmation: str) -> dict:
-    """Remove one never-used Receiver Device. Refuses anything else.
+    """Remove one never-used, already-retired Receiver Device. Refuses
+    anything else.
 
     ``typed_confirmation`` must equal the Device's public id exactly - the
     same "type the identifier of the thing being destroyed" rule
     delete_store_if_unused and delete_user_if_unused already use.
+
+    Eligibility, all recomputed here on the connection holding the
+    transaction so nothing can change between the check and the delete:
+
+    * the Device must already be ARCHIVED (``archived_at`` set) or REVOKED/
+      RETIRED (``status = 'retired'``) - an ACTIVE or merely DISABLED Device
+      is refused outright, before any dependency count;
+    * it must not be a Store's current primary;
+    * it must have zero issued credentials and zero recorded credential
+      events - which is every real enrolled Device, since enrolment is what
+      creates one.
+
+    Never cascades away audit/credential history to make a delete succeed -
+    a Device with any such history is refused, not cleaned up.
     """
     with engine.begin() as connection:
+        columns = {c[1] for c in connection.exec_driver_sql("PRAGMA table_info(receiver_devices)")}
+        archived_select = "archived_at" if "archived_at" in columns else "NULL AS archived_at"
         row = connection.execute(
             text(
-                "SELECT id, public_id, store_id, display_name FROM receiver_devices "
-                "WHERE public_id = :public_id"
+                f"SELECT id, public_id, store_id, display_name, status, {archived_select} "
+                "FROM receiver_devices WHERE public_id = :public_id"
             ),
             {"public_id": public_id}).first()
         if row is None:
@@ -174,6 +201,30 @@ def delete_device_if_unused(engine: Engine, *, public_id: str,
                 f"{row.public_id}"
             )
 
+        is_archived = row.archived_at is not None
+        is_retired = row.status == "retired"
+        if not (is_archived or is_retired):
+            raise DeletionRefused(
+                f"This Device is {row.status} and not archived. An ACTIVE or merely "
+                "DISABLED Device is still in ordinary rotation and is never "
+                "permanently deleted - archive or revoke it first."
+            )
+
+        has_primary_table = connection.exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='receiver_store_primary_device'"
+        ).first()
+        if has_primary_table:
+            is_primary = connection.execute(
+                text("SELECT 1 FROM receiver_store_primary_device WHERE device_id = :i"),
+                {"i": row.id},
+            ).first()
+            if is_primary:
+                raise DeletionRefused(
+                    "This Device is still its Store's primary. Assign a different "
+                    "primary, or leave the Store without one, before deleting it."
+                )
+
         # Recounted here, on the connection holding the transaction, so nothing
         # can be re-enrolled or credentialed between the check and the delete.
         summary = _count_dependencies(
@@ -184,16 +235,16 @@ def delete_device_if_unused(engine: Engine, *, public_id: str,
                 "Archive it instead. " + summary.explain()
             )
 
-        has_primary_table = connection.exec_driver_sql(
-            "SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='receiver_store_primary_device'"
-        ).first()
-        if has_primary_table:
-            connection.execute(
-                text("DELETE FROM receiver_store_primary_device WHERE device_id = :i"),
-                {"i": row.id},
-            )
         connection.execute(text("DELETE FROM receiver_devices WHERE id = :i"), {"i": row.id})
+        con_check = connection.execute(text("PRAGMA foreign_key_check")).all()
+        if con_check:
+            # Should be unreachable - the dependency count above already
+            # proved zero referencing rows - but a delete that would violate
+            # referential integrity is refused rather than committed either way.
+            raise DeletionRefused(
+                "This Device could not be safely removed without breaking "
+                "referential integrity. Archive it instead."
+            )
         return {"public_id": row.public_id, "store_id": row.store_id,
                 "display_name": row.display_name}
 

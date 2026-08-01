@@ -173,11 +173,45 @@ def test_permanent_delete_is_refused_for_a_device_with_an_issued_credential(clie
     assert still_there.status_code == 200
 
 
-def test_permanent_delete_succeeds_for_a_never_used_device(client):
+def test_permanent_delete_refuses_an_active_never_used_device(client):
+    """ACTIVE is still ordinary rotation. A Device is never permanently
+    deleted while active, no matter how unused it is."""
     headers = sign_in(client)
     store_id = _first_store_id(client)
     device_id = str(uuid.uuid4())
     _insert_bare_device(client.server_module.engine, store_id=store_id, public_id=device_id)
+
+    deleted = client.delete(f"/api/receiver-devices/{device_id}/permanently",
+                           headers=headers, params={"confirm": device_id})
+    assert deleted.status_code == 409, deleted.text
+
+    still_there = client.get(f"/api/receiver-devices/{device_id}", headers=headers)
+    assert still_there.status_code == 200
+
+
+def test_permanent_delete_refuses_a_disabled_but_not_archived_device(client):
+    """DISABLED alone does not mean retired - it can be re-enabled with no
+    ceremony, so it is refused the same as ACTIVE."""
+    headers = sign_in(client)
+    store_id = _first_store_id(client)
+    device_id = str(uuid.uuid4())
+    _insert_bare_device(client.server_module.engine, store_id=store_id, public_id=device_id)
+    disable = client.post(f"/api/receiver-devices/{device_id}/disable", headers=headers)
+    assert disable.status_code == 200, disable.text
+    assert disable.json()["archived_at"] is None
+
+    deleted = client.delete(f"/api/receiver-devices/{device_id}/permanently",
+                           headers=headers, params={"confirm": device_id})
+    assert deleted.status_code == 409, deleted.text
+
+
+def test_permanent_delete_succeeds_for_an_archived_never_used_device(client):
+    headers = sign_in(client)
+    store_id = _first_store_id(client)
+    device_id = str(uuid.uuid4())
+    _insert_bare_device(client.server_module.engine, store_id=store_id, public_id=device_id)
+    archive = client.post(f"/api/receiver-devices/{device_id}/archive", headers=headers)
+    assert archive.status_code == 200, archive.text
 
     dependencies = client.get(f"/api/receiver-devices/{device_id}/dependencies", headers=headers)
     assert dependencies.json()["deletable"] is True
@@ -188,6 +222,59 @@ def test_permanent_delete_succeeds_for_a_never_used_device(client):
 
     gone = client.get(f"/api/receiver-devices/{device_id}", headers=headers)
     assert gone.status_code == 404
+
+
+def test_permanent_delete_succeeds_for_a_revoked_never_used_device(client):
+    headers = sign_in(client)
+    store_id = _first_store_id(client)
+    device_id = str(uuid.uuid4())
+    _insert_bare_device(client.server_module.engine, store_id=store_id, public_id=device_id)
+    revoke = client.post(f"/api/receiver-devices/{device_id}/revoke", headers=headers)
+    assert revoke.status_code == 200, revoke.text
+    assert revoke.json()["status"] == "retired"
+
+    deleted = client.delete(f"/api/receiver-devices/{device_id}/permanently",
+                           headers=headers, params={"confirm": device_id})
+    assert deleted.status_code == 200, deleted.text
+
+    gone = client.get(f"/api/receiver-devices/{device_id}", headers=headers)
+    assert gone.status_code == 404
+
+
+def test_permanent_delete_refuses_an_archived_device_that_is_still_primary(client):
+    headers = sign_in(client)
+    store_id = _first_store_id(client)
+    device_id = str(uuid.uuid4())
+    _insert_bare_device(client.server_module.engine, store_id=store_id, public_id=device_id)
+    promote = client.post(f"/api/receiver-devices/{device_id}/promote", headers=headers)
+    assert promote.status_code == 200, promote.text
+
+    # Force an inconsistent state directly: archived, but the primary row was
+    # never cleared. archive_device() always clears it - this proves the
+    # permanent-delete check is a real, independent guard, not a side effect
+    # of archiving always happening to clear it first.
+    from sqlalchemy import text
+    with client.server_module.engine.begin() as connection:
+        device_row_id = connection.execute(
+            text("SELECT id FROM receiver_devices WHERE public_id = :pid"),
+            {"pid": device_id}).scalar_one()
+        connection.execute(
+            text("UPDATE receiver_devices SET archived_at = :now WHERE public_id = :pid"),
+            {"now": datetime.now(timezone.utc).isoformat(), "pid": device_id})
+        connection.execute(
+            text(
+                "INSERT INTO receiver_store_primary_device "
+                "(store_id, device_id, promoted_at, promoted_by) "
+                "VALUES (:sid, :did, :now, NULL) "
+                "ON CONFLICT(store_id) DO UPDATE SET device_id = excluded.device_id"
+            ),
+            {"sid": store_id, "did": device_row_id,
+             "now": datetime.now(timezone.utc).isoformat()},
+        )
+
+    deleted = client.delete(f"/api/receiver-devices/{device_id}/permanently",
+                           headers=headers, params={"confirm": device_id})
+    assert deleted.status_code == 409, deleted.text
 
 
 def test_permanent_delete_refuses_a_wrong_typed_confirmation(client):
