@@ -1240,3 +1240,37 @@ sidecar files," across files that have nothing to do with the change
 being tested. If a wide swath of unrelated tests suddenly fail together,
 check for exactly that kind of session-local residue before suspecting
 the code.
+
+## Learning Box 28 — A mock that reuses a fixture object leaks state between tests
+
+**What happened.** A new Playwright mock for permanently deleting a Store
+did `const store = state.stores.find(...)` and then set
+`store.lifecycle_state = 'deleted'` directly on the object it found. That
+object was not a per-test copy - `state.stores` defaults to `options.stores
+|| STORES`, the same module-level array every test in the file shares by
+reference unless it passes its own. Mutating one element of it in place
+permanently tombstoned that fixture Store for the rest of the test
+process. The very next test in file order, which expected to find that
+Store's "Permanently Delete" button, timed out waiting for a row that the
+previous test had - invisibly, from that test's own point of view -
+already deleted.
+
+The tell was specific: the test passed every time it was run alone, and
+failed every time it followed the delete test in the same file, in that
+exact order. That combination - passes isolated, fails only after a
+specific prior test, same failure every time in that ordering - is the
+signature of shared mutable state, not of timing flakiness. Pure flakiness
+looks different: which test fails varies run to run.
+
+**The general shape.** Any mock/fixture layer that hands out a shared
+default (`options.x || SHARED_CONSTANT`) is safe to *read* across tests but
+never to *write* to in place. A handler that mutates a fetched record
+needs to build a new object (`{...store, ...changes}`) and replace it in
+the collection, not edit the one it found.
+
+**What to do about it.** When a test only fails in a specific position
+within a suite - never alone, never in a different order - suspect a
+shared object before suspecting timing. Grep the mock file for the
+fixture's own name (`STORES`, `DEVICES`, `HQ_USERS`) inside any handler
+that both reads and writes; a `.find()` immediately followed by an
+in-place property assignment on the result is the pattern to fix.

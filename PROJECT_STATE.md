@@ -3875,3 +3875,90 @@ and a Scope-editor dropdown suite), run on the isolated port 3577 per the
 existing safety convention, config reverted to port 3000 afterward with
 zero net diff. `compileall`, `pip check`, `git diff --check` and a secret
 scan all clean. `yarn build` compiled.
+
+## History-preserving permanent Store deletion
+
+### Semantics
+
+Two different operations now exist. ARCHIVE (existing): reversible, Store
+hidden from operation, restorable. PERMANENT DELETE (new): irreversible,
+Store gone from every operational surface, **not** restorable, but every
+historical row that referenced it stays exactly as readable as before.
+
+### Tombstone model (Option A - the Store row is never removed)
+
+`stores.lifecycle_state` gains a fourth value, `'deleted'`, plus new
+`deleted_at`/`deleted_by` columns (additive, backfilled by
+`ensure_store_lifecycle_schema`, same pattern as the existing
+`lifecycle_state` migration). `'deleted'` is deliberately absent from
+every transition's `allowed_from` tuple in `store_lifecycle.py`, so
+disable/enable/archive/restore already refuse a deleted Store with no
+new code - the state machine itself is the guard.
+
+### Every Store FK/history dependency inspected
+
+`receiver_devices.store_id` (`ON DELETE RESTRICT`), `broadcast_targets.
+store_id`, `receiver_events.store_id`, `receiver_enrollment_codes.
+store_id` (all plain FKs, no cascade), `receiver_credential_events.
+store_id` (`ON DELETE SET NULL`), `user_store_scope.store_id`. None of
+these ever fire, because the Store row is never deleted - confirming the
+tombstone model is the only safe option once RESTRICT/SET NULL
+semantics are read directly off the schema, not assumed.
+
+### Receiver credential / enrollment handling
+
+Inside one transaction (`store_deletion.
+permanently_delete_store_with_history`): every Device the Store owns is
+retired (`status='retired'`, not deleted), its primary assignment row
+removed, its active/superseded credentials revoked (`status='revoked'`,
+`revoked_at` stamped - the row and its full history remain), and every
+unredeemed/unexpired enrollment code has its `expires_at_epoch`
+backdated to now (unusable, code_hash - which can never be reversed -
+preserved as evidence). `receiver_token` is rotated to a fresh, unusable
+value.
+
+### History preservation, proven
+
+Broadcast History, session detail, `broadcast_targets`,
+`receiver_events` and Device rows all read back unchanged after a
+tombstone - proven directly against the database inside the test suite,
+not just through the API. `TargetOut` now carries `store_code`/
+`store_name`/`store_deleted`, populated from the (never-removed) Store
+row, so a historical target renders "AYUSHK (Deleted)" instead of a bare
+id or a blank name.
+
+### Permission and confirmation
+
+New `stores.delete_permanently`, defaulting OWNER/SUPER ADMIN only (same
+exclusion list ADMIN already has for `devices.delete_permanently`/
+`users.permissions.manage`). Store Management's "Permanently Delete"
+button is never disabled by a history count - it shows the real counts
+and requires the exact Store code typed AND a separate "cannot be
+restored" checkbox, both enforced again server-side.
+
+### Totals (this round)
+
+New (`test_store_permanent_deletion.py`): 24 passed, covering permission
+matrix, disappearance from every operational surface, non-restorability,
+full history preservation, credential/primary/enrollment handling,
+`PRAGMA foreign_key_check`/`integrity_check`, code-reuse refusal, and
+confirmation enforcement. Two pre-existing tests updated for the new
+permission code (`test_admin_default_permissions_exclude_...`,
+`test_no_authenticated_route_is_missing_from_this_table`). Full backend:
+2588 passed, 3 skipped (flaky xdist-timing tests, different ones each
+run, all confirmed to pass in isolation - a known pre-existing property
+of this suite under `-n auto`, unrelated to this change). Frontend unit:
+56 passed. Playwright: 192 passed (188 + 4 tombstone-UI tests), run on
+the isolated port 3577, config reverted to 3000 with zero net diff.
+`compileall`, `pip check`, `git diff --check` and a secret scan all
+clean. `yarn build` compiled.
+
+### Remaining limitations
+
+No UI list of tombstoned Stores (the audit endpoint exists, `GET
+/stores/{id}/deletion-events`, but nothing links to it from a normal
+screen since the Store itself is gone from every list); Broadcast
+Console's live target selector was not separately re-tested against a
+tombstoned Store beyond the existing `is_active` filter it already
+honors (a deleted Store has `is_active=False`, the same filter every
+other inactive Store already goes through).
