@@ -19,6 +19,7 @@ const VIEWER = { id: 4, username: 'anita', role: 'VIEWER' };
 const ALL_PERMISSION_CODES = [
   'menu.broadcast.view', 'broadcast.start', 'broadcast.stop', 'broadcast.emergency_stop',
   'menu.stores.view', 'stores.create', 'stores.update', 'stores.archive',
+  'stores.delete_permanently',
   'menu.receivers.view', 'devices.enrollment.create', 'devices.primary.assign',
   'devices.rotate', 'devices.disable', 'devices.revoke', 'devices.archive',
   'devices.delete_permanently',
@@ -264,6 +265,64 @@ test.describe('I. Scope editor uses canonical City/Zone dropdowns', () => {
     await expect(page.getByTestId('scope-entry-1')).toBeVisible();
     await expect(page.getByTestId('scope-entry-2')).toBeVisible();
     await expect(page.getByTestId('scope-clarity-banner')).toContainText('Restricted Scope');
+  });
+});
+
+// ===========================================================================
+// J. History-preserving permanent Store deletion
+// ===========================================================================
+test.describe('J. Permanent Store deletion (tombstone)', () => {
+  test('the button is SUPER ADMIN-only', async ({ page }) => {
+    const adminPermissions = ALL_PERMISSION_CODES.filter(
+      (c) => c !== 'users.permissions.manage' && c !== 'devices.delete_permanently'
+        && c !== 'stores.delete_permanently');
+    await mockBackend(page, { operator: ADMIN, permissions: adminPermissions });
+    await signIn(page);
+    await page.goto('/stores');
+    await expect(page.getByTestId(`tombstone-store-${STORES[0].store_code}`)).toHaveCount(0);
+  });
+
+  test('SUPER ADMIN sees the button, and deletion requires the typed code AND the acknowledgement', async ({ page }) => {
+    await mockBackend(page, { operator: SUPER_ADMIN });
+    await signIn(page);
+    await page.goto('/stores');
+
+    await expect(page.getByTestId(`tombstone-store-${STORES[0].store_code}`)).toBeVisible();
+    await page.getByTestId(`tombstone-store-${STORES[0].store_code}`).click();
+    await expect(page.getByTestId('tombstone-store-modal')).toBeVisible();
+
+    // Confirm button stays disabled until BOTH the exact code is typed and
+    // the checkbox is checked - neither alone is enough.
+    await expect(page.getByTestId('tombstone-confirm')).toBeDisabled();
+    await page.getByTestId('tombstone-confirm-input').fill(STORES[0].store_code);
+    await expect(page.getByTestId('tombstone-confirm')).toBeDisabled();
+    await page.getByTestId('tombstone-acknowledge-checkbox').check();
+    await expect(page.getByTestId('tombstone-confirm')).toBeEnabled();
+
+    await page.getByTestId('tombstone-confirm').click();
+    await expect(page.getByTestId('tombstone-store-modal')).toHaveCount(0);
+    await expect(page.getByTestId(`store-mgmt-row-${STORES[0].store_code}`)).toHaveCount(0);
+  });
+
+  test('a wrong typed code keeps the confirm button disabled', async ({ page }) => {
+    await mockBackend(page, { operator: SUPER_ADMIN });
+    await signIn(page);
+    await page.goto('/stores');
+    await page.getByTestId(`tombstone-store-${STORES[0].store_code}`).click();
+    await page.getByTestId('tombstone-confirm-input').fill('WRONG-CODE');
+    await page.getByTestId('tombstone-acknowledge-checkbox').check();
+    await expect(page.getByTestId('tombstone-confirm')).toBeDisabled();
+  });
+
+  test('a Store with history shows the counts and still allows deletion, not a disabled button', async ({ page }) => {
+    await mockBackend(page, { operator: SUPER_ADMIN, storeDependencies: { 1: 3 } });
+    await signIn(page);
+    await page.goto('/stores');
+    await page.getByTestId(`tombstone-store-${STORES[0].store_code}`).click();
+    await expect(page.getByTestId('tombstone-history-summary')).toBeVisible();
+    await page.getByTestId('tombstone-confirm-input').fill(STORES[0].store_code);
+    await page.getByTestId('tombstone-acknowledge-checkbox').check();
+    await expect(page.getByTestId('tombstone-confirm')).toBeEnabled();
   });
 });
 

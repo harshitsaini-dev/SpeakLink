@@ -2,7 +2,7 @@ import React from "react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
-import { Plus, RefreshCw, KeyRound, MonitorSmartphone, Pencil, Power, Archive, ArchiveRestore, Trash2 } from "lucide-react";
+import { Plus, RefreshCw, KeyRound, MonitorSmartphone, Pencil, Power, Archive, ArchiveRestore, Trash2, ShieldAlert } from "lucide-react";
 import StatusBadge from "@/components/StatusBadge";
 
 // A Store is never deleted. It owns Receiver Devices, broadcast sessions,
@@ -22,6 +22,7 @@ function LifecycleBadge({ state }) {
     ACTIVE: "bg-green-50 text-green-800 border-green-200",
     DISABLED: "bg-amber-50 text-amber-800 border-amber-200",
     ARCHIVED: "bg-slate-100 text-slate-600 border-slate-300",
+    DELETED: "bg-red-50 text-red-700 border-red-200",
   };
   return (
     <span
@@ -42,6 +43,7 @@ export default function StoreManagement() {
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState("");
   const [deleting, setDeleting] = React.useState(null);
+  const [tombstoning, setTombstoning] = React.useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -177,7 +179,13 @@ export default function StoreManagement() {
                         on a guess would hide it from the one never-used Store
                         it exists for. */}
                     {can("stores.archive") && (
-                      <button data-testid={`delete-store-${s.store_code}`} onClick={() => setDeleting(s)} title="Delete permanently" aria-label={`Delete ${s.store_name} permanently`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50"><Trash2 size={12}/></button>
+                      <button data-testid={`delete-store-${s.store_code}`} onClick={() => setDeleting(s)} title="Delete permanently (if unused)" aria-label={`Delete ${s.store_name} permanently if unused`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50"><Trash2 size={12}/></button>
+                    )}
+                    {/* Distinct from the button above: this one works even
+                        when the Store HAS history. SUPER ADMIN only - see
+                        stores.delete_permanently in the permission catalog. */}
+                    {can("stores.delete_permanently") && (
+                      <button data-testid={`tombstone-store-${s.store_code}`} onClick={() => setTombstoning(s)} title="Permanently delete (even with history)" aria-label={`Permanently delete ${s.store_name}, even with history`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-500 text-red-800 bg-red-50 rounded hover:bg-red-100"><ShieldAlert size={12}/></button>
                     )}
                   </td>
                 </tr>
@@ -192,6 +200,14 @@ export default function StoreManagement() {
           store={deleting}
           onClose={() => setDeleting(null)}
           onDeleted={() => { setDeleting(null); load(); }}
+        />
+      )}
+
+      {tombstoning && (
+        <TombstoneStoreModal
+          store={tombstoning}
+          onClose={() => setTombstoning(null)}
+          onDeleted={() => { setTombstoning(null); load(); }}
         />
       )}
 
@@ -308,6 +324,127 @@ function DeleteStoreModal({ store, onClose, onDeleted }) {
             className="flex-1 px-4 py-2 bg-red-700 text-white rounded-md text-sm disabled:opacity-40"
           >
             Delete permanently
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Permanently delete a Store even when it HAS history - a tombstone, not a
+ * row removal. Unlike DeleteStoreModal above, this is never disabled by the
+ * dependency count; instead it shows exactly what history exists, requires
+ * the exact Store code typed AND a separate "cannot be restored"
+ * acknowledgement, and only a SUPER ADMIN ever sees the button that opens it.
+ */
+function TombstoneStoreModal({ store, onClose, onDeleted }) {
+  const [summary, setSummary] = React.useState(null);
+  const [typed, setTyped] = React.useState("");
+  const [acknowledged, setAcknowledged] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  React.useEffect(() => {
+    let cancelled = false;
+    api.get(`/stores/${store.id}/dependencies`)
+      .then((r) => { if (!cancelled) setSummary(r.data); })
+      .catch(() => { if (!cancelled) setSummary({ counts: {}, total: 0 }); });
+    return () => { cancelled = true; };
+  }, [store.id]);
+
+  const remove = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await api.post(`/stores/${store.id}/delete-permanently`, { confirm: typed, acknowledged });
+      onDeleted();
+    } catch (e) {
+      setError(e?.response?.data?.detail || "That Store could not be permanently deleted.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const counts = summary?.counts || {};
+  const historyLines = [
+    counts.broadcast_targets ? `${counts.broadcast_targets} Broadcast Targets` : null,
+    counts.receiver_devices ? `${counts.receiver_devices} Receiver Device${counts.receiver_devices === 1 ? "" : "s"}` : null,
+    counts.receiver_enrollment_codes ? `${counts.receiver_enrollment_codes} enrollment code${counts.receiver_enrollment_codes === 1 ? "" : "s"}` : null,
+    counts.receiver_events ? `${counts.receiver_events} Receiver events` : null,
+  ].filter(Boolean);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+         data-testid="tombstone-store-modal">
+      <div className="bg-white rounded-lg w-full max-w-md p-5 space-y-3">
+        <h3 className="font-semibold text-red-900">
+          Permanently delete {store.store_code}?
+        </h3>
+
+        {summary === null && (
+          <p className="text-sm text-slate-600" data-testid="tombstone-checking">
+            Checking this Store's history…
+          </p>
+        )}
+
+        {summary !== null && (
+          <>
+            {historyLines.length > 0 ? (
+              <div className="text-sm text-slate-700 space-y-1" data-testid="tombstone-history-summary">
+                <p>This Store has:</p>
+                <ul className="list-disc list-inside">
+                  {historyLines.map((line) => <li key={line}>{line}</li>)}
+                </ul>
+              </div>
+            ) : (
+              <p className="text-sm text-slate-700" data-testid="tombstone-no-history">
+                Nothing currently refers to this Store.
+              </p>
+            )}
+            <p className="text-sm text-red-800">
+              The Store will be permanently removed from operational EchoCast.
+              Historical records will remain for audit purposes.
+            </p>
+
+            <label htmlFor="tombstone-confirm-input" className="block text-xs font-bold uppercase tracking-widest text-slate-500">
+              Type the Store code to confirm
+            </label>
+            <input
+              id="tombstone-confirm-input"
+              className="w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono"
+              value={typed} onChange={(e) => setTyped(e.target.value)}
+              placeholder={store.store_code}
+              autoComplete="off" data-testid="tombstone-confirm-input"
+            />
+
+            <label className="flex items-start gap-2 text-sm pt-1">
+              <input type="checkbox" data-testid="tombstone-acknowledge-checkbox"
+                     checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} />
+              <span>I understand this Store cannot be restored.</span>
+            </label>
+          </>
+        )}
+
+        {error && (
+          <div role="alert" data-testid="tombstone-error"
+               className="text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">
+            {error}
+          </div>
+        )}
+
+        <div className="flex gap-2 pt-1">
+          <button type="button" data-testid="tombstone-cancel" onClick={onClose}
+                  className="flex-1 px-4 py-2 border border-slate-300 rounded-md text-sm">
+            Cancel
+          </button>
+          <button
+            type="button" data-testid="tombstone-confirm"
+            disabled={busy || summary === null || typed !== store.store_code || !acknowledged}
+            onClick={remove}
+            className="flex-1 px-4 py-2 bg-red-700 text-white rounded-md text-sm disabled:opacity-40"
+          >
+            Permanently Delete Store
           </button>
         </div>
       </div>
