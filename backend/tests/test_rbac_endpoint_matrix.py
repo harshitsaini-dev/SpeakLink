@@ -94,6 +94,8 @@ EXPECTED: dict[str, object] = {
     # ADMIN a path to grant themselves more.
     "read_user_permission_overrides": "OWNER",
     "write_user_permission_overrides": "OWNER",
+    "read_user_store_scope": "OWNER",
+    "write_user_store_scope": "OWNER",
 
     # Dependency summaries, and the dependency-guarded hard deletes.
     "read_store_dependencies": "menu.stores.view",
@@ -111,6 +113,10 @@ EXPECTED: dict[str, object] = {
     "read_receiver_device": "menu.receivers.view",
     "read_receiver_device_roles": "menu.receivers.view",
     "disable_receiver_device": "devices.disable",
+    "archive_receiver_device": "devices.disable",
+    "restore_receiver_device": "devices.disable",
+    "read_receiver_device_dependencies": "menu.receivers.view",
+    "hard_delete_receiver_device": "devices.revoke",
     "revoke_receiver_device": "devices.revoke",
     "promote_receiver_device": "devices.primary.assign",
     "rotate_receiver_device": "devices.rotate",
