@@ -185,17 +185,78 @@ def migrate(sqlite_path: Path, *, force: bool = False) -> dict:
                     continue
                 rows = source.execute(f"SELECT {', '.join(columns)} FROM {table}").fetchall()
                 if rows:
-                    placeholders = ", ".join(f":{c}" for c in columns)
-                    connection.execute(
-                        text(f"INSERT INTO {table} ({', '.join(columns)}) "
-                            f"VALUES ({placeholders})"),
-                        [dict(row) for row in rows],
-                    )
+                    target = postgres_schema.metadata.tables[table]
+                    payload = [_coerce_row(dict(row), target) for row in rows]
+                    # An INSERT built from the Core Table (not a text() string)
+                    # so SQLAlchemy applies each column's own bind processor -
+                    # which is what turns a coerced Python bool/datetime into
+                    # the right PostgreSQL wire type.
+                    connection.execute(target.insert(), payload)
                 copied[table] = len(rows)
             _repair_sequences(connection)
     finally:
         source.close()
     return copied
+
+
+#: SQLite has no boolean and no date type. It stores booleans as INTEGER 0/1
+#: and DateTime columns as TEXT. PostgreSQL has real ``boolean`` and
+#: ``timestamp`` types and refuses the SQLite representations outright
+#: ("column is of type boolean but expression is of type smallint"). Rather
+#: than special-casing column names - which would silently miss the next
+#: boolean somebody adds - each value is converted according to the TYPE
+#: DECLARED FOR THAT COLUMN in postgres_schema/models, so the mapping stays
+#: correct as the schema grows.
+_DATETIME_FORMATS = (
+    "%Y-%m-%d %H:%M:%S.%f",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S.%f%z",
+    "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M:%S",
+)
+
+
+def _parse_datetime(value: str):
+    from datetime import datetime
+
+    text_value = value.strip()
+    try:
+        return datetime.fromisoformat(text_value)
+    except ValueError:
+        pass
+    for fmt in _DATETIME_FORMATS:
+        try:
+            return datetime.strptime(text_value, fmt)
+        except ValueError:
+            continue
+    raise SystemExit(
+        f"Could not parse a stored timestamp: {text_value!r}. Refusing to "
+        "guess - a misread timestamp would silently corrupt broadcast history."
+    )
+
+
+def _coerce_row(row: dict, target) -> dict:
+    """One SQLite row -> values PostgreSQL will accept, driven by the
+    destination column types rather than by column-name guesswork."""
+    from sqlalchemy import Boolean, DateTime
+
+    coerced = {}
+    for name, value in row.items():
+        column = target.columns.get(name)
+        if value is None or column is None:
+            coerced[name] = value
+            continue
+        column_type = column.type
+        if isinstance(column_type, Boolean) and not isinstance(value, bool):
+            # SQLite's 0/1. Anything non-zero is true, matching how every
+            # existing SQLite read of these columns already behaves.
+            coerced[name] = bool(value)
+        elif isinstance(column_type, DateTime) and isinstance(value, str):
+            coerced[name] = _parse_datetime(value)
+        else:
+            coerced[name] = value
+    return coerced
 
 
 def _repair_sequences(connection) -> None:
