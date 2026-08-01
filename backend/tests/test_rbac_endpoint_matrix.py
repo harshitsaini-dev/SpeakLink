@@ -167,6 +167,12 @@ EXPECTED: dict[str, object] = {
     "unarchive_system_logs": "system_logs.archive",
     "delete_system_logs": "system_logs.delete_permanently",
     "read_admin_deletion_events": "menu.logs.view",
+
+    # Server-side search/filter/pagination. Same permission as the list each
+    # one narrows - a filtered view is still a view.
+    "search_logs": "menu.logs.view",
+    "search_broadcast_history": "menu.history.view",
+    "search_users": "menu.users.view",
 }
 
 #: Routes that take no HTTP session, each for a stated reason.
