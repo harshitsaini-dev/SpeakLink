@@ -61,6 +61,23 @@ def ensure_store_scope_schema(engine: Engine) -> None:
             "ON user_store_scope(user_id, scope_type, scope_value) "
             "WHERE scope_type IN ('CITY', 'REGION')"
         )
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS store_scope_audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_user_id INTEGER NOT NULL REFERENCES hq_users(id),
+                target_user_id INTEGER NOT NULL REFERENCES hq_users(id),
+                scope_type TEXT NOT NULL CHECK (scope_type IN ('STORE', 'CITY', 'REGION')),
+                scope_label TEXT NOT NULL,
+                action TEXT NOT NULL CHECK (action IN ('ADDED', 'REMOVED')),
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS idx_store_scope_audit_target "
+            "ON store_scope_audit_events(target_user_id)"
+        )
 
 
 def resolve_store_scope(engine: Engine, user) -> frozenset[int] | None:
@@ -118,10 +135,30 @@ def list_user_scope(engine: Engine, *, user_id: int) -> list[dict]:
     ]
 
 
-def set_user_scope(engine: Engine, *, user_id: int, entries: list[dict]) -> None:
+def _entry_key(scope_type: str, *, store_id=None, scope_value=None) -> tuple:
+    return (scope_type, store_id, scope_value)
+
+
+def _store_label(connection, store_id: int) -> str:
+    row = connection.execute(
+        text("SELECT store_code, store_name FROM stores WHERE id = :id"), {"id": store_id}
+    ).first()
+    return f"{row.store_name} ({row.store_code})" if row else f"store#{store_id}"
+
+
+def set_user_scope(engine: Engine, *, user_id: int, entries: list[dict],
+                   actor_id: int | None = None) -> list[dict]:
     """Replace this account's entire scope set in one transaction. An empty
     list means "unrestricted again" - the same "no rows means no
-    restriction" rule resolve_store_scope reads."""
+    restriction" rule resolve_store_scope reads.
+
+    Every row added or removed by this call is recorded in
+    ``store_scope_audit_events`` with a safe, human-readable label (a Store's
+    name and code, or the city/Zone name) - never an internal id alone, and
+    never anything that could be mistaken for a credential. Returns the list
+    of audit rows written, for the caller to log a count without needing a
+    second query.
+    """
     now = datetime.now(timezone.utc).isoformat()
     with engine.begin() as connection:
         exists = connection.execute(
@@ -130,10 +167,19 @@ def set_user_scope(engine: Engine, *, user_id: int, entries: list[dict]) -> None
         if not exists:
             raise InvalidScopeEntry("That account no longer exists.")
 
-        connection.execute(
-            text("DELETE FROM user_store_scope WHERE user_id = :user_id"),
+        before_rows = connection.execute(
+            text(
+                "SELECT scope_type, store_id, scope_value FROM user_store_scope "
+                "WHERE user_id = :user_id"
+            ),
             {"user_id": user_id},
-        )
+        ).all()
+        before = {
+            _entry_key(r.scope_type, store_id=r.store_id, scope_value=r.scope_value): r
+            for r in before_rows
+        }
+
+        validated: list[dict] = []
         for entry in entries:
             scope_type = entry.get("scope_type")
             if scope_type not in SCOPE_TYPES:
@@ -147,32 +193,86 @@ def set_user_scope(engine: Engine, *, user_id: int, entries: list[dict]) -> None
                 ).first()
                 if not found:
                     raise InvalidScopeEntry(f"No Store with id {store_id}.")
-                connection.execute(
-                    text(
-                        "INSERT INTO user_store_scope "
-                        "(user_id, scope_type, store_id, scope_value, created_at) "
-                        "VALUES (:user_id, 'STORE', :store_id, NULL, :now)"
-                    ),
-                    {"user_id": user_id, "store_id": store_id, "now": now},
-                )
+                validated.append({"scope_type": "STORE", "store_id": store_id, "scope_value": None})
             else:
                 value = (entry.get("scope_value") or "").strip()
                 if not value:
                     raise InvalidScopeEntry(f"A {scope_type} scope entry needs a scope_value.")
-                connection.execute(
-                    text(
-                        "INSERT INTO user_store_scope "
-                        "(user_id, scope_type, store_id, scope_value, created_at) "
-                        "VALUES (:user_id, :scope_type, NULL, :value, :now)"
-                    ),
-                    {"user_id": user_id, "scope_type": scope_type, "value": value, "now": now},
-                )
+                validated.append({"scope_type": scope_type, "store_id": None, "scope_value": value})
+
+        after = {
+            _entry_key(e["scope_type"], store_id=e["store_id"], scope_value=e["scope_value"]): e
+            for e in validated
+        }
+
+        connection.execute(
+            text("DELETE FROM user_store_scope WHERE user_id = :user_id"),
+            {"user_id": user_id},
+        )
+        for entry in validated:
+            connection.execute(
+                text(
+                    "INSERT INTO user_store_scope "
+                    "(user_id, scope_type, store_id, scope_value, created_at) "
+                    "VALUES (:user_id, :scope_type, :store_id, :scope_value, :now)"
+                ),
+                {"user_id": user_id, "scope_type": entry["scope_type"],
+                 "store_id": entry["store_id"], "scope_value": entry["scope_value"], "now": now},
+            )
+
+        def label(scope_type, store_id, scope_value):
+            return _store_label(connection, store_id) if scope_type == "STORE" else scope_value
+
+        audit_rows: list[dict] = []
+        removed_keys = set(before) - set(after)
+        added_keys = set(after) - set(before)
+        for key in removed_keys:
+            scope_type, store_id, scope_value = key
+            audit_rows.append({"scope_type": scope_type,
+                               "scope_label": label(scope_type, store_id, scope_value),
+                               "action": "REMOVED"})
+        for key in added_keys:
+            scope_type, store_id, scope_value = key
+            audit_rows.append({"scope_type": scope_type,
+                               "scope_label": label(scope_type, store_id, scope_value),
+                               "action": "ADDED"})
+
+        for row in audit_rows:
+            connection.execute(
+                text(
+                    "INSERT INTO store_scope_audit_events "
+                    "(actor_user_id, target_user_id, scope_type, scope_label, action, created_at) "
+                    "VALUES (:actor_id, :target_id, :scope_type, :scope_label, :action, :now)"
+                ),
+                {"actor_id": actor_id, "target_id": user_id, "scope_type": row["scope_type"],
+                 "scope_label": row["scope_label"], "action": row["action"], "now": now},
+            )
+        return audit_rows
+
+
+def list_scope_audit_events(engine: Engine, *, user_id: int) -> list[dict]:
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT actor_user_id, target_user_id, scope_type, scope_label, action, "
+                "created_at FROM store_scope_audit_events WHERE target_user_id = :user_id "
+                "ORDER BY id"
+            ),
+            {"user_id": user_id},
+        ).all()
+    return [
+        {"actor_user_id": r.actor_user_id, "target_user_id": r.target_user_id,
+         "scope_type": r.scope_type, "scope_label": r.scope_label, "action": r.action,
+         "created_at": r.created_at}
+        for r in rows
+    ]
 
 
 __all__ = [
     "SCOPE_TYPES",
     "InvalidScopeEntry",
     "ensure_store_scope_schema",
+    "list_scope_audit_events",
     "list_user_scope",
     "resolve_store_scope",
     "set_user_scope",

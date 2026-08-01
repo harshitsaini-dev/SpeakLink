@@ -69,9 +69,9 @@ def make_user(client, headers, username, role):
     return response.json()["id"]
 
 
-def set_scope(engine, *, user_id, entries):
+def set_scope(engine, *, user_id, entries, actor_id=1):
     from store_scope import set_user_scope
-    set_user_scope(engine, user_id=user_id, entries=entries)
+    return set_user_scope(engine, user_id=user_id, entries=entries, actor_id=actor_id)
 
 
 def test_unscoped_admin_sees_every_store(client):
@@ -201,3 +201,152 @@ def test_removing_all_scope_rows_returns_to_unrestricted(client):
     set_scope(client.server_module.engine, user_id=user_id, entries=[])
     headers = sign_in(client, "gina")
     assert len(client.get("/api/stores", headers=headers).json()) == len(stores)
+
+
+# ===========================================================================
+# Scope audit
+# ===========================================================================
+def test_scope_change_over_the_api_is_recorded_in_the_audit_table(client):
+    owner = sign_in(client)
+    owner_me = client.get("/api/auth/me", headers=owner).json()
+    user_id = make_user(client, owner, "henry", "ADMIN")
+    stores = client.get("/api/stores", headers=owner).json()
+
+    resp = client.put(f"/api/users/{user_id}/store-scope", headers=owner,
+                      json={"entries": [{"scope_type": "STORE", "store_id": stores[0]["id"]}]})
+    assert resp.status_code == 200, resp.text
+
+    from store_scope import list_scope_audit_events
+    events = list_scope_audit_events(client.server_module.engine, user_id=user_id)
+    assert len(events) == 1
+    assert events[0]["action"] == "ADDED"
+    assert events[0]["scope_type"] == "STORE"
+    assert events[0]["actor_user_id"] == owner_me["id"]
+    assert events[0]["target_user_id"] == user_id
+    assert stores[0]["store_code"] in events[0]["scope_label"]
+
+
+def test_removing_a_scope_entry_is_recorded_as_removed(client):
+    owner = sign_in(client)
+    user_id = make_user(client, owner, "iris", "ADMIN")
+    stores = client.get("/api/stores", headers=owner).json()
+
+    client.put(f"/api/users/{user_id}/store-scope", headers=owner,
+              json={"entries": [{"scope_type": "CITY", "scope_value": stores[0]["city"]}]})
+    resp = client.put(f"/api/users/{user_id}/store-scope", headers=owner, json={"entries": []})
+    assert resp.status_code == 200, resp.text
+
+    from store_scope import list_scope_audit_events
+    events = list_scope_audit_events(client.server_module.engine, user_id=user_id)
+    actions = [e["action"] for e in events]
+    assert actions == ["ADDED", "REMOVED"]
+    assert events[1]["scope_label"] == stores[0]["city"]
+
+
+def test_scope_audit_contains_no_secrets(client):
+    owner = sign_in(client)
+    user_id = make_user(client, owner, "jack", "ADMIN")
+    stores = client.get("/api/stores", headers=owner).json()
+
+    resp = client.put(f"/api/users/{user_id}/store-scope", headers=owner,
+                      json={"entries": [{"scope_type": "STORE", "store_id": stores[0]["id"]}]})
+    payload = resp.text.lower()
+    for forbidden in ("password", "jwt", "bearer ", "hmac", "secret", "token"):
+        assert forbidden not in payload
+
+    from sqlalchemy import text
+    with client.server_module.engine.connect() as connection:
+        rows = connection.execute(text("SELECT * FROM store_scope_audit_events")).all()
+    assert rows
+    for row in rows:
+        for value in row:
+            text_value = str(value).lower()
+            for forbidden in ("password", "jwt", "bearer ", "hmac"):
+                assert forbidden not in text_value
+
+
+def test_broadcast_history_hides_sessions_outside_scope_and_recomputes_counts(client):
+    owner = sign_in(client)
+    stores = client.get("/api/stores", headers=owner).json()
+    in_scope_store, out_of_scope_store = stores[0], stores[1]
+
+    # A session targeting BOTH an in-scope and an out-of-scope Store.
+    created = client.post("/api/broadcast/sessions", headers=owner, json={
+        "campaign_name": "mixed scope", "target_mode": "selected",
+        "store_ids": [in_scope_store["id"], out_of_scope_store["id"]]})
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+    assert created.json()["selected_store_count"] == 2
+
+    user_id = make_user(client, owner, "liam", "ADMIN")
+    set_scope(client.server_module.engine, user_id=user_id,
+              entries=[{"scope_type": "STORE", "store_id": in_scope_store["id"]}])
+    headers = sign_in(client, "liam")
+
+    history = client.get("/api/broadcast/history", headers=headers)
+    assert history.status_code == 200, history.text
+    visible = [s for s in history.json() if s["id"] == session_id]
+    assert len(visible) == 1
+    # Recomputed to the scoped subset - never the real total of 2.
+    assert visible[0]["selected_store_count"] == 1
+
+    detail = client.get(f"/api/broadcast/sessions/{session_id}", headers=headers)
+    assert detail.status_code == 200, detail.text
+    detail_body = detail.json()
+    assert detail_body["selected_store_count"] == 1
+    assert {t["store_id"] for t in detail_body["targets"]} == {in_scope_store["id"]}
+
+
+def test_session_detail_is_404_for_a_session_with_no_in_scope_targets(client):
+    owner = sign_in(client)
+    stores = client.get("/api/stores", headers=owner).json()
+    out_of_scope_store = stores[1]
+
+    created = client.post("/api/broadcast/sessions", headers=owner, json={
+        "campaign_name": "entirely out of scope", "target_mode": "selected",
+        "store_ids": [out_of_scope_store["id"]]})
+    session_id = created.json()["id"]
+
+    user_id = make_user(client, owner, "mona", "ADMIN")
+    set_scope(client.server_module.engine, user_id=user_id,
+              entries=[{"scope_type": "STORE", "store_id": stores[0]["id"]}])
+    headers = sign_in(client, "mona")
+
+    detail = client.get(f"/api/broadcast/sessions/{session_id}", headers=headers)
+    assert detail.status_code == 404
+
+    history = client.get("/api/broadcast/history", headers=headers)
+    assert session_id not in {s["id"] for s in history.json()}
+
+
+def test_system_logs_are_not_store_scoped_by_design(client):
+    """system_logs has no store_id column - a log line is free text that MAY
+    mention a Store, but is not structurally associated with one. Fabricating
+    a Store scope over it would mean guessing at unstructured text, so it
+    stays governed only by menu.logs.view, exactly like before scope shipped.
+    """
+    owner = sign_in(client)
+    stores = client.get("/api/stores", headers=owner).json()
+    user_id = make_user(client, owner, "noah", "ADMIN")
+    set_scope(client.server_module.engine, user_id=user_id,
+              entries=[{"scope_type": "STORE", "store_id": stores[0]["id"]}])
+    headers = sign_in(client, "noah")
+
+    scoped_logs = client.get("/api/logs", headers=headers)
+    unscoped_logs = client.get("/api/logs", headers=owner)
+    assert scoped_logs.status_code == 200, scoped_logs.text
+    # Same count as OWNER's - logs are not filtered by Store scope.
+    assert len(scoped_logs.json()) == len(unscoped_logs.json())
+
+
+def test_only_owner_can_change_store_scope(client):
+    owner = sign_in(client)
+    user_id = make_user(client, owner, "kelly", "ADMIN")
+    admin_headers = sign_in(client, "kelly")
+
+    resp = client.put(f"/api/users/{user_id}/store-scope", headers=admin_headers,
+                      json={"entries": []})
+    assert resp.status_code == 403
+
+    read_resp = client.get(f"/api/users/{user_id}/store-scope", headers=admin_headers)
+    assert read_resp.status_code == 403
