@@ -76,7 +76,7 @@ function Badge({ text, styles }) {
 }
 
 export default function UserManagement() {
-  const { user: me } = useAuth();
+  const { user: me, can } = useAuth();
   const [users, setUsers] = React.useState(null);
   const [error, setError] = React.useState("");
   const [notice, setNotice] = React.useState("");
@@ -163,7 +163,7 @@ export default function UserManagement() {
           >
             <RefreshCw size={16} /> Refresh
           </button>
-          {MANAGEABLE[myRole]?.size > 0 && (
+          {MANAGEABLE[myRole]?.size > 0 && can("users.create") && (
             <button
               type="button" onClick={() => setCreating(true)} disabled={busy}
               className="inline-flex items-center gap-2 rounded bg-slate-900 px-3 py-2 text-sm text-white"
@@ -224,14 +224,14 @@ export default function UserManagement() {
                   <td className="space-x-2 text-right">
                     {/* Editing a name is not a lock-out, so it is offered for
                         your own account too. */}
-                    {(allowed || mine) && (
+                    {((allowed && can("users.update")) || mine) && (
                       <button type="button" disabled={busy} onClick={() => setEditing(row)}
                               className="inline-flex items-center gap-1 rounded border px-2 py-1"
                               data-testid={`edit-${row.username}`}>
                         <Pencil size={14} /> Edit
                       </button>
                     )}
-                    {allowed && row.lifecycle_state === "active" && (
+                    {allowed && can("users.disable") && row.lifecycle_state === "active" && (
                       <button type="button" disabled={busy}
                               onClick={() => act(() => api.post(`/users/${row.id}/disable`),
                                                  `${row.display_name} was disabled.`)}
@@ -240,7 +240,7 @@ export default function UserManagement() {
                         <Power size={14} /> Disable
                       </button>
                     )}
-                    {allowed && row.lifecycle_state === "disabled" && (
+                    {allowed && can("users.update") && row.lifecycle_state === "disabled" && (
                       <button type="button" disabled={busy}
                               onClick={() => act(() => api.post(`/users/${row.id}/enable`),
                                                  `${row.display_name} was enabled.`)}
@@ -249,7 +249,7 @@ export default function UserManagement() {
                         <Power size={14} /> Enable
                       </button>
                     )}
-                    {allowed && row.lifecycle_state !== "archived" && (
+                    {allowed && can("users.disable") && row.lifecycle_state !== "archived" && (
                       <button type="button" disabled={busy}
                               onClick={() => act(() => api.post(`/users/${row.id}/archive`),
                                                  `${row.display_name} was archived.`)}
@@ -258,7 +258,7 @@ export default function UserManagement() {
                         <Archive size={14} /> Archive
                       </button>
                     )}
-                    {allowed && row.lifecycle_state === "archived" && (
+                    {allowed && can("users.update") && row.lifecycle_state === "archived" && (
                       <button type="button" disabled={busy}
                               onClick={() => act(() => api.post(`/users/${row.id}/restore`),
                                                  `${row.display_name} was restored, and is disabled until somebody enables it.`)}
@@ -278,7 +278,7 @@ export default function UserManagement() {
                         it. Whether it is actually permitted is decided by the
                         dependency summary the dialog fetches, and again by the
                         server inside the deleting transaction. */}
-                    {allowed && row.role !== "OWNER" && (
+                    {allowed && can("users.disable") && row.role !== "OWNER" && (
                       <button type="button" disabled={busy} onClick={() => setDeleting(row)}
                               className="inline-flex items-center gap-1 rounded border border-red-300 px-2 py-1 text-red-700"
                               data-testid={`delete-${row.username}`}>

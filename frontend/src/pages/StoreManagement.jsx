@@ -1,6 +1,7 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
+import { useAuth } from "@/contexts/AuthContext";
 import { Plus, RefreshCw, KeyRound, MonitorSmartphone, Pencil, Power, Archive, ArchiveRestore, Trash2 } from "lucide-react";
 import StatusBadge from "@/components/StatusBadge";
 
@@ -33,6 +34,7 @@ function LifecycleBadge({ state }) {
 }
 
 export default function StoreManagement() {
+  const { can } = useAuth();
   const [stores, setStores] = React.useState([]);
   const [showAdd, setShowAdd] = React.useState(false);
   const [editing, setEditing] = React.useState(null);
@@ -106,7 +108,9 @@ export default function StoreManagement() {
         </div>
         <div className="flex gap-2">
           <button data-testid="stores-refresh-btn" onClick={load} className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50"><RefreshCw size={14}/> Refresh</button>
-          <button data-testid="add-store-btn" onClick={() => setShowAdd(true)} className="inline-flex items-center gap-1 px-3 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-md text-sm font-medium"><Plus size={16}/> Add Store</button>
+          {can("stores.create") && (
+            <button data-testid="add-store-btn" onClick={() => setShowAdd(true)} className="inline-flex items-center gap-1 px-3 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-md text-sm font-medium"><Plus size={16}/> Add Store</button>
+          )}
         </div>
       </div>
 
@@ -148,30 +152,33 @@ export default function StoreManagement() {
                   <td className="px-3 py-2 text-right space-x-1 whitespace-nowrap">
                     {/* The Store id, not a credential. Enrolment lives on that page. */}
                     <Link data-testid={`devices-${s.store_code}`} to={`/stores/${s.id}/devices`} title="Receiver Devices" aria-label={`Receiver Devices for ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-blue-50"><MonitorSmartphone size={12}/></Link>
-                    {!archived && (
+                    {!archived && can("stores.update") && (
                       <button data-testid={`edit-store-${s.store_code}`} onClick={() => setEditing(s)} title="Edit Store" aria-label={`Edit ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-slate-50"><Pencil size={12}/></button>
                     )}
-                    {!archived && (
+                    {!archived && can("stores.update") && (
                       <button data-testid={`regen-token-${s.store_code}`} onClick={() => regen(s.id)} disabled={busy === `regen-${s.id}`} title="Regenerate legacy token" aria-label={`Regenerate the legacy Receiver token for ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-amber-50 disabled:opacity-50"><KeyRound size={12}/></button>
                     )}
-                    {state === "ACTIVE" && (
+                    {state === "ACTIVE" && can("stores.archive") && (
                       <button data-testid={`disable-store-${s.store_code}`} onClick={() => disable(s)} disabled={busy === `disable-${s.id}`} title="Disable" aria-label={`Disable ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-amber-200 text-amber-800 rounded hover:bg-amber-50 disabled:opacity-50"><Power size={12}/></button>
                     )}
-                    {state === "DISABLED" && (
+                    {state === "DISABLED" && can("stores.update") && (
                       <button data-testid={`enable-store-${s.store_code}`} onClick={() => enable(s)} disabled={busy === `enable-${s.id}`} title="Re-enable" aria-label={`Re-enable ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-green-200 text-green-800 rounded hover:bg-green-50 disabled:opacity-50"><Power size={12}/></button>
                     )}
-                    {!archived && (
+                    {!archived && can("stores.archive") && (
                       <button data-testid={`archive-store-${s.store_code}`} onClick={() => archive(s)} disabled={busy === `archive-${s.id}`} title="Archive" aria-label={`Archive ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-200 text-red-700 rounded hover:bg-red-50 disabled:opacity-50"><Archive size={12}/></button>
                     )}
-                    {archived && (
+                    {archived && can("stores.update") && (
                       <button data-testid={`restore-store-${s.store_code}`} onClick={() => restore(s)} disabled={busy === `restore-${s.id}`} title="Restore to disabled" aria-label={`Restore ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-blue-200 text-blue-800 rounded hover:bg-blue-50 disabled:opacity-50"><ArchiveRestore size={12}/></button>
                     )}
-                    {/* Offered on every Store, because whether it is actually
-                        allowed is decided by the dependency summary the dialog
-                        fetches - and again by the server inside the deleting
-                        transaction. Hiding it on a guess would hide it from the
-                        one never-used Store it exists for. */}
-                    <button data-testid={`delete-store-${s.store_code}`} onClick={() => setDeleting(s)} title="Delete permanently" aria-label={`Delete ${s.store_name} permanently`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50"><Trash2 size={12}/></button>
+                    {/* Offered on every Store this account may archive, because
+                        whether it is actually allowed is decided by the
+                        dependency summary the dialog fetches - and again by
+                        the server inside the deleting transaction. Hiding it
+                        on a guess would hide it from the one never-used Store
+                        it exists for. */}
+                    {can("stores.archive") && (
+                      <button data-testid={`delete-store-${s.store_code}`} onClick={() => setDeleting(s)} title="Delete permanently" aria-label={`Delete ${s.store_name} permanently`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50"><Trash2 size={12}/></button>
+                    )}
                   </td>
                 </tr>
               );
