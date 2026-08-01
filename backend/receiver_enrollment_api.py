@@ -122,6 +122,12 @@ def _require_phase_one(engine: Engine) -> None:
             f"phase-one schema is missing ({', '.join(missing)}). Apply it with "
             "tools/receiver_migration.py during a maintenance window."
         )
+    # Self-healing rather than startup-only: any caller that ran Phase One
+    # directly (a test fixture, a maintenance script) and never went through
+    # server.py's startup_event still gets the archive column the moment it
+    # reads or writes a Device - the same "add it wherever it might be
+    # missing" rule ensure_rbac_schema's session_version column follows.
+    ensure_device_archive_schema(engine)
 
 
 def _active_store(db: Session, store_id: int) -> Store:
@@ -285,8 +291,30 @@ def redeem_and_enroll(
 # ---------------------------------------------------------------------------
 _DEVICE_COLUMNS = (
     "public_id", "store_id", "display_name", "status",
-    "enrolled_at", "disabled_at", "created_at", "updated_at",
+    "enrolled_at", "disabled_at", "created_at", "updated_at", "archived_at",
 )
+
+
+def ensure_device_archive_schema(engine: Engine) -> None:
+    """Add ``receiver_devices.archived_at`` if missing. Additive and idempotent.
+
+    ``status`` already has a fixed CHECK constraint of ``active`` /
+    ``disabled`` / ``retired`` (SQLite cannot ALTER a CHECK constraint without
+    rebuilding the table), so "archived" is not a fourth status value - it is
+    this separate nullable timestamp, the same shape Store and HQUser already
+    use for their own archive/restore lifecycle. A Device is archived by
+    setting this column (and disabling it, if it was still active); restoring
+    clears the column and leaves it disabled, never straight back to active -
+    exactly the rule Store/User restore already follow.
+    """
+    with engine.begin() as connection:
+        columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(receiver_devices)")
+        }
+        if "archived_at" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE receiver_devices ADD COLUMN archived_at TEXT"
+            )
 
 
 def _device_row(row) -> dict:
@@ -371,6 +399,79 @@ def revoke_device(engine: Engine, *, public_id: str) -> dict:
     return _set_status(engine, public_id=public_id, status="retired")
 
 
+def archive_device(engine: Engine, *, public_id: str) -> dict:
+    """Retire this Device from the active list. Reversible - its credential
+    history and every enrolment/audit event stay exactly as they were.
+
+    Mirrors Store/User archive: the Device is disabled (if it was still
+    active) and ``archived_at`` is stamped, but nothing is deleted and its
+    Store keeps every other Device working.
+    """
+    from datetime import datetime, timezone
+
+    _require_phase_one(engine)
+    now = datetime.now(timezone.utc).isoformat()
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        row = connection.execute(
+            text("SELECT status FROM receiver_devices WHERE public_id = :public_id"),
+            {"public_id": public_id},
+        ).one_or_none()
+        if row is None:
+            raise DeviceNotFound("no Receiver Device with that identifier")
+        if row.status == "active":
+            connection.execute(
+                text(
+                    "UPDATE receiver_devices SET status = 'disabled', disabled_at = :now, "
+                    "archived_at = :now, updated_at = :now WHERE public_id = :public_id"
+                ),
+                {"now": now, "public_id": public_id},
+            )
+        else:
+            connection.execute(
+                text(
+                    "UPDATE receiver_devices SET archived_at = :now, updated_at = :now "
+                    "WHERE public_id = :public_id"
+                ),
+                {"now": now, "public_id": public_id},
+            )
+        has_primary_table = connection.exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='receiver_store_primary_device'"
+        ).first()
+        if has_primary_table:
+            connection.execute(
+                text(
+                    "DELETE FROM receiver_store_primary_device WHERE device_id = "
+                    "(SELECT id FROM receiver_devices WHERE public_id = :public_id)"
+                ),
+                {"public_id": public_id},
+            )
+        connection.commit()
+    return read_device(engine, public_id=public_id)
+
+
+def restore_device(engine: Engine, *, public_id: str) -> dict:
+    """Bring an archived Device back to DISABLED, never straight to active -
+    the same rule Store/User restore already follow. An operator re-enables it
+    deliberately, the same way they would any other disabled Device."""
+    from datetime import datetime, timezone
+
+    _require_phase_one(engine)
+    now = datetime.now(timezone.utc).isoformat()
+    with engine.begin() as connection:
+        updated = connection.execute(
+            text(
+                "UPDATE receiver_devices SET archived_at = NULL, updated_at = :now "
+                "WHERE public_id = :public_id"
+            ),
+            {"now": now, "public_id": public_id},
+        ).rowcount
+    if not updated:
+        raise DeviceNotFound("no Receiver Device with that identifier")
+    return read_device(engine, public_id=public_id)
+
+
 __all__ = [
     "MAX_OUTSTANDING_CODES_PER_STORE",
     "DeviceNotFound",
@@ -378,10 +479,13 @@ __all__ = [
     "EnrollmentRefused",
     "EnrollmentUnavailable",
     "TooManyOutstandingCodes",
+    "archive_device",
     "create_enrollment_code",
     "disable_device",
+    "ensure_device_archive_schema",
     "list_devices",
     "read_device",
     "redeem_and_enroll",
+    "restore_device",
     "revoke_device",
 ]
