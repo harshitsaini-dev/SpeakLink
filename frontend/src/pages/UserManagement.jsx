@@ -19,6 +19,7 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   UserPlus, RefreshCw, KeyRound, Pencil, Power, Archive, ArchiveRestore, ShieldAlert, Trash2,
+  ShieldCheck,
 } from "lucide-react";
 
 const ROLES = ["OWNER", "ADMIN", "BROADCASTER", "VIEWER"];
@@ -71,6 +72,7 @@ export default function UserManagement() {
   const [editing, setEditing] = React.useState(null);
   const [resetting, setResetting] = React.useState(null);
   const [deleting, setDeleting] = React.useState(null);
+  const [editingRights, setEditingRights] = React.useState(null);
 
   const myRole = me?.role || "VIEWER";
   const canManage = (role) => (MANAGEABLE[myRole] || new Set()).has(role);
@@ -269,6 +271,16 @@ export default function UserManagement() {
                         <Trash2 size={14} /> Delete
                       </button>
                     )}
+                    {/* Only OWNER may reach the endpoint this opens; the button
+                        is hidden for the same reason the endpoint refuses an
+                        OWNER target - OWNER's rights are never overridden. */}
+                    {isSuperAdmin && row.role !== "OWNER" && (
+                      <button type="button" disabled={busy} onClick={() => setEditingRights(row)}
+                              className="inline-flex items-center gap-1 rounded border px-2 py-1"
+                              data-testid={`rights-${row.username}`}>
+                        <ShieldCheck size={14} /> Rights
+                      </button>
+                    )}
                   </td>
                 </tr>
               );
@@ -333,6 +345,190 @@ export default function UserManagement() {
           }}
         />
       )}
+
+      {editingRights && (
+        <RightsEditor
+          user={editingRights}
+          onCancel={() => setEditingRights(null)}
+          onSaved={() => setEditingRights(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+const GROUP_ORDER = ["Broadcast", "Stores", "Receivers", "History", "Logs", "Users"];
+
+/**
+ * Beginner-friendly rights editor: Role / Override / Effective, per
+ * permission, grouped the way an operator thinks about the product rather
+ * than by table name. Changing rights here never touches a password or role -
+ * it calls exactly one endpoint, PUT /users/{id}/permissions, which does
+ * nothing else.
+ */
+function RightsEditor({ user, onCancel, onSaved }) {
+  const [rows, setRows] = React.useState(null);
+  const [role, setRole] = React.useState(user.role);
+  const [pending, setPending] = React.useState({});
+  const [loadError, setLoadError] = React.useState("");
+  const [saveError, setSaveError] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+  const [saved, setSaved] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    setLoadError("");
+    try {
+      const { data } = await api.get(`/users/${user.id}/permissions`);
+      setRole(data.role);
+      setRows(data.permissions);
+      setPending({});
+    } catch (failure) {
+      setLoadError(
+        failure?.response?.status === 403
+          ? "You do not have permission to view or change this account's rights."
+          : "This account's rights could not be loaded."
+      );
+    }
+  }, [user.id]);
+
+  React.useEffect(() => { load(); }, [load]);
+
+  const effectiveOverride = (row) => pending[row.code] ?? row.override;
+
+  const effectiveNow = (row) => {
+    const override = effectiveOverride(row);
+    if (override === "ALLOW") return true;
+    if (override === "DENY") return false;
+    return row.role_allowed;
+  };
+
+  const changedCount = Object.keys(pending).length;
+
+  const save = async () => {
+    setSaving(true);
+    setSaveError("");
+    setSaved(false);
+    try {
+      const changes = Object.entries(pending).map(([code, effect]) => ({ code, effect }));
+      await api.put(`/users/${user.id}/permissions`, { changes });
+      setSaved(true);
+      await load();
+    } catch (failure) {
+      const detail = failure?.response?.data?.detail;
+      setSaveError(detail || "These rights could not be saved.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const grouped = React.useMemo(() => {
+    if (!rows) return [];
+    const byGroup = new Map();
+    for (const row of rows) {
+      if (!byGroup.has(row.group)) byGroup.set(row.group, []);
+      byGroup.get(row.group).push(row);
+    }
+    return GROUP_ORDER.filter((g) => byGroup.has(g)).map((g) => [g, byGroup.get(g)]);
+  }, [rows]);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+         data-testid="rights-editor">
+      <div className="bg-white rounded-md shadow-xl max-w-2xl w-full max-h-[85vh] flex flex-col">
+        <div className="p-5 border-b flex items-center justify-between">
+          <div>
+            <div className="text-xs uppercase tracking-widest text-slate-500">User</div>
+            <div className="text-lg font-semibold" data-testid="rights-username">{user.display_name}</div>
+            <div className="text-xs text-slate-500">
+              Base Role: <span className="font-medium" data-testid="rights-base-role">{role}</span>
+            </div>
+          </div>
+          <button type="button" onClick={onCancel} className="text-slate-500 hover:text-slate-900"
+                  data-testid="rights-close">✕</button>
+        </div>
+
+        <div className="p-5 overflow-y-auto space-y-5">
+          {loadError && (
+            <p className="text-sm text-red-700" data-testid="rights-load-error">{loadError}</p>
+          )}
+          {!rows && !loadError && (
+            <p className="text-sm text-slate-500" data-testid="rights-loading">Loading rights…</p>
+          )}
+          {grouped.map(([group, groupRows]) => (
+            <div key={group}>
+              <h3 className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">{group}</h3>
+              <div className="space-y-2">
+                {groupRows.map((row) => {
+                  const override = effectiveOverride(row);
+                  const effective = effectiveNow(row);
+                  return (
+                    <div key={row.code}
+                         className="flex items-center justify-between gap-3 border rounded px-3 py-2"
+                         data-testid={`right-row-${row.code}`}>
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium">{row.label}</div>
+                        <div className="text-xs text-slate-500">
+                          Role: {row.role_allowed ? "Allowed" : "Not allowed"}
+                          {override !== "INHERIT" && <> · Override: {override}</>}
+                          {" · "}
+                          Effective:{" "}
+                          <span className={effective ? "text-emerald-700 font-medium" : "text-red-700 font-medium"}>
+                            {effective ? "Allowed" : "Denied"}
+                          </span>
+                        </div>
+                      </div>
+                      <select
+                        className="border rounded px-2 py-1 text-sm bg-white shrink-0"
+                        value={override}
+                        data-testid={`right-select-${row.code}`}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setPending((prev) => {
+                            const next = { ...prev };
+                            if (value === row.override) delete next[row.code];
+                            else next[row.code] = value;
+                            return next;
+                          });
+                        }}
+                      >
+                        <option value="INHERIT">Inherit</option>
+                        <option value="ALLOW">Allow</option>
+                        <option value="DENY">Deny</option>
+                      </select>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="p-5 border-t space-y-2">
+          {saveError && <p className="text-sm text-red-700" data-testid="rights-save-error">{saveError}</p>}
+          {saved && !saveError && (
+            <p className="text-sm text-emerald-700" data-testid="rights-save-success">Rights saved.</p>
+          )}
+          <div className="flex gap-2">
+            <button
+              type="button" onClick={save} disabled={saving || changedCount === 0}
+              className="rounded bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-40"
+              data-testid="rights-save"
+            >
+              {saving ? "Saving…" : `Save Changes${changedCount ? ` (${changedCount})` : ""}`}
+            </button>
+            <button type="button" onClick={onCancel}
+                    className="rounded border px-3 py-2 text-sm" data-testid="rights-cancel">
+              Cancel
+            </button>
+            {saved && (
+              <button type="button" onClick={onSaved}
+                      className="ml-auto rounded border px-3 py-2 text-sm" data-testid="rights-done">
+                Done
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

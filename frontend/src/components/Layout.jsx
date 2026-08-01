@@ -2,6 +2,7 @@ import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { Radio, LayoutDashboard, Store as StoreIcon, History, Radar, ScrollText, Users, KeyRound, LogOut, Menu, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { MENU_PERMISSION_BY_PATH } from "@/lib/menuPermissions";
 
 const NAV = [
   { to: "/console", label: "Broadcast Console", icon: LayoutDashboard, testid: "nav-console" },
@@ -9,22 +10,27 @@ const NAV = [
   { to: "/history", label: "Broadcast History", icon: History, testid: "nav-history" },
   { to: "/receivers", label: "Receiver Status", icon: Radar, testid: "nav-receivers" },
   { to: "/logs", label: "System Logs", icon: ScrollText, testid: "nav-logs" },
-  // Shown only to accounts that hold MANAGE_USERS. This is presentation, not
+  // Shown only to accounts holding menu.users.view (OWNER/ADMIN by default,
+  // and per-user overrides can change that). This is presentation, not
   // protection - the backend answers 403 to the request either way, and a
-  // navigation link is not a permission check.
-  { to: "/users", label: "User Management", icon: Users, testid: "nav-users",
-    roles: ["OWNER", "ADMIN"] },
+  // navigation link is not a permission check. ProtectedRoute enforces the
+  // same MENU_PERMISSION_BY_PATH map against a direct URL visit.
+  { to: "/users", label: "User Management", icon: Users, testid: "nav-users" },
   // Everybody, deliberately: read-only does not mean unable to secure your own
   // account.
   { to: "/account/password", label: "Change Password", icon: KeyRound, testid: "nav-password" },
 ];
 
 export default function Layout() {
-  const { user, logout } = useAuth();
+  const { user, logout, can } = useAuth();
   const navigate = useNavigate();
   const [open, setOpen] = React.useState(false);
 
   const handleLogout = () => { logout(); navigate("/login"); };
+  const visibleNav = NAV.filter((n) => {
+    const permission = MENU_PERMISSION_BY_PATH[n.to];
+    return !permission || can(permission);
+  });
 
   return (
     <div className="h-screen flex bg-slate-50 overflow-hidden">
@@ -38,7 +44,7 @@ export default function Layout() {
           </div>
         </div>
         <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-4 space-y-1">
-          {NAV.filter((n) => !n.roles || n.roles.includes(user?.role)).map((n) => (
+          {visibleNav.map((n) => (
             <NavLink
               key={n.to}
               to={n.to}
