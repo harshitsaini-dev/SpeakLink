@@ -319,7 +319,11 @@ def test_no_frontend_source_puts_a_reusable_token_in_an_api_url():
 
 
 def test_the_frontend_websocket_urls_carry_only_a_ticket():
-    console = (FRONTEND_SOURCE / "pages" / "BroadcastConsole.jsx").read_text(encoding="utf-8")
+    # This logic moved from BroadcastConsole.jsx into BroadcastContext.js so
+    # the live broadcast/session state (and this ticket handshake) survives
+    # navigating away from the Console and back - see
+    # frontend/src/contexts/BroadcastContext.js.
+    console = (FRONTEND_SOURCE / "contexts" / "BroadcastContext.js").read_text(encoding="utf-8")
     assert "ticket=" in console
     assert "/ws/hq\")}?token=" not in console
     assert "/ws/broadcaster\")}?token=" not in console
