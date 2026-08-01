@@ -21,7 +21,7 @@ from starlette.middleware.cors import CORSMiddleware
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from db import engine, get_db, SessionLocal
 from models import (
@@ -89,6 +89,14 @@ from store_deletion import (
     StoreDeletionRefused,
     list_store_deletion_events,
     permanently_delete_store_with_history,
+)
+from admin_records import (
+    archive_logs,
+    archive_sessions,
+    delete_logs_permanently,
+    delete_sessions_permanently,
+    ensure_admin_records_schema,
+    list_admin_deletion_events,
 )
 from device_deletion import (
     DeviceDeletionRefused,
@@ -548,6 +556,12 @@ def startup_event():
         ensure_device_deletion_schema(engine)
     except Exception:
         logger.warning("Device deletion table could not be prepared", exc_info=False)
+
+    # Broadcast History / System Log archive + administrative deletion audit.
+    try:
+        ensure_admin_records_schema(engine)
+    except Exception:
+        logger.warning("Admin records schema could not be prepared", exc_info=False)
 
     # Every hq_users migration, in one call, in the one order that works.
     #
@@ -2226,8 +2240,13 @@ def _scoped_session_target_counts(db: Session, session: BroadcastSession, scope)
 
 
 @api.get("/broadcast/history", response_model=List[SessionOut])
-def broadcast_history(limit: int = 50, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.VIEW_HISTORY))):
-    sessions = db.query(BroadcastSession).order_by(BroadcastSession.id.desc()).limit(limit).all()
+def broadcast_history(limit: int = 50, include_archived: bool = False,
+                      db: Session = Depends(get_db),
+                      user: HQUser = Depends(require(Permission.VIEW_HISTORY))):
+    query = db.query(BroadcastSession)
+    if not include_archived:
+        query = query.filter(BroadcastSession.archived_at.is_(None))
+    sessions = query.order_by(BroadcastSession.id.desc()).limit(limit).all()
     scope = resolve_store_scope(engine, user)
     if scope is None:
         return sessions
@@ -2310,13 +2329,131 @@ def session_detail(sid: int, db: Session = Depends(get_db), user: HQUser = Depen
 def list_logs(
     level: Optional[str] = None,
     limit: int = 200,
+    include_archived: bool = False,
     db: Session = Depends(get_db),
     user: HQUser = Depends(require(Permission.VIEW_LOGS)),
 ):
     q = db.query(SystemLog)
     if level:
         q = q.filter(SystemLog.level == level)
+    if not include_archived:
+        # Archived log lines are hidden, not removed - Show Archived brings
+        # them back. Permanent deletion is a separate, irreversible action.
+        q = q.filter(SystemLog.archived_at.is_(None))
     return q.order_by(SystemLog.id.desc()).limit(limit).all()
+
+
+class BulkIdsRequest(BaseModel):
+    ids: List[int] = Field(default_factory=list)
+    #: Present only for permanent deletion. Bulk destruction requires the
+    #: operator to type it, exactly like the single-row deletes elsewhere.
+    confirm: Optional[str] = None
+    acknowledged: bool = False
+    #: What the operator had on screen when they chose "all filtered". Recorded
+    #: in the audit so a bulk delete can be explained months later.
+    filters: Optional[dict] = None
+
+
+def _require_bulk_confirmation(payload: BulkIdsRequest, expected: str) -> None:
+    if not payload.acknowledged:
+        raise HTTPException(
+            status_code=400,
+            detail="The 'this cannot be undone' acknowledgement is required.")
+    if (payload.confirm or "").strip() != expected:
+        raise HTTPException(
+            status_code=409,
+            detail=f"The typed confirmation did not match. Type exactly: {expected}")
+
+
+@api.post("/broadcast/history/archive")
+def archive_broadcast_sessions(payload: BulkIdsRequest,
+                               db: Session = Depends(get_db),
+                               user: HQUser = Depends(require("broadcast_history.archive"))):
+    """Hide sessions from the normal History list. Reversible - nothing is
+    removed, and Show Archived brings them back into view."""
+    result = archive_sessions(engine, session_ids=payload.ids,
+                              actor_user_id=user.id, archived=True)
+    _write_log(db, "warn",
+               f"BROADCAST_HISTORY_ARCHIVED count={result.affected} by={user.username}")
+    return result.as_dict()
+
+
+@api.post("/broadcast/history/unarchive")
+def unarchive_broadcast_sessions(payload: BulkIdsRequest,
+                                 db: Session = Depends(get_db),
+                                 user: HQUser = Depends(require("broadcast_history.archive"))):
+    result = archive_sessions(engine, session_ids=payload.ids,
+                              actor_user_id=user.id, archived=False)
+    _write_log(db, "info",
+               f"BROADCAST_HISTORY_UNARCHIVED count={result.affected} by={user.username}")
+    return result.as_dict()
+
+
+@api.post("/broadcast/history/delete-permanently")
+def delete_broadcast_sessions(payload: BulkIdsRequest,
+                              db: Session = Depends(get_db),
+                              user: HQUser = Depends(
+                                  require("broadcast_history.delete_permanently"))):
+    """Really remove broadcast sessions and their targets. Irreversible.
+
+    Unlike a Store/User/Device, history IS the record - there is nothing
+    downstream for a tombstone to protect - so this genuinely deletes.
+    Nothing else is touched: never a Store, a User or a Receiver Device.
+    """
+    _require_bulk_confirmation(payload, "DELETE")
+    result = delete_sessions_permanently(
+        engine, session_ids=payload.ids, actor_user_id=user.id,
+        filters=payload.filters)
+    _write_log(db, "warn",
+               f"BROADCAST_HISTORY_DELETED count={result.affected} "
+               f"requested={result.requested} by={user.username}")
+    return result.as_dict()
+
+
+@api.post("/logs/archive")
+def archive_system_logs(payload: BulkIdsRequest, db: Session = Depends(get_db),
+                        user: HQUser = Depends(require("system_logs.archive"))):
+    result = archive_logs(engine, log_ids=payload.ids, actor_user_id=user.id,
+                          archived=True)
+    _write_log(db, "warn", f"SYSTEM_LOGS_ARCHIVED count={result.affected} by={user.username}")
+    return result.as_dict()
+
+
+@api.post("/logs/unarchive")
+def unarchive_system_logs(payload: BulkIdsRequest, db: Session = Depends(get_db),
+                          user: HQUser = Depends(require("system_logs.archive"))):
+    result = archive_logs(engine, log_ids=payload.ids, actor_user_id=user.id,
+                          archived=False)
+    _write_log(db, "info", f"SYSTEM_LOGS_UNARCHIVED count={result.affected} by={user.username}")
+    return result.as_dict()
+
+
+@api.post("/logs/delete-permanently")
+def delete_system_logs(payload: BulkIdsRequest, db: Session = Depends(get_db),
+                       user: HQUser = Depends(require("system_logs.delete_permanently"))):
+    """Really remove system_logs rows. Irreversible.
+
+    Only system_logs is touched. The administrative deletion audit lives in
+    its own table precisely so a log purge can never erase the record of the
+    purge.
+    """
+    _require_bulk_confirmation(payload, "DELETE")
+    result = delete_logs_permanently(engine, log_ids=payload.ids,
+                                     actor_user_id=user.id, filters=payload.filters)
+    _write_log(db, "warn",
+               f"SYSTEM_LOGS_DELETED count={result.affected} "
+               f"requested={result.requested} by={user.username}")
+    return result.as_dict()
+
+
+@api.get("/admin/deletion-events")
+def read_admin_deletion_events(record_type: Optional[str] = None, limit: int = 200,
+                               user: HQUser = Depends(require("menu.logs.view"))):
+    """The immutable administrative deletion audit. Records who removed how
+    many rows and by what filter - never the deleted content, which would
+    defeat the deletion the operator asked for."""
+    return {"events": list_admin_deletion_events(engine, record_type=record_type,
+                                                 limit=limit)}
 
 
 # ================ WEBSOCKETS ================

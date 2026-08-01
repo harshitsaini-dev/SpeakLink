@@ -157,6 +157,16 @@ EXPECTED: dict[str, object] = {
     "session_detail": "menu.history.view",
 
     "list_logs": "menu.logs.view",
+
+    # Broadcast History / System Log lifecycle. Archiving is reversible and
+    # stays with ADMIN; permanent deletion is SUPER ADMIN-only.
+    "archive_broadcast_sessions": "broadcast_history.archive",
+    "unarchive_broadcast_sessions": "broadcast_history.archive",
+    "delete_broadcast_sessions": "broadcast_history.delete_permanently",
+    "archive_system_logs": "system_logs.archive",
+    "unarchive_system_logs": "system_logs.archive",
+    "delete_system_logs": "system_logs.delete_permanently",
+    "read_admin_deletion_events": "menu.logs.view",
 }
 
 #: Routes that take no HTTP session, each for a stated reason.
