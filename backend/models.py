@@ -154,6 +154,10 @@ class BroadcastSession(Base):
     offline_store_count = Column(Integer, default=0)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
+    #: Archived history is hidden from the normal list but fully readable with
+    #: Show Archived. Reversible - unlike permanent deletion, which really
+    #: removes the row. See admin_records.py.
+    archived_at = Column(String(40), nullable=True, index=True)
 
     targets = relationship("BroadcastTarget", back_populates="session", cascade="all, delete-orphan")
     starter = relationship("HQUser")
@@ -189,6 +193,14 @@ class SystemLog(Base):
     level = Column(String(20), nullable=False, index=True)  # info|warn|error
     message = Column(Text, nullable=False)
     created_at = Column(DateTime, default=utcnow, nullable=False)
+    archived_at = Column(String(40), nullable=True, index=True)
+    #: Structured entity references, populated for NEW log lines only and
+    #: deliberately never back-filled. Existing messages are free text, and
+    #: regexing them into relationships would present guesses as facts - so
+    #: filters built on these are labelled as covering newer logs.
+    actor_user_id = Column(Integer, nullable=True, index=True)
+    store_id = Column(Integer, nullable=True, index=True)
+    device_public_id = Column(String(36), nullable=True)
 
 
 Index("ix_receiver_events_store_time", ReceiverEvent.store_id, ReceiverEvent.event_time.desc())

@@ -43,6 +43,7 @@ those modules' own docstrings.
 from __future__ import annotations
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Column,
     ForeignKeyConstraint,
@@ -99,6 +100,8 @@ receiver_devices = Table(
     Column("enrolled_at", String(40), nullable=False),
     Column("disabled_at", String(40)),
     Column("archived_at", String(40)),
+    Column("deleted_at", String(40)),
+    Column("deleted_by", Integer),
     Column("created_by", Integer),
     Column("created_at", String(40), nullable=False),
     Column("updated_at", String(40), nullable=False),
@@ -309,6 +312,41 @@ user_deletion_events = Table(
 )
 
 
+#: Irreversible Device deletion audit (device_deletion.py).
+device_deletion_events = Table(
+    "device_deletion_events", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("actor_user_id", Integer, nullable=False),
+    Column("device_id", Integer, nullable=False),
+    Column("public_id", String(36), nullable=False),
+    Column("store_id", Integer, nullable=False),
+    Column("display_name", String(200), nullable=False),
+    Column("credentials_revoked", Integer, nullable=False),
+    Column("was_primary", Boolean, nullable=False),
+    Column("deleted_at", String(40), nullable=False),
+)
+
+
+#: Immutable administrative deletion audit (admin_records.py). Deliberately a
+#: SEPARATE table from system_logs: a purge of system_logs must never be able
+#: to erase the record of the purge. Records who/when/how many/by-what-filter -
+#: never the deleted content, which would defeat the delete itself.
+admin_deletion_events = Table(
+    "admin_deletion_events", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("actor_user_id", Integer, nullable=False),
+    Column("record_type", String(40), nullable=False),
+    Column("action", String(20), nullable=False),
+    Column("affected_count", Integer, nullable=False),
+    Column("filter_json", Text, nullable=False),
+    Column("created_at", String(40), nullable=False),
+    CheckConstraint("record_type IN ('broadcast_session', 'system_log')",
+                    name="ck_admin_deletion_events_type"),
+    CheckConstraint("action IN ('archived', 'unarchived', 'deleted')",
+                    name="ck_admin_deletion_events_action"),
+)
+
+
 def create_all(engine: Engine) -> None:
     """Create the complete PostgreSQL production schema - every ORM table in
     models.py (Store, HQUser, BroadcastSession, ...) AND every table
@@ -322,7 +360,9 @@ def create_all(engine: Engine) -> None:
 
 
 __all__ = [
+    "admin_deletion_events",
     "create_all",
+    "device_deletion_events",
     "metadata",
     "permission_audit_events",
     "permissions",
