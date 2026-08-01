@@ -24,6 +24,19 @@ import {
 
 const ROLES = ["OWNER", "ADMIN", "BROADCASTER", "VIEWER"];
 
+/**
+ * Display-only rename: OWNER -> SUPER ADMIN.
+ *
+ * The stored role value, the API, and every backend comparison stay
+ * "OWNER" - rbac.py's own history explains why that string is the one
+ * thing every existing account, migration and test already agrees on
+ * (`LEGACY_ROLE_ALIASES`, the SUPER_ADMIN -> OWNER rename). Renaming the
+ * stored value again would need a second migration and touch every test
+ * that asserts role == "OWNER". This renames only what a person reads.
+ */
+const ROLE_LABEL = { OWNER: "SUPER ADMIN", ADMIN: "ADMIN", BROADCASTER: "BROADCASTER", VIEWER: "VIEWER" };
+const roleLabel = (role) => ROLE_LABEL[role] || role;
+
 const ROLE_STYLE = {
   OWNER: "bg-purple-100 text-purple-800 border-purple-200",
   ADMIN: "bg-blue-100 text-blue-800 border-blue-200",
@@ -135,9 +148,9 @@ export default function UserManagement() {
               understands why a control is missing instead of thinking the page
               is broken. */}
           <p className="mt-1 text-xs text-slate-500" data-testid="owner-protection-note">
-            <strong>OWNER</strong> and <strong>ADMIN</strong> both have full operational
-            access. The one difference: only an OWNER can change another OWNER, and the
-            last enabled OWNER cannot be disabled, archived or demoted — otherwise nobody
+            <strong>SUPER ADMIN</strong> and <strong>ADMIN</strong> both have full operational
+            access. The one difference: only a SUPER ADMIN can change another SUPER ADMIN, and the
+            last enabled SUPER ADMIN cannot be disabled, archived or demoted — otherwise nobody
             would be able to administer SpeakLink again.
           </p>
         </div>
@@ -202,7 +215,7 @@ export default function UserManagement() {
                 <tr key={row.id} className="border-t" data-testid={`user-row-${row.username}`}>
                   <td className="py-2">{row.display_name}</td>
                   <td className="text-slate-600">{row.username}</td>
-                  <td><Badge text={row.role} styles={ROLE_STYLE[row.role] || ROLE_STYLE.VIEWER} /></td>
+                  <td><Badge text={roleLabel(row.role)} styles={ROLE_STYLE[row.role] || ROLE_STYLE.VIEWER} /></td>
                   <td>
                     <Badge text={row.lifecycle_state}
                            styles={STATE_STYLE[row.lifecycle_state] || STATE_STYLE.disabled} />
@@ -440,7 +453,7 @@ function RightsEditor({ user, onCancel, onSaved }) {
             <div className="text-xs uppercase tracking-widest text-slate-500">User</div>
             <div className="text-lg font-semibold" data-testid="rights-username">{user.display_name}</div>
             <div className="text-xs text-slate-500">
-              Base Role: <span className="font-medium" data-testid="rights-base-role">{role}</span>
+              Base Role: <span className="font-medium" data-testid="rights-base-role">{roleLabel(role)}</span>
             </div>
           </div>
           <button type="button" onClick={onCancel} className="text-slate-500 hover:text-slate-900"
@@ -582,7 +595,7 @@ function CreateUserForm({ myRole, onCancel, onSubmit }) {
         <span className="mb-1 block text-slate-600">Role</span>
         <select className="w-full rounded border px-2 py-1" value={form.role}
                 onChange={change("role")} data-testid="create-role">
-          {assignable.map((role) => <option key={role} value={role}>{role}</option>)}
+          {assignable.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}
         </select>
       </label>
       {/* type="password" so it is not read over a shoulder, and never written
@@ -618,7 +631,7 @@ function EditUserForm({ user, onCancel, onSubmit, canChangeRole, assignableRoles
           <select className="w-full rounded border px-2 py-1" value={role}
                   onChange={(event) => setRole(event.target.value)} data-testid="edit-role">
             {[...new Set([user.role, ...assignableRoles])].map((option) => (
-              <option key={option} value={option}>{option}</option>
+              <option key={option} value={option}>{roleLabel(option)}</option>
             ))}
           </select>
           <span className="mt-1 block text-xs text-slate-500">
