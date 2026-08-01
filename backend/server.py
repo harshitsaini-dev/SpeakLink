@@ -90,6 +90,14 @@ from store_deletion import (
     list_store_deletion_events,
     permanently_delete_store_with_history,
 )
+from admin_search import (
+    DEFAULT_PAGE_SIZE,
+    Page,
+    apply_paging,
+    like_term,
+    normalize_paging,
+    parse_date,
+)
 from admin_records import (
     archive_logs,
     archive_sessions,
@@ -821,6 +829,46 @@ def _user_lifecycle_call(action, **kwargs) -> dict:
 @api.get("/users", response_model=List[HQUserOut])
 def list_hq_users(user: HQUser = Depends(require("menu.users.view"))):
     return [HQUserOut(**record) for record in list_users(engine)]
+
+
+# Declared BEFORE /users/{user_id}: FastAPI matches routes in definition
+# order, so with the parameterised route first the literal path 'search'
+# is parsed as a user_id and the request fails with a 422 about an
+# unparseable integer rather than reaching this handler.
+@api.get("/users/search")
+def search_users(
+    q: Optional[str] = None,
+    role: Optional[str] = None,
+    state: Optional[str] = None,
+    include_deleted: bool = False,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    user: HQUser = Depends(require("menu.users.view")),
+):
+    """Filtered, paginated User Management.
+
+    Permanently deleted accounts are excluded unless include_deleted, and
+    there is deliberately no restore path for them anywhere.
+    """
+    page, page_size = normalize_paging(page, page_size)
+    records = list_users(engine, include_deleted=include_deleted)
+
+    needle = (q or "").strip().lower()
+    if needle:
+        records = [r for r in records
+                   if needle in (r.get("username") or "").lower()
+                   or needle in (r.get("display_name") or "").lower()]
+    if role:
+        records = [r for r in records if (r.get("role") or "").upper() == role.upper()]
+    if state:
+        wanted = state.lower()
+        records = [r for r in records
+                   if (r.get("lifecycle_state") or "active").lower() == wanted]
+
+    total = len(records)
+    offset = (page - 1) * page_size
+    return Page(items=records[offset:offset + page_size], total=total,
+                page=page, page_size=page_size).as_dict()
 
 
 @api.get("/users/{user_id}", response_model=HQUserOut)
@@ -2454,6 +2502,164 @@ def read_admin_deletion_events(record_type: Optional[str] = None, limit: int = 2
     defeat the deletion the operator asked for."""
     return {"events": list_admin_deletion_events(engine, record_type=record_type,
                                                  limit=limit)}
+
+
+# ================ SERVER-SIDE SEARCH / FILTER ================
+# Deliberately separate paths from the existing list endpoints: those return
+# bare arrays that the frontend, the Playwright mocks and the tooling all
+# depend on, and adding a second response shape behind a flag would be two
+# contracts wearing one name. See admin_search.py.
+
+
+@api.get("/logs/search")
+def search_logs(
+    q: Optional[str] = None,
+    level: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    actor_user_id: Optional[int] = None,
+    store_id: Optional[int] = None,
+    device_public_id: Optional[str] = None,
+    include_archived: bool = False,
+    archived_only: bool = False,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("menu.logs.view")),
+):
+    """Filtered, paginated System Logs.
+
+    The entity filters (actor/store/device) apply only to log lines recorded
+    since those columns existed - the response says so in
+    meta.entity_filter_coverage rather than letting a filter that silently
+    matches nothing look like "no results".
+    """
+    page, page_size = normalize_paging(page, page_size)
+    query = db.query(SystemLog)
+
+    term = like_term(q)
+    if term:
+        query = query.filter(SystemLog.message.ilike(term))
+    if level:
+        query = query.filter(SystemLog.level == level)
+    try:
+        start_at = parse_date(date_from)
+        end_at = parse_date(date_to, end_of_day=True)
+    except ValueError as bad:
+        raise HTTPException(status_code=400, detail=str(bad))
+    if start_at:
+        query = query.filter(SystemLog.created_at >= start_at)
+    if end_at:
+        query = query.filter(SystemLog.created_at <= end_at)
+    if actor_user_id is not None:
+        query = query.filter(SystemLog.actor_user_id == actor_user_id)
+    if store_id is not None:
+        query = query.filter(SystemLog.store_id == store_id)
+    if device_public_id:
+        query = query.filter(SystemLog.device_public_id == device_public_id)
+
+    if archived_only:
+        query = query.filter(SystemLog.archived_at.isnot(None))
+    elif not include_archived:
+        query = query.filter(SystemLog.archived_at.is_(None))
+
+    total = query.count()
+    rows = apply_paging(query.order_by(SystemLog.id.desc()), page, page_size).all()
+
+    structured = db.query(SystemLog).filter(
+        (SystemLog.actor_user_id.isnot(None)) | (SystemLog.store_id.isnot(None))).count()
+    result = Page(items=rows, total=total, page=page, page_size=page_size,
+                  meta={"entity_filter_coverage": {
+                      "rows_with_structured_entities": structured,
+                      "note": "Actor/Store/Device filters cover log lines recorded "
+                              "since those fields existed. Older lines are searchable "
+                              "by text, level and date only.",
+                  }})
+    return result.as_dict(
+        lambda row: SystemLogOut.model_validate(row).model_dump(mode="json"))
+
+
+@api.get("/broadcast/history/search")
+def search_broadcast_history(
+    q: Optional[str] = None,
+    status_f: Optional[str] = Query(None, alias="status"),
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    started_by: Optional[int] = None,
+    store_id: Optional[int] = None,
+    city: Optional[str] = None,
+    region: Optional[str] = None,
+    include_archived: bool = False,
+    archived_only: bool = False,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("menu.history.view")),
+):
+    """Filtered, paginated Broadcast History.
+
+    A multi-target session matches a Store/City/Zone filter when AT LEAST ONE
+    of its targets does, and is returned once rather than once per matching
+    target - the join is expressed as an EXISTS subquery for exactly that
+    reason.
+    """
+    page, page_size = normalize_paging(page, page_size)
+    query = db.query(BroadcastSession)
+
+    term = like_term(q)
+    if term:
+        query = query.filter(BroadcastSession.campaign_name.ilike(term))
+    if status_f:
+        query = query.filter(BroadcastSession.status == status_f)
+    try:
+        start_at = parse_date(date_from)
+        end_at = parse_date(date_to, end_of_day=True)
+    except ValueError as bad:
+        raise HTTPException(status_code=400, detail=str(bad))
+    if start_at:
+        query = query.filter(BroadcastSession.created_at >= start_at)
+    if end_at:
+        query = query.filter(BroadcastSession.created_at <= end_at)
+    if started_by is not None:
+        query = query.filter(BroadcastSession.started_by == started_by)
+
+    target_conditions = []
+    if store_id is not None:
+        target_conditions.append(BroadcastTarget.store_id == store_id)
+    if city or region:
+        store_match = []
+        if city:
+            store_match.append(Store.city == city)
+        if region:
+            store_match.append(Store.region == region)
+        target_conditions.append(
+            BroadcastTarget.store_id.in_(
+                db.query(Store.id).filter(*store_match).scalar_subquery()))
+    if target_conditions:
+        query = query.filter(
+            db.query(BroadcastTarget.id)
+              .filter(BroadcastTarget.session_id == BroadcastSession.id,
+                      *target_conditions)
+              .exists())
+
+    if archived_only:
+        query = query.filter(BroadcastSession.archived_at.isnot(None))
+    elif not include_archived:
+        query = query.filter(BroadcastSession.archived_at.is_(None))
+
+    scope = resolve_store_scope(engine, user)
+    if scope is not None:
+        query = query.filter(
+            db.query(BroadcastTarget.id)
+              .filter(BroadcastTarget.session_id == BroadcastSession.id,
+                      BroadcastTarget.store_id.in_(scope) if scope
+                      else BroadcastTarget.store_id.in_([-1]))
+              .exists())
+
+    total = query.count()
+    rows = apply_paging(query.order_by(BroadcastSession.id.desc()), page, page_size).all()
+    return Page(items=rows, total=total, page=page, page_size=page_size).as_dict(
+        lambda row: SessionOut.model_validate(row).model_dump(mode="json"))
 
 
 # ================ WEBSOCKETS ================
