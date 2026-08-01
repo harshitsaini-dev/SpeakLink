@@ -19,7 +19,7 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   UserPlus, RefreshCw, KeyRound, Pencil, Power, Archive, ArchiveRestore, ShieldAlert, Trash2,
-  ShieldCheck,
+  ShieldCheck, MapPin,
 } from "lucide-react";
 
 const ROLES = ["OWNER", "ADMIN", "BROADCASTER", "VIEWER"];
@@ -86,6 +86,7 @@ export default function UserManagement() {
   const [resetting, setResetting] = React.useState(null);
   const [deleting, setDeleting] = React.useState(null);
   const [editingRights, setEditingRights] = React.useState(null);
+  const [editingScope, setEditingScope] = React.useState(null);
 
   const myRole = me?.role || "VIEWER";
   const canManage = (role) => (MANAGEABLE[myRole] || new Set()).has(role);
@@ -294,6 +295,15 @@ export default function UserManagement() {
                         <ShieldCheck size={14} /> Rights
                       </button>
                     )}
+                    {/* Store/City/Zone scope. Same OWNER-only reservation as
+                        Rights, for the same reason. */}
+                    {isSuperAdmin && row.role !== "OWNER" && (row.role === "ADMIN" || row.role === "BROADCASTER") && (
+                      <button type="button" disabled={busy} onClick={() => setEditingScope(row)}
+                              className="inline-flex items-center gap-1 rounded border px-2 py-1"
+                              data-testid={`scope-${row.username}`}>
+                        <MapPin size={14} /> Scope
+                      </button>
+                    )}
                   </td>
                 </tr>
               );
@@ -364,6 +374,14 @@ export default function UserManagement() {
           user={editingRights}
           onCancel={() => setEditingRights(null)}
           onSaved={() => setEditingRights(null)}
+        />
+      )}
+
+      {editingScope && (
+        <ScopeEditor
+          user={editingScope}
+          onCancel={() => setEditingScope(null)}
+          onSaved={() => setEditingScope(null)}
         />
       )}
     </div>
@@ -749,5 +767,200 @@ function ResetPasswordForm({ user, onCancel, onSubmit }) {
         I will give this password to {user.display_name} in person or by phone, not in writing.
       </label>
     </Panel>
+  );
+}
+
+/**
+ * Store/City/Zone scope: which Stores this account may see and manage.
+ *
+ * An empty list means unrestricted - the same "no rows means no
+ * restriction" rule the backend resolver follows, so clearing every row here
+ * and saving genuinely returns the account to seeing every Store, not to an
+ * error state.
+ */
+function ScopeEditor({ user, onCancel, onSaved }) {
+  const [entries, setEntries] = React.useState(null);
+  const [stores, setStores] = React.useState([]);
+  const [draftType, setDraftType] = React.useState("STORE");
+  const [draftStoreId, setDraftStoreId] = React.useState("");
+  const [draftValue, setDraftValue] = React.useState("");
+  const [loadError, setLoadError] = React.useState("");
+  const [saveError, setSaveError] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+  const [saved, setSaved] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    setLoadError("");
+    try {
+      const [{ data: scope }, { data: storeList }] = await Promise.all([
+        api.get(`/users/${user.id}/store-scope`),
+        api.get("/stores", { params: { include_inactive: true, include_archived: true } }),
+      ]);
+      setEntries(scope.entries);
+      setStores(storeList);
+      if (storeList.length) setDraftStoreId(String(storeList[0].id));
+    } catch (failure) {
+      setLoadError(
+        failure?.response?.status === 403
+          ? "You do not have permission to view or change this account's scope."
+          : "This account's scope could not be loaded."
+      );
+    }
+  }, [user.id]);
+
+  React.useEffect(() => { load(); }, [load]);
+
+  const addEntry = () => {
+    if (draftType === "STORE") {
+      if (!draftStoreId) return;
+      const store = stores.find((s) => String(s.id) === draftStoreId);
+      if (!store) return;
+      if (entries.some((e) => e.scope_type === "STORE" && String(e.store_id) === draftStoreId)) return;
+      setEntries([...entries, { scope_type: "STORE", store_id: store.id, scope_value: null,
+                                 _label: `${store.store_name} (${store.store_code})` }]);
+    } else {
+      const value = draftValue.trim();
+      if (!value) return;
+      if (entries.some((e) => e.scope_type === draftType && e.scope_value === value)) return;
+      setEntries([...entries, { scope_type: draftType, store_id: null, scope_value: value }]);
+      setDraftValue("");
+    }
+  };
+
+  const removeEntry = (index) => setEntries(entries.filter((_, i) => i !== index));
+
+  const save = async () => {
+    setSaving(true);
+    setSaveError("");
+    setSaved(false);
+    try {
+      const payload = {
+        entries: entries.map((e) => ({
+          scope_type: e.scope_type, store_id: e.store_id, scope_value: e.scope_value,
+        })),
+      };
+      await api.put(`/users/${user.id}/store-scope`, payload);
+      setSaved(true);
+      await load();
+    } catch (failure) {
+      setSaveError(failure?.response?.data?.detail || "This account's scope could not be saved.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const describeEntry = (entry) => {
+    if (entry.scope_type === "STORE") {
+      if (entry._label) return `Store: ${entry._label}`;
+      const store = stores.find((s) => s.id === entry.store_id);
+      return `Store: ${store ? `${store.store_name} (${store.store_code})` : entry.store_id}`;
+    }
+    return entry.scope_type === "CITY" ? `City: ${entry.scope_value}` : `Zone: ${entry.scope_value}`;
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+         data-testid="scope-editor">
+      <div className="bg-white rounded-md shadow-xl max-w-lg w-full max-h-[85vh] flex flex-col">
+        <div className="p-5 border-b flex items-center justify-between">
+          <div>
+            <div className="text-xs uppercase tracking-widest text-slate-500">User</div>
+            <div className="text-lg font-semibold">{user.display_name}</div>
+            <p className="mt-1 text-xs text-slate-500">
+              No entries means unrestricted — this account sees every Store. Adding an entry
+              limits it to only what is listed here.
+            </p>
+          </div>
+          <button type="button" onClick={onCancel} className="text-slate-500 hover:text-slate-900"
+                  data-testid="scope-close">✕</button>
+        </div>
+
+        <div className="p-5 overflow-y-auto space-y-4">
+          {loadError && <p className="text-sm text-red-700" data-testid="scope-load-error">{loadError}</p>}
+          {entries === null && !loadError && (
+            <p className="text-sm text-slate-500" data-testid="scope-loading">Loading scope…</p>
+          )}
+
+          {entries && (
+            <>
+              <div className="space-y-1">
+                {entries.length === 0 && (
+                  <p className="text-sm text-slate-500" data-testid="scope-empty">
+                    Unrestricted — no Store/City/Zone limits.
+                  </p>
+                )}
+                {entries.map((entry, index) => (
+                  <div key={index} className="flex items-center justify-between border rounded px-3 py-2"
+                       data-testid={`scope-entry-${index}`}>
+                    <span className="text-sm">{describeEntry(entry)}</span>
+                    <button type="button" onClick={() => removeEntry(index)}
+                            className="text-xs text-red-700 hover:underline"
+                            data-testid={`scope-remove-${index}`}>
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="border-t pt-3 space-y-2">
+                <div className="text-xs font-bold uppercase tracking-widest text-slate-500">
+                  Add assignment
+                </div>
+                <div className="flex gap-2">
+                  <select className="border rounded px-2 py-1 text-sm bg-white" value={draftType}
+                          data-testid="scope-add-type" onChange={(e) => setDraftType(e.target.value)}>
+                    <option value="STORE">Store</option>
+                    <option value="CITY">City</option>
+                    <option value="REGION">Zone</option>
+                  </select>
+                  {draftType === "STORE" ? (
+                    <select className="flex-1 border rounded px-2 py-1 text-sm bg-white"
+                            value={draftStoreId} data-testid="scope-add-store"
+                            onChange={(e) => setDraftStoreId(e.target.value)}>
+                      {stores.map((s) => (
+                        <option key={s.id} value={s.id}>{s.store_name} ({s.store_code})</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input className="flex-1 border rounded px-2 py-1 text-sm" value={draftValue}
+                           data-testid="scope-add-value"
+                           placeholder={draftType === "CITY" ? "City name" : "Zone name"}
+                           onChange={(e) => setDraftValue(e.target.value)} />
+                  )}
+                  <button type="button" onClick={addEntry}
+                          className="rounded border px-3 py-1 text-sm" data-testid="scope-add-btn">
+                    Add
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="p-5 border-t space-y-2">
+          {saveError && <p className="text-sm text-red-700" data-testid="scope-save-error">{saveError}</p>}
+          {saved && !saveError && (
+            <p className="text-sm text-emerald-700" data-testid="scope-save-success">Scope saved.</p>
+          )}
+          <div className="flex gap-2">
+            <button type="button" onClick={save} disabled={saving || entries === null}
+                    className="rounded bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-40"
+                    data-testid="scope-save">
+              {saving ? "Saving…" : "Save Changes"}
+            </button>
+            <button type="button" onClick={onCancel} className="rounded border px-3 py-2 text-sm"
+                    data-testid="scope-cancel">
+              Cancel
+            </button>
+            {saved && (
+              <button type="button" onClick={onSaved} className="ml-auto rounded border px-3 py-2 text-sm"
+                      data-testid="scope-done">
+                Done
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
