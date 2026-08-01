@@ -3811,9 +3811,67 @@ passed**. Playwright: **184 passed**. `compileall`, `pip check`,
 ### Remaining limitations
 
 No UI surface for scope-audit or permission-audit history (the tables are
-queryable, not yet displayed anywhere); the Scope editor's city/Zone text
-inputs are free text, not a dropdown sourced from `/stores/meta/
-regions-cities` (a typo silently resolves to zero Stores rather than being
-caught at entry time); System Logs remaining permission-only (by design,
-documented above) means a scoped BROADCASTER can still read log lines that
-mention an out-of-scope Store by name in free text.
+queryable, not yet displayed anywhere); System Logs remaining
+permission-only (by design, documented above) means a scoped BROADCASTER
+can still read log lines that mention an out-of-scope Store by name in
+free text.
+
+## RC10 live defect: Receiver Status blank page for a scoped BROADCASTER
+
+### Root cause
+
+Not a UNION bug. `resolve_store_scope()` already combined STORE ∪ CITY ∪
+REGION correctly. The real defect: `Role.BROADCASTER`'s default
+permissions never included `menu.stores.view`, which `GET /api/stores` -
+the only endpoint `ReceiverStatus.jsx` calls - hard-requires. A fresh
+BROADCASTER with no manually added per-user override got a 403 on every
+load; `ReceiverStatus.jsx` had no try/catch around that fetch, so the
+error rendered as silent blank whitespace, indistinguishable from "zero
+Stores in scope."
+
+Read-only diagnosis of the live database (`persistent-lan-server/data/
+echocast.db`, not the repo-local dev copy) at the time of inspection
+showed only one scope row for the operator's `broadcaster` account
+(`STORE` → Uttam Nagar ASR) and an already-present ad hoc
+`menu.stores.view` ALLOW override, added by hand at some point after the
+original blank-page report - consistent with the 403 having been the
+actual first cause.
+
+### Fix
+
+- `menu.stores.view` added to `Role.BROADCASTER`'s default permission set
+  (`permission_catalog.py`) - the role-default fix, not a per-user
+  workaround.
+- `set_user_scope()` now rejects a CITY/REGION value that matches zero
+  Stores at save time (400), closing the gap noted in the prior
+  entry - a typo can no longer be persisted and silently resolve to
+  nothing later.
+- Scope editor's City/Zone entry is now a dropdown sourced from the
+  existing `/stores/meta/regions-cities` endpoint - no free text, no
+  hard-coded catalog in React.
+- Scope editor shows "No assignments = All Stores (unrestricted)" or
+  "Restricted Scope — Effective Stores: N" plus an expandable preview,
+  computed client-side from data already fetched from the backend for
+  display only - the backend resolver remains the sole
+  security-enforcing authority.
+- `ReceiverStatus.jsx` now shows a visible error on API failure and an
+  explicit "No Stores are available in this account's current Scope."
+  empty-state - never silent blank whitespace either way.
+
+### RED evidence
+
+Five new backend tests failed before the fix: a fresh BROADCASTER could
+not load `/api/stores` at all (403); a BROADCASTER with REGION+CITY+STORE
+scope got a 403-shaped error object instead of the union; saving an
+unknown City/Zone succeeded when it should have been rejected (x2).
+
+### Totals (this round)
+
+Targeted (`test_store_scope.py`): 21 passed. Full backend: 2560 passed,
+3 skipped (2 environment-flaky GUI/lock-timing tests confirmed to pass
+in isolation, unrelated to this change). Frontend unit: 56 passed.
+Playwright: 188 passed (184 existing + a Receiver Status regression suite
+and a Scope-editor dropdown suite), run on the isolated port 3577 per the
+existing safety convention, config reverted to port 3000 afterward with
+zero net diff. `compileall`, `pip check`, `git diff --check` and a secret
+scan all clean. `yarn build` compiled.
