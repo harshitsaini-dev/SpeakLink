@@ -781,6 +781,8 @@ function ResetPasswordForm({ user, onCancel, onSubmit }) {
 function ScopeEditor({ user, onCancel, onSaved }) {
   const [entries, setEntries] = React.useState(null);
   const [stores, setStores] = React.useState([]);
+  const [cities, setCities] = React.useState([]);
+  const [regions, setRegions] = React.useState([]);
   const [draftType, setDraftType] = React.useState("STORE");
   const [draftStoreId, setDraftStoreId] = React.useState("");
   const [draftValue, setDraftValue] = React.useState("");
@@ -792,13 +794,19 @@ function ScopeEditor({ user, onCancel, onSaved }) {
   const load = React.useCallback(async () => {
     setLoadError("");
     try {
-      const [{ data: scope }, { data: storeList }] = await Promise.all([
+      const [{ data: scope }, { data: storeList }, { data: meta }] = await Promise.all([
         api.get(`/users/${user.id}/store-scope`),
         api.get("/stores", { params: { include_inactive: true, include_archived: true } }),
+        api.get("/stores/meta/regions-cities"),
       ]);
       setEntries(scope.entries);
+      // Canonical Store list - never hard-coded in React. Sorted and
+      // deduplicated by the backend already; kept as-is here.
       setStores(storeList);
+      setCities(meta.cities);
+      setRegions(meta.regions);
       if (storeList.length) setDraftStoreId(String(storeList[0].id));
+      setDraftValue("");
     } catch (failure) {
       setLoadError(
         failure?.response?.status === 403
@@ -819,15 +827,33 @@ function ScopeEditor({ user, onCancel, onSaved }) {
       setEntries([...entries, { scope_type: "STORE", store_id: store.id, scope_value: null,
                                  _label: `${store.store_name} (${store.store_code})` }]);
     } else {
-      const value = draftValue.trim();
-      if (!value) return;
+      const value = draftValue;
+      // Dropdown-only: the value must be one of the canonical, currently
+      // existing City/Zone labels - never arbitrary free text.
+      const known = draftType === "CITY" ? cities : regions;
+      if (!value || !known.includes(value)) return;
       if (entries.some((e) => e.scope_type === draftType && e.scope_value === value)) return;
       setEntries([...entries, { scope_type: draftType, store_id: null, scope_value: value }]);
-      setDraftValue("");
     }
   };
 
   const removeEntry = (index) => setEntries(entries.filter((_, i) => i !== index));
+
+  // UX-only preview of the effective Store set from data already fetched
+  // from the backend (the canonical Store catalog). This never decides
+  // security - the backend's own resolve_store_scope remains authoritative
+  // and is what every API call actually enforces.
+  const effectiveStores = React.useMemo(() => {
+    if (!entries || !stores.length) return null;
+    if (entries.length === 0) return null; // unrestricted - nothing to preview
+    const ids = new Set();
+    entries.forEach((e) => {
+      if (e.scope_type === "STORE") { ids.add(e.store_id); return; }
+      const column = e.scope_type === "CITY" ? "city" : "region";
+      stores.forEach((s) => { if (s[column] === e.scope_value) ids.add(s.id); });
+    });
+    return stores.filter((s) => ids.has(s.id));
+  }, [entries, stores]);
 
   const save = async () => {
     setSaving(true);
@@ -883,6 +909,36 @@ function ScopeEditor({ user, onCancel, onSaved }) {
 
           {entries && (
             <>
+              <div className="rounded-md border px-3 py-2 text-xs"
+                   data-testid="scope-clarity-banner">
+                {entries.length === 0 ? (
+                  <span className="text-slate-600">No assignments = All Stores (unrestricted)</span>
+                ) : (
+                  <span className="text-amber-800">
+                    Restricted Scope — Effective Stores: {effectiveStores ? effectiveStores.length : "…"}
+                  </span>
+                )}
+                <p className="mt-1 text-slate-500">
+                  Store, City and Zone assignments are combined. A Store matching any assignment
+                  is included.
+                </p>
+              </div>
+
+              {entries.length > 0 && effectiveStores && (
+                <details className="text-xs" data-testid="scope-effective-preview">
+                  <summary className="cursor-pointer text-slate-600">
+                    Preview effective Stores ({effectiveStores.length})
+                  </summary>
+                  <ul className="mt-1 space-y-0.5 max-h-32 overflow-y-auto">
+                    {effectiveStores.map((s) => (
+                      <li key={s.id} className="text-slate-600">
+                        {s.store_name} ({s.store_code})
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+
               <div className="space-y-1">
                 {entries.length === 0 && (
                   <p className="text-sm text-slate-500" data-testid="scope-empty">
@@ -908,7 +964,8 @@ function ScopeEditor({ user, onCancel, onSaved }) {
                 </div>
                 <div className="flex gap-2">
                   <select className="border rounded px-2 py-1 text-sm bg-white" value={draftType}
-                          data-testid="scope-add-type" onChange={(e) => setDraftType(e.target.value)}>
+                          data-testid="scope-add-type"
+                          onChange={(e) => { setDraftType(e.target.value); setDraftValue(""); }}>
                     <option value="STORE">Store</option>
                     <option value="CITY">City</option>
                     <option value="REGION">Zone</option>
@@ -922,10 +979,16 @@ function ScopeEditor({ user, onCancel, onSaved }) {
                       ))}
                     </select>
                   ) : (
-                    <input className="flex-1 border rounded px-2 py-1 text-sm" value={draftValue}
-                           data-testid="scope-add-value"
-                           placeholder={draftType === "CITY" ? "City name" : "Zone name"}
-                           onChange={(e) => setDraftValue(e.target.value)} />
+                    <select className="flex-1 border rounded px-2 py-1 text-sm bg-white" value={draftValue}
+                            data-testid="scope-add-value"
+                            onChange={(e) => setDraftValue(e.target.value)}>
+                      <option value="" disabled>
+                        {draftType === "CITY" ? "Select a City" : "Select a Zone"}
+                      </option>
+                      {(draftType === "CITY" ? cities : regions).map((value) => (
+                        <option key={value} value={value}>{value}</option>
+                      ))}
+                    </select>
                   )}
                   <button type="button" onClick={addEntry}
                           className="rounded border px-3 py-1 text-sm" data-testid="scope-add-btn">
