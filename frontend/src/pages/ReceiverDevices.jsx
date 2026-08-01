@@ -1,6 +1,7 @@
 import React from "react";
 import { useParams, Link } from "react-router-dom";
 import { api } from "@/lib/api";
+import { useAuth } from "@/contexts/AuthContext";
 import { RefreshCw, Plus, KeyRound, Star, Ban, Trash2, ArrowLeft, Archive, ArchiveRestore } from "lucide-react";
 
 // Receiver Device administration for one Store.
@@ -210,7 +211,9 @@ function ShownOnce({ label, value, testId, onDismiss }) {
 
 export default function ReceiverDevices() {
   const { storeId } = useParams();
+  const { can } = useAuth();
   const [devices, setDevices] = React.useState([]);
+  const [showArchived, setShowArchived] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const [busy, setBusy] = React.useState("");
@@ -374,6 +377,9 @@ export default function ReceiverDevices() {
   const [deletingDevice, setDeletingDevice] = React.useState(null);
 
   const hasPrimary = devices.some((d) => d.role === "PRIMARY" && d.status === "active");
+  const archivedDevices = devices.filter((d) => d.archived_at);
+  const activeDevices = devices.filter((d) => !d.archived_at);
+  const visibleDevices = showArchived ? devices : activeDevices;
 
   return (
     <div className="space-y-4" data-testid="receiver-devices-page">
@@ -393,6 +399,15 @@ export default function ReceiverDevices() {
           </p>
         </div>
         <div className="flex gap-2">
+          <label className="inline-flex items-center gap-1.5 px-3 py-2 border border-slate-300 rounded-md text-sm">
+            <input
+              type="checkbox"
+              data-testid="show-archived-toggle"
+              checked={showArchived}
+              onChange={(e) => setShowArchived(e.target.checked)}
+            />
+            Show Archived {archivedDevices.length > 0 && `(${archivedDevices.length})`}
+          </label>
           <button
             data-testid="devices-refresh-btn"
             onClick={load}
@@ -400,14 +415,16 @@ export default function ReceiverDevices() {
           >
             <RefreshCw size={14} /> Refresh
           </button>
-          <button
-            data-testid="create-enrolment-code-btn"
-            onClick={createCode}
-            disabled={busy === "create-code"}
-            className="inline-flex items-center gap-1 px-3 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-60 text-white rounded-md text-sm font-medium"
-          >
-            <Plus size={16} /> {busy === "create-code" ? "Creating…" : "Create enrolment code"}
-          </button>
+          {can("devices.enrollment.create") && (
+            <button
+              data-testid="create-enrolment-code-btn"
+              onClick={createCode}
+              disabled={busy === "create-code"}
+              className="inline-flex items-center gap-1 px-3 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-60 text-white rounded-md text-sm font-medium"
+            >
+              <Plus size={16} /> {busy === "create-code" ? "Creating…" : "Create enrolment code"}
+            </button>
+          )}
         </div>
       </div>
 
@@ -458,30 +475,37 @@ export default function ReceiverDevices() {
               <th scope="col" className="px-3 py-2">Role</th>
               <th scope="col" className="px-3 py-2">Status</th>
               <th scope="col" className="px-3 py-2">Enrolled</th>
+              <th scope="col" className="px-3 py-2">Archived</th>
               <th scope="col" className="px-3 py-2 text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading && (
               <tr>
-                <td colSpan={6} data-testid="devices-loading" className="px-3 py-6 text-center text-slate-500">
+                <td colSpan={7} data-testid="devices-loading" className="px-3 py-6 text-center text-slate-500">
                   Loading…
                 </td>
               </tr>
             )}
-            {!loading && devices.length === 0 && (
+            {!loading && visibleDevices.length === 0 && (
               <tr>
-                <td colSpan={6} data-testid="devices-empty" className="px-3 py-6 text-center text-slate-500">
-                  No Receiver Devices are enrolled in this Store yet. Create an enrolment code and
-                  run the Agent on that computer.
+                <td colSpan={7} data-testid="devices-empty" className="px-3 py-6 text-center text-slate-500">
+                  {devices.length === 0
+                    ? "No Receiver Devices are enrolled in this Store yet. Create an enrolment code and run the Agent on that computer."
+                    : "No active Devices. Check “Show Archived” to see retired ones."}
                 </td>
               </tr>
             )}
-            {devices.map((device) => (
+            {visibleDevices.map((device) => {
+              // Eligible for permanent deletion only once retired for good -
+              // an ACTIVE or merely DISABLED Device is refused by the backend
+              // regardless, so the button is never even offered for one.
+              const eligibleForDelete = device.archived_at || device.status === "retired";
+              return (
               <tr
                 key={device.public_id}
                 data-testid={`device-row-${device.public_id}`}
-                className="border-b border-slate-100 even:bg-slate-50/50"
+                className={`border-b border-slate-100 even:bg-slate-50/50 ${device.archived_at ? "opacity-70" : ""}`}
               >
                 <td className="px-3 py-2 font-medium">{device.display_name}</td>
                 <td className="px-3 py-2 font-mono text-xs text-slate-500" title="Shortened identifier">
@@ -497,12 +521,21 @@ export default function ReceiverDevices() {
                   >
                     {device.status}
                   </span>
+                  {device.archived_at && (
+                    <span className="ml-1 text-[10px] uppercase tracking-wide text-amber-700 border border-amber-200 bg-amber-50 rounded px-1"
+                          data-testid={`device-archived-badge-${device.public_id}`}>
+                      Archived
+                    </span>
+                  )}
                 </td>
                 <td className="px-3 py-2 text-xs text-slate-500">
                   {(device.enrolled_at || "").slice(0, 16).replace("T", " ")}
                 </td>
+                <td className="px-3 py-2 text-xs text-slate-500" data-testid={`device-archived-at-${device.public_id}`}>
+                  {device.archived_at ? device.archived_at.slice(0, 16).replace("T", " ") : "—"}
+                </td>
                 <td className="px-3 py-2 text-right space-x-1 whitespace-nowrap">
-                  {device.status === "active" && device.role !== "PRIMARY" && (
+                  {!device.archived_at && device.status === "active" && device.role !== "PRIMARY" && can("devices.primary.assign") && (
                     <button
                       data-testid={`promote-${device.public_id}`}
                       onClick={() => promote(device)}
@@ -514,7 +547,7 @@ export default function ReceiverDevices() {
                       <Star size={12} /> Promote
                     </button>
                   )}
-                  {device.status === "active" && (
+                  {!device.archived_at && device.status === "active" && can("devices.rotate") && (
                     <button
                       data-testid={`rotate-${device.public_id}`}
                       onClick={() => rotate(device)}
@@ -526,7 +559,7 @@ export default function ReceiverDevices() {
                       <KeyRound size={12} /> Rotate
                     </button>
                   )}
-                  {device.status === "active" && (
+                  {!device.archived_at && device.status === "active" && can("devices.disable") && (
                     <button
                       data-testid={`disable-${device.public_id}`}
                       onClick={() => disable(device)}
@@ -538,7 +571,7 @@ export default function ReceiverDevices() {
                       <Ban size={12} /> Disable
                     </button>
                   )}
-                  {device.status !== "retired" && (
+                  {!device.archived_at && device.status !== "retired" && can("devices.revoke") && (
                     <button
                       data-testid={`revoke-${device.public_id}`}
                       onClick={() => revoke(device)}
@@ -550,7 +583,7 @@ export default function ReceiverDevices() {
                       <Trash2 size={12} /> Revoke
                     </button>
                   )}
-                  {!device.archived_at ? (
+                  {can("devices.archive") && (!device.archived_at ? (
                     <button
                       data-testid={`archive-${device.public_id}`}
                       onClick={() => archive(device)}
@@ -572,19 +605,25 @@ export default function ReceiverDevices() {
                     >
                       <ArchiveRestore size={12} /> Restore
                     </button>
+                  ))}
+                  {/* Never offered for an active or merely disabled Device -
+                      the backend refuses it outright, and a button that always
+                      404s/409s is worse than no button. */}
+                  {eligibleForDelete && can("devices.delete_permanently") && (
+                    <button
+                      data-testid={`delete-${device.public_id}`}
+                      onClick={() => setDeletingDevice(device)}
+                      title="Permanently delete this Device"
+                      aria-label={`Permanently delete ${device.display_name}`}
+                      className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50 disabled:opacity-50"
+                    >
+                      <Trash2 size={12} /> Delete
+                    </button>
                   )}
-                  <button
-                    data-testid={`delete-${device.public_id}`}
-                    onClick={() => setDeletingDevice(device)}
-                    title="Permanently delete this Device"
-                    aria-label={`Permanently delete ${device.display_name}`}
-                    className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50 disabled:opacity-50"
-                  >
-                    <Trash2 size={12} /> Delete
-                  </button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
