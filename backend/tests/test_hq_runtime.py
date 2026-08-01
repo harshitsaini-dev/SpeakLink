@@ -102,6 +102,63 @@ def test_missing_keys_are_refused(persistent):
     assert "key" in str(refusal.value).lower()
 
 
+# ===========================================================================
+# Production DATABASE_URL: fail closed, never a silent SQLite fallback
+# ===========================================================================
+def test_development_profile_never_reads_or_requires_a_database_url_file(persistent):
+    """The default, and what every existing installed HQ (app_env unset)
+    keeps doing after this feature ships: zero behavior change."""
+    root, _build = persistent
+    profile = resolve_runtime_profile()
+    assert profile.app_env == "development"
+    assert profile.database_url_file is None
+
+
+def test_production_without_a_database_url_file_is_refused(persistent):
+    root, _build = persistent
+    (root / "config" / "hq-runtime.json").write_text(
+        '{"app_env": "production"}', encoding="utf-8")
+    with pytest.raises(RuntimeConfigError) as refusal:
+        resolve_runtime_profile()
+    assert "database-url.txt" in str(refusal.value)
+    assert "production" in str(refusal.value).lower()
+
+
+def test_production_with_a_database_url_file_resolves_and_injects_it(persistent):
+    from tools.hq_runtime import child_environment
+
+    root, _build = persistent
+    (root / "config" / "hq-runtime.json").write_text(
+        '{"app_env": "production"}', encoding="utf-8")
+    (root / "keys" / "database-url.txt").write_text(
+        "postgresql://user:pw@example.pooler.supabase.com:5432/postgres",
+        encoding="utf-8",
+    )
+    profile = resolve_runtime_profile()
+    assert profile.app_env == "production"
+    env = child_environment(profile)
+    assert env["APP_ENV"] == "production"
+    assert env["DATABASE_URL"] == (
+        "postgresql://user:pw@example.pooler.supabase.com:5432/postgres"
+    )
+
+
+def test_the_database_url_never_reaches_a_child_command_line(persistent):
+    """Mirrors test_no_secret_reaches_a_child_command_line for JWT_SECRET -
+    the URL (which carries the database password) must travel only through
+    the environment, never a command-line argument."""
+    root, _build = persistent
+    (root / "config" / "hq-runtime.json").write_text(
+        '{"app_env": "production"}', encoding="utf-8")
+    (root / "keys" / "database-url.txt").write_text(
+        "postgresql://user:supersecretpw@example.pooler.supabase.com:5432/postgres",
+        encoding="utf-8",
+    )
+    profile = resolve_runtime_profile()
+    command = backend_command(profile) + frontend_command(profile)
+    assert not any("supersecretpw" in str(part) for part in command)
+
+
 def test_a_missing_frontend_build_is_refused(persistent, monkeypatch):
     monkeypatch.setattr("tools.hq_runtime.FRONTEND_BUILD",
                         Path(str(persistent[0] / "no-such-build")))

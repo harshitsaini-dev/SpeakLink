@@ -170,6 +170,14 @@ class RuntimeProfile:
     state: RuntimeState = RuntimeState.STARTING
     mode: str = PERSISTENT_MARKER
     status_file: Path = field(default_factory=runtime_status_path)
+    #: 'development' (default) or 'production'. Only 'production' ever reads
+    #: database_url_file - development never touches PostgreSQL/Supabase,
+    #: matching db_config.py's own rule exactly.
+    app_env: str = "development"
+    #: Never auto-created (unlike jwt_secret_file) - a missing production
+    #: database credential must fail startup, not mint a fresh SQLite file
+    #: that looks like it works. See docs/SUPABASE_PRODUCTION_CUTOVER.md.
+    database_url_file: Path | None = None
 
     @property
     def backend_health_url(self) -> str:
@@ -355,6 +363,20 @@ def resolve_runtime_profile() -> RuntimeProfile:
             "directory of the deployed checkout."
         )
 
+    app_env = str(settings.get("app_env") or "development").strip().lower()
+    database_url_file = server.key_container.parent / "database-url.txt"
+    if app_env == "production" and not database_url_file.exists():
+        # Fail closed, at the exact same moment every other missing-secret
+        # refusal in this function fires - never at the first PostgreSQL
+        # query, deep inside a request, after the frontend already looks up.
+        raise RuntimeConfigError(
+            f"config/hq-runtime.json sets app_env=production but "
+            f"{database_url_file} does not exist. Production never falls "
+            "back to a local SQLite database - put the Supabase Session "
+            "Pooler DATABASE_URL in that file first. See "
+            "docs/SUPABASE_PRODUCTION_CUTOVER.md."
+        )
+
     return RuntimeProfile(
         root=server.root,
         database=server.database,
@@ -368,6 +390,8 @@ def resolve_runtime_profile() -> RuntimeProfile:
         frontend_port=int(settings.get("frontend_port") or DEFAULT_FRONTEND_PORT),
         python=resolve_python_executable(settings.get("python")),
         backend_root=backend_root,
+        app_env=app_env,
+        database_url_file=database_url_file if app_env == "production" else None,
     )
 
 
@@ -511,7 +535,7 @@ def child_environment(profile: RuntimeProfile) -> dict:
     an environment is not.
     """
     secret = profile.jwt_secret_file.read_text(encoding="utf-8").strip()
-    return dict(
+    env = dict(
         os.environ,
         ECHOCAST_DB_PATH=str(profile.database),
         ECHOCAST_KEY_CONTAINER=str(profile.key_container),
@@ -519,7 +543,16 @@ def child_environment(profile: RuntimeProfile) -> dict:
         ECHOCAST_SERVER_MODE=profile.mode,
         JWT_SECRET=secret,
         CORS_ORIGINS=f"http://{profile.hq_address}:{profile.frontend_port}",
+        APP_ENV=profile.app_env,
     )
+    if profile.app_env == "production":
+        # Read fresh on every start rather than cached anywhere - the same
+        # "outside Git, outside the package, read from one protected file"
+        # shape jwt_secret_file already uses. Never logged, never printed;
+        # build_runtime_profile already refused to reach here if this file
+        # is missing.
+        env["DATABASE_URL"] = profile.database_url_file.read_text(encoding="utf-8").strip()
+    return env
 
 
 def http_ok(url: str, *, timeout: float = HEALTH_TIMEOUT_SECONDS) -> bool:

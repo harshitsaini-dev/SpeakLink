@@ -52,6 +52,36 @@ _configured = os.environ.get("ECHOCAST_DB_PATH")
 if not _configured or Path(_configured).resolve() == PROTECTED_DATABASE.resolve():
     os.environ["ECHOCAST_DB_PATH"] = str(_DEFAULT_ENGINE_DATABASE)
 
+# The test suite is ALWAYS a development environment, whatever the machine it
+# runs on happens to be configured for.
+#
+# ``server.py`` calls ``load_dotenv(backend/.env)`` at import. The moment an
+# operator puts real production settings in that file - APP_ENV=production and
+# a Supabase DATABASE_URL, which is a completely reasonable thing to believe
+# belongs there - every test that imports ``server`` resolves its engine to
+# PostgreSQL instead of its own throwaway SQLite file. ``db.DB_PATH`` is then
+# None (correct for PostgreSQL), and the ~30 test modules that assert
+# ``Path(db.DB_PATH) == their_temp_file`` fail with an unrelated-looking
+# TypeError. That is not hypothetical: it happened here, and cost 70 failures
+# and 250 errors across files that have nothing to do with PostgreSQL.
+#
+# Worse than the noise is the risk it removes: a test run that silently
+# connected to the real production database would be doing destructive things
+# to live data. Clearing these two here means a local .env can never point the
+# suite at production, no matter what it contains.
+#
+# Production configuration reaches the real HQ through
+# ``keys/database-url.txt`` and ``tools/hq_runtime.py``, never through this
+# path - see docs/SUPABASE_PRODUCTION_CUTOVER.md.
+# Both are set to a value rather than deleted, and that detail is the whole
+# mechanism: ``load_dotenv`` defaults to ``override=False``, so it only fills
+# in names that are ABSENT from os.environ. Deleting DATABASE_URL here would
+# simply let .env put it back a moment later, when server.py is imported.
+# An empty string is present (so dotenv leaves it alone) and is treated as
+# "not configured" by db_config.load_database_config's development branch.
+os.environ["DATABASE_URL"] = ""
+os.environ["APP_ENV"] = "development"
+
 
 def pytest_configure(config):  # noqa: D401 - pytest hook
     """Refuse to run at all if the default engine points at the protected file.
