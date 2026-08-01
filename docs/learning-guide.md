@@ -1151,3 +1151,40 @@ defect, and the fix is "don't run the two commands concurrently" - not a code
 change. Confirmed here by re-running `test_hq_runtime.py` alone against the
 now-complete build (26 passed) and then re-running the full suite with
 nothing else touching `frontend/build` (green, 2538 passed).
+
+---
+
+## Learning Box 26 — A new authenticated response can silently hide every button in every existing test
+
+**What happened.** Adding `GET /auth/permissions` and gating every action
+button on `can(code)` was, on its own, exactly the right fix - menu hiding
+had never been a boundary, and now it finally is one everywhere. Running the
+existing 174-test Playwright suite immediately after wiring `can()` into
+`StoreManagement.jsx` and `BroadcastConsole.jsx` would have shown almost
+every button in every spec vanishing, for one reason: the mocked backend in
+`e2e/support/backend.js` had no route for `/auth/permissions` at all.
+`AuthContext.loadPermissions()` fails closed on a missing route - empty
+permission set, by design - so `can("stores.create")` etc. would have
+returned `false` for literally every existing spec until the mock caught up.
+
+It never actually reached that state, because the mock was updated in the
+same change that added the first `can()` call. But the shape of the risk is
+worth naming: a fail-closed authorization check is only as safe as its
+default in a TEST HARNESS - a mock that has not learned about a new endpoint
+yet does not error loudly, it just quietly grants nothing, and "nothing
+visible" looks identical to "test passed, nothing to click" right up until
+an assertion expects a button that used to be there unconditionally.
+
+**The general shape.** Any fail-closed check (a permission resolver, a
+feature flag defaulting off, a capability negotiation) that a test suite
+mocks at the transport layer needs its mock updated in the SAME commit that
+introduces the real check - not after. The two are coupled even though
+nothing imports between them.
+
+**What to do about it.** Before gating a UI action on a new authorization
+call, grep the existing test mocks for that call first. If none exists,
+add a default that mirrors the real backend's default role matrix - not an
+empty stub - so existing specs keep testing what they were written to test,
+and a spec that deliberately wants a denied permission does so by overriding
+the mock explicitly, the same way `usersStatus: 403` already worked for
+other refusals in this file.

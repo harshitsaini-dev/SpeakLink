@@ -3668,3 +3668,152 @@ compiled successfully with the new favicon and role label in the output.
 Not done in this pass: a UI affordance to view a Device's `archived_at`
 timestamp anywhere other than the raw API response, and no Playwright/E2E
 walk of the new Scope/Rights editors in a real browser.
+
+## Closing the authorization/lifecycle/E2E gaps before a scoped-RBAC pilot
+
+### Real Device archive/delete permissions
+
+`devices.disable`/`devices.revoke` were being reused for Archive/Delete -
+not fine-grained enough for per-user customisation. Added
+`devices.archive` and `devices.delete_permanently` to the catalog.
+Defaults: OWNER both; ADMIN gets `devices.archive` but **not**
+`devices.delete_permanently` (excluded the same way `users.permissions.
+manage` already is); BROADCASTER/VIEWER neither. `archive_receiver_device`/
+`restore_receiver_device` now require `devices.archive`;
+`hard_delete_receiver_device` requires `devices.delete_permanently`.
+Permanent deletion is effectively SUPER ADMIN-only by default.
+
+### Hardened permanent delete
+
+`delete_device_if_unused` now refuses outright, before any dependency
+count, unless the Device is already ARCHIVED (`archived_at` set) or
+REVOKED/RETIRED (`status='retired'`) - an ACTIVE or merely DISABLED Device
+is still ordinary rotation and is never eligible. Also refuses if the
+Device is still a Store's primary, and re-runs `PRAGMA foreign_key_check`
+after the delete inside the same transaction as a last-resort guard.
+Nothing is ever cascade-deleted to make a delete succeed. Six RED-then-
+GREEN tests in `test_receiver_device_archive_and_delete.py` prove: ACTIVE
+refused, DISABLED-not-archived refused, ARCHIVED-and-unused allowed,
+REVOKED-and-unused allowed, still-primary refused, wrong confirmation
+refused.
+
+### Archived Device UI
+
+`ReceiverDevices.jsx` hides archived Devices by default behind a "Show
+Archived" toggle (with a count badge), shows an Archived date/time column
+and an "Archived" status badge, and only offers Restore for an archived
+row / Archive for a non-archived one. Delete is now never rendered for an
+ACTIVE or merely DISABLED Device - only when `archived_at` is set or
+`status === 'retired'` AND the account holds `devices.delete_permanently`.
+`describe_store_devices` (backend) now returns `archived_at` per row so the
+frontend never has to re-derive it.
+
+### Scope audit
+
+New `store_scope_audit_events` table: actor, target, scope type, a safe
+human-readable label (a Store's name+code, or the city/Zone name - never a
+bare id), action (`ADDED`/`REMOVED`), UTC timestamp. `set_user_scope` diffs
+the before/after scope sets inside the same transaction that writes them
+and records one row per real change - clearing every entry logs `REMOVED`
+for each one that existed. No password, JWT, Receiver credential or HMAC
+key ever reaches it or the accompanying `system_logs` line (proven by
+`test_scope_audit_contains_no_secrets`).
+
+### Scope enforcement, audited end to end
+
+Store-associated endpoints now all apply `_require_store_in_scope` or an
+equivalent filter: Store Management (list + every by-id action), Receiver
+Devices (list/read/dependencies + every store-id-keyed route),
+Broadcast Console's live status, Broadcast target creation/start
+(`_resolve_targets`), and - newly this round - **Broadcast History**:
+`broadcast_history` hides a session with zero in-scope targets entirely,
+and `session_detail` 404s the same way for a session that never reached
+this account's Stores (indistinguishable from "no such session," so a
+scoped user cannot infer an out-of-scope campaign existed) - `selected_
+store_count`/`online_store_count`/`offline_store_count` are recomputed to
+the in-scope subset, never the real totals. **System Logs** was
+deliberately left unscoped: `system_logs` has no `store_id` column, so it
+is not Store-associated, and scoping unstructured free text would mean
+guessing - it stays governed only by `menu.logs.view`, proven by a test
+asserting a scoped ADMIN sees exactly as many log rows as OWNER.
+
+### Action buttons converted to `can(permission)`
+
+`StoreManagement.jsx` (Add/Edit/Regenerate-token/Disable/Enable/Archive/
+Restore/Delete), `BroadcastConsole.jsx` (Start/Stop/Emergency Stop),
+`ReceiverDevices.jsx` (already converted last round; extended with the two
+new device codes), and `UserManagement.jsx` (New User/Edit/Disable/Enable/
+Archive/Restore/Delete, layered on top of the existing role-based "which
+OTHER role you may manage" check, which is a business rule about targets
+and not a coarse permission substitute) all now gate on the exact effective
+permission rather than role or unconditional visibility. The Rights/Scope
+buttons remain OWNER-only, the one deliberately protected exception the
+task itself calls for.
+
+### Playwright / real browser E2E
+
+The repository already had a configured Playwright suite
+(`frontend/e2e`, 174 tests, backend fully mocked via `page.route`) that had
+never been run against this branch's changes. Running it first surfaced a
+real gap: `GET /auth/permissions` had no mock at all, so every `can()`
+call would have silently returned `false` and hidden every action button in
+every existing spec (see Learning Box 26). Fixed by mirroring `DEFAULT_
+ROLE_PERMISSIONS` in `e2e/support/backend.js`, plus mocks for the new
+Device archive/restore/dependencies/permanently and Rights/Scope editor
+endpoints.
+
+Three existing tests then failed for a legitimate reason - they encoded the
+pre-this-branch design ("a route only administrators can reach in the
+router is a lock on a door with no walls"), which `ProtectedRoute`'s new
+menu-permission gating deliberately supersedes. Updated: one to expect
+"SUPER ADMIN" instead of "OWNER", one to use an ADMIN (who the frontend
+does admit) to prove the backend's independent 403, and one rewritten to
+assert the new, correct behaviour - a VIEWER visiting `/users` directly is
+redirected, not shown a forbidden page.
+
+New `frontend/e2e/permissions-and-scope.spec.js` (10 tests) proves, in a
+real Chromium: (A) an ADMIN with `stores.update` denied keeps the Store
+list but loses Edit, and a hand-crafted `fetch` to the API is refused
+anyway; (B) a BROADCASTER scoped to one Store sees only it and a
+hand-crafted out-of-scope broadcast target is refused; (C) a Zone-scoped
+BROADCASTER sees only that Zone's Stores; (D) VIEWER offers no
+create/edit/lifecycle actions and the Users nav link/route are both gone;
+(E) SUPER ADMIN sees every Store action and can open the Rights and Scope
+editors; (F) an unauthenticated visit to any protected route lands on
+`/login`; (G) an archived Device is hidden by default and appears with
+"Show Archived", with Restore offered and Archived badge/date shown.
+
+**Full Playwright suite: 184 passed, 0 failed** (174 existing + 10 new),
+run against an isolated port (3577) specifically so as not to disturb the
+real, currently-running live HQ RC9 install serving the actual port 3000 on
+this machine - `playwright.config.js` was reverted to port 3000 afterwards
+with no net diff.
+
+### Migration safety
+
+`test_rbac_migration_safety.py` (6 tests), all against a temporary clone
+built by the app's own `startup_event`, never the live database: existing
+users/roles/Stores survive; an existing ADMIN with zero scope rows stays
+unrestricted after every new migration re-runs; `ensure_permission_schema`/
+`ensure_store_scope_schema`/`ensure_device_archive_schema` are each
+idempotent across three consecutive re-runs with identical row counts;
+the archive column never duplicates; no migration ever shrinks or deletes
+the database file; a full archive→restore→archive→permanent-delete
+lifecycle on a real clone leaves `foreign_key_check` empty and
+`integrity_check` at `ok`.
+
+### Totals
+
+Backend: **2557 passed, 3 skipped, 0 failed**. Frontend unit: **56
+passed**. Playwright: **184 passed**. `compileall`, `pip check`,
+`git diff --check` and a secret scan all clean. `yarn build` compiled.
+
+### Remaining limitations
+
+No UI surface for scope-audit or permission-audit history (the tables are
+queryable, not yet displayed anywhere); the Scope editor's city/Zone text
+inputs are free text, not a dropdown sourced from `/stores/meta/
+regions-cities` (a typo silently resolves to zero Stores rather than being
+caught at entry time); System Logs remaining permission-only (by design,
+documented above) means a scoped BROADCASTER can still read log lines that
+mention an out-of-scope Store by name in free text.
