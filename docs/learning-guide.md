@@ -474,7 +474,130 @@ holding anything.
 
 ---
 
-## Learning Box 19 — Fix a defect in every language it lives in
+## Learning Box 20 — A naive timestamp is a timezone guess waiting to happen
+
+**What happened.** The very first real broadcast showed an elapsed timer of
+roughly `05:30:28` the instant it started, instead of `00:00:00`. That number
+is suspicious in one specific way: 5 hours 30 minutes is exactly the IST
+(UTC+05:30) offset of the browser that saw it.
+
+The database stores UTC by convention, but SQLite drops a Python `datetime`'s
+`tzinfo` on every round trip. So a value read back from the ORM is a *naive*
+datetime — still UTC in fact, but with nothing in the object saying so.
+Pydantic's default JSON serialization of a naive datetime omits any offset:
+`"2026-08-01T05:30:00.123456"`, no `Z`, no `+00:00`. A browser's
+`new Date(...)` treats a string with no offset as **local time**, not UTC. On
+an IST browser that silently shifted every timestamp in the app by exactly
+UTC+05:30.
+
+**The general shape.** Whenever a naive datetime crosses a serialization
+boundary, the receiving side has to *guess* what timezone it means, and
+`new Date(...)` guesses "wherever I am right now." A defect like this is
+invisible in whatever timezone the developer tests in (UTC, or a
+timezone-aware test harness) and appears only for a viewer somewhere else -
+which is exactly why it survived to the first real broadcast instead of
+showing up in earlier local testing.
+
+**What to do about it.**
+
+- Never let a naive datetime reach an API response. Attach a UTC `tzinfo`
+  explicitly at the serialization boundary (`backend/schemas.py`'s `_utc_iso`),
+  not deep in a formatting helper three files away from where the value is
+  used.
+- On the frontend, never call `new Date(iso).getTime()` directly across the
+  app. Route every parse through one function
+  (`frontend/src/lib/time.js#parseUtcMs`) that treats an offset-less string as
+  UTC rather than trusting the browser's guess - a defensive net even if the
+  backend contract is later violated by a new field.
+- Compute an elapsed duration from two epoch values, never by re-parsing a
+  *formatted* clock string. A formatted string has already thrown away the
+  information (the offset) that made the original instant unambiguous.
+- Write the regression test in the units the defect actually happened in:
+  assert the literal JSON string carries an explicit `Z`/offset, and assert
+  that the elapsed-seconds calculation for "started 1 second ago" is `1`, not
+  `19801` (5h30m + 1s) — a numeric assertion pins the exact prior failure mode
+  in a way "the timestamp looks right" does not.
+
+---
+
+## Learning Box 21 — Route-local state dies when the route unmounts
+
+**What happened.** During a live broadcast, navigating from Broadcast Console
+to another page and back left the broadcast still marked LIVE — but the
+microphone level meter sat at zero, as if nothing were being captured, even
+though audio was still being sent.
+
+The live `MediaStream`, `AudioContext`, `AnalyserNode`, `MediaRecorder`, and
+`WebSocket` were all owned by `BroadcastConsole`'s own component state
+(`useState`). React unmounts a page component on every route change and
+remounts a fresh one on return. The underlying browser objects kept running —
+nothing explicitly stopped them — but the *only reference* to them was a
+`useState` value that had just been thrown away and replaced with a brand new
+`broadcaster = null`. The meter had nothing left to read from.
+
+**The general shape.** Any state that represents a real-world *thing in
+progress* (an open connection, a running capture, a background job someone is
+watching) cannot live in the component that happens to render its UI, if the
+user is allowed to navigate away from that component while the thing keeps
+running. Component state answers "what does this screen look like right now,"
+not "what is actually still happening in the world."
+
+**What to do about it.**
+
+- Identify what must outlive the screen that started it, and lift *only that*
+  above the router - here, a `BroadcastProvider` mounted once, above
+  `<Layout/>`'s `<Outlet/>`, holding the `HQBroadcaster` instance in a
+  `useRef` and the derived UI state (`meter`, `broadcasterStatus`, `current`)
+  in `useState`. The page component (`BroadcastConsole`) becomes a *consumer*
+  of that context, not an owner - it can safely mount and unmount freely.
+- Do not create a second capture on remount. The bug's natural "fix" - just
+  call `getUserMedia` again when the Console remounts - would have produced a
+  second microphone permission prompt, a second `MediaRecorder`, and duplicate
+  audio chunks. The correct fix is that there is nothing to recreate: the
+  owning component never unmounted in the first place.
+- Tie any native browser lifecycle hook (here, `beforeunload`) to the *fact*
+  that matters (`isLive`), installed and removed from the same place that owns
+  the fact - not from the page that happens to be showing it. A route change
+  must never install or remove it, and Stop/Emergency Stop must remove it the
+  same way.
+- Test the ownership boundary as a pure, framework-free unit where possible:
+  `beforeUnloadGuard.js`'s `sync(isLive)` is trivially testable against a fake
+  event target with no React rendering at all, which is what proved "exactly
+  one handler, never duplicated across repeated start/stop" cheaply.
+
+---
+
+## Learning Box 22 — Mojibake in source is a paste error, not a build defect
+
+**What happened.** The HQ header showed `HQ Broadcast Console Â· v1.0`. The
+`Â` was not a build-pipeline charset bug and not a font-rendering problem: it
+was sitting in the JSX source file itself, as an actual pasted character. UTF-8
+encodes `·` as the two bytes `0xC2 0xB7`; if those two bytes are ever
+re-decoded as Latin-1/CP1252 and then re-encoded as UTF-8, `0xC2` becomes the
+separate character `Â` in front of the original `·`. Somewhere, a `·`
+travelled through one extra decode/encode pass - almost always a copy-paste
+between two tools that disagreed about encoding - before landing in the file.
+
+**The general shape.** Not everything that renders wrong is a rendering
+problem. `grep` the source file directly before touching `<meta charset>`,
+build config, or font stacks - if the bad character is already sitting in the
+`.jsx`/`.py`/`.md` file on disk, no pipeline change downstream can fix it,
+and every pipeline change is wasted effort chasing the wrong layer.
+
+**What to do about it.**
+
+- Read the raw file content (not the rendered page) and check for the
+  mojibake byte sequence directly.
+- Fix it at the source: replace the bad literal with the correct UTF-8
+  character, once, in the file that has it.
+- Pin it with a test that reads the actual shipped file, not a re-typed
+  paraphrase of its content (`Layout.header.test.js`) - a test that only
+  checks a hand-copied string can pass even if the real file still has the
+  mojibake, if the copy was typed correctly by hand.
+
+---
+
+## Learning Box 23 — Fix a defect in every language it lives in
 
 The runtime demanded a key file that nothing creates before the first start, and
 refused a correctly initialized HQ with an instruction no procedure in this
