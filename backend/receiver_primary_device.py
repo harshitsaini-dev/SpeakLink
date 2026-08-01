@@ -218,10 +218,13 @@ def clear_primary_for_device(engine: Engine, *, device_id: int) -> bool:
 def describe_store_devices(engine: Engine, *, store_id: int) -> list[dict]:
     """Every Device of one Store, each with its role. No credential material."""
     with engine.connect() as connection:
+        columns = {c[1] for c in connection.exec_driver_sql("PRAGMA table_info(receiver_devices)")}
+        archived_select = "d.archived_at" if "archived_at" in columns else "NULL AS archived_at"
         rows = connection.execute(
             text(
-                "SELECT d.public_id, d.display_name, d.status, d.enrolled_at, "
-                "       d.disabled_at, p.device_id AS primary_device_id, d.id AS device_id, "
+                f"SELECT d.public_id, d.display_name, d.status, d.enrolled_at, "
+                f"       d.disabled_at, {archived_select}, "
+                "       p.device_id AS primary_device_id, d.id AS device_id, "
                 "       p.promoted_at "
                 f"FROM receiver_devices d LEFT JOIN {PRIMARY_TABLE} p "
                 "  ON p.store_id = d.store_id AND p.device_id = d.id "
@@ -236,6 +239,7 @@ def describe_store_devices(engine: Engine, *, store_id: int) -> list[dict]:
             "status": row.status,
             "enrolled_at": row.enrolled_at,
             "disabled_at": row.disabled_at,
+            "archived_at": row.archived_at,
             "role": DeviceRole.PRIMARY if row.primary_device_id else DeviceRole.STANDBY,
             "promoted_at": row.promoted_at,
         }

@@ -53,8 +53,21 @@ USER_DEPENDENCY_TABLES = (
     "broadcast_sessions",
 )
 
+#: Every table that can reference a Receiver Device's internal id. Named
+#: explicitly for the same reason as STORE_DEPENDENCY_TABLES: a new table is a
+#: decision. ``receiver_credentials`` already carries an ON DELETE RESTRICT
+#: foreign key, so a Device that was ever enrolled - which is every real
+#: Device, since enrolment is what creates one - can never actually pass this
+#: check. That is intentional: hard deletion stays the exception, and archive
+#: is the default, exactly as it is for a Store or a User.
+DEVICE_DEPENDENCY_TABLES = (
+    "receiver_credentials",
+    "receiver_credential_events",
+)
+
 _STORE_COLUMN = "store_id"
 _USER_COLUMNS = {"broadcast_sessions": "started_by"}
+_DEVICE_COLUMN = "device_id"
 
 
 @dataclass
@@ -121,6 +134,68 @@ def user_dependencies(engine: Engine, *, user_id: int) -> DependencySummary:
         summary.exists = bool(connection.execute(
             text("SELECT COUNT(*) FROM hq_users WHERE id = :i"), {"i": user_id}).scalar())
     return summary
+
+
+def device_dependencies(engine: Engine, *, public_id: str) -> DependencySummary:
+    with engine.connect() as connection:
+        row = connection.execute(
+            text("SELECT id FROM receiver_devices WHERE public_id = :public_id"),
+            {"public_id": public_id},
+        ).first()
+        if row is None:
+            return DependencySummary(exists=False)
+        summary = _count_dependencies(
+            connection, DEVICE_DEPENDENCY_TABLES, lambda _t: _DEVICE_COLUMN, row.id)
+        summary.exists = True
+    return summary
+
+
+def delete_device_if_unused(engine: Engine, *, public_id: str,
+                           typed_confirmation: str) -> dict:
+    """Remove one never-used Receiver Device. Refuses anything else.
+
+    ``typed_confirmation`` must equal the Device's public id exactly - the
+    same "type the identifier of the thing being destroyed" rule
+    delete_store_if_unused and delete_user_if_unused already use.
+    """
+    with engine.begin() as connection:
+        row = connection.execute(
+            text(
+                "SELECT id, public_id, store_id, display_name FROM receiver_devices "
+                "WHERE public_id = :public_id"
+            ),
+            {"public_id": public_id}).first()
+        if row is None:
+            raise DeletionRefused("That Receiver Device no longer exists.")
+
+        if typed_confirmation != row.public_id:
+            raise DeletionRefused(
+                f"The typed confirmation did not match. Type the Device id exactly: "
+                f"{row.public_id}"
+            )
+
+        # Recounted here, on the connection holding the transaction, so nothing
+        # can be re-enrolled or credentialed between the check and the delete.
+        summary = _count_dependencies(
+            connection, DEVICE_DEPENDENCY_TABLES, lambda _t: _DEVICE_COLUMN, row.id)
+        if summary.total or summary.unchecked:
+            raise DeletionRefused(
+                "This Device has issued credentials or recorded events. "
+                "Archive it instead. " + summary.explain()
+            )
+
+        has_primary_table = connection.exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='receiver_store_primary_device'"
+        ).first()
+        if has_primary_table:
+            connection.execute(
+                text("DELETE FROM receiver_store_primary_device WHERE device_id = :i"),
+                {"i": row.id},
+            )
+        connection.execute(text("DELETE FROM receiver_devices WHERE id = :i"), {"i": row.id})
+        return {"public_id": row.public_id, "store_id": row.store_id,
+                "display_name": row.display_name}
 
 
 def delete_store_if_unused(engine: Engine, *, store_id: int,

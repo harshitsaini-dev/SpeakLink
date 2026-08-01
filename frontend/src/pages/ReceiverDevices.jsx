@@ -1,7 +1,7 @@
 import React from "react";
 import { useParams, Link } from "react-router-dom";
 import { api } from "@/lib/api";
-import { RefreshCw, Plus, KeyRound, Star, Ban, Trash2, ArrowLeft } from "lucide-react";
+import { RefreshCw, Plus, KeyRound, Star, Ban, Trash2, ArrowLeft, Archive, ArchiveRestore } from "lucide-react";
 
 // Receiver Device administration for one Store.
 //
@@ -351,6 +351,28 @@ export default function ReceiverDevices() {
     );
   };
 
+  const archive = (device) => {
+    if (
+      !window.confirm(
+        `Archive "${device.display_name}"?\n\n` +
+          "It is disabled and hidden from active setup, but its credential history stays " +
+          "readable and it can be restored later.",
+      )
+    )
+      return;
+    return act("archive-" + device.public_id, () =>
+      api.post(`/receiver-devices/${device.public_id}/archive`),
+    );
+  };
+
+  const restore = (device) => {
+    return act("restore-" + device.public_id, () =>
+      api.post(`/receiver-devices/${device.public_id}/restore`),
+    );
+  };
+
+  const [deletingDevice, setDeletingDevice] = React.useState(null);
+
   const hasPrimary = devices.some((d) => d.role === "PRIMARY" && d.status === "active");
 
   return (
@@ -528,6 +550,38 @@ export default function ReceiverDevices() {
                       <Trash2 size={12} /> Revoke
                     </button>
                   )}
+                  {!device.archived_at ? (
+                    <button
+                      data-testid={`archive-${device.public_id}`}
+                      onClick={() => archive(device)}
+                      disabled={busy.startsWith("archive-")}
+                      title="Archive this Device"
+                      aria-label={`Archive ${device.display_name}`}
+                      className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      <Archive size={12} /> Archive
+                    </button>
+                  ) : (
+                    <button
+                      data-testid={`restore-${device.public_id}`}
+                      onClick={() => restore(device)}
+                      disabled={busy.startsWith("restore-")}
+                      title="Restore this Device"
+                      aria-label={`Restore ${device.display_name}`}
+                      className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      <ArchiveRestore size={12} /> Restore
+                    </button>
+                  )}
+                  <button
+                    data-testid={`delete-${device.public_id}`}
+                    onClick={() => setDeletingDevice(device)}
+                    title="Permanently delete this Device"
+                    aria-label={`Permanently delete ${device.display_name}`}
+                    className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50 disabled:opacity-50"
+                  >
+                    <Trash2 size={12} /> Delete
+                  </button>
                 </td>
               </tr>
             ))}
@@ -535,10 +589,109 @@ export default function ReceiverDevices() {
         </table>
       </div>
 
+      {deletingDevice && (
+        <DeleteDeviceDialog
+          device={deletingDevice}
+          onCancel={() => setDeletingDevice(null)}
+          onConfirm={async (typed) => {
+            await act(
+              "delete-" + deletingDevice.public_id,
+              () => api.delete(`/receiver-devices/${deletingDevice.public_id}/permanently`,
+                               { params: { confirm: typed } }),
+            );
+            setDeletingDevice(null);
+          }}
+        />
+      )}
+
       <p className="text-xs text-slate-400">
         Playing here means a Device accepted and decoded audio. It does not mean anyone heard it -
         only EchoGuard acoustic verification can establish that.
       </p>
+    </div>
+  );
+}
+
+/**
+ * Permanent deletion, refused far more often than it succeeds - the same
+ * shape as UserManagement's DeleteUserDialog. Every enrolled Device has at
+ * least one issued credential, so this is refused unless the row was never
+ * really used.
+ */
+function DeleteDeviceDialog({ device, onCancel, onConfirm }) {
+  const [summary, setSummary] = React.useState(null);
+  const [failed, setFailed] = React.useState("");
+  const [typed, setTyped] = React.useState("");
+
+  React.useEffect(() => {
+    let cancelled = false;
+    api.get(`/receiver-devices/${device.public_id}/dependencies`)
+      .then((response) => { if (!cancelled) setSummary(response.data); })
+      .catch(() => { if (!cancelled) setFailed("The dependency check could not be run."); });
+    return () => { cancelled = true; };
+  }, [device.public_id]);
+
+  const matches = typed === device.public_id;
+
+  return (
+    <div className="rounded border border-red-200 bg-red-50 p-4 space-y-3"
+         data-testid="delete-device-dialog">
+      <h2 className="font-medium text-red-900">
+        Permanently delete {device.display_name}
+      </h2>
+
+      {summary === null && !failed && (
+        <p className="text-sm text-slate-600" data-testid="delete-device-checking">
+          Checking what still refers to this Device…
+        </p>
+      )}
+      {failed && (
+        <p className="text-sm text-red-800" data-testid="delete-device-check-failed">
+          {failed} Nothing has been deleted. Archive this Device instead.
+        </p>
+      )}
+      {summary && (
+        <>
+          <p className="text-sm text-slate-700" data-testid="delete-device-summary">
+            {summary.explanation}
+          </p>
+          {!summary.deletable && (
+            <p className="text-sm text-red-800" data-testid="delete-device-blocked">
+              This Device cannot be deleted. Archive it instead — its history stays readable
+              and it can be restored.
+            </p>
+          )}
+          {summary.deletable && (
+            <>
+              <p className="text-sm text-red-800">
+                This cannot be undone. Type the Device id exactly to confirm:
+                <br /><code className="text-xs">{device.public_id}</code>
+              </p>
+              <input
+                className="w-full max-w-md rounded border px-2 py-1" value={typed}
+                onChange={(event) => setTyped(event.target.value)}
+                autoComplete="off" data-testid="delete-device-confirm-input"
+              />
+            </>
+          )}
+        </>
+      )}
+
+      <div className="flex gap-2">
+        <button
+          type="button"
+          disabled={!summary || !summary.deletable || !matches}
+          onClick={() => onConfirm(typed)}
+          className="rounded bg-red-700 px-3 py-2 text-sm text-white disabled:opacity-40"
+          data-testid="delete-device-confirm"
+        >
+          Delete permanently
+        </button>
+        <button type="button" onClick={onCancel} className="rounded border px-3 py-2 text-sm"
+                data-testid="delete-device-cancel">
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }
