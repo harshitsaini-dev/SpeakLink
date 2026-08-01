@@ -294,6 +294,21 @@ store_deletion_events = Table(
 )
 
 
+#: Irreversible User deletion audit (user_deletion.py). Mirrors
+#: store_deletion_events: the actor, what was destroyed, and how much history
+#: still points at it - never a password, a hash or a token.
+user_deletion_events = Table(
+    "user_deletion_events", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("actor_user_id", Integer, nullable=False),
+    Column("user_id", Integer, nullable=False),
+    Column("username", String(100), nullable=False),
+    Column("role", String(30), nullable=False),
+    Column("history_counts_json", Text, nullable=False),
+    Column("deleted_at", String(40), nullable=False),
+)
+
+
 def create_all(engine: Engine) -> None:
     """Create the complete PostgreSQL production schema - every ORM table in
     models.py (Store, HQUser, BroadcastSession, ...) AND every table
@@ -318,6 +333,7 @@ __all__ = [
     "role_permissions",
     "store_deletion_events",
     "store_scope_audit_events",
+    "user_deletion_events",
     "user_permission_overrides",
     "user_store_scope",
 ]

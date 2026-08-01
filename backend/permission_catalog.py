@@ -80,15 +80,37 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
     PermissionDefinition("devices.delete_permanently", "Receivers", "Permanently Delete Device"),
 
     PermissionDefinition("menu.history.view", "History", "View Broadcast History"),
+    PermissionDefinition("broadcast_history.archive", "History",
+                        "Archive Broadcast Sessions"),
+    PermissionDefinition("broadcast_history.delete_permanently", "History",
+                        "Permanently Delete Broadcast Sessions"),
 
     PermissionDefinition("menu.logs.view", "Logs", "View System Logs"),
+    PermissionDefinition("system_logs.archive", "Logs", "Archive System Logs"),
+    PermissionDefinition("system_logs.delete_permanently", "Logs",
+                        "Permanently Delete System Logs"),
 
     PermissionDefinition("menu.users.view", "Users", "View User Management"),
     PermissionDefinition("users.create", "Users", "Create User"),
     PermissionDefinition("users.update", "Users", "Edit User"),
     PermissionDefinition("users.disable", "Users", "Disable / Archive User"),
     PermissionDefinition("users.permissions.manage", "Users", "Manage User Rights"),
+    PermissionDefinition("users.delete_permanently", "Users",
+                        "Permanently Delete User (history-preserving tombstone)"),
 )
+
+#: Irreversibly destructive operations. ADMIN is denied all of them by
+#: default - running the estate is a different kind of trust than destroying
+#: its records - and they are listed once here rather than repeated in the
+#: role matrix, so adding a destructive permission cannot silently grant it
+#: to ADMIN by omission.
+DESTRUCTIVE_CODES: frozenset[str] = frozenset({
+    "stores.delete_permanently",
+    "devices.delete_permanently",
+    "users.delete_permanently",
+    "broadcast_history.delete_permanently",
+    "system_logs.delete_permanently",
+})
 
 PERMISSION_CODES: frozenset[str] = frozenset(p.code for p in PERMISSION_DEFINITIONS)
 PERMISSIONS_BY_CODE: dict[str, PermissionDefinition] = {p.code: p for p in PERMISSION_DEFINITIONS}
@@ -115,10 +137,10 @@ _VIEW_ONLY_CODES = frozenset({
 #: reviewed policy changes that.
 DEFAULT_ROLE_PERMISSIONS: dict[Role, frozenset[str]] = {
     Role.OWNER: _ALL_CODES,
-    Role.ADMIN: _ALL_CODES - frozenset(
-        {"users.permissions.manage", "devices.delete_permanently",
-         "stores.delete_permanently"}
-    ),
+    # Everything except granting rights to others, and every irreversibly
+    # destructive operation (DESTRUCTIVE_CODES). ADMIN keeps every archive
+    # action - archiving is reversible and is the intended everyday tool.
+    Role.ADMIN: _ALL_CODES - frozenset({"users.permissions.manage"}) - DESTRUCTIVE_CODES,
     # Broadcast Console, its three controls, History and Receiver Status -
     # nothing that edits a Store, a Device's security, or a User.
     # menu.stores.view is included because Receiver Status (GET /api/stores)

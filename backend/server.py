@@ -90,6 +90,12 @@ from store_deletion import (
     list_store_deletion_events,
     permanently_delete_store_with_history,
 )
+from user_deletion import (
+    UserDeletionRefused,
+    ensure_user_deletion_schema,
+    list_user_deletion_events,
+    permanently_delete_user_with_history,
+)
 from user_schema import UserSchemaError, ensure_user_auth_schema
 from user_lifecycle import (
     migrate_super_admin_to_owner,
@@ -523,6 +529,13 @@ def startup_event():
         ensure_store_scope_schema(engine)
     except Exception:
         logger.warning("Store scope table could not be prepared", exc_info=False)
+
+    # Irreversible User deletion: two additive hq_users columns and one audit
+    # table. Additive and idempotent, so it is safe on every boot.
+    try:
+        ensure_user_deletion_schema(engine)
+    except Exception:
+        logger.warning("User deletion table could not be prepared", exc_info=False)
 
     # Every hq_users migration, in one call, in the one order that works.
     #
@@ -1786,6 +1799,63 @@ def write_user_store_scope(
         f"by={user.username}",
     )
     return {"user_id": user_id, "entries": list_user_scope(engine, user_id=user_id)}
+
+
+class UserTombstoneRequest(BaseModel):
+    confirm: str
+    acknowledged: bool = False
+
+
+@api.post("/users/{user_id}/delete-permanently")
+def tombstone_user(user_id: int, payload: UserTombstoneRequest,
+                   db: Session = Depends(get_db),
+                   user: HQUser = Depends(require("users.delete_permanently"))):
+    """Permanently remove an account from operational EchoCast even though it
+    is the recorded actor in Broadcast and audit history.
+
+    The hq_users row is never deleted - see user_deletion.py - so every
+    broadcast_sessions.started_by and audit reference stays valid and
+    readable. The account is tombstoned instead: it cannot sign in, its live
+    sessions end immediately, and it can never be restored.
+
+    Distinct from DELETE /users/{id}/permanently, which only ever removes an
+    account nothing has ever referenced.
+    """
+    if not payload.acknowledged:
+        raise HTTPException(
+            status_code=400,
+            detail="The 'this account cannot be restored' acknowledgement is required.",
+        )
+    existing = _user_or_404(user_id)
+    try:
+        result = permanently_delete_user_with_history(
+            engine, user_id=user_id, typed_confirmation=payload.confirm,
+            actor_user_id=user.id,
+        )
+    except UserDeletionRefused as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    _write_log(
+        db, "warn",
+        f"USER_PERMANENTLY_DELETED user_id={result.user_id} "
+        f"username={result.username} role={result.role} "
+        f"history={result.history_counts} by={user.username}",
+    )
+    return {
+        "ok": True,
+        "user_id": result.user_id,
+        "username": result.username,
+        "role": result.role,
+        "deleted_at": result.deleted_at,
+        "history_counts": result.history_counts,
+    }
+
+
+@api.get("/users/{user_id}/deletion-events")
+def read_user_deletion_events(user_id: int,
+                              user: HQUser = Depends(require("menu.users.view"))):
+    """Audit trail for a tombstoned account - who deleted it, when, and how
+    much history still names it. Never a password or a hash."""
+    return {"events": list_user_deletion_events(engine, user_id=user_id)}
 
 
 @api.delete("/users/{user_id}/permanently")
