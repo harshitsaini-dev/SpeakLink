@@ -42,7 +42,13 @@ from sqlalchemy.engine import Engine
 ACTIVE = "active"
 DISABLED = "disabled"
 ARCHIVED = "archived"
-KNOWN_STATES = (ACTIVE, DISABLED, ARCHIVED)
+#: A tombstone, not a fourth ordinary state. A DELETED Store never appears in
+#: ``allowed_from`` for disable/enable/archive/restore below, so every one of
+#: those transitions already refuses it (409) without any extra code here -
+#: the state machine itself is the guard. See ``store_deletion.py`` for the
+#: one-way transition into this state.
+DELETED = "deleted"
+KNOWN_STATES = (ACTIVE, DISABLED, ARCHIVED, DELETED)
 
 MAX_STORE_CODE_LENGTH = 50
 MAX_STORE_NAME_LENGTH = 200
@@ -89,6 +95,10 @@ def ensure_store_lifecycle_schema(engine: Engine) -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE stores ADD COLUMN lifecycle_state VARCHAR(20)"
             )
+        if "deleted_at" not in columns:
+            connection.exec_driver_sql("ALTER TABLE stores ADD COLUMN deleted_at VARCHAR(40)")
+        if "deleted_by" not in columns:
+            connection.exec_driver_sql("ALTER TABLE stores ADD COLUMN deleted_by INTEGER")
         # Backfill anything NULL - both a fresh column and a row inserted by an
         # older code path that did not know about this one.
         connection.execute(

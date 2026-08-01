@@ -306,6 +306,12 @@ class TargetOut(BaseModel):
     started_playing_at: Optional[datetime] = None
     stopped_at: Optional[datetime] = None
     error_message: Optional[str] = None
+    #: Populated by the endpoint from the Store row, which is NEVER removed
+    #: even after a permanent delete (see store_deletion.py) - so history
+    #: keeps showing a real name/code instead of a bare id or a blank field.
+    store_code: Optional[str] = None
+    store_name: Optional[str] = None
+    store_deleted: bool = False
 
     @field_serializer("command_sent_at", "started_playing_at", "stopped_at", when_used="json")
     def _serialize_utc(self, value: Optional[datetime]) -> Optional[str]:
