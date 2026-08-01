@@ -115,6 +115,46 @@ def test_stores_carries_its_lifecycle_and_tombstone_fields():
     assert {"lifecycle_state", "deleted_at", "deleted_by"} <= columns
 
 
+def test_every_lifecycle_column_reaches_postgresql_not_just_sqlite():
+    """Regression test for a real bug. hq_users.deleted_at/deleted_by were
+    added by user_deletion.ensure_user_deletion_schema via ALTER TABLE, which
+    runs on whichever engine is connected - but PostgreSQL's schema is built
+    from models.py's metadata, and a column declared nowhere in the ORM is
+    simply absent from a freshly created production database. The User
+    tombstone would then fail on production the first time it ran, having
+    passed every SQLite test.
+
+    Any column a lifecycle/tombstone feature depends on has to be declared on
+    the ORM model, not only ALTERed in."""
+    expected = {
+        "hq_users": {"deleted_at", "deleted_by", "lifecycle_state", "archived_at"},
+        "stores": {"deleted_at", "deleted_by", "lifecycle_state"},
+        "receiver_devices": {"deleted_at", "deleted_by", "archived_at"},
+        "broadcast_sessions": {"archived_at"},
+        "system_logs": {"archived_at", "actor_user_id", "store_id", "device_public_id"},
+    }
+    for table, columns in expected.items():
+        declared = {c.name for c in postgres_schema.metadata.tables[table].columns}
+        missing = columns - declared
+        assert not missing, f"{table} is missing {missing} from the PostgreSQL schema"
+
+
+def test_the_new_audit_tables_compile_as_postgresql_ddl():
+    """No AUTOINCREMENT, no GLOB - both SQLite-only and both silently fatal
+    against PostgreSQL."""
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateTable
+
+    for name in ("user_deletion_events", "device_deletion_events",
+                 "admin_deletion_events"):
+        assert name in postgres_schema.metadata.tables, f"{name} not declared"
+        ddl = str(CreateTable(postgres_schema.metadata.tables[name])
+                  .compile(dialect=postgresql.dialect())).upper()
+        assert "AUTOINCREMENT" not in ddl
+        assert "GLOB" not in ddl
+        assert "SERIAL" in ddl or "IDENTITY" in ddl
+
+
 def test_receiver_devices_carries_its_archive_field():
     columns = {c.name for c in postgres_schema.metadata.tables["receiver_devices"].columns}
     assert "archived_at" in columns
