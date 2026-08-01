@@ -1,7 +1,8 @@
 import React from "react";
 import { Mic, MicOff, Play, Square, AlertOctagon, Search, RefreshCcw, Users, Wifi, WifiOff, Radio } from "lucide-react";
-import { api, getToken, wsUrl } from "@/lib/api";
-import { HQBroadcaster } from "@/lib/audio/HQBroadcaster";
+import { api } from "@/lib/api";
+import { useBroadcast } from "@/contexts/BroadcastContext";
+import { elapsedSeconds } from "@/lib/time";
 import StatusBadge from "@/components/StatusBadge";
 
 const TARGET_MODES = [
@@ -21,13 +22,17 @@ const RECEIVING_STATUSES = ["audio_receiving"];
 const CONFIRMED_STATUSES = ["playback_confirmed"];
 const ERROR_STATUSES = ["playback_error", "device_error"];
 
-function useTimer(startTs) {
-  const [elapsed, setElapsed] = React.useState(0);
+// Timezone-independent: elapsed is derived from epoch values via
+// elapsedSeconds(), never from a formatted local clock string, so it cannot
+// drift with the browser's timezone (see frontend/src/lib/time.js).
+function useTimer(startedAtIso) {
+  const [elapsed, setElapsed] = React.useState(() => elapsedSeconds(startedAtIso));
   React.useEffect(() => {
-    if (!startTs) return;
-    const id = setInterval(() => setElapsed(Math.floor((Date.now() - startTs) / 1000)), 250);
+    if (!startedAtIso) { setElapsed(0); return undefined; }
+    setElapsed(elapsedSeconds(startedAtIso));
+    const id = setInterval(() => setElapsed(elapsedSeconds(startedAtIso)), 250);
     return () => clearInterval(id);
-  }, [startTs]);
+  }, [startedAtIso]);
   return elapsed;
 }
 
@@ -39,6 +44,12 @@ function fmtDur(sec) {
 }
 
 export default function BroadcastConsole() {
+  const {
+    current, load: loadBroadcast, isLive, meter, broadcasterStatus,
+    error, setError, startBroadcast: startBroadcastAudio,
+    stopBroadcast: stopBroadcastAudio, emergencyStop: emergencyStopAudio,
+  } = useBroadcast();
+
   const [stores, setStores] = React.useState([]);
   const [meta, setMeta] = React.useState({ regions: [], cities: [] });
   const [q, setQ] = React.useState("");
@@ -47,66 +58,28 @@ export default function BroadcastConsole() {
   const [region, setRegion] = React.useState("");
   const [city, setCity] = React.useState("");
   const [campaign, setCampaign] = React.useState("");
-  const [current, setCurrent] = React.useState(null); // {live, session, targets, online_receivers}
   const [busy, setBusy] = React.useState(false);
-  const [error, setError] = React.useState("");
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [micTest, setMicTest] = React.useState({ on: false, level: 0 });
-  const [broadcaster, setBroadcaster] = React.useState(null);
-  const [meter, setMeter] = React.useState(0);
-  const [broadcasterStatus, setBroadcasterStatus] = React.useState("idle");
-  const hqWsRef = React.useRef(null);
   const testAudioRef = React.useRef(null);
 
   const load = React.useCallback(async () => {
-    const [{ data: s }, { data: m }, { data: c }] = await Promise.all([
+    const [{ data: s }, { data: m }] = await Promise.all([
       api.get("/stores"),
       api.get("/stores/meta/regions-cities"),
-      api.get("/broadcast/current"),
     ]);
-    setStores(s); setMeta(m); setCurrent(c);
-  }, []);
+    setStores(s); setMeta(m);
+    await loadBroadcast();
+  }, [loadBroadcast]);
 
   React.useEffect(() => { load(); }, [load]);
 
-  // Poll while live so status is fresh
+  // Poll while mounted so the store list and target counts are fresh. The
+  // live/broadcaster/meter state itself is polled by BroadcastProvider, above
+  // this route, so it survives navigating away from this page and back.
   React.useEffect(() => {
     const id = setInterval(() => load(), 3000);
     return () => clearInterval(id);
-  }, [load]);
-
-  // HQ Dashboard status WS.
-  //
-  // The handshake carries a single-use ticket, never the access token. A
-  // browser cannot set an Authorization header on a WebSocket, and Uvicorn
-  // writes the whole URL to its access log - so what travels here must be
-  // worthless once used. The ticket is fetched over the normal authenticated
-  // HTTP API, where the JWT stays in a header.
-  React.useEffect(() => {
-    if (!getToken()) return undefined;
-    let socket = null;
-    let cancelled = false;
-
-    (async () => {
-      try {
-        // "hq" only. Asking for a broadcaster ticket to feed the dashboard
-        // would hand every viewer the credential that opens the microphone.
-        const { data } = await api.post("/auth/ws-ticket", { audience: "hq" });
-        if (cancelled) return;
-        socket = new WebSocket(`${wsUrl("/ws/hq")}?ticket=${encodeURIComponent(data.ticket)}`);
-        hqWsRef.current = socket;
-        socket.onmessage = () => { load(); };
-        socket.onclose = () => { hqWsRef.current = null; };
-      } catch {
-        // This socket only speeds up refreshes; the 3 s poll above still keeps
-        // the console honest without it.
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      try { if (socket) socket.close(); } catch { /* */ }
-    };
   }, [load]);
 
   const filteredStores = React.useMemo(() => {
@@ -163,104 +136,33 @@ export default function BroadcastConsole() {
     setMicTest({ on: false, level: 0 });
   };
 
-  // Poll the backend for an explicit receiver_ready acknowledgement. READY is
-  // never inferred from CONNECTED, and never from a command having been sent.
-  const waitForReceiverReady = React.useCallback(async (targetIdList, timeoutMs = 20000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      try {
-        const { data } = await api.get("/broadcast/current");
-        const ready = (data?.ready_receivers || []).filter((id) => targetIdList.includes(id));
-        if (ready.length > 0) return ready;
-      } catch { /* keep polling until the deadline */ }
-      await new Promise((resolve) => setTimeout(resolve, 400));
-    }
-    return [];
-  }, []);
-
   const startBroadcast = async () => {
-    setError(""); setBusy(true);
+    setBusy(true);
     try {
-      if (!campaign.trim()) throw new Error("Please enter a campaign name");
-      const ids = resolveTargetStoreIds();
-      if (ids.length === 0) throw new Error("No stores selected for broadcast");
-      // Create session
-      const { data: session } = await api.post("/broadcast/sessions", {
-        campaign_name: campaign.trim(),
-        target_mode: targetMode,
-        store_ids: targetMode === "selected" ? ids : undefined,
-        region: targetMode === "region" ? region : undefined,
-        city: targetMode === "city" ? city : undefined,
-      });
-      // Fail early and honestly if this browser cannot produce WebM/Opus.
-      if (!HQBroadcaster.supportedMime()) {
-        throw new Error(
-          "This browser cannot record WebM/Opus audio. EchoCast will not send a " +
-          "different format silently. Try a current Chrome or Edge browser."
-        );
-      }
-
-      // Start the session first: the backend sends PREPARE to each targeted
-      // Receiver, which runs its own FFmpeg/codec checks before reporting READY.
-      await api.post(`/broadcast/sessions/${session.id}/start`);
-
-      // Do not send a single audio byte until a Receiver has actually
-      // acknowledged READY. A command being sent is not readiness.
-      setBroadcasterStatus("waiting for receiver readiness");
-      const readyIds = await waitForReceiverReady(ids);
-      if (readyIds.length === 0) {
-        throw new Error(
-          "No Receiver reported READY, so no audio was sent. Check that the " +
-          "Receiver is running and that FFmpeg is available on it."
-        );
-      }
-
-      // A fresh single-use ticket, so the audio uplink URL in the access log
-      // cannot be replayed either.
-      const { data: uplink } = await api.post("/auth/ws-ticket", {
-        audience: "broadcaster",
-      });
-      const bc = new HQBroadcaster({
-        wsUrl: `${wsUrl("/ws/broadcaster")}?ticket=${encodeURIComponent(uplink.ticket)}`,
-        onMeter: (l) => setMeter(l),
-        onStatus: (s) => setBroadcasterStatus(s),
-        onError: (m) => setError(m),
-      });
-      await bc.start();
-      setBroadcaster(bc);
-      await load();
+      await startBroadcastAudio({ campaign, targetMode, ids: resolveTargetStoreIds(), region, city });
     } catch (e) {
       setError(e?.response?.data?.detail || e.message || "Failed to start broadcast");
-      // cleanup partial state
-      // If broadcaster was created but session failed, stop broadcaster
     } finally { setBusy(false); setConfirmOpen(false); }
   };
 
   const stopBroadcast = async () => {
-    setBusy(true); setError("");
+    setBusy(true);
     try {
-      if (current?.session?.id) {
-        await api.post(`/broadcast/sessions/${current.session.id}/stop`);
-      }
-      if (broadcaster) { await broadcaster.stop(); setBroadcaster(null); setMeter(0); }
-      await load();
+      await stopBroadcastAudio();
     } catch (e) { setError(e?.response?.data?.detail || e.message); }
     finally { setBusy(false); }
   };
 
   const emergencyStop = async () => {
-    setBusy(true); setError("");
+    setBusy(true);
     try {
-      await api.post("/broadcast/emergency-stop");
-      if (broadcaster) { await broadcaster.stop(); setBroadcaster(null); setMeter(0); }
-      await load();
+      await emergencyStopAudio();
     } catch (e) { setError(e?.response?.data?.detail || e.message); }
     finally { setBusy(false); }
   };
 
-  const isLive = current?.live;
-  const startedAt = current?.session?.started_at ? new Date(current.session.started_at).getTime() : null;
-  const elapsed = useTimer(startedAt);
+  const startedAtIso = current?.session?.started_at || null;
+  const elapsed = useTimer(startedAtIso);
 
   const targetsById = React.useMemo(() => {
     const map = new Map();

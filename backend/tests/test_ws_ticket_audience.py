@@ -234,9 +234,15 @@ def test_the_ticket_route_is_still_in_the_rbac_matrix():
 def test_the_frontend_asks_for_the_audience_it_needs():
     """Two call sites, two different sockets. A frontend that asked for a
     broadcaster ticket to feed the dashboard would hand every viewer the
-    stronger credential again."""
-    console = (REPOSITORY_ROOT / "frontend" / "src" / "pages" /
-               "BroadcastConsole.jsx").read_text(encoding="utf-8")
+    stronger credential again.
+
+    This logic moved from BroadcastConsole.jsx into BroadcastContext.js so the
+    live broadcast/session state (and this ticket handshake) survives
+    navigating away from the Console and back - see
+    frontend/src/contexts/BroadcastContext.js.
+    """
+    console = (REPOSITORY_ROOT / "frontend" / "src" / "contexts" /
+               "BroadcastContext.js").read_text(encoding="utf-8")
     assert console.count("/auth/ws-ticket") == 2
     assert '"hq"' in console or "'hq'" in console
     assert '"broadcaster"' in console or "'broadcaster'" in console
