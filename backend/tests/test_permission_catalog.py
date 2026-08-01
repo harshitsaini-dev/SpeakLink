@@ -121,10 +121,14 @@ def test_devices_archive_is_allowed_for_owner_and_admin_only():
 
 
 def test_broadcaster_default_permissions_are_exactly_broadcast_and_read_only():
+    # menu.stores.view is included: Receiver Status (GET /api/stores) requires
+    # it, and a BROADCASTER without it got a 403 there - the live defect this
+    # round fixes. It is still read-only: no stores.create/update/archive.
     broadcaster = DEFAULT_ROLE_PERMISSIONS[Role.BROADCASTER]
     assert broadcaster == {
         "menu.broadcast.view", "broadcast.start", "broadcast.stop",
         "broadcast.emergency_stop", "menu.history.view", "menu.receivers.view",
+        "menu.stores.view",
     }
     # No Store modification, no Device security changes, no User management.
     assert not any(code.startswith("stores.") for code in broadcaster)
