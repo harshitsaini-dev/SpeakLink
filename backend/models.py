@@ -27,6 +27,16 @@ class Store(Base):
     # archiving - and none of them can accidentally miss it. See
     # store_lifecycle.py; existing databases get the column additively.
     lifecycle_state = Column(String(20), default="active", nullable=True, index=True)
+    # Tombstone fields (store_deletion.py). Added to the ORM class here for
+    # the same reason lifecycle_state is declared above rather than only
+    # ALTERed in: PostgreSQL's schema comes from this class's metadata
+    # (see postgres_schema.py), so a column that exists only via a raw
+    # SQLite ALTER TABLE would silently be missing there. SQLite continues
+    # to get them additively via store_lifecycle.ensure_store_lifecycle_
+    # schema, unchanged - this declaration does not add a migration step,
+    # only makes the ORM/Postgres side aware of columns that already exist.
+    deleted_at = Column(String(40), nullable=True)
+    deleted_by = Column(Integer, nullable=True)
     status = Column(String(20), default="offline", nullable=False)  # online|offline|playing|error
     last_seen = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
