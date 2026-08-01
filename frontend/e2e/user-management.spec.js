@@ -28,7 +28,9 @@ test.describe('Seeing the accounts', () => {
   test('every account is listed with its role and status', async ({ page }) => {
     await open(page, { operator: SUPER_ADMIN });
     await expect(page.getByTestId('users-table')).toBeVisible();
-    await expect(page.getByTestId('user-row-founder')).toContainText('OWNER');
+    // OWNER is displayed as SUPER ADMIN - a rename of the label only, not of
+    // the stored role value the rest of this file still asserts against.
+    await expect(page.getByTestId('user-row-founder')).toContainText('SUPER ADMIN');
     await expect(page.getByTestId('user-row-priya')).toContainText('ADMIN');
     await expect(page.getByTestId('user-row-rahul')).toContainText('disabled');
     await expect(page.getByTestId('user-row-anita')).toContainText('archived');
@@ -50,7 +52,11 @@ test.describe('Seeing the accounts', () => {
 
   test('a forbidden list shows the refusal rather than an empty page',
     async ({ page }) => {
-      await open(page, { operator: VIEWER, usersStatus: 403 });
+      // ADMIN, not VIEWER: VIEWER now never reaches this page at all (see
+      // "the route is redirected away" below) - this proves defence in depth
+      // for an account the frontend DOES let onto the page, where the API
+      // itself still refuses the specific request.
+      await open(page, { operator: ADMIN, usersStatus: 403 });
       await expect(page.getByTestId('user-error')).toContainText(/permission/i);
     });
 });
@@ -164,13 +170,18 @@ test.describe('What each role is offered', () => {
       await expect(page.getByTestId('nav-password')).toBeVisible();
     });
 
-  test('the route is still reachable directly, and the server decides',
+  test('a direct visit by an unauthorised account is redirected, not shown a forbidden page',
     async ({ page }) => {
-      // A route only administrators can reach in the router is a lock on a door
-      // with no walls: the API is one fetch away regardless.
+      // This used to be "the page renders and shows a 403" - menu hiding was
+      // the only guard, and hiding a link is not a boundary. ProtectedRoute
+      // now enforces the same menu.users.view permission the sidebar already
+      // hides on, so a VIEWER typing /users directly never reaches the page
+      // at all; it lands back on the first route this account can use. The
+      // backend 403 in the previous test proves the second, independent
+      // layer for an account the frontend DOES admit.
       await open(page, { operator: VIEWER, usersStatus: 403 });
-      await expect(page.getByTestId('user-management-page')).toBeVisible();
-      await expect(page.getByTestId('user-error')).toContainText(/permission/i);
+      await expect(page.getByTestId('user-management-page')).toHaveCount(0);
+      await expect(page).toHaveURL(/\/console$/);
     });
 });
 
