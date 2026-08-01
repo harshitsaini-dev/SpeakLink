@@ -5,9 +5,22 @@ import { RefreshCw } from "lucide-react";
 
 export default function ReceiverStatus() {
   const [stores, setStores] = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState("");
   const load = async () => {
-    const { data } = await api.get("/stores");
-    setStores(data);
+    try {
+      const { data } = await api.get("/stores");
+      setStores(data);
+      setLoadError("");
+    } catch (failure) {
+      setLoadError(
+        failure?.response?.status === 403
+          ? "You do not have permission to view Receiver Status."
+          : "Receiver Status could not be loaded. Try Refresh."
+      );
+    } finally {
+      setLoading(false);
+    }
   };
   React.useEffect(() => { load(); const id = setInterval(load, 4000); return () => clearInterval(id); }, []);
 
@@ -26,6 +39,20 @@ export default function ReceiverStatus() {
         </div>
         <button data-testid="receivers-refresh-btn" onClick={load} className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50"><RefreshCw size={14}/> Refresh</button>
       </div>
+
+      {loadError && (
+        <p className="text-sm text-red-700 border border-red-200 bg-red-50 rounded-md px-3 py-2"
+           data-testid="receivers-error">
+          {loadError}
+        </p>
+      )}
+
+      {!loading && !loadError && stores.length === 0 && (
+        <p className="text-sm text-slate-500 border border-slate-200 rounded-md px-3 py-6 text-center"
+           data-testid="receivers-empty">
+          No Stores are available in this account's current Scope.
+        </p>
+      )}
 
       {Object.entries(groups).map(([region, list]) => (
         <div key={region}>

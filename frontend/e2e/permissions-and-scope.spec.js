@@ -195,6 +195,79 @@ test.describe('F. Direct protected URL visits', () => {
 });
 
 // ===========================================================================
+// H. Receiver Status - the real live defect this round fixes
+// ===========================================================================
+test.describe('H. Receiver Status reflects the backend-authoritative scoped set', () => {
+  test('a BROADCASTER with Store+City+Zone scope sees the Store row, not a blank page', async ({ page }) => {
+    // The backend already resolved the union before this response left the
+    // server - the mock just returns what a correctly-scoped GET /stores
+    // would, exactly like test B/C already model for /console.
+    await mockBackend(page, { operator: BROADCASTER, stores: STORES });
+    await signIn(page);
+    await page.goto('/receivers');
+    await expect(page.getByTestId('receivers-page')).toBeVisible();
+    await expect(page.getByTestId(`receiver-card-${STORES[0].store_code}`)).toBeVisible();
+    await expect(page.getByTestId('receivers-empty')).toHaveCount(0);
+  });
+
+  test('a genuinely empty scoped result shows an explanatory empty-state, not blank whitespace', async ({ page }) => {
+    await mockBackend(page, { operator: BROADCASTER, stores: [] });
+    await signIn(page);
+    await page.goto('/receivers');
+    await expect(page.getByTestId('receivers-empty')).toBeVisible();
+    await expect(page.getByTestId('receivers-empty')).toContainText('No Stores are available');
+  });
+
+  test('an API failure shows a visible error, never silent blank whitespace', async ({ page }) => {
+    await mockBackend(page, { operator: BROADCASTER, storesListStatus: 500 });
+    await signIn(page);
+    await page.goto('/receivers');
+    await expect(page.getByTestId('receivers-error')).toBeVisible();
+  });
+});
+
+// ===========================================================================
+// I. Scope editor: canonical dropdowns, not free text
+// ===========================================================================
+test.describe('I. Scope editor uses canonical City/Zone dropdowns', () => {
+  test('Store/City/Zone assignment types each offer a dropdown, never free text, and saved state survives a reopen', async ({ page }) => {
+    await mockBackend(page, { operator: SUPER_ADMIN });
+    await signIn(page);
+    await page.goto('/users');
+    await page.getByTestId('scope-priya').click();
+    await expect(page.getByTestId('scope-editor')).toBeVisible();
+
+    await page.getByTestId('scope-add-type').selectOption('CITY');
+    await expect(page.getByTestId('scope-add-value')).toBeVisible();
+    await expect(page.locator('[data-testid="scope-add-value"][type="text"]')).toHaveCount(0);
+    await page.getByTestId('scope-add-value').selectOption('UN ZONE');
+    await page.getByTestId('scope-add-btn').click();
+    await expect(page.getByTestId('scope-entry-0')).toContainText('City: UN ZONE');
+
+    await page.getByTestId('scope-add-type').selectOption('REGION');
+    await page.getByTestId('scope-add-value').selectOption('UN ZONE');
+    await page.getByTestId('scope-add-btn').click();
+    await expect(page.getByTestId('scope-entry-1')).toContainText('Zone: UN ZONE');
+
+    await page.getByTestId('scope-add-type').selectOption('STORE');
+    await page.getByTestId('scope-add-store').selectOption(String(STORES[0].id));
+    await page.getByTestId('scope-add-btn').click();
+    await expect(page.getByTestId('scope-entry-2')).toContainText('Store:');
+
+    await page.getByTestId('scope-save').click();
+    await expect(page.getByTestId('scope-save-success')).toBeVisible();
+
+    // Reopen: every saved assignment must still be there.
+    await page.getByTestId('scope-done').click();
+    await page.getByTestId('scope-priya').click();
+    await expect(page.getByTestId('scope-entry-0')).toBeVisible();
+    await expect(page.getByTestId('scope-entry-1')).toBeVisible();
+    await expect(page.getByTestId('scope-entry-2')).toBeVisible();
+    await expect(page.getByTestId('scope-clarity-banner')).toContainText('Restricted Scope');
+  });
+});
+
+// ===========================================================================
 // G. Archived Devices hidden by default, shown with "Show Archived"
 // ===========================================================================
 test.describe('G. Archived Devices', () => {
