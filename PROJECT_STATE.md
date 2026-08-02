@@ -4509,3 +4509,118 @@ changed in this round.
 
 `PILOT_ONLY_ZERO_CARD_OPTION_FOUND`. A zero-card pilot path exists. It is not
 yet proven as a zero-card production path for 50-100 Stores.
+
+---
+
+## Real-PostgreSQL validation of the admin-management round
+
+Run against a disposable Supabase TEST project (fingerprint
+`7263a431a7754638`, PostgreSQL 17.6, ap-south-1). Production
+(`e720ac35878a1d7b`) was touched only by a read-only transaction. Nothing was
+installed, no cutover was performed, nothing was pushed.
+
+### The gates that ran before anything destructive
+
+| Gate | Result |
+|---|---|
+| Production fingerprint matches documented `e720ac35878a1d7b` | PASS |
+| TEST fingerprint differs, different project, different password | PASS |
+| Read-only inventory: `public` empty, 0 leftover schemas, no `public.stores` | PASS |
+
+A note on the convention, because it cost a round: the documented fingerprint
+is `sha256("postgres.<project-ref>")[:16]` - the **full pooler username**, not
+the bare ref. Hashing the ref alone produces a different value that reads as a
+mismatch on a project that is in fact correct.
+
+### Seven PostgreSQL-only defects, every one invisible to 2716 SQLite tests
+
+| File | Defect | Consequence on Supabase |
+|---|---|---|
+| `user_deletion.py` | `is_active = 1` in WHERE | last-SUPER-ADMIN guard crashes |
+| `user_deletion.py` | `is_active = 0` in UPDATE | permanent User deletion fails |
+| `store_deletion.py` | `is_active = 0` in UPDATE | permanent Store deletion fails |
+| `store_deletion.py` | one bind parameter shared by `VARCHAR` + `TIMESTAMP` | "inconsistent types deduced for parameter" |
+| `store_deletion.py` | `CREATE TABLE ... AUTOINCREMENT`, unguarded `PRAGMA foreign_key_check` | the deletion audit table cannot be created |
+| `store_lifecycle.py` | `PRAGMA table_info` | **HQ does not boot** |
+| `user_lifecycle.py` | `PRAGMA table_info` | **HQ does not boot** |
+
+The last two are the ones that matter most. They run in `ensure_*_schema` at
+every start-up, so the failure would not have been a broken feature - the
+cutover would have failed at boot, before anything could report why.
+
+Fixed with bound Python booleans (which SQLAlchemy renders correctly per
+dialect, so there is no second code path to keep in step), the SQLAlchemy
+Inspector in place of `PRAGMA`, distinct bind parameters per column type, and
+the portable `postgres_schema` Table definition that already existed beside
+the raw DDL. `server.py:2752` already carried a correct dialect branch for
+exactly this - the trap was known, and had been fixed in one of the five
+places it existed.
+
+### Totals
+
+| Suite | Result |
+|---|---|
+| `test_postgres_schema.py` + `test_postgres_integration.py` | 28 passed |
+| `test_postgres_admin_management.py` (new, 29 tests) | 29 passed |
+| **PostgreSQL total** | **57 passed, 0 failed** |
+| Backend (SQLite, after the fixes) | 2716 passed, 50 skipped, 0 failed |
+| Frontend unit | 66 passed |
+| Playwright | 211 passed |
+| Production frontend build | Compiled successfully |
+| compileall / pip check / git diff --check / secret scan | PASS |
+
+The backend skip count moved 21 -> 50 because the 29 new PostgreSQL tests
+skip when `TEST_POSTGRES_URL` is absent, which is every ordinary offline run.
+
+### Cleanup evidence
+
+```
+leaked echocast_test_* schemas : 0
+tables in public               : 0
+supabase-managed schemas       : auth, extensions, graphql, realtime, storage, vault
+  their table counts           : auth=23, extensions=2, graphql=0, realtime=3, storage=8, vault=2
+  EchoCast tables inside them  : 0
+```
+
+### Production read-only verification
+
+Executed inside `SET TRANSACTION READ ONLY` (confirmed `on`). Nothing written.
+
+| Check | Result |
+|---|---|
+| Fingerprint | `e720ac35878a1d7b` |
+| Rotated credential connects | yes |
+| Snapshot | 22 tables (19 source-backed + 3 feature-branch), 45 Stores, 3 Users, 5 Devices - identical to the migration record |
+| Store 31 | `BP` / Bindapur / ME ZONE / active |
+| Store 31 primary Device | identity `9301b399232a8e7c`, status active - unchanged |
+| `echocast_test_*` schemas in production | 0 |
+
+### A credential mistake worth recording
+
+The first attempt failed because the TEST file had been built by copying the
+production URI and changing only the project-ref - so it carried the
+**production password**, which the test project rightly rejected. Two
+consequences: the production credential existed in a second file on disk, and
+it was transmitted (over TLS, to Supabase's own pooler, and refused) during
+two authentication attempts. Build a test URI from the test project's own
+connection string, never by editing production's.
+
+Related: a password containing `%` is percent-decoded by URI parsing, so the
+value actually sent is not the value in the file. Alphanumeric database
+passwords avoid the entire class of problem.
+
+### Incident: live HQ frontend stopped during this round
+
+While arranging Playwright, port 3000 was found occupied by the live RC12 HQ
+static server (`spa_server.py`, bound to 192.168.4.134). The Playwright run
+was moved to port 3123 via a config held outside the repository, and the
+suite passed 211/211 - but `spa_server.py` had already exited during the two
+earlier attempts against port 3000. The HQ **backend** stayed up throughout,
+so Store Receivers - which connect to the backend WebSocket on 8000 and never
+to 3000 - were unaffected; the HQ browser UI was not reachable until an
+operator restarted it.
+
+The rule this earns: **never point a test harness at a port on a machine
+running live HQ without checking who owns it first.** Playwright's
+`reuseExistingServer` makes this worse, not better, because it will silently
+adopt whatever answers.
