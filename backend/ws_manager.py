@@ -1,10 +1,18 @@
 """WebSocket connection manager for HQ + store receivers.
 
 Design:
-- Only ONE HQ audio broadcaster is active at a time.
+- SEVERAL HQ broadcasts may be live at once, one microphone socket each. Live
+  session state lives in ``self.broadcasts`` (see broadcast_runtime), keyed by
+  session id, so one session's audio, queues and teardown never touch another's.
+- A Store belongs to at most one live session. That rule is enforced by the
+  broadcast_store_leases unique index, NOT here - an in-memory copy of it could
+  disagree with the database, and after a restart the in-memory one would be
+  the one that is wrong.
 - Receivers connect using their store token; server tracks them by store_id.
-- Broadcast session state kept in-memory (session_id + selected store_ids).
-- Audio frames from HQ (binary) are fanned out only to LIVE targets.
+  Receiver connection and health state is deliberately SHARED across sessions:
+  a Store has one Receiver whatever is being broadcast to it.
+- Audio frames from HQ (binary) are fanned out only to the sending session's
+  own live targets.
 """
 import asyncio
 import json
@@ -14,7 +22,8 @@ from typing import Dict, Optional, Set
 
 from fastapi import WebSocket
 
-from audio_streaming import DEFAULT_STORE_QUEUE_CAPACITY, AudioFanout
+from audio_streaming import DEFAULT_STORE_QUEUE_CAPACITY
+from broadcast_runtime import BroadcastRuntime
 from receiver_connection_inventory import (
     ActiveReceiverConnectionInventory,
     AuthenticatedReceiverConnection,
@@ -82,15 +91,16 @@ class WSManager:
         self.offline_after = timedelta(seconds=OFFLINE_AFTER_SECONDS)
         # hq_user_id -> WebSocket (dashboards) — multiple HQ dashboards allowed
         self.hq_dashboards: Dict[str, WebSocket] = {}
-        # The single active broadcaster WS (mic uplink)
-        self.active_broadcaster_ws: Optional[WebSocket] = None
-        # In-memory live session state
-        self.live_session_id: Optional[int] = None
-        self.live_target_store_ids: Set[int] = set()
-        # One bounded audio queue and one sender task per targeted Store, so a
-        # slow Receiver can never stall the broadcaster read loop or the other
-        # Stores, and no backlog can grow without limit.
-        self.audio_fanout = AudioFanout(capacity=DEFAULT_STORE_QUEUE_CAPACITY)
+        # Every live broadcast, keyed by session id. This replaced four
+        # singleton fields - one broadcaster socket, one session id, one target
+        # set and one AudioFanout - each of which asserted that EchoCast has
+        # exactly one broadcast. Store exclusivity is NOT duplicated here: the
+        # broadcast_store_leases unique index is the only authority, and a
+        # second in-memory rule could only ever disagree with it.
+        self.broadcasts = BroadcastRuntime(
+            sender_factory=self._audio_sender,
+            capacity=DEFAULT_STORE_QUEUE_CAPACITY,
+        )
         self._lock = asyncio.Lock()
         self._receiver_lock = asyncio.Lock()
 
@@ -605,31 +615,30 @@ class WSManager:
     async def notify_dashboards(self, msg: dict):
         await self._notify_dashboards(msg)
 
-    # ---------- Broadcaster / Live session ----------
-    async def set_broadcaster(self, ws: WebSocket) -> bool:
-        async with self._lock:
-            if self.active_broadcaster_ws is not None:
-                return False
-            self.active_broadcaster_ws = ws
-            return True
-
-    async def clear_broadcaster(self, ws: WebSocket):
-        async with self._lock:
-            if self.active_broadcaster_ws is ws:
-                self.active_broadcaster_ws = None
-
-    def start_live_session(self, session_id: int, store_ids: Set[int]):
-        self.live_session_id = session_id
-        self.live_target_store_ids = set(store_ids)
+    # ---------- Broadcaster / Live sessions ----------
+    async def start_live_session(self, session_id: int, store_ids: Set[int],
+                                 *, owner_user_id: int):
+        """Put one session on air. Others keep running untouched."""
+        live = await self.broadcasts.start(
+            session_id=session_id,
+            owner_user_id=owner_user_id,
+            target_store_ids=store_ids,
+        )
         for store_id in store_ids:
             self.prepare_receiver_session(store_id, session_id)
+        return live
 
-    def stop_live_session(self):
-        self.live_session_id = None
-        self.live_target_store_ids = set()
+    async def stop_live_session(self, session_id: int):
+        """Tear down ONE session: its queues, its pumps, its socket."""
+        return await self.broadcasts.end(session_id)
 
-    def is_live(self) -> bool:
-        return self.live_session_id is not None
+    def is_live(self, session_id: "int | None" = None) -> bool:
+        """One session, or - with no argument - whether anything is on air."""
+        return self.broadcasts.is_live(session_id)
+
+    def live_store_ids(self) -> Set[int]:
+        """Every Store receiving any live broadcast, across all sessions."""
+        return set(self.broadcasts.live_store_ids())
 
     def _audio_sender(self, store_id: int):
         async def send(chunk: bytes) -> None:
@@ -641,32 +650,20 @@ class WSManager:
 
         return send
 
-    async def fanout_audio(self, data: bytes) -> int:
-        """Enqueue one audio chunk for every live, connected target Store.
+    async def fanout_audio(self, session_id: int, data: bytes) -> int:
+        """Enqueue one chunk for ONE session's connected target Stores.
 
-        This never awaits a Receiver socket, so one slow Store cannot block the
-        broadcaster read loop or any other Store. Returns how many Store queues
-        accepted the chunk without dropping.
+        The session id is required rather than inferred. Inferring it is what
+        the singleton did, and it meant every socket fed whatever target set
+        happened to be current - so audio from one operator could reach another
+        operator's Stores.
         """
-        if not self.is_live():
-            return 0
-        targets = set(self.live_target_store_ids) & set(self.receivers)
-        if not targets:
-            return 0
-
-        active = set(self.audio_fanout.active_store_ids())
-        for store_id in targets - active:
-            await self.audio_fanout.start_store(store_id, self._audio_sender(store_id))
-
-        return self.audio_fanout.broadcast(targets, data)
-
-    async def stop_audio_fanout(self) -> dict:
-        """Close every Store audio queue and cancel its sender task."""
-        return await self.audio_fanout.stop_all()
+        return await self.broadcasts.fanout(
+            session_id, data, connected_store_ids=set(self.receivers))
 
     def audio_metrics(self) -> dict:
-        """Non-secret per-Store queue metrics. Contains no audio payload."""
-        return self.audio_fanout.all_metrics()
+        """Per-session, per-Store queue metrics. Never an audio payload."""
+        return self.broadcasts.metrics()
 
 
 manager = WSManager()

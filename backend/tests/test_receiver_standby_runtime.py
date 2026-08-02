@@ -52,6 +52,9 @@ from ws_manager import WSManager  # noqa: E402
 
 
 NOW = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+#: The one session these tests drive. fanout and teardown are per session
+#: now, so the id has to be named rather than implied.
+SESSION_UNDER_TEST = 1
 STORE = 41
 PRIMARY_DEVICE = 7
 STANDBY_DEVICE = 8
@@ -150,11 +153,11 @@ def test_the_standby_receives_no_audio_chunks(manager: WSManager):
         await _connect(manager, primary, connection_id="c-primary", device_id=PRIMARY_DEVICE)
         await _connect(manager, standby, connection_id="c-standby",
                        device_id=STANDBY_DEVICE, is_primary=False)
-        manager.start_live_session(1, {STORE})
+        await manager.start_live_session(SESSION_UNDER_TEST, {STORE}, owner_user_id=1)
         for index in range(5):
-            await manager.fanout_audio(bytes([index]) * 64)
+            await manager.fanout_audio(SESSION_UNDER_TEST, bytes([index]) * 64)
         await asyncio.sleep(0.2)
-        await manager.stop_audio_fanout()
+        await manager.stop_live_session(SESSION_UNDER_TEST)
 
     asyncio.run(scenario())
 
@@ -314,11 +317,11 @@ def test_a_standby_that_never_reads_cannot_delay_the_primary(manager: WSManager)
         await _connect(manager, primary, connection_id="c-primary", device_id=PRIMARY_DEVICE)
         await _connect(manager, stuck, connection_id="c-stuck",
                        device_id=STANDBY_DEVICE, is_primary=False)
-        manager.start_live_session(1, {STORE})
+        await manager.start_live_session(SESSION_UNDER_TEST, {STORE}, owner_user_id=1)
         for index in range(8):
-            await manager.fanout_audio(bytes([index]) * 32)
+            await manager.fanout_audio(SESSION_UNDER_TEST, bytes([index]) * 32)
         await asyncio.sleep(0.3)
-        await manager.stop_audio_fanout()
+        await manager.stop_live_session(SESSION_UNDER_TEST)
 
     asyncio.run(asyncio.wait_for(scenario(), timeout=15))
     assert primary.sent_bytes, "the primary was starved by a standby it never sends to"
@@ -350,10 +353,10 @@ def test_a_store_with_only_a_standby_has_no_audio_target(manager: WSManager):
     async def scenario():
         await _connect(manager, standby, connection_id="c-standby",
                        device_id=STANDBY_DEVICE, is_primary=False)
-        manager.start_live_session(1, {STORE})
-        await manager.fanout_audio(b"x" * 32)
+        await manager.start_live_session(SESSION_UNDER_TEST, {STORE}, owner_user_id=1)
+        await manager.fanout_audio(SESSION_UNDER_TEST, b"x" * 32)
         await asyncio.sleep(0.15)
-        await manager.stop_audio_fanout()
+        await manager.stop_live_session(SESSION_UNDER_TEST)
 
     asyncio.run(scenario())
     assert standby.sent_bytes == []

@@ -486,12 +486,18 @@ def test_live_broadcast_target_refuses_permanent_deletion(client):
     assert session.status_code == 201, session.text
 
     engine = client.server_module.engine
+    import asyncio
+
     from ws_manager import manager
-    manager.live_session_id = session.json()["id"]
-    manager.live_target_store_ids = {store["id"]}
+
+    # Live state is per session now, so the guard is driven through the real
+    # runtime rather than by assigning two module fields.
+    session_id = session.json()["id"]
+    asyncio.run(manager.broadcasts.start(
+        session_id=session_id, owner_user_id=1,
+        target_store_ids={store["id"]}))
     try:
         resp = _delete(client, owner, store["id"], confirm=store["store_code"])
         assert resp.status_code == 409
     finally:
-        manager.live_session_id = None
-        manager.live_target_store_ids = set()
+        asyncio.run(manager.broadcasts.end(session_id))

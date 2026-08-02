@@ -104,11 +104,15 @@ def test_every_reported_value_is_an_integer(runtime):
     import asyncio
 
     async def scenario():
-        await runtime.server.manager.audio_fanout.start_store(7, lambda _c: None)
+        # Queues belong to a session now, so one has to exist for there to be
+        # anything to measure. The endpoint reports session_id per row.
+        live = await runtime.server.manager.broadcasts.start(
+            session_id=4242, owner_user_id=1, target_store_ids={7})
+        await live.fanout.start_store(7, lambda _c: None)
         try:
             return runtime.server.read_audio_metrics(user=runtime.operator)
         finally:
-            await runtime.server.manager.audio_fanout.stop_all()
+            await runtime.server.manager.broadcasts.end(4242)
 
     result = asyncio.run(scenario())
     assert result["stores"], "the scenario built no queue, so it proves nothing"
@@ -121,11 +125,15 @@ def test_the_reported_keys_are_the_bounded_queue_counters(runtime):
     import asyncio
 
     async def scenario():
-        await runtime.server.manager.audio_fanout.start_store(7, lambda _c: None)
+        # Queues belong to a session now, so one has to exist for there to be
+        # anything to measure. The endpoint reports session_id per row.
+        live = await runtime.server.manager.broadcasts.start(
+            session_id=4242, owner_user_id=1, target_store_ids={7})
+        await live.fanout.start_store(7, lambda _c: None)
         try:
             return runtime.server.read_audio_metrics(user=runtime.operator)
         finally:
-            await runtime.server.manager.audio_fanout.stop_all()
+            await runtime.server.manager.broadcasts.end(4242)
 
     result = asyncio.run(scenario())
     entry = result["stores"][0]
@@ -138,11 +146,15 @@ def test_no_forbidden_field_can_appear(runtime):
     import asyncio
 
     async def scenario():
-        await runtime.server.manager.audio_fanout.start_store(7, lambda _c: None)
+        # Queues belong to a session now, so one has to exist for there to be
+        # anything to measure. The endpoint reports session_id per row.
+        live = await runtime.server.manager.broadcasts.start(
+            session_id=4242, owner_user_id=1, target_store_ids={7})
+        await live.fanout.start_store(7, lambda _c: None)
         try:
             return runtime.server.read_audio_metrics(user=runtime.operator)
         finally:
-            await runtime.server.manager.audio_fanout.stop_all()
+            await runtime.server.manager.broadcasts.end(4242)
 
     result = asyncio.run(scenario())
     import json
