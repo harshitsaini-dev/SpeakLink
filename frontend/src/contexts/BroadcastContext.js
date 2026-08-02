@@ -127,7 +127,13 @@ export function BroadcastProvider({ children }) {
 
     const { data: uplink } = await api.post("/auth/ws-ticket", { audience: "broadcaster" });
     const bc = new HQBroadcaster({
-      wsUrl: `${wsUrl("/ws/broadcaster")}?ticket=${encodeURIComponent(uplink.ticket)}`,
+      // session_id is required now. The microphone socket is bound to ONE
+      // broadcast server-side, and the server re-reads ownership from the
+      // database rather than trusting this value - so sending someone else's
+      // id is refused rather than honoured. Passing our own is simply how the
+      // socket knows which of several concurrent broadcasts it feeds.
+      wsUrl: `${wsUrl("/ws/broadcaster")}?ticket=${encodeURIComponent(uplink.ticket)}`
+             + `&session_id=${encodeURIComponent(session.id)}`,
       onMeter: (l) => setMeter(l),
       onStatus: (s) => setBroadcasterStatus(s),
       onError: (m) => setError(m),

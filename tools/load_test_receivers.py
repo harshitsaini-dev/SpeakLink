@@ -310,7 +310,7 @@ async def _drive(paths, store_count: int, port: int, backend_pid: int, fixture: 
         started.set()
 
         async with websockets.connect(
-            f"ws://127.0.0.1:{port}/api/ws/broadcaster?ticket={ticket}",
+            f"ws://127.0.0.1:{port}/api/ws/broadcaster?ticket={ticket}&session_id={session_id}",
             open_timeout=20, max_size=4 * 1024 * 1024,
         ) as uplink:
             await uplink.send(json.dumps({"type": "init", "mime": "audio/webm;codecs=opus"}))

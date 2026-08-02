@@ -431,7 +431,12 @@ def smoke(paths) -> dict:
         # there would be logged in clear on every connection.
         ticket = _api_post(base_url, "/api/auth/ws-ticket", access_token,
                            {"audience": "broadcaster"})["ticket"]
-        broadcaster_url = f"ws://127.0.0.1:{port}/api/ws/broadcaster?ticket={ticket}"
+        # session_id is required: the microphone socket is bound to ONE broadcast
+        # now, so audio cannot reach a session the sender does not own.
+        broadcaster_url = (
+            f"ws://127.0.0.1:{port}/api/ws/broadcaster"
+            f"?ticket={ticket}&session_id={session_id}"
+        )
         seen_states: set[str] = set()
 
         def _await_acknowledgements() -> bool:

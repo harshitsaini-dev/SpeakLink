@@ -735,7 +735,8 @@ def _drive_one_broadcast(base_url, access_token, store_id, database_path) -> dic
         _api(base_url, "POST", f"/api/broadcast/sessions/{session_id}/stop", access_token)
 
     phase = asyncio.run(_audio_phase(
-        websocket_url_from(base_url, "/api/ws/broadcaster", query={"ticket": ticket}),
+        websocket_url_from(base_url, "/api/ws/broadcaster",
+                           query={"ticket": ticket, "session_id": session_id}),
         Path(fixture["path"]),
         await_acknowledgements=_await_acknowledgements,
         request_stop=_request_stop,
