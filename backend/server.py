@@ -2510,22 +2510,62 @@ def read_audio_metrics(user: HQUser = Depends(require(Permission.VIEW_STATUS))):
 
 @api.post("/broadcast/emergency-stop")
 async def emergency_stop(db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.EMERGENCY_STOP))):
-    """Stop every live broadcast.
+    """EMERGENCY STOP ALL - every live broadcast, whoever owns it.
 
-    MINIMALLY ADAPTED, not rewritten. With one global broadcast this ended
-    "the" session; it now ends all of them, which is what the words already
-    meant. The full Emergency Stop work - its own permission split, the audit
-    event, the idempotency contract and the UI separation - is a later
-    checkpoint and is deliberately not attempted here.
+    Not "stop the current session" and not "stop mine". This is the one
+    operation that reaches across owners, which is why it has its own
+    permission rather than travelling with ordinary broadcast rights, and why
+    ordinary Stop remains own-session-only for every role including OWNER.
+
+    The session ids are SNAPSHOTTED before the loop. Ending a session mutates
+    the registry it is read from, so iterating it live would skip sessions -
+    the exact failure mode where "all stopped" is reported and one broadcast
+    is still on air.
+
+    Each session is ended through the same _end_session used by an ordinary
+    stop, so each gets STOP sent to ITS OWN targets carrying ITS OWN
+    session_id, its own queues closed, its own microphone socket closed and
+    its own leases released. There is no global target set anywhere in this
+    path.
+
+    A failure on one session must not abandon the others. Each is attempted
+    independently and failures are collected, because leaving four broadcasts
+    live because the fifth misbehaved is worse than the original emergency.
     """
-    stopped = []
-    for session_id in manager.broadcasts.active_session_ids():
-        session = db.query(BroadcastSession).filter(
-            BroadcastSession.id == session_id).first()
-        if session and session.status == "live":
-            await _end_session(db, session, "emergency_stopped",
-                               reason="emergency", broadcast_to_all=True)
-            stopped.append(session.id)
+    snapshot = list(manager.broadcasts.active_session_ids())
+    stopped: list[int] = []
+    failed: list[int] = []
+    for session_id in snapshot:
+        try:
+            session = db.query(BroadcastSession).filter(
+                BroadcastSession.id == session_id).first()
+            if session and session.status == "live":
+                await _end_session(db, session, "emergency_stopped",
+                                   reason="emergency", broadcast_to_all=True)
+                stopped.append(session.id)
+        except Exception:
+            # Bounded: the id, never the exception text, which could carry a
+            # path or a connection detail into an operator-facing summary.
+            db.rollback()
+            failed.append(session_id)
+            logger.exception("Emergency Stop could not end session %s", session_id)
+
+    if failed:
+        _write_log(db, "error",
+                   f"EMERGENCY STOP by {user.username}: stopped {stopped}, "
+                   f"FAILED to stop {failed}")
+        # Honest rather than convenient: the caller is told exactly which
+        # broadcasts are still live, so they can act on them.
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "EMERGENCY_STOP_INCOMPLETE",
+                "message": "Some broadcasts could not be stopped and may still "
+                           "be live.",
+                "stopped_session_ids": stopped,
+                "failed_session_ids": failed,
+            },
+        )
     if stopped:
         _write_log(db, "error", f"EMERGENCY STOP triggered by {user.username} "
                                 f"on session(s) {stopped}")
@@ -2538,6 +2578,94 @@ async def emergency_stop(db: Session = Depends(get_db), user: HQUser = Depends(r
         await manager.send_to_receiver(sid_, {"type": "stop", "reason": "emergency"})
     _write_log(db, "warn", f"Emergency stop invoked with no live session by {user.username}")
     return {"ok": True, "session_ids": [], "session_id": None}
+
+
+@api.get("/broadcast/active")
+def active_broadcasts(db: Session = Depends(get_db),
+                      user: HQUser = Depends(require("menu.broadcast.view"))):
+    """Every live broadcast, redacted to what THIS account may know.
+
+    THREE TIERS, DECIDED HERE AND NOT IN REACT
+
+    * ``mine`` - your own live broadcast, in full. It is yours.
+    * ``busy_store_ids`` - Stores held by anybody's broadcast, intersected
+      with your Store Scope. A Broadcaster needs this to pick different
+      Stores; it says a Store is unavailable and nothing about who has it.
+    * ``sessions`` - other people's broadcasts with owner and campaign. EMPTY
+      unless this account holds broadcast.view_ownership.
+
+    The redaction is applied by NOT SERIALISING the hidden fields, rather than
+    by sending them and hiding them client-side. A field that reaches the
+    browser has been disclosed, whatever the interface does with it
+    afterwards - it is in the network tab, the response cache and any log
+    that records bodies.
+
+    SCOPE AND COUNTS
+
+    Target lists are intersected with the viewer's Store Scope, and
+    ``target_store_count`` counts what SURVIVED that intersection. Reporting
+    the real total while showing fewer rows would let a scoped Admin infer
+    exactly how many Stores they are not allowed to see - a count is a
+    disclosure like any other.
+
+    Nothing here reports SPEAKER_VERIFIED, and nothing infers playback from
+    the fact that a broadcast is live.
+    """
+    scope = resolve_store_scope(engine, user)
+    may_see_owners = has_permission_code(engine, user, "broadcast.view_ownership")
+
+    busy = active_busy_store_ids(engine, scope=scope)
+
+    mine = None
+    others = []
+    for session_id in manager.broadcasts.active_session_ids():
+        live = manager.broadcasts.get(session_id)
+        if live is None:
+            continue
+        session = db.query(BroadcastSession).filter(
+            BroadcastSession.id == session_id).first()
+        if session is None:
+            continue
+
+        visible_targets = sorted(
+            store_id for store_id in live.target_store_ids
+            if scope is None or store_id in scope)
+
+        if live.owner_user_id == user.id:
+            mine = {
+                "session_id": session.id,
+                "campaign_name": session.campaign_name,
+                "started_at": session.started_at.isoformat()
+                if session.started_at else None,
+                "target_store_ids": visible_targets,
+                "target_store_count": len(visible_targets),
+            }
+            continue
+
+        if not may_see_owners:
+            # Deliberately nothing at all - not a redacted stub. An entry with
+            # a null owner still discloses how many other broadcasts exist.
+            continue
+
+        owner = db.query(HQUser).filter(HQUser.id == live.owner_user_id).first()
+        others.append({
+            "session_id": session.id,
+            "campaign_name": session.campaign_name,
+            "owner_user_id": live.owner_user_id,
+            "owner_username": owner.username if owner else None,
+            "owner_display_name": owner.display_name if owner else None,
+            "started_at": session.started_at.isoformat()
+            if session.started_at else None,
+            "target_store_ids": visible_targets,
+            "target_store_count": len(visible_targets),
+        })
+
+    return {
+        "mine": mine,
+        "sessions": others,
+        "busy_store_ids": sorted(busy),
+        "may_view_ownership": may_see_owners,
+    }
 
 
 @api.get("/broadcast/current")

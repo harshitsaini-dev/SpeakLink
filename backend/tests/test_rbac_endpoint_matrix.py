@@ -157,6 +157,7 @@ EXPECTED: dict[str, object] = {
     "start_session": "broadcast.start",
     "stop_session": "broadcast.stop",
     "emergency_stop": "broadcast.emergency_stop",
+    "active_broadcasts": "menu.broadcast.view",
     "current_broadcast": "menu.broadcast.view",
     "broadcast_history": "menu.history.view",
     "session_detail": "menu.history.view",
