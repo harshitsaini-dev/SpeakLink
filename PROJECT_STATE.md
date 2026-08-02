@@ -5036,3 +5036,32 @@ Emergency Stop permission redesign, admin ownership visibility, the
 multi-broadcast console UI, the load matrix, and release packaging.
 
 Live RC18 was not modified at any point and remains READY on SQLite.
+
+### Control and privacy for concurrent broadcasts (2026-08-03)
+
+**Emergency Stop is now its own capability.** BROADCASTER inherited it through
+the group named after ordinary broadcasting; with concurrent sessions that
+means terminating every other operator's broadcast. It is ADMIN/OWNER by
+default, reachable per user through the existing override system, and an
+explicit DENY still removes it from an ADMIN. No username is special-cased.
+
+**Emergency Stop ALL** snapshots the active session ids before iterating -
+ending a session mutates the registry it is read from, so a live iteration
+would skip sessions and report "all stopped" with one still on air. Each
+session is ended through the same path an ordinary stop uses, so each gets
+STOP carrying its own session_id, its own queues closed, its own microphone
+socket closed and its own leases released. A failure on one is collected and
+returned honestly rather than abandoning the rest.
+
+**broadcast.view_ownership** gates who may learn WHOSE broadcast is using a
+Store. `GET /api/broadcast/active` returns three tiers decided server-side:
+your own broadcast in full, Scope-filtered `busy_store_ids` for everyone, and
+other people's sessions with owner and campaign only for holders of the new
+permission. Hidden fields are not serialised at all - a field that reaches the
+browser has been disclosed whatever the interface does with it.
+
+Target lists are intersected with Store Scope and `target_store_count` counts
+what survived that intersection, so a scoped Admin cannot infer how many
+Stores they are not allowed to see.
+
+Normal Stop remains own-session-only for every role including OWNER.

@@ -61,7 +61,18 @@ def client(tmp_path, monkeypatch):
     run_receiver_credential_phase_one(server_module.engine)
     with TestClient(server_module.app) as made:
         made.server_module = server_module
-        yield made
+        try:
+            yield made
+        finally:
+            # The runtime registry is on the module-level manager and outlives
+            # this test's database. A broadcast left live makes its Store a
+            # live target for later tests in the same worker, and archiving or
+            # deleting a live target is correctly refused - which surfaces as
+            # an unrelated Store lifecycle failure several files away.
+            import asyncio
+
+            for session_id in server_module.manager.broadcasts.active_session_ids():
+                asyncio.run(server_module.manager.broadcasts.end(session_id))
 
 
 def sign_in(client, username="founder", password=PASSWORD):
