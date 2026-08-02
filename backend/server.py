@@ -75,6 +75,14 @@ from store_scope import (
     resolve_store_scope,
     set_user_scope,
 )
+from broadcast_reservation import (
+    StoreBusyError,
+    StoreNotInScopeError,
+    active_busy_store_ids,
+    ensure_broadcast_lease_schema,
+    release_session_leases,
+    reserve_stores_for_session,
+)
 from enrolment_refusal import classify_enrolment_refusal
 from deletion_safety import (
     DeletionRefused,
@@ -549,6 +557,16 @@ def startup_event():
         ensure_device_archive_schema(engine)
     except Exception:
         logger.warning("Receiver Device archive column could not be prepared", exc_info=False)
+
+    # Which live Broadcast Session holds which Store. Additive, and created
+    # before any broadcast route can run: the partial unique index on it is
+    # what actually prevents one Store carrying two live broadcasts, so a
+    # missing table would mean the rule is enforced by nothing at all.
+    try:
+        ensure_broadcast_lease_schema(engine)
+    except Exception:
+        logger.warning("Broadcast Store lease schema could not be prepared",
+                       exc_info=False)
 
     # Additive table for per-user Store/City/Zone scope. An account with no
     # rows here is unrestricted, so this is safe to run on every boot even
@@ -2238,10 +2256,55 @@ def create_session(payload: SessionCreate, db: Session = Depends(get_db), user: 
     return session
 
 
+def _store_busy_refusal(db: Session, busy_store_ids, scope) -> HTTPException:
+    """The one STORE_BUSY answer, built in one place.
+
+    WHAT IT DELIBERATELY OMITS: the owning user, their display name, the other
+    campaign's name, and the other session's id. A Broadcaster learns which of
+    THEIR OWN selected Stores is unavailable and nothing more - who is using it
+    is somebody else's business, and an operator who can enumerate other
+    people's campaigns by trying to start broadcasts has been given a directory
+    nobody meant to publish.
+
+    Store codes rather than ids, because "BP" is what the operator selected and
+    what they must deselect. Ids are included too for the UI to match rows
+    without re-resolving codes.
+    """
+    visible = sorted(s for s in busy_store_ids if scope is None or s in scope)
+    codes = sorted(row.store_code for row in
+                   db.query(Store).filter(Store.id.in_(visible)).all()) \
+        if visible else []
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "STORE_BUSY",
+            "message": (
+                f"{', '.join(codes)} currently in use by another broadcast. "
+                "Remove the busy Store and try again."
+                if codes else
+                "One or more selected Stores are currently in use by another "
+                "broadcast."
+            ),
+            "busy_store_ids": visible,
+            "busy_store_codes": codes,
+        },
+    )
+
+
+def _refuse_busy_stores(db: Session, user: HQUser, target_store_ids) -> None:
+    """Read-only conflict check. Claims nothing, so it can run before the
+    single-broadcast gate without leaving a lease behind on any other
+    refusal."""
+    if not target_store_ids:
+        return
+    scope = resolve_store_scope(engine, user)
+    busy = active_busy_store_ids(engine) & set(target_store_ids)
+    if busy:
+        raise _store_busy_refusal(db, busy, scope)
+
+
 @api.post("/broadcast/sessions/{sid}/start", response_model=SessionOut)
 async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.START_BROADCAST))):
-    if manager.is_live():
-        raise HTTPException(status_code=409, detail="A broadcast is already live")
     session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2251,6 +2314,44 @@ async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = 
     targets = db.query(BroadcastTarget).filter(BroadcastTarget.session_id == sid).all()
     online_ids = manager.online_store_ids()
     target_store_ids = {t.store_id for t in targets}
+
+    # A Store conflict is reported BEFORE the one-broadcast-at-a-time gate
+    # below, because it is the more specific and more actionable answer: "BP is
+    # in use" tells an operator what to change, where "a broadcast is already
+    # live" tells them only to wait. This is a read-only look - the actual
+    # claim happens after the gate, so a start refused for any other reason
+    # cannot leave a lease behind.
+    _refuse_busy_stores(db, user, target_store_ids)
+
+    # The single-broadcast gate. Still here on purpose: concurrent live
+    # sessions need the per-session audio manager, which is a later change.
+    # The reservation below is already correct for that world.
+    if manager.is_live():
+        raise HTTPException(status_code=409, detail="A broadcast is already live")
+
+    # Claim every target Store, or none of them, BEFORE anything is marked
+    # live or any Receiver is told to play. All-or-nothing is the operationally
+    # important half: starting on "the Stores that happened to be free" would
+    # put a campaign on air half-targeted, and the operator would have no
+    # reason to suspect it - they asked for all of them.
+    #
+    # The refusal names only Stores this account can already see. Who holds a
+    # busy Store, and for what campaign, is deliberately not in the answer.
+    scope = resolve_store_scope(engine, user)
+    try:
+        reserve_stores_for_session(engine, session_id=session.id,
+                                   store_ids=target_store_ids, scope=scope)
+    except StoreNotInScopeError:
+        raise HTTPException(
+            status_code=403,
+            detail="This broadcast targets Stores that are not available to "
+                   "this account.",
+        )
+    except StoreBusyError as busy:
+        # Lost the race between the read-only pre-check above and this claim.
+        # Same answer, same shape - the caller cannot tell which layer refused,
+        # and does not need to.
+        raise _store_busy_refusal(db, busy.busy_store_ids, scope)
 
     session.status = "live"
     session.started_at = datetime.now(timezone.utc)
@@ -2307,6 +2408,11 @@ async def _end_session(db: Session, session: BroadcastSession, final_status: str
     # clearing live state, so no orphan queue or task survives the session.
     await manager.stop_audio_fanout()
     manager.stop_live_session()
+    # Release ONLY this session's Stores. Scoped by session id rather than by
+    # store id: releasing by Store could free one another session is
+    # legitimately broadcasting to, and the symptom would be a second campaign
+    # arriving on speakers that were already busy.
+    release_session_leases(engine, session_id=session.id)
     # Force-close the active broadcaster WS so its slot is freed immediately
     if manager.active_broadcaster_ws is not None:
         try:
