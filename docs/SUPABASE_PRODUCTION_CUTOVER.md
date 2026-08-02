@@ -358,3 +358,47 @@ then confirm the fingerprint, that the rotated credential connects, that the
 snapshot still reads (22 tables = 19 source-backed + 3 feature-branch,
 45 Stores, 3 Users, 5 Devices), that Store 31 (Bindapur) is present and
 active, and that its primary Device identity is unchanged.
+
+## 11. STOP: the Receiver authentication service is SQLite-only
+
+**Do not attempt a cutover until this is fixed and shipped in a new RC.**
+
+`receiver_auth_service.authenticate_receiver_credential` - the function every
+Receiver WebSocket handshake goes through - opens with:
+
+```python
+if engine.dialect.name != "sqlite" or _database_path(engine) == PROTECTED_DATABASE_PATH.resolve():
+    raise _configuration_failure()
+```
+
+It refuses any non-SQLite engine. It also uses `PRAGMA foreign_keys`,
+`PRAGMA table_info`, `PRAGMA foreign_key_check` and `sqlite_master`
+unconditionally, and it reads two tables the migration tool does not carry:
+`schema_migrations` and `receiver_credential_migration_state`.
+
+The consequence of ignoring this: HQ boots, `hq-runtime-status.json` reports
+`READY`, the admin UI works, every screen loads - and **no Store Receiver can
+authenticate**. The failure is invisible from HQ.
+
+Required before retrying, in order:
+
+1. make the authentication path dialect-aware, with real-PostgreSQL tests
+   that drive an actual handshake rather than asserting on schema;
+2. decide and implement how `schema_migrations` and
+   `receiver_credential_migration_state` reach PostgreSQL - migrate them, or
+   have start-up re-derive them;
+3. build and verify a new RC (RC14 does not contain these fixes);
+4. prove the whole path against the disposable TEST project - start-up,
+   `READY`, and one successful Receiver handshake - before touching
+   production.
+
+### Resetting a stale destination
+
+`tools/reset_postgres_destination.py` exists for the one job of emptying the
+EchoCast tables in a destination that already holds an older snapshot, so the
+migration tool (which has no delta mode, and whose `--force` only INSERTs)
+can run into a clean destination. It checks the project fingerprint, defaults
+to dry-run, requires a typed `RESET` confirmation, touches only the known
+EchoCast table inventory in FK-safe reverse order, refuses outright if it
+finds an unrecognised public table, never issues `DROP`, and never touches a
+Supabase-managed schema. It is deliberately not a general-purpose utility.

@@ -1530,3 +1530,46 @@ to be exercised against the real second engine, on the real code paths,
 before anyone claims it. Seven defects survived 2716 tests because those
 tests all asked SQLite. The number of tests was never the issue; the number
 of *engines* was.
+
+---
+
+## A test count is not coverage of a code path nobody called
+
+The Supabase cutover was attempted with 2716 backend tests, 57 real
+PostgreSQL tests, 211 browser tests and a package verified 31/31. It was
+stopped by one line that none of them executed:
+
+```python
+if engine.dialect.name != "sqlite" or ...:
+    raise _configuration_failure()
+```
+
+That line is the first statement of the function every Receiver WebSocket
+handshake calls. Against PostgreSQL it refuses every Store in the fleet.
+
+**Why so much green missed it.** The PostgreSQL suite was built to answer
+"does the schema work, and do the service modules behave" - and it answers
+that honestly; its own docstring even states it does not drive the HTTP or
+WebSocket layer. The SQLite suite drives the handshake constantly, but only
+ever with SQLite, so the precondition was always satisfied and never
+observed. Each suite was correct about its own scope. The defect lived in the
+intersection neither one covered.
+
+**The shape to recognise.** A precondition written when there was only one
+possible answer does not look like an assumption; it looks like validation.
+`dialect.name != "sqlite"` was *correct* when SQLite was the only database.
+Adding a second database silently turned a guard into a blocker, and nothing
+failed, because nothing tried.
+
+**What to do about it.** When a system gains a second mode - a second
+database, a second transport, a second identity provider - the question is
+not "do the tests pass in the new mode". It is "which code paths have never
+been executed in the new mode at all". Those are found by reading for
+single-mode assumptions (`dialect.name`, `PRAGMA`, `sqlite_master`,
+platform checks), not by counting tests.
+
+And when the subsystem is the one that must never break - here, the one that
+decides whether a Store may connect - the proof has to be an end-to-end
+exercise in the new mode, not a schema assertion near it. A cutover that
+leaves HQ booting, the admin UI working and every Store locked out is worse
+than one that fails loudly, because everything visible looks correct.
