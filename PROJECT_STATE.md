@@ -4831,3 +4831,102 @@ executed against stashed-out code and looked green while proving nothing about
 the change. The stash was recovered intact and every gate re-run. **A gate run
 is only evidence if the working tree contained the change** - and a stash is
 an easy way to quietly break that.
+
+---
+
+## Incident: SpeakLink outage, and the three supervisor defects behind it
+
+Two symptoms were reported: enrolment codes refused, and Stores offline. They
+had different causes and only one of them was a code defect.
+
+### Why enrolment failed
+
+Not corruption, and not an enrolment bug. Two codes for Store 25 (JHA) were
+created at 11:40:22 and 11:41:04 while HQ was temporarily running against
+PostgreSQL during the cutover attempt. HQ was rolled back to SQLite at
+11:43:30, and writes made in that window are not replayed backwards - so from
+the live system's point of view those codes had never been issued, and the
+backend refused them correctly.
+
+The live SQLite database held 12 codes, **0 of them usable**, and 0 for Store
+25. Also lost: 11 `system_logs` rows. Nothing else - no Store, Device,
+credential or history row was affected.
+
+This was avoidable and is on me: the rollback was performed while the operator
+was actively using the system, and the lossy-rollback property was documented
+but not communicated loudly enough before the window opened.
+
+### Why Stores showed offline
+
+`RECEIVER_NOT_REACHING_HQ`, not `AUTH_REJECTED`. Zero ESTABLISHED connections
+on port 8000, zero Receiver authentication failures ever recorded, and no
+`receiver_event` since 09:44:28. HQ was refusing nobody; nobody was arriving.
+
+Store 31's row still read `status='online'` because HQ had been stopped
+abruptly and never wrote the disconnect. That column is NOT what the dashboard
+uses - `search_receiver_status` overrides it with
+`manager.online_store_ids()`, the live WebSocket state - so the dashboard was
+telling the truth while the column lied. Verified from code; no change made.
+
+### The three P0 defects found
+
+**1. Start-up spawned duplicate backends.** `supervise_child` started a child,
+asked for health once immediately, and on a negative answer started another
+without stopping the first. Against SQLite the first answers instantly.
+Against Supabase the backend needs ~10 s for its start-up migrations, so
+attempts 2 and 3 landed on top of a still-starting backend; the first won port
+8000, the others died, and the supervisor was left watching a dead child.
+Every 15 s it "restarted the backend", lost the same race, and after six
+strikes went DEGRADED and stopped the frontend - while reporting READY
+throughout.
+
+Fixed by separating start-up from ongoing health: a bounded startup grace
+during which a live-but-silent child is left alone, every failed attempt
+reaped (whole tree) before the next, and `ChildOutcome` now carries the child
+that actually became healthy. Deliberately not "raise the timeout" - that
+hides a dead backend for exactly as long as it protects a slow one.
+
+**2. One missed probe created a duplicate.** `watch_once` restarted on the
+first failed probe. Now three consecutive misses are required, any good probe
+clears the count, and the old child is reaped before a replacement starts.
+
+**3. Children outlived a hard-killed supervisor.** `stop()` reaps correctly -
+but only when it runs. Task Scheduler's Stop kills the supervisor outright,
+which stranded uvicorn and spa_server.py on ports 8000 and 3000 three separate
+times during this work. Children are now assigned to a Windows Job Object with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, moving the guarantee into the kernel.
+**Proven on the live install**: stopping the task released both ports with no
+survivors and no manual PID hunting.
+
+**4. Sequence repair used a hand-kept list** (found during the cutover, fixed
+here). `login_security_state` was missing from it, so its sequence sat at
+`(1, false)` with rows 1 and 2 present - the next login-security write would
+have failed on a duplicate key. The set is now discovered from the catalog,
+covering SERIAL and IDENTITY alike.
+
+### Neither database was corrupted
+
+SQLite: `integrity_check ok`, 0 FK violations, Bindapur Device/primary/
+credentials intact, `hash_only`/`0` preserved. PostgreSQL holds its verified
+migrated copy, untouched by this incident.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| Backend SQLite | **2736 passed, 80 skipped, 0 failed** |
+| PostgreSQL | **95 passed, 0 failed** |
+| Frontend unit | 66 passed |
+| Playwright | 211 passed (isolated port 3123) |
+| Production build | Compiled successfully |
+| compileall / pip check / diff --check / secret scan | PASS |
+
+### RC16
+
+`SpeakLinkHQ-0.1.0-rc16-227c2b8-20260802-180703`, 31/31 PASS, installed.
+The runtime executable was genuinely rebuilt from `hq_runtime.spec`:
+`FC97E7EB…65F` -> `224DB2AD…78F4`. A hash unchanged after `hq_runtime.py`
+changed would have meant a stale build, and was checked for explicitly.
+
+Installed with `app_env` absent, so **SQLite remains authoritative**. Supabase
+was not activated.
