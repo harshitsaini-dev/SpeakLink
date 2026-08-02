@@ -61,7 +61,10 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
     PermissionDefinition("menu.broadcast.view", "Broadcast", "View Broadcast Console"),
     PermissionDefinition("broadcast.start", "Broadcast", "Start Broadcast"),
     PermissionDefinition("broadcast.stop", "Broadcast", "Stop Broadcast"),
-    PermissionDefinition("broadcast.emergency_stop", "Broadcast", "Emergency Stop"),
+    PermissionDefinition("broadcast.emergency_stop", "Broadcast",
+                        "Emergency Stop ALL Broadcasts"),
+    PermissionDefinition("broadcast.view_ownership", "Broadcast",
+                        "View Active Broadcast Owners"),
 
     PermissionDefinition("menu.stores.view", "Stores", "View Store Management"),
     PermissionDefinition("stores.create", "Stores", "Create Store"),
@@ -116,8 +119,21 @@ PERMISSION_CODES: frozenset[str] = frozenset(p.code for p in PERMISSION_DEFINITI
 PERMISSIONS_BY_CODE: dict[str, PermissionDefinition] = {p.code: p for p in PERMISSION_DEFINITIONS}
 
 _ALL_CODES = frozenset(PERMISSION_CODES)
+
+#: What running a broadcast needs: open the console, start, stop your own.
+#:
+#: broadcast.emergency_stop is deliberately NOT here. It used to be, and
+#: BROADCASTER inherited it - which was nearly harmless when there was one
+#: global broadcast, since the only thing to stop was usually your own. With
+#: concurrent sessions the same permission means "terminate every other
+#: operator's broadcast estate-wide", and that is not a capability that should
+#: arrive by inheritance from the group named after ordinary broadcasting.
+#:
+#: broadcast.view_ownership is not here either. Knowing a Store is busy is
+#: operational information a Broadcaster needs; knowing WHOSE campaign is
+#: using it is not.
 _BROADCAST_CODES = frozenset({
-    "menu.broadcast.view", "broadcast.start", "broadcast.stop", "broadcast.emergency_stop",
+    "menu.broadcast.view", "broadcast.start", "broadcast.stop",
 })
 _VIEW_ONLY_CODES = frozenset({
     "menu.broadcast.view", "menu.stores.view", "menu.receivers.view",
