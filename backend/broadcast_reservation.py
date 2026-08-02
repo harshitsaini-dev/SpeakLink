@@ -58,6 +58,7 @@ __all__ = [
     "active_busy_store_ids",
     "ensure_broadcast_lease_schema",
     "release_session_leases",
+    "release_session_leases_in",
     "reserve_stores_for_session",
     "session_leased_store_ids",
 ]
@@ -240,6 +241,24 @@ def _busy_among(engine: Engine, requested: set) -> set:
         return set(requested)
 
 
+def release_session_leases_in(connection, *, session_id: int) -> int:
+    """Release this session's leases INSIDE a caller's transaction.
+
+    Exists so restart reconciliation can close a session and free its Stores
+    atomically. The two halves must commit together: a crash between them
+    leaves either a finished session still holding Stores - the permanent
+    STORE_BUSY this whole mechanism exists to prevent - or a freed Store whose
+    session still claims to be live.
+
+    The SQL lives here, once, rather than being copied into the reconciler.
+    """
+    result = connection.execute(text(
+        "UPDATE broadcast_store_leases SET released_at = :now "
+        "WHERE session_id = :session AND released_at IS NULL"),
+        {"now": _now(), "session": session_id})
+    return int(result.rowcount or 0)
+
+
 def release_session_leases(engine: Engine, *, session_id: int) -> int:
     """Release everything this session holds. Returns how many were released.
 
@@ -253,8 +272,4 @@ def release_session_leases(engine: Engine, *, session_id: int) -> int:
     there is nothing to clean up is a cleanup path people wrap in try/except.
     """
     with engine.begin() as connection:
-        result = connection.execute(text(
-            "UPDATE broadcast_store_leases SET released_at = :now "
-            "WHERE session_id = :session AND released_at IS NULL"),
-            {"now": _now(), "session": session_id})
-        return int(result.rowcount or 0)
+        return release_session_leases_in(connection, session_id=session_id)

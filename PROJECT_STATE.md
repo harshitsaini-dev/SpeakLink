@@ -4976,3 +4976,63 @@ installer file, self-contained runtime change or fresh-profile initializer
 exists on this branch.
 
 Live RC18 was not modified at any point and remains READY on SQLite.
+
+---
+
+## Concurrent broadcasts (in progress, 2026-08-03)
+
+Several HQ operators can now broadcast at once, and a Store belongs to at most
+one of them.
+
+### What exists
+
+**Store leases** (`bc337a3`). `broadcast_store_leases` with a PARTIAL UNIQUE
+INDEX on `store_id WHERE released_at IS NULL`. The database is the final
+guard, not the application: a 12-thread barrier race on one Store produces
+exactly one winner, and a hand-written conflicting INSERT is refused. Claims
+are all-or-nothing, so a start that touches one busy Store reserves none of
+them. `STORE_BUSY` names Store codes only - never the owning user, their
+campaign, or the session id.
+
+**Per-session runtime** (`42da03d`). The four singleton fields
+(`active_broadcaster_ws`, `live_session_id`, `live_target_store_ids`, one
+`AudioFanout`) are gone. Each live broadcast owns its own fanout, queues and
+microphone socket. Byte-marked tests prove audio from one session never
+reaches another's Stores, and a stalled Store in one session delays neither
+its siblings nor any other session.
+
+**Ownership** (`d0887d2`). Normal Stop is own-session-only for EVERY role
+including OWNER; the refusal is byte-identical to "no such session" so the
+route cannot be used to enumerate other people's broadcasts. The microphone
+socket takes `session_id` and is refused unless that session is live and
+`started_by` the authenticated account.
+
+### Restart orphan reconciliation
+
+A restart destroys the microphone socket and every audio queue, but leases are
+persistent by design - so an unclean stop could leave `status='live'` rows
+holding Stores that then answered STORE_BUSY for ever.
+
+At startup, after the schema exists and before any broadcast can start,
+`broadcast_reconciliation.reconcile_orphaned_broadcasts` closes every
+persisted live session with no runtime owner and releases its leases in ONE
+transaction. It fails loudly rather than warning: an unreleased lease is a
+Store nothing can ever broadcast to again.
+
+**An interrupted broadcast receives `status='failed'`**, `ended_at` set, and a
+fixed reason in `notes`. Not `ended` - that would claim an operator stopped it
+and would hide the incident. Not a new label - every consumer would need
+updating to avoid rendering a blank badge. `BroadcastTarget.play_status` is
+deliberately NOT rewritten: whether the speakers were playing when the process
+died is knowledge the dead process had and this one does not.
+
+Receivers need no extra STOP. `AudioReceiverPilot._shutdown` closes the FFmpeg
+decoder, PCM sink and queue in the `finally` of the session loop, so playback
+ends whenever the HQ connection does.
+
+### Still to come
+
+Emergency Stop permission redesign, admin ownership visibility, the
+multi-broadcast console UI, the load matrix, and release packaging.
+
+Live RC18 was not modified at any point and remains READY on SQLite.
