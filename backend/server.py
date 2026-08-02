@@ -356,13 +356,16 @@ def build_receiver_runtime_authenticator():
     if key_ring is None:
         return None
     try:
-        with engine.connect() as connection:
-            present = {
-                row[0]
-                for row in connection.exec_driver_sql(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-            }
+        # SQLAlchemy's Inspector, not sqlite_master. The sqlite_master form
+        # raised on PostgreSQL, the except below swallowed it, and this
+        # function returned None - which silently degrades the whole fleet to
+        # legacy Store-token authentication and refuses every Device
+        # credential. HQ then looks completely healthy while no Store can
+        # connect, which is the same failure shape as the RC14 blocker and
+        # just as invisible.
+        from sqlalchemy import inspect
+
+        present = set(inspect(engine).get_table_names())
         if not {"receiver_devices", "receiver_credentials"} <= present:
             return None
         return DualRuntimeAuthenticator(

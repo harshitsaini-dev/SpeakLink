@@ -186,7 +186,31 @@ class OwnerOverrideRefused(RuntimeError):
 def ensure_permission_schema(engine: Engine) -> None:
     """Additive and idempotent. Never touches ``user_permission_overrides``
     or ``permission_audit_events`` once created - those hold operator
-    decisions and history, not derived configuration."""
+    decisions and history, not derived configuration.
+
+    On PostgreSQL the tables come from the portable ``postgres_schema``
+    definitions instead of the raw SQL below, which is SQLite-only
+    (``AUTOINCREMENT`` is a syntax error on PostgreSQL, and ``IF NOT EXISTS``
+    does not save it - the statement still has to parse).
+
+    Skipping the DDL is not skipping the function. The RESEED below is the
+    part that matters on every boot: it is what adds a newly introduced
+    permission code to a database created by an older release. Without it a
+    cutover would carry the previous release's catalog forever, and every
+    feature guarded by a new code would be denied to everybody with nothing
+    to indicate why.
+    """
+    if engine.dialect.name != "sqlite":
+        import postgres_schema
+
+        for table in (postgres_schema.permissions,
+                      postgres_schema.role_permissions,
+                      postgres_schema.user_permission_overrides,
+                      postgres_schema.permission_audit_events):
+            table.create(bind=engine, checkfirst=True)
+        _reseed_permission_catalog(engine)
+        return
+
     with engine.begin() as connection:
         connection.exec_driver_sql(
             """
@@ -266,6 +290,38 @@ def ensure_permission_schema(engine: Engine) -> None:
                         "INSERT INTO role_permissions (role, permission_code) "
                         "VALUES (:role, :code)"
                     ),
+                    {"role": role.value, "code": code},
+                )
+
+
+def _reseed_permission_catalog(engine: Engine) -> None:
+    """The derived catalog and role matrix, written from code.
+
+    Extracted so both dialects run the SAME reseed - the SQLite path keeps its
+    raw-SQL table creation, PostgreSQL gets its tables from postgres_schema,
+    and neither has its own private copy of what the catalog should contain.
+
+    ``ON CONFLICT(code) DO UPDATE`` is standard on both PostgreSQL and modern
+    SQLite, so the statement itself needs no branch.
+    """
+    with engine.begin() as connection:
+        for definition in PERMISSION_DEFINITIONS:
+            connection.execute(
+                text(
+                    "INSERT INTO permissions (code, permission_group, label) "
+                    "VALUES (:code, :group_name, :label) "
+                    "ON CONFLICT(code) DO UPDATE SET "
+                    "permission_group=excluded.permission_group, label=excluded.label"
+                ),
+                {"code": definition.code, "group_name": definition.group,
+                 "label": definition.label},
+            )
+        connection.exec_driver_sql("DELETE FROM role_permissions")
+        for role, codes in DEFAULT_ROLE_PERMISSIONS.items():
+            for code in codes:
+                connection.execute(
+                    text("INSERT INTO role_permissions (role, permission_code) "
+                         "VALUES (:role, :code)"),
                     {"role": role.value, "code": code},
                 )
 

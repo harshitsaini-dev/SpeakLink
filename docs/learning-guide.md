@@ -1573,3 +1573,46 @@ decides whether a Store may connect - the proof has to be an end-to-end
 exercise in the new mode, not a schema assertion near it. A cutover that
 leaves HQ booting, the admin UI working and every Store locked out is worse
 than one that fails loudly, because everything visible looks correct.
+
+---
+
+## The dangerous direction of a security regression
+
+Porting Receiver authentication to PostgreSQL turned up a decision that looks
+like a detail and is not. Two tables - `schema_migrations` and
+`receiver_credential_migration_state` - hold the fleet's credential
+verification state. The live value is `hash_only` with
+`legacy_verification_enabled = 0`, meaning a Store's old shared token is no
+longer accepted anywhere.
+
+The tempting shortcut is to let PostgreSQL re-derive them at start-up: the
+code that creates them already exists and runs on every boot. But it creates
+them at `legacy_only` with legacy verification **on**. So the shortcut would
+have quietly re-enabled an authentication method the fleet was deliberately
+migrated off.
+
+**Notice which way that fails.** It does not lock anybody out. It lets more in.
+Nothing errors, no Receiver disconnects, no dashboard turns red, and the
+system keeps working - on a weaker credential model than anyone believes it
+is running. A regression that authenticates fewer people announces itself
+within minutes; a regression that authenticates more can sit there for months.
+
+So the rule: **when porting security state, copy the decision - do not
+recompute it.** Re-deriving asks "what would this be on a fresh install",
+which is a different question from "what did the operators actually decide".
+Where those two answers differ, the fresh-install answer is almost always the
+more permissive one, because a fresh install has not yet earned the right to
+be strict.
+
+The same lens applies to the other defect found the same day.
+`build_receiver_runtime_authenticator` probed for the Device tables with
+`sqlite_master` inside a bare `except Exception: return None`. On PostgreSQL
+the probe threw, the except swallowed it, and the function returned "not
+device-capable" - degrading the entire fleet to legacy Store-token
+authentication. A broad `except` around a capability probe converts "I could
+not tell" into "no", and if "no" happens to mean "use the weaker path", the
+failure is silent by construction.
+
+Both bugs are the same shape: a fallback chosen when the system was simpler,
+still firing after the system stopped being simple, in the direction that
+makes nothing look broken.
