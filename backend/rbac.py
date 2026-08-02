@@ -78,10 +78,21 @@ ALL_PERMISSIONS = frozenset(Permission)
 
 _VIEW_ONLY = {Permission.VIEW_STATUS, Permission.VIEW_HISTORY}
 
+#: Running a broadcast: start one, stop your own.
+#:
+#: EMERGENCY_STOP is deliberately absent. It stops EVERY operator's broadcast,
+#: which is a different kind of authority from running one - and leaving it in
+#: the group named after ordinary broadcasting is how BROADCASTER came to hold
+#: it by inheritance. It is granted explicitly to ADMIN and OWNER below, and
+#: to anyone else through the per-user override system.
+#:
+#: This must agree with permission_catalog.DEFAULT_ROLE_PERMISSIONS, which is
+#: what actually gates the HTTP routes; this coarse matrix still gates the
+#: broadcaster WebSocket handshake. Two matrices that disagree is one of them
+#: being wrong somewhere nobody looks, so a test pins them together.
 _BROADCAST = {
     Permission.START_BROADCAST,
     Permission.STOP_BROADCAST,
-    Permission.EMERGENCY_STOP,
 }
 
 #: The whole policy, in one place.
@@ -99,6 +110,7 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.MANAGE_STORES,
             Permission.MANAGE_DEVICES,
             Permission.VIEW_LOGS,
+            Permission.EMERGENCY_STOP,
         }
         | _BROADCAST
         | _VIEW_ONLY

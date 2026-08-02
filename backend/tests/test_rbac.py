@@ -142,9 +142,14 @@ def test_admin_can_run_the_estate_but_not_change_security():
 def test_a_broadcaster_can_broadcast_and_nothing_administrative():
     granted = ROLE_PERMISSIONS[Role.BROADCASTER]
     for permission in (Permission.START_BROADCAST, Permission.STOP_BROADCAST,
-                       Permission.EMERGENCY_STOP, Permission.VIEW_STATUS,
-                       Permission.VIEW_HISTORY):
+                       Permission.VIEW_STATUS, Permission.VIEW_HISTORY):
         assert permission in granted
+    # EMERGENCY_STOP stops EVERY operator's broadcast, not just this
+    # account's. It used to arrive here by inheritance from the group named
+    # after ordinary broadcasting, which was nearly harmless when only one
+    # broadcast could exist. It is now granted explicitly to ADMIN and OWNER,
+    # and to anyone else only through a per-user override.
+    assert Permission.EMERGENCY_STOP not in granted
     for permission in (Permission.MANAGE_STORES, Permission.MANAGE_USERS,
                        Permission.MANAGE_DEVICES, Permission.MANAGE_SECURITY):
         assert permission not in granted

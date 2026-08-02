@@ -140,10 +140,13 @@ def test_broadcaster_default_permissions_are_exactly_broadcast_and_read_only():
     # it, and a BROADCASTER without it got a 403 there - the live defect this
     # round fixes. It is still read-only: no stores.create/update/archive.
     broadcaster = DEFAULT_ROLE_PERMISSIONS[Role.BROADCASTER]
+    # broadcast.emergency_stop and broadcast.view_ownership are deliberately
+    # absent: one stops every other operator's broadcast, the other reveals
+    # whose broadcast is using a Store. Both are ADMIN/OWNER by default and
+    # reachable per user through an override.
     assert broadcaster == {
         "menu.broadcast.view", "broadcast.start", "broadcast.stop",
-        "broadcast.emergency_stop", "menu.history.view", "menu.receivers.view",
-        "menu.stores.view",
+        "menu.history.view", "menu.receivers.view", "menu.stores.view",
     }
     # No Store modification, no Device security changes, no User management.
     assert not any(code.startswith("stores.") for code in broadcaster)
