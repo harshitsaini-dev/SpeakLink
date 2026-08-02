@@ -167,6 +167,19 @@ def ensure_user_lifecycle_schema(engine: Engine) -> None:
             ("display_name", "VARCHAR(200)"),
             ("disabled_at", "DATETIME"),
             ("archived_at", "DATETIME"),
+            # The irreversible-deletion columns belong HERE, not only in
+            # user_deletion.ensure_user_deletion_schema, for the reason this
+            # module's own ordering docstring gives: step 3
+            # (migrate_legacy_roles) reads hq_users THROUGH THE ORM, so it
+            # SELECTs every column declared on the HQUser model. Declaring
+            # deleted_at/deleted_by on the model while creating them only in
+            # a later migration meant that on a legacy table the ORM asked
+            # for a column that did not exist yet and the whole
+            # ensure_user_auth_schema sequence failed with an
+            # OperationalError - which is exactly the bug the docstring above
+            # was written about, reintroduced by a new column.
+            ("deleted_at", "VARCHAR(40)"),
+            ("deleted_by", "INTEGER"),
         ):
             if name not in columns:
                 connection.exec_driver_sql(f"ALTER TABLE hq_users ADD COLUMN {name} {definition}")

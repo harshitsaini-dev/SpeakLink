@@ -250,3 +250,50 @@ def test_the_deletion_is_audited_without_leaking_secrets(client):
     assert rows[0]["actor_user_id"] is not None
     for forbidden in ("password", "hash", "jwt", "bearer ", "secret"):
         assert forbidden not in events.text.lower()
+
+
+# ===========================================================================
+# Migration ordering
+# ===========================================================================
+def test_a_legacy_hq_users_table_can_still_be_upgraded(tmp_path):
+    """Regression test for a real bug this feature caused.
+
+    user_schema.ensure_user_auth_schema runs in a documented order, and step
+    3 (migrate_legacy_roles) reads hq_users THROUGH THE ORM - so it SELECTs
+    every column declared on the HQUser model. Declaring deleted_at and
+    deleted_by on the model while creating them only in
+    user_deletion.ensure_user_deletion_schema meant that on a legacy table
+    the ORM asked for a column no earlier step had added, and the whole
+    sequence failed with an OperationalError. Twenty-five tests went red at
+    once, none of them in the code that had changed.
+
+    The columns are now added by ensure_user_lifecycle_schema (step 2),
+    before anything reads a row through the ORM. Any future column on the
+    HQUser model has to do the same.
+    """
+    from sqlalchemy import create_engine
+    from user_lifecycle import ensure_user_lifecycle_schema
+    from user_schema import ensure_user_auth_schema
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}", future=True)
+    with engine.begin() as connection:
+        # Exactly the shape a pre-lifecycle install has on disk.
+        connection.exec_driver_sql(
+            "CREATE TABLE hq_users ("
+            " id INTEGER PRIMARY KEY,"
+            " username VARCHAR(100) NOT NULL UNIQUE,"
+            " password_hash VARCHAR(255) NOT NULL,"
+            " role VARCHAR(50) NOT NULL DEFAULT 'admin',"
+            " is_active BOOLEAN NOT NULL DEFAULT 1,"
+            " created_at DATETIME)")
+        connection.exec_driver_sql(
+            "INSERT INTO hq_users (username, password_hash, role, is_active) "
+            "VALUES ('admin', '$2b$12$notarealhashvalue', 'admin', 1)")
+
+    ensure_user_lifecycle_schema(engine)
+    ensure_user_auth_schema(engine)   # must not raise
+
+    from sqlalchemy import inspect
+    columns = {c["name"] for c in inspect(engine).get_columns("hq_users")}
+    assert {"deleted_at", "deleted_by"} <= columns
+    assert {"lifecycle_state", "display_name", "session_version"} <= columns

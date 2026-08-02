@@ -115,6 +115,8 @@ def combine(*conditions):
 
 
 __all__ = [
+    "BULK_MODES",
+    "BulkSelectionError",
     "DEFAULT_PAGE_SIZE",
     "MAX_PAGE_SIZE",
     "Page",
@@ -123,5 +125,49 @@ __all__ = [
     "like_term",
     "normalize_paging",
     "parse_date",
+    "resolve_bulk_selection",
     "text_search",
 ]
+
+
+# ===========================================================================
+# Filter-based bulk selection ("Select All Filtered")
+# ===========================================================================
+#: Two ways to name the rows a bulk action applies to.
+#:
+#: "ids"      - an explicit list. What Select Page sends, and what a single
+#:              row action sends. Unambiguous and small.
+#: "filtered" - the SAME filter object the matching /search endpoint accepts.
+#:              The backend resolves it to a row set inside the caller's own
+#:              authorization scope.
+#:
+#: The second mode exists because "Select All Filtered" must mean every
+#: server-side match, including rows on pages the operator never loaded.
+#: Building that id list in React would mean paging through the entire
+#: result set just to enumerate it - slow, fragile, and silently wrong the
+#: moment a page is missed. Sending the filter instead keeps one definition
+#: of "what is selected" and evaluates it where the authorization lives.
+BULK_MODES = ("ids", "filtered")
+
+
+class BulkSelectionError(ValueError):
+    """The selection could not be resolved. Never carries row content."""
+
+
+def resolve_bulk_selection(mode, ids, filters, *, resolver):
+    """Return (row_ids, matched_count).
+
+    ``resolver`` is a callable taking the validated filter dict and
+    returning the full list of matching ids, already narrowed to the
+    caller's scope by whichever search query backs that screen. Bulk and
+    search therefore cannot drift apart: they run the same narrowing.
+    """
+    selected_mode = (mode or "ids").strip().lower()
+    if selected_mode not in BULK_MODES:
+        raise BulkSelectionError(
+            f"Unknown selection mode {selected_mode!r}. Expected one of {BULK_MODES}.")
+    if selected_mode == "ids":
+        row_ids = list(ids or [])
+        return row_ids, len(row_ids)
+    matched = resolver(filters or {})
+    return list(matched), len(matched)

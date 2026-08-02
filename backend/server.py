@@ -91,12 +91,14 @@ from store_deletion import (
     permanently_delete_store_with_history,
 )
 from admin_search import (
+    BulkSelectionError,
     DEFAULT_PAGE_SIZE,
     Page,
     apply_paging,
     like_term,
     normalize_paging,
     parse_date,
+    resolve_bulk_selection,
 )
 from admin_records import (
     archive_logs,
@@ -840,6 +842,9 @@ def search_users(
     q: Optional[str] = None,
     role: Optional[str] = None,
     state: Optional[str] = None,
+    scope_store_id: Optional[int] = None,
+    scope_city: Optional[str] = None,
+    scope_region: Optional[str] = None,
     include_deleted: bool = False,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
@@ -864,6 +869,32 @@ def search_users(
         wanted = state.lower()
         records = [r for r in records
                    if (r.get("lifecycle_state") or "active").lower() == wanted]
+
+    # Scope filters: "which accounts are assigned to this Store/City/Zone".
+    # Deliberately matches the ASSIGNMENT rows rather than the resolved Store
+    # set - an account scoped to a City is found by its City assignment, not
+    # by every Store that City happens to contain. UNION semantics are
+    # untouched: this filters the list of accounts, it does not change what
+    # any account can see.
+    if scope_store_id is not None or scope_city or scope_region:
+        matching_users = set()
+        with engine.connect() as connection:
+            if scope_store_id is not None:
+                matching_users |= {r[0] for r in connection.execute(text(
+                    "SELECT user_id FROM user_store_scope "
+                    "WHERE scope_type = 'STORE' AND store_id = :i"),
+                    {"i": scope_store_id})}
+            if scope_city:
+                matching_users |= {r[0] for r in connection.execute(text(
+                    "SELECT user_id FROM user_store_scope "
+                    "WHERE scope_type = 'CITY' AND scope_value = :v"),
+                    {"v": scope_city})}
+            if scope_region:
+                matching_users |= {r[0] for r in connection.execute(text(
+                    "SELECT user_id FROM user_store_scope "
+                    "WHERE scope_type = 'REGION' AND scope_value = :v"),
+                    {"v": scope_region})}
+        records = [r for r in records if r["id"] in matching_users]
 
     total = len(records)
     offset = (page - 1) * page_size
@@ -1129,6 +1160,86 @@ def list_receiver_devices(
         return [ReceiverDeviceOut(**row) for row in list_devices(engine, store_id=store_id)]
     except EnrollmentUnavailable as unavailable:
         raise HTTPException(status_code=503, detail=str(unavailable))
+
+
+# Declared BEFORE /receiver-devices/{public_id}: FastAPI matches routes in
+# definition order, so with the parameterised route first the literal path
+# 'search' is taken as a public_id and the request 404s. The same trap
+# already caught /users/search - see docs/learning-guide.md.
+@api.get("/receiver-devices/search")
+def search_receiver_devices(
+    q: Optional[str] = None,
+    city: Optional[str] = None,
+    region: Optional[str] = None,
+    store_id: Optional[int] = None,
+    status_f: Optional[str] = Query(None, alias="status"),
+    is_primary: Optional[bool] = None,
+    lifecycle: Optional[str] = None,
+    include_archived: bool = True,
+    include_deleted: bool = False,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("menu.receivers.view")),
+):
+    """Filtered, paginated Receiver Devices ACROSS Stores.
+
+    archived and deleted are different states and are reported separately in
+    ``lifecycle``: an archived Device can be restored, a permanently deleted
+    one never can. Deleted Devices are hidden unless asked for.
+    """
+    page, page_size = normalize_paging(page, page_size)
+    where = ["1=1"]
+    params = {}
+    term = like_term(q)
+    if term:
+        params["term"] = term
+        where.append("(d.public_id LIKE :term OR d.display_name LIKE :term "
+                     "OR s.store_code LIKE :term OR s.store_name LIKE :term)")
+    if city:
+        params["city"] = city; where.append("s.city = :city")
+    if region:
+        params["region"] = region; where.append("s.region = :region")
+    if store_id is not None:
+        params["store_id"] = store_id; where.append("d.store_id = :store_id")
+    if status_f:
+        params["status_f"] = status_f; where.append("d.status = :status_f")
+    if not include_deleted:
+        where.append("d.deleted_at IS NULL")
+    if not include_archived:
+        where.append("d.archived_at IS NULL")
+    if lifecycle == "deleted":
+        where.append("d.deleted_at IS NOT NULL")
+    elif lifecycle == "archived":
+        where.append("d.archived_at IS NOT NULL AND d.deleted_at IS NULL")
+    elif lifecycle == "active":
+        where.append("d.archived_at IS NULL AND d.deleted_at IS NULL")
+    if is_primary is not None:
+        exists = ("EXISTS (SELECT 1 FROM receiver_store_primary_device p "
+                  "WHERE p.device_id = d.id)")
+        where.append(exists if is_primary else f"NOT {exists}")
+
+    clause = " AND ".join(where) + _receiver_scope_clause(user, params)
+    base = f"FROM receiver_devices d JOIN stores s ON s.id = d.store_id WHERE {clause}"
+
+    total = db.execute(text(f"SELECT COUNT(*) {base}"), params).scalar_one()
+    rows = db.execute(text(
+        "SELECT d.id, d.public_id, d.display_name, d.status, d.archived_at, "
+        "  d.deleted_at, s.id AS store_id, s.store_code, s.store_name, s.city, s.region, "
+        "  EXISTS (SELECT 1 FROM receiver_store_primary_device p WHERE p.device_id = d.id) "
+        f"    AS is_primary {base} ORDER BY d.id LIMIT :limit OFFSET :offset"),
+        {**params, "limit": page_size, "offset": (page - 1) * page_size}).all()
+
+    items = [{
+        "public_id": r.public_id, "display_name": r.display_name, "status": r.status,
+        "lifecycle": ("deleted" if r.deleted_at else
+                      "archived" if r.archived_at else "active"),
+        "archived_at": r.archived_at, "deleted_at": r.deleted_at,
+        "is_primary": bool(r.is_primary),
+        "store_id": r.store_id, "store_code": r.store_code,
+        "store_name": r.store_name, "city": r.city, "region": r.region,
+    } for r in rows]
+    return Page(items=items, total=total, page=page, page_size=page_size).as_dict()
 
 
 @api.get("/receiver-devices/{public_id}", response_model=ReceiverDeviceOut)
@@ -2392,6 +2503,11 @@ def list_logs(
 
 
 class BulkIdsRequest(BaseModel):
+    #: "ids" (explicit rows - a single row action, or Select Page) or
+    #: "filtered" (every server-side match of `filters`, resolved inside the
+    #: caller's own scope). See admin_search.resolve_bulk_selection for why
+    #: the second mode exists rather than having React enumerate ids.
+    mode: str = "ids"
     ids: List[int] = Field(default_factory=list)
     #: Present only for permanent deletion. Bulk destruction requires the
     #: operator to type it, exactly like the single-row deletes elsewhere.
@@ -2413,28 +2529,120 @@ def _require_bulk_confirmation(payload: BulkIdsRequest, expected: str) -> None:
             detail=f"The typed confirmation did not match. Type exactly: {expected}")
 
 
+def _history_ids_matching(filters: dict, user: HQUser, db: Session) -> list:
+    """Every broadcast session id matching `filters`, narrowed to the caller's
+    Store scope. Runs the SAME query the search endpoint runs, so a bulk
+    action can never select a row the operator could not have seen."""
+    query = db.query(BroadcastSession.id)
+    term = like_term(filters.get("q"))
+    if term:
+        query = query.filter(BroadcastSession.campaign_name.ilike(term))
+    if filters.get("status"):
+        query = query.filter(BroadcastSession.status == filters["status"])
+    try:
+        start_at = parse_date(filters.get("date_from"))
+        end_at = parse_date(filters.get("date_to"), end_of_day=True)
+    except ValueError as bad:
+        raise HTTPException(status_code=400, detail=str(bad))
+    if start_at:
+        query = query.filter(BroadcastSession.created_at >= start_at)
+    if end_at:
+        query = query.filter(BroadcastSession.created_at <= end_at)
+    if filters.get("started_by") is not None:
+        query = query.filter(BroadcastSession.started_by == filters["started_by"])
+
+    target_conditions = []
+    if filters.get("store_id") is not None:
+        target_conditions.append(BroadcastTarget.store_id == filters["store_id"])
+    if filters.get("city") or filters.get("region"):
+        store_match = []
+        if filters.get("city"):
+            store_match.append(Store.city == filters["city"])
+        if filters.get("region"):
+            store_match.append(Store.region == filters["region"])
+        target_conditions.append(BroadcastTarget.store_id.in_(
+            db.query(Store.id).filter(*store_match).scalar_subquery()))
+    if target_conditions:
+        query = query.filter(
+            db.query(BroadcastTarget.id).filter(
+                BroadcastTarget.session_id == BroadcastSession.id,
+                *target_conditions).exists())
+
+    if filters.get("archived_only"):
+        query = query.filter(BroadcastSession.archived_at.isnot(None))
+    elif not filters.get("include_archived"):
+        query = query.filter(BroadcastSession.archived_at.is_(None))
+
+    scope = resolve_store_scope(engine, user)
+    if scope is not None:
+        query = query.filter(
+            db.query(BroadcastTarget.id).filter(
+                BroadcastTarget.session_id == BroadcastSession.id,
+                BroadcastTarget.store_id.in_(scope) if scope
+                else BroadcastTarget.store_id.in_([-1])).exists())
+    return [row[0] for row in query.all()]
+
+
+def _log_ids_matching(filters: dict, db: Session) -> list:
+    query = db.query(SystemLog.id)
+    term = like_term(filters.get("q"))
+    if term:
+        query = query.filter(SystemLog.message.ilike(term))
+    if filters.get("level"):
+        query = query.filter(SystemLog.level == filters["level"])
+    try:
+        start_at = parse_date(filters.get("date_from"))
+        end_at = parse_date(filters.get("date_to"), end_of_day=True)
+    except ValueError as bad:
+        raise HTTPException(status_code=400, detail=str(bad))
+    if start_at:
+        query = query.filter(SystemLog.created_at >= start_at)
+    if end_at:
+        query = query.filter(SystemLog.created_at <= end_at)
+    for field_name, column in (("actor_user_id", SystemLog.actor_user_id),
+                               ("store_id", SystemLog.store_id),
+                               ("device_public_id", SystemLog.device_public_id)):
+        if filters.get(field_name) is not None:
+            query = query.filter(column == filters[field_name])
+    if filters.get("archived_only"):
+        query = query.filter(SystemLog.archived_at.isnot(None))
+    elif not filters.get("include_archived"):
+        query = query.filter(SystemLog.archived_at.is_(None))
+    return [row[0] for row in query.all()]
+
+
+def _resolve_bulk(payload: BulkIdsRequest, resolver):
+    try:
+        return resolve_bulk_selection(payload.mode, payload.ids, payload.filters,
+                                      resolver=resolver)
+    except BulkSelectionError as bad:
+        raise HTTPException(status_code=400, detail=str(bad))
+
+
 @api.post("/broadcast/history/archive")
 def archive_broadcast_sessions(payload: BulkIdsRequest,
                                db: Session = Depends(get_db),
                                user: HQUser = Depends(require("broadcast_history.archive"))):
     """Hide sessions from the normal History list. Reversible - nothing is
     removed, and Show Archived brings them back into view."""
-    result = archive_sessions(engine, session_ids=payload.ids,
+    ids, matched = _resolve_bulk(payload, lambda f: _history_ids_matching(f, user, db))
+    result = archive_sessions(engine, session_ids=ids,
                               actor_user_id=user.id, archived=True)
     _write_log(db, "warn",
                f"BROADCAST_HISTORY_ARCHIVED count={result.affected} by={user.username}")
-    return result.as_dict()
+    return {**result.as_dict(), "matched": matched}
 
 
 @api.post("/broadcast/history/unarchive")
 def unarchive_broadcast_sessions(payload: BulkIdsRequest,
                                  db: Session = Depends(get_db),
                                  user: HQUser = Depends(require("broadcast_history.archive"))):
-    result = archive_sessions(engine, session_ids=payload.ids,
+    ids, matched = _resolve_bulk(payload, lambda f: _history_ids_matching(f, user, db))
+    result = archive_sessions(engine, session_ids=ids,
                               actor_user_id=user.id, archived=False)
     _write_log(db, "info",
                f"BROADCAST_HISTORY_UNARCHIVED count={result.affected} by={user.username}")
-    return result.as_dict()
+    return {**result.as_dict(), "matched": matched}
 
 
 @api.post("/broadcast/history/delete-permanently")
@@ -2449,31 +2657,34 @@ def delete_broadcast_sessions(payload: BulkIdsRequest,
     Nothing else is touched: never a Store, a User or a Receiver Device.
     """
     _require_bulk_confirmation(payload, "DELETE")
+    ids, matched = _resolve_bulk(payload, lambda f: _history_ids_matching(f, user, db))
     result = delete_sessions_permanently(
-        engine, session_ids=payload.ids, actor_user_id=user.id,
+        engine, session_ids=ids, actor_user_id=user.id,
         filters=payload.filters)
     _write_log(db, "warn",
                f"BROADCAST_HISTORY_DELETED count={result.affected} "
                f"requested={result.requested} by={user.username}")
-    return result.as_dict()
+    return {**result.as_dict(), "matched": matched}
 
 
 @api.post("/logs/archive")
 def archive_system_logs(payload: BulkIdsRequest, db: Session = Depends(get_db),
                         user: HQUser = Depends(require("system_logs.archive"))):
-    result = archive_logs(engine, log_ids=payload.ids, actor_user_id=user.id,
+    ids, matched = _resolve_bulk(payload, lambda f: _log_ids_matching(f, db))
+    result = archive_logs(engine, log_ids=ids, actor_user_id=user.id,
                           archived=True)
     _write_log(db, "warn", f"SYSTEM_LOGS_ARCHIVED count={result.affected} by={user.username}")
-    return result.as_dict()
+    return {**result.as_dict(), "matched": matched}
 
 
 @api.post("/logs/unarchive")
 def unarchive_system_logs(payload: BulkIdsRequest, db: Session = Depends(get_db),
                           user: HQUser = Depends(require("system_logs.archive"))):
-    result = archive_logs(engine, log_ids=payload.ids, actor_user_id=user.id,
+    ids, matched = _resolve_bulk(payload, lambda f: _log_ids_matching(f, db))
+    result = archive_logs(engine, log_ids=ids, actor_user_id=user.id,
                           archived=False)
     _write_log(db, "info", f"SYSTEM_LOGS_UNARCHIVED count={result.affected} by={user.username}")
-    return result.as_dict()
+    return {**result.as_dict(), "matched": matched}
 
 
 @api.post("/logs/delete-permanently")
@@ -2486,12 +2697,13 @@ def delete_system_logs(payload: BulkIdsRequest, db: Session = Depends(get_db),
     purge.
     """
     _require_bulk_confirmation(payload, "DELETE")
-    result = delete_logs_permanently(engine, log_ids=payload.ids,
+    ids, matched = _resolve_bulk(payload, lambda f: _log_ids_matching(f, db))
+    result = delete_logs_permanently(engine, log_ids=ids,
                                      actor_user_id=user.id, filters=payload.filters)
     _write_log(db, "warn",
                f"SYSTEM_LOGS_DELETED count={result.affected} "
                f"requested={result.requested} by={user.username}")
-    return result.as_dict()
+    return {**result.as_dict(), "matched": matched}
 
 
 @api.get("/admin/deletion-events")
@@ -2502,6 +2714,139 @@ def read_admin_deletion_events(record_type: Optional[str] = None, limit: int = 2
     defeat the deletion the operator asked for."""
     return {"events": list_admin_deletion_events(engine, record_type=record_type,
                                                  limit=limit)}
+
+
+# ================ RECEIVER STATUS / DEVICE SEARCH ================
+# Receiver Status is Store-shaped (one row per Store plus the health of its
+# Receiver). Receiver Devices is Device-shaped and spans Stores - the
+# existing /stores/{id}/receiver-devices only ever shows one Store, which is
+# not a search surface at all.
+#
+# receiver_devices and receiver_store_primary_device are raw-SQL tables
+# (migrations.py / receiver_primary_device.py), not ORM models, so these
+# queries are built as parameterised SQL exactly like every other reader of
+# those tables. Every value is bound, never interpolated.
+
+
+def _receiver_scope_clause(user, params):
+    """Returns a SQL fragment narrowing to the caller's Store scope, or ''.
+
+    The empty frozenset case matters: scope rows exist but resolve to no
+    Stores, which is a real 'nothing' and must not be read as 'everything'."""
+    scope = resolve_store_scope(engine, user)
+    if scope is None:
+        return ""
+    if not scope:
+        return " AND 1=0"
+    keys = []
+    for index, store_id in enumerate(sorted(scope)):
+        key = f"scope_{index}"
+        params[key] = store_id
+        keys.append(f":{key}")
+    return f" AND s.id IN ({', '.join(keys)})"
+
+
+def _receiver_status_where(user, *, q, city, region, store_id, status_f):
+    """One narrowing used by BOTH the search and its filter options, so an
+    option list can never offer a Zone whose Stores the caller cannot see."""
+    where = ["s.is_active = 1" if engine.dialect.name == "sqlite" else "s.is_active = true",
+             "(s.lifecycle_state IS NULL OR s.lifecycle_state <> 'deleted')"]
+    params = {}
+    term = like_term(q)
+    if term:
+        params["term"] = term
+        where.append(
+            "(s.store_code LIKE :term OR s.store_name LIKE :term OR s.id IN "
+            "(SELECT d.store_id FROM receiver_devices d "
+            " WHERE d.public_id LIKE :term OR d.display_name LIKE :term))")
+    if city:
+        params["city"] = city; where.append("s.city = :city")
+    if region:
+        params["region"] = region; where.append("s.region = :region")
+    if store_id is not None:
+        params["store_id"] = store_id; where.append("s.id = :store_id")
+    if status_f:
+        params["status_f"] = status_f; where.append("s.status = :status_f")
+    clause = " AND ".join(where)
+    clause += _receiver_scope_clause(user, params)
+    return clause, params
+
+
+@api.get("/receivers/search")
+def search_receiver_status(
+    q: Optional[str] = None,
+    city: Optional[str] = None,
+    region: Optional[str] = None,
+    store_id: Optional[int] = None,
+    status_f: Optional[str] = Query(None, alias="status"),
+    has_primary: Optional[bool] = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("menu.receivers.view")),
+):
+    """Filtered, paginated Receiver Status.
+
+    Reports only what EchoCast can actually prove. ``speaker_verified`` is
+    NEVER derived from connected/ready/audio-receiving/playback-confirmed:
+    acoustic verification arrives on a separate trusted path, and inferring
+    it from software liveness is exactly the claim this project refuses to
+    make. It is reported as null until that proof exists.
+    """
+    page, page_size = normalize_paging(page, page_size)
+    where, params = _receiver_status_where(
+        user, q=q, city=city, region=region, store_id=store_id, status_f=status_f)
+
+    if has_primary is not None:
+        exists = ("EXISTS (SELECT 1 FROM receiver_store_primary_device p "
+                  "WHERE p.store_id = s.id)")
+        where += f" AND {'' if has_primary else 'NOT '}{exists}"
+
+    total = db.execute(
+        text(f"SELECT COUNT(*) FROM stores s WHERE {where}"), params).scalar_one()
+    rows = db.execute(text(
+        "SELECT s.id, s.store_code, s.store_name, s.city, s.region, s.status, "
+        "  EXISTS (SELECT 1 FROM receiver_store_primary_device p WHERE p.store_id = s.id) "
+        "    AS has_primary, "
+        "  (SELECT COUNT(*) FROM receiver_devices d WHERE d.store_id = s.id "
+        "     AND d.deleted_at IS NULL) AS device_count "
+        f"FROM stores s WHERE {where} ORDER BY s.store_code "
+        "LIMIT :limit OFFSET :offset"),
+        {**params, "limit": page_size, "offset": (page - 1) * page_size}).all()
+
+    online_ids = manager.online_store_ids()
+    ready_ids = manager.ready_store_ids()
+    items = [{
+        "id": r.id, "store_code": r.store_code, "store_name": r.store_name,
+        "city": r.city, "region": r.region,
+        "status": "online" if r.id in online_ids else "offline",
+        "connected": r.id in online_ids,
+        "ready": r.id in ready_ids,
+        "has_primary": bool(r.has_primary),
+        "device_count": r.device_count,
+        # Acoustic proof only - never inferred from the flags above.
+        "speaker_verified": None,
+    } for r in rows]
+    return Page(items=items, total=total, page=page, page_size=page_size).as_dict()
+
+
+@api.get("/receivers/filter-options")
+def receiver_filter_options(db: Session = Depends(get_db),
+                            user: HQUser = Depends(require("menu.receivers.view"))):
+    """Zone/City/Store options drawn from the SAME scoped narrowing the search
+    uses. A scoped account must not discover an out-of-scope Zone merely by
+    opening a dropdown."""
+    where, params = _receiver_status_where(
+        user, q=None, city=None, region=None, store_id=None, status_f=None)
+    rows = db.execute(text(
+        f"SELECT s.id, s.store_code, s.store_name, s.city, s.region "
+        f"FROM stores s WHERE {where} ORDER BY s.store_code"), params).all()
+    return {
+        "regions": sorted({r.region for r in rows if r.region}),
+        "cities": sorted({r.city for r in rows if r.city}),
+        "stores": [{"id": r.id, "store_code": r.store_code,
+                    "store_name": r.store_name} for r in rows],
+    }
 
 
 # ================ SERVER-SIDE SEARCH / FILTER ================

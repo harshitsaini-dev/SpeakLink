@@ -162,7 +162,10 @@ def test_permanent_delete_removes_the_session_and_its_targets_only(client):
     r = client.post("/api/broadcast/history/delete-permanently", headers=owner,
                     json={"ids": [doomed], **DELETE_BODY})
     assert r.status_code == 200, r.text
-    assert r.json() == {"requested": 1, "affected": 1, "skipped": 0, "failed": 0}
+    # `matched` was added alongside these when filtered-bulk mode shipped, so
+    # assert the counts that matter rather than exact dict equality.
+    assert r.json()["requested"] == 1 and r.json()["affected"] == 1
+    assert r.json()["skipped"] == 0 and r.json()["failed"] == 0
 
     with engine.connect() as c:
         assert c.execute(text("SELECT COUNT(*) FROM broadcast_sessions WHERE id=:i"),
@@ -201,7 +204,7 @@ def test_bulk_delete_reports_requested_affected_and_skipped_exactly(client):
 
     r = client.post("/api/broadcast/history/delete-permanently", headers=owner,
                     json={"ids": real + [missing], **DELETE_BODY}).json()
-    assert r == {"requested": 4, "affected": 3, "skipped": 1, "failed": 0}
+    assert (r["requested"], r["affected"], r["skipped"], r["failed"]) == (4, 3, 1, 0)
 
 
 # ===========================================================================
