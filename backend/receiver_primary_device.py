@@ -216,10 +216,30 @@ def clear_primary_for_device(engine: Engine, *, device_id: int) -> bool:
 
 
 def describe_store_devices(engine: Engine, *, store_id: int) -> list[dict]:
-    """Every Device of one Store, each with its role. No credential material."""
+    """Every OPERATIONAL Device of one Store, each with its role.
+
+    No credential material, and no permanently deleted Device.
+
+    ``deleted_at`` is the marker, and it has to be: a permanently deleted
+    Device is left at ``status='retired'``, which is exactly what an ordinarily
+    retired Device looks like. Filtering on status would either show the
+    tombstones or hide the real retired Devices an administrator needs to see.
+
+    Archived and retired Devices ARE still returned. Archiving is reversible
+    and retiring is an operational state somebody has to notice; permanent
+    deletion is neither, and this list is the operational one.
+    """
+    from sqlalchemy import inspect
+
+    # Inspector, not PRAGMA: PRAGMA is SQLite-only and this function is on the
+    # path a PostgreSQL deployment serves too.
+    columns = {c["name"] for c in inspect(engine).get_columns("receiver_devices")}
+    archived_select = "d.archived_at" if "archived_at" in columns else "NULL AS archived_at"
+    # A database that predates the tombstone column has no deleted Devices to
+    # hide, so the predicate is simply omitted rather than guessed at.
+    not_deleted = "AND d.deleted_at IS NULL " if "deleted_at" in columns else ""
+
     with engine.connect() as connection:
-        columns = {c[1] for c in connection.exec_driver_sql("PRAGMA table_info(receiver_devices)")}
-        archived_select = "d.archived_at" if "archived_at" in columns else "NULL AS archived_at"
         rows = connection.execute(
             text(
                 f"SELECT d.public_id, d.display_name, d.status, d.enrolled_at, "
@@ -228,7 +248,7 @@ def describe_store_devices(engine: Engine, *, store_id: int) -> list[dict]:
                 "       p.promoted_at "
                 f"FROM receiver_devices d LEFT JOIN {PRIMARY_TABLE} p "
                 "  ON p.store_id = d.store_id AND p.device_id = d.id "
-                "WHERE d.store_id = :store_id ORDER BY d.id"
+                f"WHERE d.store_id = :store_id {not_deleted}ORDER BY d.id"
             ),
             {"store_id": store_id},
         ).all()
