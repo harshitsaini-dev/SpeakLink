@@ -208,22 +208,24 @@ test.describe('H. Receiver Status reflects the backend-authoritative scoped set'
     await page.goto('/receivers');
     await expect(page.getByTestId('receivers-page')).toBeVisible();
     await expect(page.getByTestId(`receiver-card-${STORES[0].store_code}`)).toBeVisible();
-    await expect(page.getByTestId('receivers-empty')).toHaveCount(0);
+    await expect(page.getByTestId('list-empty')).toHaveCount(0);
   });
 
   test('a genuinely empty scoped result shows an explanatory empty-state, not blank whitespace', async ({ page }) => {
     await mockBackend(page, { operator: BROADCASTER, stores: [] });
     await signIn(page);
     await page.goto('/receivers');
-    await expect(page.getByTestId('receivers-empty')).toBeVisible();
-    await expect(page.getByTestId('receivers-empty')).toContainText('No Stores are available');
+    // The shared ListState now owns this copy, so all six admin screens
+    // describe an empty result the same way.
+    await expect(page.getByTestId('list-empty')).toBeVisible();
+    await expect(page.getByTestId('list-empty')).toContainText("No Stores match these filters");
   });
 
   test('an API failure shows a visible error, never silent blank whitespace', async ({ page }) => {
     await mockBackend(page, { operator: BROADCASTER, storesListStatus: 500 });
     await signIn(page);
     await page.goto('/receivers');
-    await expect(page.getByTestId('receivers-error')).toBeVisible();
+    await expect(page.getByTestId('list-error')).toBeVisible();
   });
 });
 

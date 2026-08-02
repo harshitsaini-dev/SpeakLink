@@ -12,6 +12,10 @@ export const MENU_PERMISSION_BY_PATH = {
   "/stores": "menu.stores.view",
   "/history": "menu.history.view",
   "/receivers": "menu.receivers.view",
+  // Same subject as /receivers, so the same menu permission gates it. A second
+  // permission for the same data would only create a way to see one view and
+  // not the other, which is a difference nobody could explain.
+  "/devices": "menu.receivers.view",
   "/logs": "menu.logs.view",
   "/users": "menu.users.view",
 };

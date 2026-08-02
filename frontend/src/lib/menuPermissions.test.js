@@ -14,6 +14,10 @@ test("every top-level nav route names its menu permission", () => {
     "/stores": "menu.stores.view",
     "/history": "menu.history.view",
     "/receivers": "menu.receivers.view",
+    // The fleet-wide Devices view shows the same Receivers from another angle,
+    // so it deliberately shares menu.receivers.view rather than inventing a
+    // second permission that could grant one view and withhold the other.
+    "/devices": "menu.receivers.view",
     "/logs": "menu.logs.view",
     "/users": "menu.users.view",
   });

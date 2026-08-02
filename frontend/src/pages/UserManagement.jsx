@@ -19,8 +19,12 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   UserPlus, RefreshCw, KeyRound, Pencil, Power, Archive, ArchiveRestore, ShieldAlert, Trash2,
-  ShieldCheck, MapPin,
+  ShieldCheck, MapPin, ShieldX,
 } from "lucide-react";
+import { useAdminList } from "@/lib/adminList";
+import {
+  FilterBar, SearchInput, FilterSelect, ListState, Pager, DestructiveModal,
+} from "@/components/AdminFilters";
 
 const ROLES = ["OWNER", "ADMIN", "BROADCASTER", "VIEWER"];
 
@@ -48,6 +52,9 @@ const STATE_STYLE = {
   active: "bg-emerald-100 text-emerald-800 border-emerald-200",
   disabled: "bg-amber-100 text-amber-900 border-amber-200",
   archived: "bg-slate-200 text-slate-600 border-slate-300",
+  // Deliberately red, not grey: archived is reversible and deleted is not,
+  // and the two must never look like variations of the same thing.
+  deleted: "bg-red-100 text-red-800 border-red-300",
 };
 
 /** Which roles a role may act on. Mirrors rbac._MANAGEABLE_ROLES exactly.
@@ -77,7 +84,13 @@ function Badge({ text, styles }) {
 
 export default function UserManagement() {
   const { user: me, can } = useAuth();
-  const [users, setUsers] = React.useState(null);
+  const list = useAdminList("/users/search", {
+    q: "", role: "", state: "",
+    scope_store_id: "", scope_city: "", scope_region: "",
+    include_deleted: false,
+  });
+  const users = list.items;
+  const [scopeOptions, setScopeOptions] = React.useState({ regions: [], cities: [], stores: [] });
   const [error, setError] = React.useState("");
   const [notice, setNotice] = React.useState("");
   const [busy, setBusy] = React.useState(false);
@@ -87,23 +100,20 @@ export default function UserManagement() {
   const [deleting, setDeleting] = React.useState(null);
   const [editingRights, setEditingRights] = React.useState(null);
   const [editingScope, setEditingScope] = React.useState(null);
+  const [purging, setPurging] = React.useState(null);
+  const [purgeError, setPurgeError] = React.useState("");
 
   const myRole = me?.role || "VIEWER";
   const canManage = (role) => (MANAGEABLE[myRole] || new Set()).has(role);
   const isSuperAdmin = myRole === "OWNER";
 
-  const load = React.useCallback(async () => {
-    setError("");
-    try {
-      const response = await api.get("/users");
-      setUsers(response.data);
-    } catch (failure) {
-      setUsers([]);
-      setError(describe(failure, "The list of Users could not be loaded."));
-    }
-  }, []);
+  const load = list.reload;
 
-  React.useEffect(() => { load(); }, [load]);
+  React.useEffect(() => {
+    api.get("/receivers/filter-options")
+      .then(({ data }) => setScopeOptions(data))
+      .catch(() => { /* the Scope filters simply stay empty */ });
+  }, []);
 
   /** Show what the server said, not a guess.
    *
@@ -188,40 +198,75 @@ export default function UserManagement() {
         </div>
       )}
 
-      {users === null && (
-        <p className="text-sm text-slate-500" data-testid="users-loading">Loading Usersâ€¦</p>
-      )}
-      {users !== null && users.length === 0 && !error && (
-        <p className="text-sm text-slate-500" data-testid="users-empty">
-          There are no HQ Users to show.
-        </p>
-      )}
+      <FilterBar onClear={list.clearFilters} activeCount={list.activeCount}
+                 total={list.total} loading={list.loading}>
+        <SearchInput value={list.filters.q} onChange={(v) => list.setFilter("q", v)}
+                     placeholder="Search username or name…" testId="users-search" />
+        <FilterSelect label="Role" testId="users-role" allLabel="All roles"
+                      value={list.filters.role}
+                      options={ROLES.map((r) => ({ value: r, label: roleLabel(r) }))}
+                      onChange={(v) => list.setFilter("role", v)} />
+        <FilterSelect label="State" testId="users-state" allLabel="Any state"
+                      value={list.filters.state}
+                      options={[{ value: "active", label: "Active" },
+                                { value: "disabled", label: "Disabled" },
+                                { value: "archived", label: "Archived" },
+                                { value: "deleted", label: "Deleted" }]}
+                      onChange={(v) => list.setFilter("state", v)} />
+        <FilterSelect label="Store Scope" testId="users-scope-store" allLabel="Any Store"
+                      value={list.filters.scope_store_id}
+                      options={scopeOptions.stores.map((s) => ({
+                        value: String(s.id), label: `${s.store_name} (${s.store_code})` }))}
+                      onChange={(v) => list.setFilter("scope_store_id", v)} />
+        <FilterSelect label="City Scope" testId="users-scope-city" allLabel="Any City"
+                      value={list.filters.scope_city} options={scopeOptions.cities}
+                      onChange={(v) => list.setFilter("scope_city", v)} />
+        <FilterSelect label="Zone Scope" testId="users-scope-region" allLabel="Any Zone"
+                      value={list.filters.scope_region} options={scopeOptions.regions}
+                      onChange={(v) => list.setFilter("scope_region", v)} />
+        <FilterSelect label="Deleted" testId="users-include-deleted" allLabel="Hide deleted"
+                      value={list.filters.include_deleted ? "yes" : ""}
+                      options={[{ value: "yes", label: "Show deleted accounts" }]}
+                      onChange={(v) => list.setFilter("include_deleted", v === "yes")} />
+      </FilterBar>
 
-      {users !== null && users.length > 0 && (
+      <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
         <table className="w-full text-sm" data-testid="users-table">
           <thead className="text-left text-slate-500">
             <tr>
-              <th className="py-2">Name</th>
-              <th>Username</th>
-              <th>Role</th>
-              <th>Status</th>
-              <th className="text-right">Actions</th>
+              <th className="py-2 px-3">Name</th>
+              <th className="px-3">Username</th>
+              <th className="px-3">Role</th>
+              <th className="px-3">Status</th>
+              <th className="px-3 text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {users.map((row) => {
+            <ListState loading={list.loading} error={list.error}
+                       empty={!users.length} colSpan={5} onRetry={list.reload}
+                       emptyText="No accounts match these filters." />
+            {!list.loading && !list.error && users.map((row) => {
               const mine = me && row.id === me.id;
-              const allowed = canManage(row.role) && !mine;
+              const purged = row.lifecycle_state === "deleted";
+              // A permanently deleted account is a tombstone kept so history
+              // stays readable. Nothing may be done to it - and in particular
+              // there is no Restore anywhere on this page for one.
+              const allowed = canManage(row.role) && !mine && !purged;
               return (
                 <tr key={row.id} className="border-t" data-testid={`user-row-${row.username}`}>
-                  <td className="py-2">{row.display_name}</td>
-                  <td className="text-slate-600">{row.username}</td>
-                  <td><Badge text={roleLabel(row.role)} styles={ROLE_STYLE[row.role] || ROLE_STYLE.VIEWER} /></td>
-                  <td>
-                    <Badge text={row.lifecycle_state}
+                  <td className="py-2 px-3">{row.display_name}</td>
+                  <td className="px-3 text-slate-600">{row.username}</td>
+                  <td className="px-3"><Badge text={roleLabel(row.role)} styles={ROLE_STYLE[row.role] || ROLE_STYLE.VIEWER} /></td>
+                  <td className="px-3">
+                    <Badge text={purged ? "permanently deleted" : row.lifecycle_state}
                            styles={STATE_STYLE[row.lifecycle_state] || STATE_STYLE.disabled} />
                   </td>
-                  <td className="space-x-2 text-right">
+                  <td className="px-3 space-x-2 text-right">
+                    {purged && (
+                      <span className="text-xs text-slate-500" data-testid={`purged-${row.username}`}>
+                        Kept only so history stays readable. This cannot be restored.
+                      </span>
+                    )}
                     {/* Editing a name is not a lock-out, so it is offered for
                         your own account too. */}
                     {((allowed && can("users.update")) || mine) && (
@@ -304,13 +349,27 @@ export default function UserManagement() {
                         <MapPin size={14} /> Scope
                       </button>
                     )}
+                    {/* Irreversible. Separate from Delete above, which only
+                        ever removes an account that never did anything: this
+                        one works on an account WITH history, and keeps that
+                        history by leaving a tombstone behind. */}
+                    {allowed && can("users.delete_permanently") && row.role !== "OWNER" && (
+                      <button type="button" disabled={busy}
+                              onClick={() => { setPurgeError(""); setPurging(row); }}
+                              className="inline-flex items-center gap-1 rounded border border-red-400 bg-red-50 px-2 py-1 text-red-800"
+                              data-testid={`purge-${row.username}`}>
+                        <ShieldX size={14} /> Delete Permanently
+                      </button>
+                    )}
                   </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
-      )}
+        <Pager page={list.page} pages={list.pages} total={list.total}
+               hasMore={list.hasMore} onPage={list.setPage} />
+      </div>
 
       {creating && (
         <CreateUserForm
@@ -352,6 +411,33 @@ export default function UserManagement() {
                                { params: { confirm: typed } }),
               `${deleting.username} was permanently deleted.`);
             if (ok) setDeleting(null);
+          }}
+        />
+      )}
+
+      {purging && (
+        <DestructiveModal
+          testIdPrefix="purge-user"
+          title={`Permanently delete ${purging.username}?`}
+          count={1} countNoun="account"
+          confirmWord={purging.username}
+          warning="The account is signed out everywhere immediately and can never sign in or be restored. Its username stays reserved and its rows in Broadcast History and the audit trail stay readable — that is the point of keeping the record."
+          busy={busy} error={purgeError}
+          onCancel={() => { setPurging(null); setPurgeError(""); }}
+          onConfirm={async ({ typed, acknowledged }) => {
+            setBusy(true);
+            setPurgeError("");
+            try {
+              await api.post(`/users/${purging.id}/delete-permanently`,
+                             { confirm: typed, acknowledged });
+              setNotice(`${purging.username} was permanently deleted.`);
+              setPurging(null);
+              await load();
+            } catch (failure) {
+              setPurgeError(describe(failure, "That account could not be deleted."));
+            } finally {
+              setBusy(false);
+            }
           }}
         />
       )}
@@ -405,6 +491,10 @@ function RightsEditor({ user, onCancel, onSaved }) {
   const [saveError, setSaveError] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
+  const [search, setSearch] = React.useState("");
+  const [category, setCategory] = React.useState("");
+  const [effect, setEffect] = React.useState("");
+  const [overriddenOnly, setOverriddenOnly] = React.useState(false);
 
   const load = React.useCallback(async () => {
     setLoadError("");
@@ -452,15 +542,54 @@ function RightsEditor({ user, onCancel, onSaved }) {
     }
   };
 
+  /**
+   * DELIBERATE EXCEPTION: Rights filtering is client-side.
+   *
+   * Every other admin list on this product filters on the server, because
+   * every other one is unbounded - Logs and History grow forever, and Stores,
+   * Users and Devices grow with the business. The permission catalog does
+   * not. It is 29 fixed rows defined in backend/permission_catalog.py, all of
+   * them already fetched by the single request above, and a new one appears
+   * only when somebody writes code to add it. Sending a round trip per
+   * keystroke to narrow 29 rows already in memory would be slower and would
+   * add an endpoint whose only job is re-filtering a constant.
+   *
+   * The rule this exception is measured against: filter on the server when
+   * the row count is driven by data, on the client when it is driven by
+   * source code. If the catalog ever becomes data-driven, this moves.
+   */
+  const visibleCount = React.useMemo(() => {
+    if (!rows) return 0;
+    return rows.filter((row) => matchesRightsFilter(row)).length;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, search, category, effect, overriddenOnly, pending]);
+
+  function matchesRightsFilter(row) {
+    const needle = search.trim().toLowerCase();
+    if (needle && !`${row.label} ${row.code}`.toLowerCase().includes(needle)) return false;
+    if (category && row.group !== category) return false;
+    if (overriddenOnly && effectiveOverride(row) === "INHERIT") return false;
+    if (effect && effectiveOverride(row) !== effect) return false;
+    return true;
+  }
+
+  const categories = React.useMemo(() => {
+    if (!rows) return [];
+    const present = new Set(rows.map((row) => row.group));
+    return GROUP_ORDER.filter((g) => present.has(g));
+  }, [rows]);
+
   const grouped = React.useMemo(() => {
     if (!rows) return [];
     const byGroup = new Map();
     for (const row of rows) {
+      if (!matchesRightsFilter(row)) continue;
       if (!byGroup.has(row.group)) byGroup.set(row.group, []);
       byGroup.get(row.group).push(row);
     }
     return GROUP_ORDER.filter((g) => byGroup.has(g)).map((g) => [g, byGroup.get(g)]);
-  }, [rows]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, search, category, effect, overriddenOnly, pending]);
 
   return (
     <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
@@ -485,6 +614,54 @@ function RightsEditor({ user, onCancel, onSaved }) {
           {!rows && !loadError && (
             <p className="text-sm text-slate-500" data-testid="rights-loading">Loading rights…</p>
           )}
+
+          {rows && (
+            <div className="border rounded-md p-3 space-y-2" data-testid="rights-filter-bar">
+              <div className="flex flex-wrap items-end gap-2">
+                <SearchInput value={search} onChange={setSearch}
+                             placeholder="Search rights…" testId="rights-search" />
+                <FilterSelect label="Category" testId="rights-category" allLabel="All categories"
+                              value={category} options={categories} onChange={setCategory} />
+                <FilterSelect label="Setting" testId="rights-effect" allLabel="Any setting"
+                              value={effect}
+                              options={[{ value: "ALLOW", label: "Allow" },
+                                        { value: "DENY", label: "Deny" },
+                                        { value: "INHERIT", label: "Inherit" }]}
+                              onChange={setEffect} />
+                <label className="flex items-center gap-2 text-xs text-slate-600 pb-1.5">
+                  <input type="checkbox" checked={overriddenOnly}
+                         data-testid="rights-overridden-only"
+                         onChange={(e) => setOverriddenOnly(e.target.checked)} />
+                  Explicit overrides only
+                </label>
+              </div>
+              <div className="flex items-center justify-between border-t pt-2 text-xs text-slate-500">
+                <span data-testid="rights-result-count">
+                  <span className="font-semibold text-slate-700">{visibleCount}</span> of {rows.length} rights
+                </span>
+                {(search || category || effect || overriddenOnly) && (
+                  <button type="button" data-testid="rights-clear-filters"
+                          onClick={() => { setSearch(""); setCategory(""); setEffect(""); setOverriddenOnly(false); }}
+                          className="rounded border px-2 py-1 hover:bg-slate-50">
+                    Clear Filters
+                  </button>
+                )}
+              </div>
+              {/* Said on screen as well as in the code, so the exception is not
+                  mistaken for an oversight. */}
+              <p className="text-[11px] text-slate-400">
+                These filters run in the browser: the rights catalog is a fixed list of
+                {" "}{rows.length} entries that is already fully loaded.
+              </p>
+            </div>
+          )}
+
+          {rows && visibleCount === 0 && (
+            <p className="text-sm text-slate-500" data-testid="rights-empty">
+              No rights match these filters.
+            </p>
+          )}
+
           {grouped.map(([group, groupRows]) => (
             <div key={group}>
               <h3 className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">{group}</h3>
