@@ -142,10 +142,15 @@ def permanently_delete_user_with_history(
 
         if str(row.role).upper() in {"OWNER", "SUPER_ADMIN"}:
             remaining = connection.execute(
+                # is_active is BOOLEAN. Writing the literal 1 works on SQLite,
+                # which has no boolean type, and PostgreSQL refuses it outright:
+                # "column is of type boolean but expression is of type integer".
+                # A bound Python bool renders correctly on both, so there is no
+                # dialect branch to keep in step.
                 text("SELECT COUNT(*) FROM hq_users WHERE UPPER(role) IN "
-                     "('OWNER','SUPER_ADMIN') AND is_active = 1 AND id <> :i "
+                     "('OWNER','SUPER_ADMIN') AND is_active = :active AND id <> :i "
                      "AND (lifecycle_state IS NULL OR lifecycle_state <> 'deleted')"),
-                {"i": user_id}).scalar_one()
+                {"i": user_id, "active": True}).scalar_one()
             if remaining == 0:
                 raise UserDeletionRefused(
                     "This is the last active SUPER ADMIN. Deleting it would leave "
@@ -159,12 +164,12 @@ def permanently_delete_user_with_history(
         # history readable and keeps the name reserved by the UNIQUE index.
         connection.execute(
             text(
-                "UPDATE hq_users SET lifecycle_state = 'deleted', is_active = 0, "
+                "UPDATE hq_users SET lifecycle_state = 'deleted', is_active = :inactive, "
                 "session_version = session_version + 1, password_hash = :dead, "
                 "deleted_at = :now, deleted_by = :actor WHERE id = :i"
             ),
             {"dead": "deleted-account-no-password-" + secrets.token_hex(16),
-             "now": now, "actor": actor_user_id, "i": user_id},
+             "now": now, "actor": actor_user_id, "i": user_id, "inactive": False},
         )
 
         import json as _json

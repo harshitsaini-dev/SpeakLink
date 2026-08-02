@@ -73,7 +73,11 @@ def permanently_delete_store_with_history(
     """
     now = datetime.now(timezone.utc).isoformat()
     with engine.begin() as connection:
-        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        # SQLite needs to be ASKED to enforce foreign keys; PostgreSQL always
+        # does and rejects the statement as a syntax error. Guarded rather than
+        # removed, because on SQLite this is what makes the guard real.
+        if engine.dialect.name == "sqlite":
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
         row = connection.execute(
             text("SELECT id, store_code, store_name, lifecycle_state, is_active "
                  "FROM stores WHERE id = :i"),
@@ -189,30 +193,31 @@ def permanently_delete_store_with_history(
         import uuid as _uuid
         connection.execute(
             text(
-                "UPDATE stores SET lifecycle_state = 'deleted', is_active = 0, "
-                "deleted_at = :now, deleted_by = :actor, receiver_token = :fresh_token, "
-                "updated_at = :now WHERE id = :store_id"
+                # is_active is BOOLEAN: a bound Python bool, never the literal 0.
+                # PostgreSQL rejects the integer outright, and SQLite accepts it,
+                # so the literal is a bug that only ever shows up in production.
+                # deleted_at is VARCHAR(40) and updated_at is a DATETIME, so they
+                # cannot share one bind parameter: PostgreSQL deduces a single
+                # type per placeholder and refuses with "inconsistent types
+                # deduced for parameter". SQLite, having no such deduction,
+                # accepted it - which is why this only ever failed in production.
+                "UPDATE stores SET lifecycle_state = 'deleted', is_active = :inactive, "
+                "deleted_at = :now_text, deleted_by = :actor, "
+                "receiver_token = :fresh_token, updated_at = :now_stamp "
+                "WHERE id = :store_id"
             ),
-            {"now": now, "actor": actor_user_id, "store_id": store_id,
-             "fresh_token": _uuid.uuid4().hex},
+            {"now_text": now, "now_stamp": datetime.now(timezone.utc),
+             "actor": actor_user_id, "store_id": store_id,
+             "fresh_token": _uuid.uuid4().hex, "inactive": False},
         )
 
-        connection.exec_driver_sql(
-            """
-            CREATE TABLE IF NOT EXISTS store_deletion_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                actor_user_id INTEGER NOT NULL,
-                store_id INTEGER NOT NULL,
-                store_code TEXT NOT NULL,
-                store_name TEXT NOT NULL,
-                dependency_counts_json TEXT NOT NULL,
-                device_public_ids_json TEXT NOT NULL,
-                enrollment_codes_revoked INTEGER NOT NULL,
-                credentials_revoked INTEGER NOT NULL,
-                deleted_at TEXT NOT NULL
-            )
-            """
-        )
+        # One portable definition, created only if absent - the same pattern
+        # user_deletion and admin_records use. The raw CREATE TABLE this
+        # replaces carried AUTOINCREMENT, which is SQLite-only syntax that
+        # PostgreSQL rejects outright; it predates postgres_schema.
+        import postgres_schema as _postgres_schema
+        _postgres_schema.store_deletion_events.create(bind=connection, checkfirst=True)
+
         import json as _json
         connection.execute(
             text(
@@ -230,7 +235,13 @@ def permanently_delete_store_with_history(
              "creds_revoked": credentials_revoked, "now": now},
         )
 
-        violations = connection.execute(text("PRAGMA foreign_key_check")).all()
+        # PRAGMA foreign_key_check is SQLite-only. PostgreSQL has no equivalent
+        # and needs none: it enforces every constraint as the statement runs,
+        # so reaching this line at all already proves integrity held.
+        violations = (
+            connection.execute(text("PRAGMA foreign_key_check")).all()
+            if connection.dialect.name == "sqlite" else []
+        )
         if violations:
             # Should be unreachable - nothing was deleted, only updated - but
             # a change that would break referential integrity is refused

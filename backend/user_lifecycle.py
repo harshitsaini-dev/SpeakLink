@@ -158,10 +158,13 @@ def ensure_user_lifecycle_schema(engine: Engine) -> None:
     decide that everybody is suddenly archived, and it must not decide that
     somebody who was switched off is active again.
     """
+    # Inspector, never PRAGMA - see the note in store_lifecycle. This runs at
+    # every start-up, so the SQLite-only form would stop HQ booting against
+    # PostgreSQL rather than degrading one feature.
+    from sqlalchemy import inspect
+
+    columns = {c["name"] for c in inspect(engine).get_columns("hq_users")}
     with engine.begin() as connection:
-        columns = {
-            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(hq_users)")
-        }
         for name, definition in (
             ("lifecycle_state", "VARCHAR(20)"),
             ("display_name", "VARCHAR(200)"),
