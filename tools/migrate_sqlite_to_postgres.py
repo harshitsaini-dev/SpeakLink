@@ -272,14 +272,44 @@ def _coerce_row(row: dict, target) -> dict:
 def _repair_sequences(connection) -> None:
     """After preserving explicit ids, move every SERIAL sequence past the
     highest migrated id - so the next INSERT through the running
-    application never collides with migrated history."""
+    application never collides with migrated history.
+
+    The set of tables is ASKED OF THE DATABASE rather than read from the
+    hand-maintained SEQUENCE_TABLES list. That list had drifted: it omitted
+    ``login_security_state``, whose sequence therefore stayed at
+    (last_value=1, is_called=false) while rows 1 and 2 existed - so the next
+    login-security write would have failed on a duplicate key. A list that has
+    to be updated by hand every time a table gains an id column is a list that
+    will be wrong again.
+
+    ``pg_get_serial_sequence`` returns NULL for a table whose id is not backed
+    by a sequence (composite or text primary keys), so those are skipped
+    without needing to be enumerated either.
+    """
     from sqlalchemy import text
 
-    for table in SEQUENCE_TABLES:
+    # A pure catalog read. pg_get_serial_sequence() cannot be used as the
+    # filter here: PostgreSQL is free to evaluate it before the join that
+    # restricts to tables having an 'id' column, and it RAISES rather than
+    # returning NULL for a table that has none ("column id of relation
+    # permissions does not exist"). information_schema answers the same
+    # question without executing anything that can fail.
+    tables = connection.execute(text(
+        "SELECT table_name FROM information_schema.columns "
+        "WHERE table_schema = current_schema() "
+        "AND column_name = 'id' "
+        # SERIAL carries a nextval default; a GENERATED ... AS IDENTITY column
+        # has NO default at all and is flagged separately. Matching only the
+        # first would repeat the original mistake in a new form.
+        "AND (column_default LIKE 'nextval(%' OR is_identity = 'YES') "
+        "ORDER BY table_name"
+    )).scalars().all()
+
+    for table in tables:
         connection.execute(text(
-            f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
-            f"COALESCE((SELECT MAX(id) FROM {table}), 1), "
-            f"(SELECT MAX(id) FROM {table}) IS NOT NULL)"
+            f'SELECT setval(pg_get_serial_sequence(\'"{table}"\', \'id\'), '
+            f'COALESCE((SELECT MAX(id) FROM "{table}"), 1), '
+            f'(SELECT MAX(id) FROM "{table}") IS NOT NULL)'
         ))
 
 
