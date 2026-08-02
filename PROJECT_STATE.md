@@ -4394,3 +4394,118 @@ instruction that it waits for frontend + Playwright + a disposable
 PostgreSQL proof.
 
 Status at this point: **READY_FOR_DISPOSABLE_POSTGRES_VALIDATION**.
+
+---
+
+## Deployment hosting discovery (research round, nothing deployed)
+
+Discovery only. No code changed, no cloud resource created, no router port
+opened, nothing installed, nothing pushed.
+
+### Requirements read out of the code, not assumed
+
+| Property | Value | Source |
+|---|---|---|
+| WebSocket routes | 3 (`/api/ws/receiver`, `/api/ws/hq`, `/api/ws/broadcaster`) | `server.py` |
+| Sockets per Store | 1 per enrolled Device; primary carries audio, standbys carry none | `ws_manager.py` |
+| Heartbeat | every 5 s; stale 15 s; offline 30 s | `receiver_contract.py` |
+| Audio | WebM/Opus mono, 32 kbps target, 250 ms chunks (4/s) | `audio_protocol.py` |
+| Server audio work | **none** - a pure byte relay. FFmpeg is a RECEIVER requirement only | `audio_streaming.py` |
+| Measured cost | 86.1 MB RSS and ~4 % of one core at 40 Receivers | `docs/LOAD_TEST_REPORT.md` |
+| Restart safety | in-memory socket state only; Agents reconnect with jittered backoff and **do not re-enrol** | `ws_manager.py`, `tools/receiver_agent.py` |
+| Inbound ports | HTTPS/WSS on 443 is sufficient; no arbitrary TCP/UDP | - |
+
+### The constraint that decides the hosting question
+
+`receiver_key_ring()` opens a **Windows DPAPI**-sealed HMAC container on the
+local filesystem, and `DpapiProtector` refuses to run when
+`sys.platform != "win32"`. So the server as it stands needs **Windows and a
+persistent disk**, and that is not a data-storage requirement Supabase can
+absorb - it is a key-custody requirement. Any host without a persistent disk
+(every free PaaS tier examined) cannot carry Receiver Device authentication
+without either a Linux key-custody port or the staging-only
+`ECHOCAST_KEY_PROTECTOR=fake`, which must never hold real Store credentials.
+
+### Bandwidth, so platforms could be rejected on evidence
+
+32 kbps/Store payload + 10 % for WebSocket/TLS/TCP framing:
+
+| Stores | 1 | 10 | 40 | 50 | 100 |
+|---|---|---|---|---|---|
+| Wire | 35 kbps | 352 kbps | 1.41 Mbps | 1.76 Mbps | **3.52 Mbps** |
+
+A 100-Store broadcast costs ~26 MB/minute, ~1.58 GB/hour. Idle heartbeat at
+100 Stores is ~3.6 GB/month outbound (the server sends no per-heartbeat
+reply, and heartbeats write nothing to the database). **Bandwidth is not the
+binding constraint** - sleep, restarts, instance-hours and terms are.
+
+### Decisions recorded
+
+* **No reputable unrestricted lifetime-free, no-card managed compute was
+  proven to exist.** Oracle Cloud is the one credible always-free VM and the
+  operator excludes it (card/identity verification). Everything else found in
+  search was an SEO content farm and is not recommended at any level.
+* **Render Free = PILOT_ONLY.** Singapore region suits Delhi, WebSockets are
+  supported and inbound WebSocket messages reset the idle timer. But it caps
+  at 750 instance-hours/month, has **no persistent disk** (so no DPAPI
+  container), the provider restarts services at will, the card requirement at
+  signup is **UNPROVEN** (docs imply none, Render's own feedback board carries
+  repeated reports of one), and Render's documentation says plainly: *"Do not
+  use them for production applications."*
+* **Cloudflare Workers = REJECT for the current architecture.** Not because
+  Workers are weak, but because the execution model is different: 10 ms CPU
+  per request, 128 MB per isolate, WebSocket server state only via Durable
+  Objects, no OS, no filesystem, no subprocess, and no established path for
+  SQLAlchemy 2 + psycopg 3 or DPAPI. Adopting it means rewriting `ws_manager`,
+  `audio_streaming`, `receiver_auth_*`, `key_custody*` and the DB layer -
+  precisely the modules the 2716-test suite covers. No benefit justifies that
+  now.
+* **Self-hosted Windows HQ + Cloudflare Tunnel = strongest zero-card pilot
+  candidate.** It is the only option that preserves DPAPI custody, the Windows
+  runtime, one Uvicorn worker and no Docker; it works behind CGNAT because the
+  tunnel is outbound-only; it gives a permanent public hostname so **Receivers
+  never re-enrol when the server moves**; and Cloudflare states WebSockets are
+  supported on all plans. Cloudflare's own Delhi edge suits the Stores.
+* **Production approval remains BLOCKED**, on two things and not on opinion:
+  1. **Cloudflare Service-Specific Terms §2.8**, which reserves the right to
+     limit CDN use for serving *"video or a disproportionate percentage of
+     pictures, audio files, or other large files"* without the relevant paid
+     services. Whether sustained WebSocket Opus fan-out to 100 endpoints falls
+     inside that is **not settled by the text**, and the remedy is at
+     Cloudflare's discretion. This must be answered by Cloudflare in writing
+     before the fleet grows past a pilot.
+  2. **No tunnel soak or load evidence exists yet** - the 40-Receiver load
+     test was loopback, with the tunnel absent from the path.
+
+  Also note a named tunnel requires a domain registered on the Cloudflare
+  account. That is a real cost (~Rs 1,000/year), so this route is
+  **no-card**, not **zero-cost**.
+* `trycloudflare.com` quick tunnels are rejected outright: 200 concurrent
+  requests, no SLA, and Cloudflare documents them as *"testing and development
+  only"*.
+* **Fly.io rejected** - *"All organizations ... require a credit card on
+  file."* **Railway rejected** - $5 one-time trial then a paid plan.
+  **Hugging Face Spaces rejected** - Docker/Gradio Spaces now require a paid
+  plan, free hardware sleeps, and outbound is limited to ports 80/443/8080 so
+  the Supabase pooler is unreachable. **PythonAnywhere free rejected** -
+  outbound is whitelist-restricted, so the Supabase pooler is unreachable, and
+  ASGI/WebSocket support is beta. **Koyeb** no longer advertises a free
+  compute tier. **Vercel/Netlify** cannot host a long-lived WebSocket server
+  at all, though either (or Cloudflare Pages) is fine for the React bundle.
+
+### Two deployment facts found in code, not yet acted on
+
+1. The frontend resolves the API origin as `{page-protocol}//{page-host}:8000`
+   unless `REACT_APP_BACKEND_URL` is set at build time (`frontend/src/lib/api.js`).
+   Behind any 443-only host that port does not exist, so the production bundle
+   must be built with the public origin.
+2. HQ currently runs two processes on two ports (backend 8000, frontend 3000)
+   via `tools/hq_runtime.py`, while most managed hosts expose one.
+
+Neither is a defect - both follow from a LAN-first design - and neither was
+changed in this round.
+
+### Verdict
+
+`PILOT_ONLY_ZERO_CARD_OPTION_FOUND`. A zero-card pilot path exists. It is not
+yet proven as a zero-card production path for 50-100 Stores.
