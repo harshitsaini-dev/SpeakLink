@@ -79,6 +79,16 @@ let webpackConfig = {
       },
     },
   },
+  // Jest resolves modules itself and knows nothing about the webpack alias
+  // below, so a unit test importing anything that uses "@/..." failed to run
+  // at all. The two must name the same directory.
+  jest: {
+    configure: {
+      moduleNameMapper: {
+        '^@/(.*)$': '<rootDir>/src/$1',
+      },
+    },
+  },
   webpack: {
     alias: {
       '@': path.resolve(__dirname, 'src'),

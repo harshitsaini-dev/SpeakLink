@@ -11,6 +11,7 @@ import StoreManagement from "@/pages/StoreManagement";
 import BroadcastHistory from "@/pages/BroadcastHistory";
 import ReceiverStatus from "@/pages/ReceiverStatus";
 import ReceiverDevices from "@/pages/ReceiverDevices";
+import ReceiverDeviceFleet from "@/pages/ReceiverDeviceFleet";
 import SystemLogs from "@/pages/SystemLogs";
 import UserManagement from "@/pages/UserManagement";
 import ChangePassword from "@/pages/ChangePassword";
@@ -44,6 +45,10 @@ export default function App() {
                 this page can show - an enrolment code and a rotated credential -
                 live in component state only, so a reload loses them. */}
             <Route path="/stores/:storeId/devices" element={<ReceiverDevices />} />
+            {/* The fleet-wide view. Same Devices, asked about the other way
+                round: "where is that Device?" rather than "what is in this
+                Store?". Enrolment and credentials stay on the per-Store page. */}
+            <Route path="/devices" element={<ReceiverDeviceFleet />} />
             <Route path="/history" element={<BroadcastHistory />} />
             <Route path="/receivers" element={<ReceiverStatus />} />
             <Route path="/logs" element={<SystemLogs />} />

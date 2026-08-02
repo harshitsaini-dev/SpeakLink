@@ -82,15 +82,21 @@ const ALL_PERMISSION_CODES = [
   'menu.receivers.view', 'devices.enrollment.create', 'devices.primary.assign',
   'devices.rotate', 'devices.disable', 'devices.revoke', 'devices.archive',
   'devices.delete_permanently',
-  'menu.history.view',
-  'menu.logs.view',
+  'menu.history.view', 'broadcast_history.archive', 'broadcast_history.delete_permanently',
+  'menu.logs.view', 'system_logs.archive', 'system_logs.delete_permanently',
   'menu.users.view', 'users.create', 'users.update', 'users.disable', 'users.permissions.manage',
+  'users.delete_permanently',
+];
+
+/** The codes an ADMIN never holds by default. Mirrors permission_catalog.DESTRUCTIVE_CODES. */
+const DESTRUCTIVE_CODES = [
+  'stores.delete_permanently', 'devices.delete_permanently', 'users.delete_permanently',
+  'broadcast_history.delete_permanently', 'system_logs.delete_permanently',
 ];
 const DEFAULT_ROLE_PERMISSIONS = {
   OWNER: ALL_PERMISSION_CODES,
   ADMIN: ALL_PERMISSION_CODES.filter(
-    (c) => c !== 'users.permissions.manage' && c !== 'devices.delete_permanently'
-      && c !== 'stores.delete_permanently'),
+    (c) => c !== 'users.permissions.manage' && !DESTRUCTIVE_CODES.includes(c)),
   BROADCASTER: ['menu.broadcast.view', 'broadcast.start', 'broadcast.stop',
                 'broadcast.emergency_stop', 'menu.history.view', 'menu.receivers.view',
                 'menu.stores.view'],
@@ -114,6 +120,30 @@ const HQ_USERS = [
     is_active: false, lifecycle_state: 'disabled' },
   { id: 4, username: 'anita', display_name: 'Anita Rao', role: 'VIEWER',
     is_active: false, lifecycle_state: 'archived' },
+];
+
+//: Structured System Log entries and Broadcast sessions, in the shape the
+//: /search endpoints return - including archived_at, which the row itself
+//: must carry so the UI can tell an archived row from a live one while
+//: showing both.
+const LOG_ENTRIES = [
+  { id: 101, level: 'info', message: 'Broadcast started for UN', created_at: '2026-08-01T09:00:00+00:00',
+    actor_user_id: 1, store_id: 1, device_public_id: null, archived_at: null },
+  { id: 102, level: 'warn', message: 'Receiver ASR heartbeat late', created_at: '2026-08-01T09:05:00+00:00',
+    actor_user_id: null, store_id: 2, device_public_id: null, archived_at: null },
+  { id: 103, level: 'error', message: 'Playback failed at Dwarka Mor', created_at: '2026-08-01T09:10:00+00:00',
+    actor_user_id: 2, store_id: 5, device_public_id: null, archived_at: null },
+];
+
+const HISTORY_SESSIONS = [
+  { id: 8, campaign_name: 'Morning offer', started_by: 1, started_at: '2026-08-01T09:00:00+00:00',
+    ended_at: '2026-08-01T09:02:00+00:00', status: 'completed', target_mode: 'selected',
+    selected_store_count: 2, online_store_count: 1, offline_store_count: 1, notes: null,
+    created_at: '2026-08-01T09:00:00+00:00', archived_at: null },
+  { id: 9, campaign_name: 'Evening reminder', started_by: 2, started_at: '2026-08-01T18:00:00+00:00',
+    ended_at: '2026-08-01T18:01:00+00:00', status: 'completed', target_mode: 'all',
+    selected_store_count: 3, online_store_count: 1, offline_store_count: 2, notes: null,
+    created_at: '2026-08-01T18:00:00+00:00', archived_at: null },
 ];
 
 const json = (body, status = 200) => ({
@@ -184,6 +214,13 @@ async function mockBackend(page, options = {}) {
     userActions: [],
     passwordResets: [],
     passwordChanges: [],
+    logs: options.logs || LOG_ENTRIES.map((row) => ({ ...row })),
+    sessions: options.sessions || HISTORY_SESSIONS.map((row) => ({ ...row })),
+    //: Every bulk request the page sent, verbatim. This is how a spec proves
+    //: Select All Filtered posted a FILTER rather than an enumerated id list -
+    //: the distinction is invisible in the resulting list either way.
+    bulkCalls: [],
+    deletePermanentlyCalls: [],
   };
 
   await page.route('**/api/**', async (route) => {
@@ -218,6 +255,153 @@ async function mockBackend(page, options = {}) {
                                   permissions: state.permissions }));
     }
 
+    // ---- Server-side search, filtering and paging --------------------------
+    // Shaped exactly like admin_search.Page.as_dict: items/total/page/
+    // page_size/pages/has_more. The frontend reads has_more to enable Next,
+    // so a mock that omitted it would make paging look broken here and work
+    // against the real server, or the reverse.
+    const paged = (rows) => {
+      const page = Number(url.searchParams.get('page') || 1);
+      const size = Number(url.searchParams.get('page_size') || 50);
+      const start = (page - 1) * size;
+      const items = rows.slice(start, start + size);
+      return {
+        items, total: rows.length, page, page_size: size,
+        pages: Math.max(1, Math.ceil(rows.length / size)),
+        has_more: start + size < rows.length,
+      };
+    };
+    const q = (url.searchParams.get('q') || '').toLowerCase();
+    const param = (name) => url.searchParams.get(name);
+    const flag = (name) => param(name) === 'true';
+
+    if (method === 'GET' && path === '/receivers/filter-options') {
+      const visible = state.stores.filter((s) => s.lifecycle_state !== 'deleted');
+      return route.fulfill(json({
+        regions: [...new Set(visible.map((s) => s.region))].sort(),
+        cities: [...new Set(visible.map((s) => s.city))].sort(),
+        stores: visible.map((s) => ({ id: s.id, store_code: s.store_code, store_name: s.store_name })),
+      }));
+    }
+
+    if (method === 'GET' && path === '/receivers/search') {
+      if (state.storesListStatus !== 200) {
+        return route.fulfill(json({ detail: 'Receiver Status could not be loaded.' },
+                                  state.storesListStatus));
+      }
+      let rows = state.stores
+        .filter((s) => s.lifecycle_state !== 'deleted')
+        .map((s) => ({
+          id: s.id, store_code: s.store_code, store_name: s.store_name,
+          city: s.city, region: s.region, status: s.status,
+          connected: s.status === 'online', ready: s.status === 'online',
+          has_primary: s.id === 1, device_count: s.id === 1 ? state.devices.length : 0,
+          speaker_verified: null,
+        }));
+      if (q) rows = rows.filter((r) => `${r.store_code} ${r.store_name}`.toLowerCase().includes(q));
+      if (param('region')) rows = rows.filter((r) => r.region === param('region'));
+      if (param('city')) rows = rows.filter((r) => r.city === param('city'));
+      if (param('store_id')) rows = rows.filter((r) => String(r.id) === param('store_id'));
+      if (param('status')) rows = rows.filter((r) => r.status === param('status'));
+      if (param('has_primary')) rows = rows.filter((r) => String(r.has_primary) === param('has_primary'));
+      return route.fulfill(json(paged(rows)));
+    }
+
+    if (method === 'GET' && path === '/receiver-devices/search') {
+      const storeOf = (id) => state.stores.find((s) => s.id === id) || state.stores[0];
+      let rows = state.devices.map((d) => {
+        const store = storeOf(d.store_id || 1);
+        return {
+          public_id: d.public_id, display_name: d.display_name, status: d.status,
+          lifecycle: d.deleted_at ? 'deleted' : d.archived_at ? 'archived' : 'active',
+          archived_at: d.archived_at || null, deleted_at: d.deleted_at || null,
+          is_primary: d.role === 'PRIMARY',
+          store_id: store.id, store_code: store.store_code, store_name: store.store_name,
+          city: store.city, region: store.region,
+        };
+      });
+      if (q) rows = rows.filter((r) =>
+        `${r.display_name} ${r.public_id} ${r.store_code} ${r.store_name}`.toLowerCase().includes(q));
+      if (param('region')) rows = rows.filter((r) => r.region === param('region'));
+      if (param('city')) rows = rows.filter((r) => r.city === param('city'));
+      if (param('store_id')) rows = rows.filter((r) => String(r.store_id) === param('store_id'));
+      if (param('status')) rows = rows.filter((r) => r.status === param('status'));
+      if (param('is_primary')) rows = rows.filter((r) => String(r.is_primary) === param('is_primary'));
+      if (param('lifecycle')) rows = rows.filter((r) => r.lifecycle === param('lifecycle'));
+      if (!flag('include_deleted')) rows = rows.filter((r) => r.lifecycle !== 'deleted');
+      if (!flag('include_archived')) rows = rows.filter((r) => r.lifecycle !== 'archived');
+      return route.fulfill(json(paged(rows)));
+    }
+
+    if (method === 'GET' && path === '/logs/search') {
+      let rows = state.logs;
+      if (q) rows = rows.filter((r) => r.message.toLowerCase().includes(q));
+      if (param('level')) rows = rows.filter((r) => r.level === param('level'));
+      if (param('actor_user_id')) rows = rows.filter((r) => String(r.actor_user_id) === param('actor_user_id'));
+      if (param('store_id')) rows = rows.filter((r) => String(r.store_id) === param('store_id'));
+      if (param('date_from')) rows = rows.filter((r) => r.created_at.slice(0, 10) >= param('date_from'));
+      if (param('date_to')) rows = rows.filter((r) => r.created_at.slice(0, 10) <= param('date_to'));
+      if (flag('archived_only')) rows = rows.filter((r) => r.archived_at);
+      else if (!flag('include_archived')) rows = rows.filter((r) => !r.archived_at);
+      const body = paged(rows);
+      body.meta = { entity_filter_coverage: {
+        rows_with_structured_entities: state.logs.filter((r) => r.store_id).length,
+        total_rows: state.logs.length } };
+      return route.fulfill(json(body));
+    }
+
+    if (method === 'GET' && path === '/broadcast/history/search') {
+      let rows = state.sessions;
+      if (q) rows = rows.filter((r) => r.campaign_name.toLowerCase().includes(q));
+      if (param('status')) rows = rows.filter((r) => r.status === param('status'));
+      if (param('started_by')) rows = rows.filter((r) => String(r.started_by) === param('started_by'));
+      if (param('date_from')) rows = rows.filter((r) => r.created_at.slice(0, 10) >= param('date_from'));
+      if (param('date_to')) rows = rows.filter((r) => r.created_at.slice(0, 10) <= param('date_to'));
+      if (flag('archived_only')) rows = rows.filter((r) => r.archived_at);
+      else if (!flag('include_archived')) rows = rows.filter((r) => !r.archived_at);
+      return route.fulfill(json(paged(rows)));
+    }
+
+    // ---- Bulk archive / unarchive / permanent delete -----------------------
+    // The request body is recorded before anything is done with it, because
+    // WHAT WAS SENT is the property under test: mode "filtered" must carry the
+    // filter and no ids, so the backend resolves the matched set inside the
+    // caller's own scope rather than trusting a list React built.
+    const bulk = path.match(/^\/(logs|broadcast\/history)\/(archive|unarchive|delete-permanently)$/);
+    if (method === 'POST' && bulk) {
+      const body = request.postDataJSON() || {};
+      state.bulkCalls.push({ path, body });
+      const collection = bulk[1] === 'logs' ? 'logs' : 'sessions';
+      const action = bulk[2];
+      const key = collection === 'logs' ? 'id' : 'id';
+
+      if (action === 'delete-permanently') {
+        if (body.confirm !== 'DELETE') {
+          return route.fulfill(json({ detail: "Type DELETE exactly to confirm." }, 409));
+        }
+        if (!body.acknowledged) {
+          return route.fulfill(json({ detail: 'The acknowledgement is required.' }, 400));
+        }
+      }
+
+      const matches = (row) => (body.mode === 'filtered'
+        ? true
+        : (body.ids || []).includes(row[key]));
+      const targeted = state[collection].filter(matches);
+
+      if (action === 'delete-permanently') {
+        state[collection] = state[collection].filter((row) => !matches(row));
+      } else {
+        const stamp = action === 'archive' ? '2026-08-02T00:00:00+00:00' : null;
+        state[collection] = state[collection].map((row) =>
+          (matches(row) ? { ...row, archived_at: stamp } : row));
+      }
+      return route.fulfill(json({
+        requested: targeted.length, affected: targeted.length, matched: targeted.length,
+        skipped: 0, failed: 0, ids: targeted.map((row) => row[key]),
+      }));
+    }
+
     // ---- HQ Users ---------------------------------------------------------
     if (method === 'POST' && path === '/auth/change-password') {
       const body = JSON.parse(request.postData() || '{}');
@@ -235,6 +419,55 @@ async function mockBackend(page, options = {}) {
       }
       if (method === 'GET' && path === '/users') {
         return route.fulfill(json(state.users));
+      }
+
+      if (method === 'GET' && path === '/users/search') {
+        let rows = state.users;
+        if (!flag('include_deleted')) {
+          rows = rows.filter((r) => (r.lifecycle_state || 'active') !== 'deleted');
+        }
+        if (q) rows = rows.filter((r) =>
+          `${r.username} ${r.display_name}`.toLowerCase().includes(q));
+        if (param('role')) rows = rows.filter((r) => r.role === param('role'));
+        if (param('state')) rows = rows.filter((r) => (r.lifecycle_state || 'active') === param('state'));
+        state.userScope = state.userScope || {};
+        const scoped = (type, value) => rows.filter((r) =>
+          (state.userScope[r.id] || []).some((e) => e.scope_type === type
+            && (type === 'STORE' ? String(e.store_id) === value : e.scope_value === value)));
+        if (param('scope_store_id')) rows = scoped('STORE', param('scope_store_id'));
+        if (param('scope_city')) rows = scoped('CITY', param('scope_city'));
+        if (param('scope_region')) rows = scoped('REGION', param('scope_region'));
+        return route.fulfill(json(paged(rows)));
+      }
+
+      // History-preserving permanent deletion: a tombstone, never a removal.
+      // Mirrors backend/user_deletion.py - the row survives so every history
+      // entry naming this account stays readable, and there is no restore.
+      const userTombstone = path.match(/^\/users\/(\d+)\/delete-permanently$/);
+      if (method === 'POST' && userTombstone) {
+        const id = Number(userTombstone[1]);
+        const row = state.users.find((c) => c.id === id);
+        if (!row) return route.fulfill(json({ detail: 'No such HQ User' }, 404));
+        const body = request.postDataJSON() || {};
+        state.deletePermanentlyCalls.push({ kind: 'user', id, body });
+        if (!body.acknowledged) {
+          return route.fulfill(json({ detail: 'The acknowledgement is required.' }, 400));
+        }
+        if (body.confirm !== row.username) {
+          return route.fulfill(json({
+            detail: `The typed confirmation did not match. Type the username exactly: ${row.username}` }, 409));
+        }
+        if (id === state.operator.id) {
+          return route.fulfill(json({ detail: 'You cannot delete your own account.' }, 409));
+        }
+        if (row.role === 'OWNER'
+            && state.users.filter((c) => c.role === 'OWNER'
+                                    && c.lifecycle_state !== 'deleted').length <= 1) {
+          return route.fulfill(json({ detail: 'This is the last SUPER ADMIN.' }, 409));
+        }
+        state.users = state.users.map((c) => (c.id === id
+          ? { ...c, lifecycle_state: 'deleted', is_active: false } : c));
+        return route.fulfill(json({ ok: true, user_id: id, username: row.username }));
       }
       if (method === 'POST' && path === '/users') {
         const body = JSON.parse(request.postData() || '{}');
@@ -688,6 +921,31 @@ async function mockBackend(page, options = {}) {
       }));
     }
 
+    // The Device tombstone. Mirrors backend/device_deletion.py: the row stays
+    // so credential and enrolment history remain readable, its status becomes
+    // 'retired', its credentials are revoked, and no restore exists.
+    const deviceTombstone = path.match(/^\/receiver-devices\/([^/]+)\/delete-permanently$/);
+    if (method === 'POST' && deviceTombstone) {
+      const publicId = deviceTombstone[1];
+      const device = state.devices.find((d) => d.public_id === publicId);
+      if (!device) return route.fulfill(json({ detail: 'No such Device' }, 404));
+      const body = request.postDataJSON() || {};
+      state.deletePermanentlyCalls.push({ kind: 'device', public_id: publicId, body });
+      if (!body.acknowledged) {
+        return route.fulfill(json({ detail: 'The acknowledgement is required.' }, 400));
+      }
+      if (body.confirm !== publicId) {
+        return route.fulfill(json({
+          detail: `The typed confirmation did not match. Type the Device id exactly: ${publicId}` }, 409));
+      }
+      state.devices = state.devices.map((d) => (d.public_id === publicId
+        ? { ...d, status: 'retired', role: 'STANDBY',
+            deleted_at: '2026-08-02T00:00:00+00:00',
+            disabled_at: '2026-08-02T00:00:00+00:00' }
+        : d));
+      return route.fulfill(json({ ok: true, public_id: publicId, credentials_revoked: 1 }));
+    }
+
     if (method === 'DELETE' && /^\/receiver-devices\/[^/]+\/permanently$/.test(path)) {
       const publicId = path.split('/')[2];
       const confirm = url.searchParams.get('confirm');
@@ -804,7 +1062,8 @@ module.exports = {
   DM,
   DEVICES,
   HQ_USERS,
-  OPERATOR,
+  LOG_ENTRIES,
+  HISTORY_SESSIONS,
   PRIMARY_DEVICE,
   STANDBY_DEVICE,
   FAKE_TOKEN,

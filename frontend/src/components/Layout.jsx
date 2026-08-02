@@ -1,6 +1,6 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { Radio, LayoutDashboard, Store as StoreIcon, History, Radar, ScrollText, Users, KeyRound, LogOut, Menu, X } from "lucide-react";
+import { Radio, LayoutDashboard, Store as StoreIcon, History, Radar, HardDrive, ScrollText, Users, KeyRound, LogOut, Menu, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { MENU_PERMISSION_BY_PATH } from "@/lib/menuPermissions";
 
@@ -9,6 +9,7 @@ const NAV = [
   { to: "/stores", label: "Store Management", icon: StoreIcon, testid: "nav-stores" },
   { to: "/history", label: "Broadcast History", icon: History, testid: "nav-history" },
   { to: "/receivers", label: "Receiver Status", icon: Radar, testid: "nav-receivers" },
+  { to: "/devices", label: "Receiver Devices", icon: HardDrive, testid: "nav-devices" },
   { to: "/logs", label: "System Logs", icon: ScrollText, testid: "nav-logs" },
   // Shown only to accounts holding menu.users.view (OWNER/ADMIN by default,
   // and per-user overrides can change that). This is presentation, not

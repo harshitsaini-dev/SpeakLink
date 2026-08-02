@@ -46,8 +46,8 @@ test.describe('Seeing the accounts', () => {
   test('a load failure is reported and does not leave a spinner forever',
     async ({ page }) => {
       await open(page, { operator: SUPER_ADMIN, usersStatus: 500 });
-      await expect(page.getByTestId('user-error')).toBeVisible();
-      await expect(page.getByTestId('users-loading')).toHaveCount(0);
+      await expect(page.getByTestId('list-error')).toBeVisible();
+      await expect(page.getByTestId('list-loading')).toHaveCount(0);
     });
 
   test('a forbidden list shows the refusal rather than an empty page',
@@ -57,7 +57,7 @@ test.describe('Seeing the accounts', () => {
       // for an account the frontend DOES let onto the page, where the API
       // itself still refuses the specific request.
       await open(page, { operator: ADMIN, usersStatus: 403 });
-      await expect(page.getByTestId('user-error')).toContainText(/permission/i);
+      await expect(page.getByTestId('list-error')).toContainText(/permission/i);
     });
 });
 

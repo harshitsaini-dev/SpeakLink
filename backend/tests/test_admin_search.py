@@ -227,6 +227,25 @@ def test_archived_sessions_are_excluded_until_asked_for(client):
     assert {i["id"] for i in only["items"]} == {hidden}
 
 
+def test_a_session_row_says_whether_it_is_archived(client):
+    """The archived filter alone is not enough for the UI.
+
+    With include_archived=True the operator sees archived and unarchived rows
+    side by side, and has to be able to tell which is which - both to read the
+    list honestly and to know whether Archive or Unarchive is the action that
+    applies. That means archived_at has to travel on the row itself.
+    """
+    owner = sign_in(client)
+    store = stores(client, owner)[0]["id"]
+    kept = make_session(client, owner, store, "kept")
+    hidden = make_session(client, owner, store, "hidden")
+    client.post("/api/broadcast/history/archive", headers=owner, json={"ids": [hidden]})
+
+    rows = {i["id"]: i for i in search_history(client, owner, include_archived=True)["items"]}
+    assert rows[kept]["archived_at"] is None
+    assert rows[hidden]["archived_at"] is not None
+
+
 def test_a_malformed_date_is_refused_rather_than_silently_ignored(client):
     owner = sign_in(client)
     r = client.get("/api/broadcast/history/search", headers=owner,

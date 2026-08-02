@@ -332,8 +332,12 @@ class SessionOut(BaseModel):
     offline_store_count: int
     notes: Optional[str]
     created_at: datetime
+    # Carried on the row, not just implied by the filter: with include_archived
+    # the list mixes both, and the operator has to see which is which.
+    archived_at: Optional[datetime] = None
 
-    @field_serializer("started_at", "ended_at", "created_at", when_used="json")
+    @field_serializer("started_at", "ended_at", "created_at", "archived_at",
+                      when_used="json")
     def _serialize_utc(self, value: Optional[datetime]) -> Optional[str]:
         return _utc_iso(value)
 

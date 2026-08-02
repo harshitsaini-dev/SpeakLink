@@ -4273,3 +4273,124 @@ was not modified, `APP_ENV` was not switched, and nothing was pushed. The
 Supabase project holds a verified snapshot only - anything written to RC12
 after the snapshot is not in it, so the cutover must re-run the migration
 as its delta step.
+
+---
+
+## Admin Management frontend (feature/admin-management-search-filter-delete)
+
+The six admin screens now use the server-side search, filter and paging
+endpoints the previous round built. Nothing was installed, no RC was cut,
+and nothing was pushed.
+
+### The shared toolkit
+
+`frontend/src/lib/adminList.js` and `frontend/src/components/AdminFilters.jsx`
+hold the parts all six screens share, for one reason: writing this six times
+produces six subtly different versions, and the difference that bites is
+always the same one. Two rules are encoded there rather than repeated:
+
+1. **Any filter change resets to page 1.** Without it, narrowing a search
+   while on page 3 shows an empty screen that reads as "no matches" rather
+   than "you are past the end".
+2. **Select All Filtered is a MODE, not a materialised id list.** The UI
+   holds the intent - "everything matching what you can see" - and the
+   request carries `{mode: "filtered", filters}`. The backend resolves the
+   matched set inside the caller's own Store Scope using the same query as
+   `/search`. React never pages through thousands of rows to enumerate ids
+   it would post straight back, and the count the operator agrees to is the
+   server's own `total`.
+
+Loading, error and empty are three distinct states in `ListState`, because
+collapsing them is how a failed request gets read as "nothing found". A 403
+says so in those words.
+
+### Screens
+
+| Screen | Endpoint | Controls |
+|---|---|---|
+| Receiver Status | `/receivers/search` | Search, Zone, City, Store, status, Primary |
+| System Logs | `/logs/search` | Search, date range, level, User, Store, Device, archived; row select, Select Page, Select All Filtered, Archive, Permanent Delete |
+| Broadcast History | `/broadcast/history/search` | Search, date range, status, User, Zone, City, Store, archived; bulk Archive/Unarchive, Permanent Delete |
+| User Management | `/users/search` | Search, Role, lifecycle state, Store/City/Zone Scope, include-deleted; permanent delete with typed username + acknowledgement |
+| Receiver Devices (new, `/devices`) | `/receiver-devices/search` | Search, Zone, City, Store, status, Primary, lifecycle; permanent delete with typed public_id + acknowledgement |
+| Rights | (none - see below) | Search, Category, Allow/Deny/Inherit, explicit-override filter |
+
+The Zone/City/Store dropdowns come from `/receivers/filter-options`, which
+is built from the same scoped query as the list - so the options can never
+name a Zone whose Stores this account may not open.
+
+### Rights filtering is client-side, deliberately
+
+Every other admin list filters on the server because every other one is
+unbounded. The permission catalog is not: 29 fixed rows defined in
+`backend/permission_catalog.py`, all of them already fetched by the single
+`GET /users/{id}/permissions` the editor makes, and a new one appears only
+when somebody writes code to add it. A round trip per keystroke to narrow a
+constant would be slower and would add an endpoint whose only job is
+re-filtering source code.
+
+The rule this exception is measured against: **filter on the server when the
+row count is driven by data, on the client when it is driven by source
+code.** If the catalog ever becomes data-driven, this moves. The page says
+so on screen as well, so the exception is not mistaken for an oversight.
+
+### Archived and deleted never look alike
+
+Archived is reversible and keeps its Restore control. Permanently deleted is
+a tombstone kept only so history stays readable: it is red, it says "kept
+only so history stays readable, this cannot be restored" in words, and
+Restore/Enable/Delete are all absent from the row. This is enforced for both
+Users and Receiver Devices, and proven in the browser rather than asserted.
+
+### New fleet-wide Receiver Devices page
+
+`/devices` answers "where is that Device?", which cannot be asked one Store
+at a time across dozens of Stores. The per-Store page keeps enrolment,
+credential rotation and promotion - those are things you do while looking at
+one Store. It shares `menu.receivers.view` rather than inventing a second
+permission that could grant one view and withhold the other.
+
+### One backend change, test-first
+
+`SessionOut` gained `archived_at`. With `include_archived` the History list
+mixes archived and live rows, and the operator has to be able to tell them
+apart and know whether Archive or Unarchive applies - so the flag has to
+travel on the row, not only in the filter. RED test
+(`test_a_session_row_says_whether_it_is_archived`) written first, then the
+field.
+
+### A bug the tests found
+
+`craco.config.js` declared the `@` webpack alias but no Jest
+`moduleNameMapper`, so any unit test importing a module that used `@/...`
+failed to run at all - not failed an assertion, failed to load. The two now
+name the same directory. This is why `adminList.test.js` exists at all: it
+was the first unit test to import through the alias.
+
+### Verification
+
+- Backend: **2716 passed, 21 skipped, 0 failed**. One run before this showed
+  a single `test_smoke.py::test_sqlite_test_database_connection` failure;
+  it passes in isolation and passed on the immediately following full run,
+  and is a known race between `-n 2` workers over the shared smoke database,
+  not a defect in this change.
+- Frontend unit: **66 passed** (was 56; +10 for the new toolkit).
+- Playwright: **211 passed** (was 192; +19 in
+  `e2e/admin-search-and-delete.spec.js`).
+- Production frontend build: compiled successfully.
+- `python -m compileall backend`, `pip check`, `git diff --check`: clean.
+- Secret scan over the whole change: clean.
+
+Four existing Playwright assertions were updated to the shared list-state
+test ids (`list-empty`, `list-error`, `list-loading`), which replaced the
+per-page ones. The behaviour they assert is unchanged.
+
+### Not done, and why
+
+Real PostgreSQL proof has NOT been run: `TEST_POSTGRES_URL` is not
+configured in this environment, and production Supabase is not an acceptable
+target for destructive tests. RC14 is not built, per the standing
+instruction that it waits for frontend + Playwright + a disposable
+PostgreSQL proof.
+
+Status at this point: **READY_FOR_DISPOSABLE_POSTGRES_VALIDATION**.
