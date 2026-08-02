@@ -249,7 +249,14 @@ def test_device_search_filters_by_store_zone_status_and_primary(client):
     assert by_zone["total"] >= 2
 
 
-def test_device_search_hides_permanently_deleted_by_default(client):
+def test_device_search_never_returns_permanently_deleted(client):
+    """This used to assert that include_deleted=True SHOWED the tombstone.
+
+    That opt-in was the hole: the UI stopped sending it, but a hand-crafted
+    URL still returned every permanently deleted Device. The contract is now
+    absolute, so the parameter is gone and passing it changes nothing. Full
+    coverage lives in test_device_search_never_returns_tombstones.py.
+    """
     owner = sign_in(client)
     store = stores(client, owner)[0]
     _, public_id = add_device(client.server_module.engine, store["id"])
@@ -260,12 +267,19 @@ def test_device_search_hides_permanently_deleted_by_default(client):
                          params={"page_size": 200}).json()
     assert public_id not in {i["public_id"] for i in default["items"]}
 
-    shown = client.get("/api/receiver-devices/search", headers=owner,
-                       params={"include_deleted": True, "page_size": 200}).json()
-    assert public_id in {i["public_id"] for i in shown["items"]}
+    asked = client.get("/api/receiver-devices/search", headers=owner,
+                       params={"include_deleted": True, "page_size": 200})
+    if asked.status_code == 200:
+        assert public_id not in {i["public_id"] for i in asked.json()["items"]}
 
 
 def test_archived_and_permanently_deleted_are_distinct_states(client):
+    """Archived is restorable and stays on the list; deleted is neither.
+
+    The distinction is now shown by what comes back rather than by two
+    lifecycle labels side by side - the deleted one is simply absent, and its
+    history is read through the deletion-event endpoint.
+    """
     owner = sign_in(client)
     store = stores(client, owner)[0]
     _, archived = add_device(client.server_module.engine, store["id"])
@@ -275,10 +289,15 @@ def test_archived_and_permanently_deleted_are_distinct_states(client):
                 json={"confirm": deleted, "acknowledged": True})
 
     body = client.get("/api/receiver-devices/search", headers=owner,
-                      params={"include_deleted": True, "page_size": 200}).json()
+                      params={"page_size": 200}).json()
     rows = {i["public_id"]: i for i in body["items"]}
     assert rows[archived]["lifecycle"] == "archived"
-    assert rows[deleted]["lifecycle"] == "deleted"
+    assert deleted not in rows
+
+    audit = client.get(f"/api/receiver-devices/{deleted}/deletion-events",
+                       headers=owner)
+    assert audit.status_code == 200, audit.text
+    assert audit.json()["events"], "the tombstone lost its audit trail"
 
     # Only the archived one can come back.
     assert client.post(f"/api/receiver-devices/{archived}/restore",
