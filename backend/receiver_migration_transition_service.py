@@ -474,10 +474,13 @@ def _active_device_rows(connection: Connection):
             SELECT d.id AS device_id, d.store_id
             FROM receiver_devices d
             JOIN stores s ON s.id = d.store_id
-            WHERE s.is_active = 1 AND d.status = 'active'
+            WHERE s.is_active = :active AND d.status = 'active'
             ORDER BY d.id
             """
-        )
+        ),
+        # Bound bool, not the literal 1: is_active is BOOLEAN, and PostgreSQL
+        # refuses an integer comparison that SQLite silently accepts.
+        {"active": True},
     ).all()
 
 

@@ -87,10 +87,14 @@ def ensure_store_lifecycle_schema(engine: Engine) -> None:
     is suddenly archived, and it must not decide that a Store somebody switched
     off is active again.
     """
+    # Inspector, never PRAGMA. PRAGMA is SQLite-only, and this migration runs
+    # at EVERY start-up - so on PostgreSQL the PRAGMA form did not fail some
+    # later feature, it stopped HQ from booting at all. The Inspector answers
+    # the same "does this column exist" question on either engine.
+    from sqlalchemy import inspect
+
+    columns = {c["name"] for c in inspect(engine).get_columns("stores")}
     with engine.begin() as connection:
-        columns = {
-            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(stores)")
-        }
         if "lifecycle_state" not in columns:
             connection.exec_driver_sql(
                 "ALTER TABLE stores ADD COLUMN lifecycle_state VARCHAR(20)"
@@ -103,11 +107,15 @@ def ensure_store_lifecycle_schema(engine: Engine) -> None:
         # older code path that did not know about this one.
         connection.execute(
             text(
+                # :true_flag rather than the literal 1 - is_active is BOOLEAN, and
+                # PostgreSQL refuses to compare it against an integer. This
+                # migration runs at every start-up, so on PostgreSQL the literal
+                # would have stopped HQ from booting at all.
                 "UPDATE stores SET lifecycle_state = CASE "
-                "WHEN is_active = 1 THEN :active ELSE :disabled END "
+                "WHEN is_active = :true_flag THEN :active ELSE :disabled END "
                 "WHERE lifecycle_state IS NULL"
             ),
-            {"active": ACTIVE, "disabled": DISABLED},
+            {"active": ACTIVE, "disabled": DISABLED, "true_flag": True},
         )
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_stores_lifecycle_state "
