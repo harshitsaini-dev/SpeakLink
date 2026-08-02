@@ -4930,3 +4930,49 @@ changed would have meant a stale build, and was checked for explicitly.
 
 Installed with `app_env` absent, so **SQLite remains authoritative**. Supabase
 was not activated.
+
+---
+
+## Self-contained HQ installer — PAUSED by the operator (2026-08-03)
+
+The project to ship a single `EchoCastHQSetup-*.exe` that needs no Python,
+Node or the repository on a fresh Windows PC is **paused**. No installer is
+currently being pursued.
+
+### Where the work lives
+
+Branch `wip/self-contained-hq-installer-paused`, checkpoint `6d0bfae`.
+`feature/self-contained-hq-installer` is also kept. Nothing was deleted.
+
+**That branch is not a release candidate and must not be installed on live
+HQ.** Its Phase 7 tests were not green when work stopped.
+
+### What it had established
+
+* `EchoCastHQBackend.exe` and `EchoCastHQFrontend.exe` — the API server and
+  the SPA server, each carrying its own CPython. Proven to run the tree
+  `EchoCastHQRuntime.exe -> Backend + Frontend`, READY, both ports 200, with
+  `PATH` stripped to the Windows system directories: no `python.exe`, no
+  `node.exe`, no command line naming the repository or `.venv`, zero orphans.
+* The supervisor's PATH search for `python` — which ran in the **packaged**
+  runtime — removed, and a missing child executable now fails closed.
+* The bind address moved out of source. `DEFAULT_HQ_ADDRESS` was the literal
+  address of one machine on one LAN.
+
+### The finding worth remembering
+
+`migrations.run_receiver_credential_phase_one` creates every Receiver table
+and has **no production caller** — 89 callers, all tests. A fresh machine can
+reach "startup complete" with no `receiver_devices` table, and the only hint
+is a warning blaming a column. Whoever resumes this starts there.
+
+### The active application branch
+
+`feature/admin-management-search-filter-delete` is **architecturally
+identical to RC18**, plus one independent API fix cherry-picked from the
+installer work (`d2454db`): a permanently deleted Receiver Device could still
+be returned by `/api/receiver-devices/search?include_deleted=true`. No
+installer file, self-contained runtime change or fresh-profile initializer
+exists on this branch.
+
+Live RC18 was not modified at any point and remains READY on SQLite.
