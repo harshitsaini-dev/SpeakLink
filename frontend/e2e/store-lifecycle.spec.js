@@ -17,6 +17,12 @@ async function openStores(page, options = {}) {
   await signIn(page);
   const state = await mockBackend(page, options);
   await page.goto('/stores');
+  // Store Management now defaults to the Active lifecycle, so a Store that
+  // this spec disables or archives correctly leaves the default view. These
+  // tests are about the lifecycle TRANSITIONS, not about the default filter,
+  // so they watch every current state.
+  await expect(page.getByTestId('stores-lifecycle')).toBeVisible();
+  await page.getByTestId('stores-lifecycle').selectOption('all_current');
   await expect(page.getByTestId('store-mgmt-row-UN')).toBeVisible();
   return state;
 }
@@ -240,14 +246,19 @@ test.describe('Secrets and accessibility', () => {
     // page under test never renders, which is a different failure wearing this
     // test's name. The stores route is then overridden on top of it.
     await mockBackend(page);
-    let failNext = true;
     // Store Management now loads through /stores/search - the server-side
     // filtered endpoint - so that is what has to fail for this test to be
     // about anything. The intent is unchanged: a load failure must be
     // reported, must not leak internals, and must recover.
+    //
+    // Every request fails until recovery is explicitly allowed, rather than
+    // only the first. useAdminList now ignores a superseded response, and the
+    // dev server's StrictMode fires the initial effect twice - so "fail once"
+    // could spend its failure on a request whose answer is correctly dropped,
+    // and the page would never show the error this test is about.
+    let failing = true;
     await page.route('**/api/stores/search*', async (route) => {
-      if (failNext) {
-        failNext = false;
+      if (failing) {
         return route.fulfill({
           status: 503, contentType: 'application/json',
           body: JSON.stringify({ detail: 'unavailable' }),
@@ -263,6 +274,7 @@ test.describe('Secrets and accessibility', () => {
     expect(message.toLowerCase()).not.toContain('traceback');
     expect(message.toLowerCase()).not.toContain('503');
 
+    failing = false;
     await page.getByTestId('stores-refresh-btn').click();
     await expect(page.getByTestId('edit-store-UN')).toBeVisible();
     await expect(page.getByTestId('list-error')).toHaveCount(0);

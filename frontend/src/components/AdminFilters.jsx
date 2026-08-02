@@ -60,13 +60,23 @@ export function SearchInput({ value, onChange, placeholder = "Search…", testId
   );
 }
 
+/**
+ * A filter dropdown.
+ *
+ * `allLabel` renders the empty "no filter" option. Pass `allLabel={null}` for
+ * an EXCLUSIVE filter whose options already cover every case - a lifecycle,
+ * say. Keeping the placeholder there would add a fifth meaning nobody chose,
+ * and when that meaning happens to compute the same rows as one of the real
+ * options you get two labels for one state. That is exactly what "Active
+ * only" and "Active" were on the Receiver Devices screen.
+ */
 export function FilterSelect({ label, value, onChange, options, testId, allLabel = "All" }) {
   return (
     <label className="flex flex-col gap-1">
       <span className="text-[10px] uppercase tracking-widest text-slate-500">{label}</span>
       <select data-testid={testId} value={value ?? ""} onChange={(e) => onChange(e.target.value)}
               className="px-2 py-1.5 text-sm border border-slate-300 rounded-md bg-white min-w-[120px]">
-        <option value="">{allLabel}</option>
+        {allLabel !== null && <option value="">{allLabel}</option>}
         {options.map((option) => {
           const key = typeof option === "string" ? option : option.value;
           const text = typeof option === "string" ? option : option.label;

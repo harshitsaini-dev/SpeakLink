@@ -43,12 +43,17 @@ export default function StoreManagement() {
   // two different things, and a scoped account could be shown a total that
   // includes Stores it may not open.
   //
-  // include_inactive/include_archived default to true here because Store
-  // Management is precisely where a disabled or archived Store must remain
-  // visible - that is not true of the Broadcast Console.
+  // ONE lifecycle control, and it is the only thing deciding which Stores
+  // appear. The previous pair of include_* switches could latch one on while
+  // the other changed, which is how selecting a lifecycle left the previous
+  // one still on screen.
+  //
+  // 'active' is the default: the first view is the estate that is actually
+  // running, and Disabled or Archived are chosen deliberately. A permanently
+  // deleted Store has no option at all - its history lives in the deletion
+  // records, not in this list.
   const list = useAdminList("/stores/search", {
-    q: "", region: "", city: "",
-    include_inactive: true, include_archived: true,
+    q: "", region: "", city: "", lifecycle: "active",
   });
   const stores = list.items;
   const [options, setOptions] = React.useState({ regions: [], cities: [] });
@@ -137,6 +142,15 @@ export default function StoreManagement() {
         <FilterSelect label="City" testId="stores-city" allLabel="All Cities"
                       value={list.filters.city} options={options.cities}
                       onChange={(v) => list.setFilter("city", v)} />
+        {/* No "all" placeholder: every selection here is a real, exclusive
+            state, so an empty option would be a fifth meaning nobody chose. */}
+        <FilterSelect label="Lifecycle" testId="stores-lifecycle" allLabel={null}
+                      value={list.filters.lifecycle}
+                      options={[{ value: "all_current", label: "All Current" },
+                                { value: "active", label: "Active" },
+                                { value: "disabled", label: "Disabled" },
+                                { value: "archived", label: "Archived" }]}
+                      onChange={(v) => list.setFilter("lifecycle", v || "active")} />
       </FilterBar>
 
       <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
