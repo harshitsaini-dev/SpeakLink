@@ -41,7 +41,9 @@ export default function ReceiverDeviceFleet() {
   const { can } = useAuth();
   const list = useAdminList("/receiver-devices/search", {
     q: "", region: "", city: "", store_id: "", status: "", is_primary: "",
-    lifecycle: "", include_archived: false, include_deleted: false,
+    // One control, one source of truth. include_deleted is never sent: this
+    // screen is operational, and a permanently deleted Device is not.
+    lifecycle: "all_current",
   });
   const [options, setOptions] = React.useState({ regions: [], cities: [], stores: [] });
   const [purging, setPurging] = React.useState(null);
@@ -96,30 +98,22 @@ export default function ReceiverDeviceFleet() {
                       options={[{ value: "true", label: "Primary only" },
                                 { value: "false", label: "Standby only" }]}
                       onChange={(v) => list.setFilter("is_primary", v)} />
-        <FilterSelect label="Lifecycle" testId="fleet-lifecycle" allLabel="Active only"
+        {/* ONE control. There used to be two - a Lifecycle dropdown and an
+            Include dropdown - both deciding the same thing, and the Include
+            flags only ever latched ON. Choosing "Permanently deleted" and
+            then "Active only" therefore showed both, because the deleted
+            latch was never cleared.
+
+            "Permanently deleted" is gone entirely: a deleted Device is
+            operationally gone, and its history is in the deletion-event
+            records. There is no Restore, so offering the state here would
+            only invite one. */}
+        <FilterSelect label="Lifecycle" testId="fleet-lifecycle" allLabel={null}
                       value={list.filters.lifecycle}
-                      options={[{ value: "active", label: "Active" },
-                                { value: "archived", label: "Archived" },
-                                { value: "deleted", label: "Permanently deleted" }]}
-                      onChange={(v) => list.setFilters((f) => ({
-                        ...f,
-                        lifecycle: v,
-                        // Asking for a lifecycle implies asking to see it. Without
-                        // this the two controls contradict each other and the list
-                        // comes back empty for no visible reason.
-                        include_archived: v === "archived" ? true : f.include_archived,
-                        include_deleted: v === "deleted" ? true : f.include_deleted,
-                      }))} />
-        <FilterSelect label="Include" testId="fleet-include" allLabel="Active Devices only"
-                      value={list.filters.include_deleted ? "deleted"
-                             : list.filters.include_archived ? "archived" : ""}
-                      options={[{ value: "archived", label: "Include archived" },
-                                { value: "deleted", label: "Include archived and deleted" }]}
-                      onChange={(v) => list.setFilters((f) => ({
-                        ...f,
-                        include_archived: v === "archived" || v === "deleted",
-                        include_deleted: v === "deleted",
-                      }))} />
+                      options={[{ value: "all_current", label: "All Current" },
+                                { value: "active", label: "Active" },
+                                { value: "archived", label: "Archived" }]}
+                      onChange={(v) => list.setFilter("lifecycle", v || "all_current")} />
       </FilterBar>
 
       {purgeError && !purging && (

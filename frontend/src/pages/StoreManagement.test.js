@@ -99,12 +99,44 @@ test("choosing a City sends city to the server", async () => {
   });
 });
 
-test("Store Management asks for inactive and archived Stores", async () => {
-  // This is the screen where a disabled or archived Store must stay visible.
+test("Store Management defaults to the Active lifecycle", async () => {
   respond();
   await renderPage();
-  expect(searchCalls()[0][1].params).toMatchObject({
-    include_inactive: true, include_archived: true,
+  expect(searchCalls()[0][1].params).toMatchObject({ lifecycle: "active" });
+  // The old pair of overlapping switches is gone.
+  expect(searchCalls()[0][1].params).not.toHaveProperty("include_inactive");
+  expect(searchCalls()[0][1].params).not.toHaveProperty("include_archived");
+});
+
+test("there is exactly one lifecycle control, with no duplicate or deleted option", async () => {
+  respond();
+  await renderPage();
+  const lifecycle = screen.getByTestId("stores-lifecycle");
+  const labels = [...lifecycle.querySelectorAll("option")].map((o) => o.textContent);
+  expect(labels).toEqual(["All Current", "Active", "Disabled", "Archived"]);
+  // No "Permanent Deleted", and no empty placeholder that would mean the
+  // same as one of the real states.
+  expect(labels.some((l) => /delete/i.test(l))).toBe(false);
+  expect(new Set(labels).size).toBe(labels.length);
+});
+
+test("selecting a lifecycle REPLACES the previous one", async () => {
+  respond();
+  await renderPage();
+
+  await act(async () => {
+    fireEvent.change(screen.getByTestId("stores-lifecycle"), { target: { value: "archived" } });
+  });
+  await waitFor(() => expect(searchCalls().at(-1)[1].params.lifecycle).toBe("archived"));
+
+  await act(async () => {
+    fireEvent.change(screen.getByTestId("stores-lifecycle"), { target: { value: "active" } });
+  });
+  await waitFor(() => {
+    const params = searchCalls().at(-1)[1].params;
+    expect(params.lifecycle).toBe("active");
+    // The reported bug: the previous selection must not still be in effect.
+    expect(JSON.stringify(params)).not.toContain("archived");
   });
 });
 
@@ -125,7 +157,7 @@ test("changing a filter returns to page 1", async () => {
   });
 });
 
-test("Clear Filters drops every filter and reloads", async () => {
+test("Clear Filters returns to the default Active view", async () => {
   respond();
   await renderPage();
   await act(async () => {
@@ -134,7 +166,9 @@ test("Clear Filters drops every filter and reloads", async () => {
   await waitFor(() => expect(screen.getByTestId("clear-filters")).toBeTruthy());
   await act(async () => { fireEvent.click(screen.getByTestId("clear-filters")); });
   await waitFor(() => {
-    expect(searchCalls().at(-1)[1].params).not.toHaveProperty("q");
+    const params = searchCalls().at(-1)[1].params;
+    expect(params).not.toHaveProperty("q");
+    expect(params.lifecycle).toBe("active");
   });
 });
 

@@ -141,3 +141,57 @@ describe("useBulkSelection", () => {
     expect(screen.getByTestId("count").textContent).toBe("900");
   });
 });
+
+
+// ===========================================================================
+// Stale responses
+// ===========================================================================
+describe("a slow earlier response must not overwrite a newer one", () => {
+  function Harness() {
+    const list = useAdminList("/stores/search", { lifecycle: "active" });
+    return (
+      <div>
+        <span data-testid="rows">{list.items.map((i) => i.tag).join(",")}</span>
+        <button onClick={() => list.setFilter("lifecycle", "archived")}>archived</button>
+        <button onClick={() => list.setFilter("lifecycle", "active")}>active</button>
+      </div>
+    );
+  }
+
+  test("the newest filter wins even when the older request resolves last", async () => {
+    // Choose Archived, then immediately Active. The Archived response arrives
+    // AFTER the Active one. Without a guard the list ends up showing Archived,
+    // which is the reported symptom wearing a different hat: the screen
+    // disagrees with the control.
+    const deferred = [];
+    api.get.mockImplementation((path, config) => {
+      const lifecycle = config.params.lifecycle;
+      return new Promise((resolve) => {
+        deferred.push({ lifecycle, resolve });
+      });
+    });
+
+    render(<Harness />);
+    await act(async () => {});
+
+    await act(async () => { screen.getByText("archived").click(); });
+    await act(async () => { screen.getByText("active").click(); });
+
+    // The LAST request of each kind. The initial mount also asked for
+    // 'active', and resolving that one would prove nothing - it is correctly
+    // stale, so its answer is supposed to be dropped.
+    const archived = deferred.filter((d) => d.lifecycle === "archived").at(-1);
+    const active = deferred.filter((d) => d.lifecycle === "active").at(-1);
+
+    // The NEWER request resolves first...
+    await act(async () => {
+      active.resolve({ data: { items: [{ tag: "ACTIVE" }], total: 1, pages: 1, has_more: false } });
+    });
+    // ...and the OLDER one lands afterwards.
+    await act(async () => {
+      archived.resolve({ data: { items: [{ tag: "ARCHIVED" }], total: 1, pages: 1, has_more: false } });
+    });
+
+    expect(screen.getByTestId("rows").textContent).toBe("ACTIVE");
+  });
+});

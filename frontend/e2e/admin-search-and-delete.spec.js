@@ -357,12 +357,14 @@ test.describe('Receiver Devices fleet', () => {
     expect(state.deletePermanentlyCalls[0].body)
       .toMatchObject({ confirm: publicId, acknowledged: true });
 
-    await page.getByTestId('fleet-include').selectOption('deleted');
-    await expect(page.getByTestId(`fleet-lifecycle-${publicId}`))
-      .toContainText(/permanently deleted/i);
-    await expect(page.getByTestId(`fleet-deleted-note-${publicId}`))
-      .toContainText(/cannot be restored/i);
-    await expect(page.getByTestId(`fleet-purge-${publicId}`)).toHaveCount(0);
+    // A permanently deleted Device is now operationally gone: there is no
+    // lifecycle selection that brings it back on screen, which is the point -
+    // it cannot be restored, so offering a way to look at it would only
+    // invite somebody to try.
+    for (const selection of ['all_current', 'active', 'archived']) {
+      await page.getByTestId('fleet-lifecycle').selectOption(selection);
+      await expect(page.getByTestId(`fleet-row-${publicId}`)).toHaveCount(0);
+    }
   });
 
   test('archived and deleted are told apart, not merged into one grey state',
@@ -380,7 +382,7 @@ test.describe('Receiver Devices fleet', () => {
     // Archived is hidden by default - it is not an operational Device.
     await expect(page.getByTestId(`fleet-row-${archived}`)).toHaveCount(0);
 
-    await page.getByTestId('fleet-include').selectOption('archived');
+    await page.getByTestId('fleet-lifecycle').selectOption('archived');
     await expect(page.getByTestId(`fleet-lifecycle-${archived}`)).toHaveText('Archived');
     // And crucially: it does NOT read as deleted.
     await expect(page.getByTestId(`fleet-lifecycle-${archived}`)).not.toContainText(/deleted/i);

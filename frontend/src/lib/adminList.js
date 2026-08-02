@@ -54,16 +54,31 @@ export function useAdminList(path, initialFilters = {}, { pageSize = DEFAULT_PAG
   const [error, setError] = React.useState("");
   const [meta, setMeta] = React.useState(null);
 
+  // Which request is the current one. Changing a filter starts a new request
+  // without cancelling the old one, and responses can arrive out of order - a
+  // heavier query started first can land last. Without this, choosing
+  // Archived and then Active can leave Archived rows on screen under an
+  // Active filter: the list and the control disagree, which reads exactly
+  // like the filter being broken.
+  //
+  // A counter rather than AbortController on purpose: the request is already
+  // in flight and the server has already done the work, so there is nothing
+  // useful to cancel. What matters is only that its answer is ignored.
+  const requestId = React.useRef(0);
+
   const load = React.useCallback(async () => {
+    const mine = ++requestId.current;
     setLoading(true);
     setError("");
     try {
       const { data: body } = await api.get(path, {
         params: { ...activeFilters(filters), page, page_size: pageSize },
       });
+      if (mine !== requestId.current) return;   // a newer request has taken over
       setData(body);
       setMeta(body.meta || null);
     } catch (failure) {
+      if (mine !== requestId.current) return;
       setError(
         failure?.response?.status === 403
           ? "You do not have permission to view this."
@@ -71,7 +86,7 @@ export function useAdminList(path, initialFilters = {}, { pageSize = DEFAULT_PAG
       );
       setData({ items: [], total: 0, pages: 0, has_more: false });
     } finally {
-      setLoading(false);
+      if (mine === requestId.current) setLoading(false);
     }
   }, [path, filters, page, pageSize]);
 

@@ -288,11 +288,16 @@ async function mockBackend(page, options = {}) {
         return route.fulfill(json({ detail: 'You do not have permission to view this.' },
                                   state.storesListStatus));
       }
-      // A permanently deleted Store never appears, under any flag.
+      // A permanently deleted Store never appears, under any selection.
       let rows = state.stores.filter((x) => x.lifecycle_state !== 'deleted');
-      if (!flag('include_inactive')) rows = rows.filter((x) => x.is_active !== false);
-      if (!flag('include_archived')) {
-        rows = rows.filter((x) => (x.lifecycle_state || 'active') !== 'archived');
+      // ONE exclusive lifecycle control, defaulting to active.
+      const lifecycle = param('lifecycle') || 'active';
+      if (lifecycle === 'active') {
+        rows = rows.filter((x) => (x.lifecycle_state || (x.is_active ? 'active' : 'disabled')) === 'active');
+      } else if (lifecycle === 'disabled') {
+        rows = rows.filter((x) => (x.lifecycle_state || (x.is_active ? 'active' : 'disabled')) === 'disabled');
+      } else if (lifecycle === 'archived') {
+        rows = rows.filter((x) => x.lifecycle_state === 'archived');
       }
       if (q) rows = rows.filter((x) =>
         `${x.store_code} ${x.store_name}`.toLowerCase().includes(q));
@@ -359,9 +364,12 @@ async function mockBackend(page, options = {}) {
       if (param('store_id')) rows = rows.filter((r) => String(r.store_id) === param('store_id'));
       if (param('status')) rows = rows.filter((r) => r.status === param('status'));
       if (param('is_primary')) rows = rows.filter((r) => String(r.is_primary) === param('is_primary'));
-      if (param('lifecycle')) rows = rows.filter((r) => r.lifecycle === param('lifecycle'));
-      if (!flag('include_deleted')) rows = rows.filter((r) => r.lifecycle !== 'deleted');
-      if (!flag('include_archived')) rows = rows.filter((r) => r.lifecycle !== 'archived');
+      const deviceLifecycle = param('lifecycle') || 'all_current';
+      if (deviceLifecycle === 'all_current') {
+        rows = rows.filter((r) => r.lifecycle !== 'deleted');
+      } else {
+        rows = rows.filter((r) => r.lifecycle === deviceLifecycle);
+      }
       return route.fulfill(json(paged(rows)));
     }
 
@@ -864,7 +872,10 @@ async function mockBackend(page, options = {}) {
       if (state.deviceRolesStatus !== 200) {
         return route.fulfill(json({ detail: 'unavailable' }, state.deviceRolesStatus));
       }
-      return route.fulfill(json(state.devices));
+      // A permanently deleted Device is operationally gone. deleted_at is the
+      // marker: its status is 'retired', and so is an ordinarily retired
+      // Device's, so status cannot tell them apart.
+      return route.fulfill(json(state.devices.filter((d) => !d.deleted_at)));
     }
 
     if (method === 'POST' && path === '/receiver-devices/enrollment-codes') {
