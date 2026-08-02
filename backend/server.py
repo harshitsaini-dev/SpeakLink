@@ -1211,7 +1211,12 @@ def search_receiver_devices(
         where.append("d.deleted_at IS NULL")
     if not include_archived:
         where.append("d.archived_at IS NULL")
-    if lifecycle == "deleted":
+    if lifecycle in (None, "", "all_current"):
+        # Every Device that still exists. 'all_current' is named rather than
+        # implied by an empty value, so the control has no meaning that
+        # nobody chose.
+        pass
+    elif lifecycle == "deleted":
         where.append("d.deleted_at IS NOT NULL")
     elif lifecycle == "archived":
         where.append("d.archived_at IS NOT NULL AND d.deleted_at IS NULL")
@@ -2859,8 +2864,22 @@ def receiver_filter_options(db: Session = Depends(get_db),
 # contracts wearing one name. See admin_search.py.
 
 
+#: Store Management's lifecycle selections, and the ONE control that decides
+#: which Stores it shows.
+#:
+#: Deliberately a single parameter rather than the older
+#: include_inactive/include_archived pair. Two independent switches for one
+#: concern produce combinations nobody designed - and worse, a UI built on
+#: them can latch one switch on while changing the other, which is exactly how
+#: selecting one lifecycle left the previous one still on screen.
+#:
+#: 'deleted' is absent on purpose and is refused below. A permanently deleted
+#: Store is reachable only through the deletion-event and history surfaces.
+STORE_LIFECYCLE_SELECTIONS = ("all_current", "active", "disabled", "archived")
+
+
 def _store_admin_query(db: Session, user: HQUser, *, q=None, city=None, region=None,
-                       include_inactive: bool = False, include_archived: bool = False):
+                       lifecycle: str = "active"):
     """The one narrowing Store Management search AND its filter options use.
 
     Shared deliberately. When the list and the dropdown are built by two
@@ -2869,16 +2888,27 @@ def _store_admin_query(db: Session, user: HQUser, *, q=None, city=None, region=N
     """
     query = db.query(Store)
 
-    # A permanently deleted Store never appears here, under any flag. Unlike
-    # archived, there is no switch that reveals it: its history stays reachable
-    # through the rows that reference it, never through this operational list.
+    # A permanently deleted Store never appears here, under any selection. Its
+    # history stays reachable through the rows that reference it, never
+    # through this operational list.
     query = query.filter(
         (Store.lifecycle_state.is_(None)) | (Store.lifecycle_state != "deleted"))
-    if not include_inactive:
-        query = query.filter(Store.is_active.is_(True))
-    if not include_archived:
+
+    # Each selection is exclusive. Choosing one REPLACES the last, rather than
+    # widening what is already shown.
+    if lifecycle == "active":
+        # A legacy row with no lifecycle_state is active exactly when
+        # is_active says so - that is the pairing store_lifecycle keeps.
         query = query.filter(
-            (Store.lifecycle_state.is_(None)) | (Store.lifecycle_state != "archived"))
+            (Store.lifecycle_state == "active")
+            | (Store.lifecycle_state.is_(None) & Store.is_active.is_(True)))
+    elif lifecycle == "disabled":
+        query = query.filter(
+            (Store.lifecycle_state == "disabled")
+            | (Store.lifecycle_state.is_(None) & Store.is_active.is_(False)))
+    elif lifecycle == "archived":
+        query = query.filter(Store.lifecycle_state == "archived")
+    # 'all_current' adds nothing beyond the not-deleted filter above.
 
     if city:
         query = query.filter(Store.city == city)
@@ -2906,8 +2936,7 @@ def search_stores(
     q: Optional[str] = None,
     city: Optional[str] = None,
     region: Optional[str] = None,
-    include_inactive: bool = False,
-    include_archived: bool = False,
+    lifecycle: str = "active",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     db: Session = Depends(get_db),
@@ -2924,10 +2953,24 @@ def search_stores(
     that is Receiver Status's job, and it comes from live WebSocket state
     rather than from a Store row.
     """
+    if lifecycle == "deleted":
+        # Refused rather than quietly returning nothing, so the caller learns
+        # that this is not the surface for tombstones.
+        raise HTTPException(
+            status_code=400,
+            detail="Permanently deleted Stores are not available here. Their "
+                   "history is in the deletion-event records.")
+    if lifecycle not in STORE_LIFECYCLE_SELECTIONS:
+        # Ignoring an unknown value would silently return the default set,
+        # which reads as a filter that works and does nothing.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown lifecycle {lifecycle!r}. Expected one of "
+                   f"{', '.join(STORE_LIFECYCLE_SELECTIONS)}.")
+
     page, page_size = normalize_paging(page, page_size)
     query = _store_admin_query(db, user, q=q, city=city, region=region,
-                               include_inactive=include_inactive,
-                               include_archived=include_archived)
+                               lifecycle=lifecycle)
     total = query.count()
     rows = apply_paging(query.order_by(Store.store_code), page, page_size).all()
     return Page(items=rows, total=total, page=page, page_size=page_size).as_dict(
@@ -2954,8 +2997,9 @@ def store_filter_options(
     dropdown offers every Zone this account may reach and not merely the ones
     that happen to be on screen - and never one it may not.
     """
-    rows = _store_admin_query(db, user, include_inactive=True,
-                              include_archived=True).all()
+    # all_current: every Store this account may reach that still exists, so a
+    # Zone is offered even when its only Store is archived.
+    rows = _store_admin_query(db, user, lifecycle="all_current").all()
     return {
         "regions": sorted({row.region for row in rows if row.region}),
         "cities": sorted({row.city for row in rows if row.city}),
