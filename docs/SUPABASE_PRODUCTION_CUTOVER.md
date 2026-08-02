@@ -402,3 +402,62 @@ to dry-run, requires a typed `RESET` confirmation, touches only the known
 SpeakLink table inventory in FK-safe reverse order, refuses outright if it
 finds an unrecognised public table, never issues `DROP`, and never touches a
 Supabase-managed schema. It is deliberately not a general-purpose utility.
+
+## 12. RC15 - Receiver authentication now works on PostgreSQL
+
+Section 11's blocker is fixed. **Use RC15 or later for the cutover; RC14
+cannot authenticate a single Receiver against PostgreSQL.**
+
+What changed:
+
+* `receiver_auth_service` accepts `sqlite` and `postgresql` (an explicit list,
+  so an unexpected dialect is still refused), introspects with SQLAlchemy's
+  Inspector instead of `PRAGMA`/`sqlite_master`, keeps the SQLite `PRAGMA
+  foreign_keys` guard on SQLite only, and casts the `public_id` parameter that
+  PostgreSQL could not type-infer;
+* `server.build_receiver_runtime_authenticator` probes for the Device tables
+  with the Inspector - the old `sqlite_master` probe threw, was swallowed by a
+  bare `except`, and silently degraded the fleet to legacy Store-token
+  authentication;
+* `postgres_schema` gained `schema_migrations`,
+  `receiver_credential_migration_state`, and the four indexes Receiver
+  authentication requires;
+* `migrate_sqlite_to_postgres.TABLE_ORDER` carries both state tables;
+* `ensure_permission_schema` reseeds the catalog on PostgreSQL.
+
+### The state tables travel - do not let them be re-derived
+
+`receiver_credential_migration_state` must arrive as it is in SQLite
+(`hash_only`, `legacy_verification_enabled = 0`). If it is ever recreated
+instead of copied, it comes back as `legacy_only` with legacy verification ON,
+which silently re-enables Store shared-token authentication. Verify after
+migration:
+
+```sql
+SELECT state, legacy_verification_enabled
+FROM receiver_credential_migration_state WHERE id = 1;
+```
+
+Expected: `hash_only`, `0`. Anything else - stop.
+
+### The migration source must be a FRESH backup
+
+`speaklink-FINAL-pre-supabase-cutover-20260802-091545.db` is rollback evidence
+from the blocked attempt. **It is no longer a valid migration source**,
+because live HQ resumed writing to SQLite afterwards. At the real cutover:
+stop HQ, prove SQLite quiescent, take a NEW final backup, and migrate from
+that one.
+
+### Order for the next attempt
+
+1. stop the `SpeakLink HQ Runtime` Scheduled Task, and confirm no orphaned
+   `uvicorn` survives it (one did last time, and it kept the database open);
+2. prove quiescence - two samples, counters and file sizes unchanged;
+3. NEW final backup via the SQLite backup API, with `integrity_check` and
+   `foreign_key_check`;
+4. fingerprint gate on production (`e720ac35878a1d7b`);
+5. `tools/reset_postgres_destination.py` - dry-run, then the confirmed reset;
+6. migrate from the new backup; `--verify`;
+7. check `receiver_credential_migration_state` as above;
+8. install **RC15**, set `app_env=production`, start the task, require READY;
+9. confirm a Store Receiver reconnects with no re-enrolment.

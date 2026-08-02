@@ -47,6 +47,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     ForeignKeyConstraint,
+    Index,
     Integer,
     String,
     Table,
@@ -347,6 +348,91 @@ admin_deletion_events = Table(
 )
 
 
+# ---------------------------------------------------------------------------
+# Receiver credential migration state (migrations.py)
+# ---------------------------------------------------------------------------
+# These two tables are read by receiver_auth_service on EVERY Receiver
+# handshake. They were absent here until RC15, which meant a PostgreSQL
+# deployment could authenticate nobody.
+#
+# WHY THEY ARE MIGRATED RATHER THAN RE-DERIVED
+#
+# ``run_receiver_credential_phase_one`` creates them fresh at
+# ``state='legacy_only'`` with ``legacy_verification_enabled=1``. The live
+# fleet is at ``hash_only`` with legacy verification OFF - meaning a Store's
+# old shared token is no longer accepted anywhere. Re-deriving on a
+# PostgreSQL start-up would therefore silently REACTIVATE legacy Store-token
+# authentication.
+#
+# That is the dangerous direction of a security regression: it authenticates
+# MORE, not less, so nothing fails, nothing alerts, and the fleet quietly
+# returns to a posture it was deliberately migrated off. Copying the rows
+# preserves the decision that was actually made.
+schema_migrations = Table(
+    "schema_migrations", metadata,
+    Column("version", Integer, primary_key=True, autoincrement=False),
+    Column("name", String(200), nullable=False, unique=True),
+    Column("applied_at", String(40), nullable=False),
+    # The SQLite original spells this with substr(); PostgreSQL takes the same
+    # meaning as a portable pattern check. Both say "a UTC timestamp".
+    CheckConstraint(
+        "char_length(applied_at) BETWEEN 20 AND 40 "
+        "AND (applied_at LIKE '%+00:00' OR applied_at LIKE '%Z')",
+        name="ck_schema_migrations_applied_at_utc"),
+)
+
+receiver_credential_migration_state = Table(
+    "receiver_credential_migration_state", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=False),
+    Column("schema_version", Integer, nullable=False),
+    Column("state", String(24), nullable=False),
+    # INTEGER 0/1 rather than BOOLEAN, deliberately: the SQLite column is an
+    # INTEGER with a CHECK IN (0,1), the migration tool copies the value
+    # verbatim, and receiver_auth_service compares it against the integers in
+    # _EXPECTED_LEGACY_FLAG. Making it BOOLEAN here would mean the copied 0
+    # arrives as False and the comparison 'False != 0' is... equal in Python,
+    # but the copy itself would have to coerce. Keeping the storage type the
+    # same on both engines removes the question entirely.
+    Column("legacy_verification_enabled", Integer, nullable=False, server_default="1"),
+    Column("updated_at", String(40), nullable=False),
+    CheckConstraint("id = 1", name="ck_receiver_credential_migration_state_singleton"),
+    CheckConstraint("schema_version > 0",
+                    name="ck_receiver_credential_migration_state_version"),
+    CheckConstraint(
+        "state IN ('legacy_only', 'backfilled', 'dual_verify', 'hash_only', "
+        "'raw_neutralized')",
+        name="ck_receiver_credential_migration_state_state"),
+    CheckConstraint("legacy_verification_enabled IN (0, 1)",
+                    name="ck_receiver_credential_migration_state_legacy_flag"),
+    CheckConstraint(
+        "updated_at LIKE '%+00:00' OR updated_at LIKE '%Z'",
+        name="ck_receiver_credential_migration_state_updated_at_utc"),
+)
+
+
+# ---------------------------------------------------------------------------
+# The indexes Receiver authentication REQUIRES
+# ---------------------------------------------------------------------------
+# receiver_auth_service._REQUIRED_INDEXES names these four and refuses to
+# authenticate anybody if one is missing. On SQLite they are created by
+# run_receiver_credential_phase_one; they were never declared here, so a
+# PostgreSQL deployment failed that check for the whole fleet.
+#
+# The check is not bureaucratic. ix_receiver_credentials_auth_lookup is what
+# turns the per-handshake credential lookup into an index probe instead of a
+# scan of every credential in the fleet - and the moment that matters most is
+# a mass reconnect after an outage, i.e. exactly when the system is already
+# under stress.
+Index("ix_receiver_devices_store_status",
+      receiver_devices.c.store_id, receiver_devices.c.status)
+Index("ix_receiver_credentials_public_id",
+      receiver_credentials.c.public_id, unique=True)
+Index("ix_receiver_credentials_auth_lookup",
+      receiver_credentials.c.hash_key_version, receiver_credentials.c.token_hash)
+Index("ix_receiver_credentials_device_status",
+      receiver_credentials.c.device_id, receiver_credentials.c.status)
+
+
 def create_all(engine: Engine) -> None:
     """Create the complete PostgreSQL production schema - every ORM table in
     models.py (Store, HQUser, BroadcastSession, ...) AND every table
@@ -362,6 +448,8 @@ def create_all(engine: Engine) -> None:
 __all__ = [
     "admin_deletion_events",
     "create_all",
+    "receiver_credential_migration_state",
+    "schema_migrations",
     "device_deletion_events",
     "metadata",
     "permission_audit_events",

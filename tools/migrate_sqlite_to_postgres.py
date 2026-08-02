@@ -56,6 +56,12 @@ for candidate in (REPO_ROOT, BACKEND_ROOT):
 # topological sort - never hand-guessed. See tests/test_migration_tool.py
 # for the assertion that this list stays in sync with the live schema.
 TABLE_ORDER = [
+    # No foreign keys, so the position is free - they lead because they are
+    # what receiver_auth_service reads before it will authenticate anybody,
+    # and because a reader of this list should see them before wondering
+    # whether Receiver auth state travels. It does.
+    "schema_migrations",
+    "receiver_credential_migration_state",
     "stores",
     "hq_users",
     "login_security_state",

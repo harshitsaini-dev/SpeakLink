@@ -4729,3 +4729,105 @@ no credential was rotated.
 4. Prove the whole thing at runtime against the disposable TEST project
    before touching production: HQ start-up, `READY`, and one real Receiver
    handshake.
+
+---
+
+## RC15: Receiver authentication works on PostgreSQL
+
+The blocker that stopped the cutover is fixed, and - more importantly - it is
+now proven by a real Receiver reaching CONNECTED over a real WebSocket against
+real PostgreSQL. That proof did not exist before RC14 and is why RC14 shipped
+a total Receiver outage nobody could see.
+
+### What was actually wrong
+
+Nine SQLite-only assumptions on the path a Receiver takes to authenticate:
+
+| Where | Assumption | Effect on PostgreSQL |
+|---|---|---|
+| `receiver_auth_service._validate_inputs` | `dialect.name != "sqlite"` -> refuse | **every Receiver refused** |
+| same | `PROTECTED_DATABASE_PATH` file-path compare | meaningless off SQLite |
+| `_columns` | `PRAGMA table_info` | syntax error |
+| `_validate_schema_and_state` | `sqlite_master` (tables) | relation does not exist |
+| same | `sqlite_master` (indexes) | relation does not exist |
+| same | `PRAGMA foreign_key_check` | syntax error |
+| `authenticate_receiver_credential` | `PRAGMA foreign_keys=ON` + verify | syntax error |
+| `_hash_candidates` | `:public_id IS NULL` with a bare parameter | `could not determine data type of parameter` |
+| `server.build_receiver_runtime_authenticator` | `sqlite_master` probe inside a bare `except` | **silently degrades the whole fleet to legacy Store-token auth** |
+
+The last one deserves its own line. It does not raise anything a caller sees:
+the probe throws, the `except Exception: return None` swallows it, and HQ then
+serves the legacy authenticator - which refuses every Device credential. Same
+shape as the RC14 blocker: healthy dashboard, zero Stores able to connect.
+
+Plus two schema gaps that would have refused everybody even after the dialect
+fixes: `schema_migrations` and `receiver_credential_migration_state` were
+absent from `postgres_schema` and from the migration tool's `TABLE_ORDER`, and
+none of the four `_REQUIRED_INDEXES` existed on the PostgreSQL side.
+
+### The two state tables are MIGRATED, not re-derived
+
+Deliberate, and the reasoning is a security one.
+`run_receiver_credential_phase_one` creates them fresh at `legacy_only` with
+`legacy_verification_enabled = 1`. The live fleet runs `hash_only` with legacy
+verification OFF, meaning a Store's old shared token is no longer accepted
+anywhere. Re-deriving on a PostgreSQL start-up would silently **reactivate**
+legacy Store-token authentication - a regression in the dangerous direction,
+because it authenticates MORE, so nothing fails and nothing alerts. Copying
+the rows preserves the decision that was actually made.
+
+### One more thing start-up did not do
+
+`ensure_permission_schema` was SQLite-only (`AUTOINCREMENT`, which `IF NOT
+EXISTS` does not save because the statement still has to parse). Its DDL was
+not the important part - the RESEED was. Without it a cutover would carry the
+RC12 catalog forever and every feature guarded by a newly added code would be
+denied to everybody with nothing explaining why. Measured on PostgreSQL after
+the fix: **29 permissions, 64 role_permissions, 44 Stores, 1 administrator**,
+including all five admin-management codes that do not exist in RC12's catalog.
+
+### The proof RC14 never had
+
+`tests/test_postgres_receiver_handshake.py` starts the whole application
+against an isolated PostgreSQL schema and drives a real Receiver WebSocket:
+
+* the application starts and serves, dialect asserted `postgresql`;
+* an administrator signs in;
+* **a Receiver with an existing credential reaches CONNECTED**, is registered
+  in the connection manager, and its connection is recorded in
+  `receiver_events`;
+* a wrong credential is refused at the socket;
+* authenticating rotates and re-issues nothing - **no re-enrolment**.
+
+It claims nothing about audio. No `PLAYBACK_CONFIRMED`, no
+`SPEAKER_VERIFIED`; those need a real Receiver, a real amplifier and an
+operator's ears.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| PostgreSQL suite | **90 passed, 0 failed** (was 57) |
+| Backend SQLite suite | **2724 passed, 75 skipped, 0 failed** |
+| Frontend unit | 66 passed |
+| Playwright | 211 passed (isolated port 3123 - live HQ owns 3000) |
+| Production build | Compiled successfully |
+| compileall / pip check / diff --check / secret scan | PASS |
+
+### A test-isolation bug this round exposed
+
+`test_smoke.py` asserted `PRAGMA database_list` returns exactly one row. It
+also returns a `temp` row once anything on that connection has created a
+temporary object, so the assertion really said "nobody has ever used a temp
+table on this connection" - which the test does not control. Adding two
+unrelated test files changed xdist's `loadscope` distribution and made it
+true. It now selects the `main` row by name, which is what it always meant.
+
+### A process mistake worth recording
+
+Midway through, a `git stash` used to compare against clean code was
+interrupted after the stash but before the pop. Several gate runs then
+executed against stashed-out code and looked green while proving nothing about
+the change. The stash was recovered intact and every gate re-run. **A gate run
+is only evidence if the working tree contained the change** - and a stash is
+an easy way to quietly break that.

@@ -123,7 +123,14 @@ def test_sqlite_test_database_connection(isolated_backend):
     db = isolated_backend["db"]
     with db.engine.connect() as connection:
         assert connection.scalar(text("SELECT 1")) == 1
-        database_file = connection.exec_driver_sql("PRAGMA database_list").one()[2]
+        # The 'main' row specifically, not "the only row". PRAGMA
+        # database_list also reports 'temp' once anything on that connection
+        # has created a temporary object, so .one() was asserting "nobody has
+        # ever used a temp table here" - which is not what this test is about
+        # and is not under its control. Adding two unrelated test files was
+        # enough to change xdist's loadscope distribution and make it true.
+        rows = connection.exec_driver_sql("PRAGMA database_list").all()
+        database_file = next(row[2] for row in rows if row[1] == "main")
         assert Path(database_file) == Path(db.DB_PATH).resolve()
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
 

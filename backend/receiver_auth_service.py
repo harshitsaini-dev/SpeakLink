@@ -161,13 +161,31 @@ def _database_path(engine: Engine) -> Path | None:
     return Path(database).resolve()
 
 
+#: The engines this service will authenticate against. SQLite is the local
+#: HQ database; PostgreSQL is Supabase.
+#:
+#: Until RC15 this read ``!= "sqlite"`` and refused everything else. That was
+#: correct when SQLite was the only database and became a total outage the
+#: moment a second one existed: HQ would boot, report READY, serve every admin
+#: screen, and authenticate no Receiver at all. The list is explicit rather
+#: than open so an unexpected dialect is still refused rather than attempted.
+SUPPORTED_DIALECTS = frozenset({"sqlite", "postgresql"})
+
+
 def _validate_inputs(
     engine: Engine,
     presented_token: object,
     hash_keys: object,
     now: datetime | None,
 ) -> tuple[str, dict[int, bytes], datetime]:
-    if engine.dialect.name != "sqlite" or _database_path(engine) == PROTECTED_DATABASE_PATH.resolve():
+    dialect = engine.dialect.name
+    if dialect not in SUPPORTED_DIALECTS:
+        raise _configuration_failure()
+    # The protected-database guard is a FILE PATH check, so it only means
+    # anything on SQLite. On PostgreSQL there is no path to protect and
+    # ``engine.url.database`` is the database name, which would never match -
+    # so the check is skipped rather than evaluated into a false negative.
+    if dialect == "sqlite" and _database_path(engine) == PROTECTED_DATABASE_PATH.resolve():
         raise _configuration_failure()
     if not isinstance(hash_keys, Mapping) or not 1 <= len(hash_keys) <= MAX_HASH_KEY_VERSIONS:
         raise _configuration_failure()
@@ -201,29 +219,66 @@ def _validate_inputs(
     return presented_token, validated_keys, validated_now
 
 
+def _inspector(connection: Connection):
+    """SQLAlchemy's own introspection, which answers on either dialect.
+
+    This replaces ``PRAGMA table_info`` and two ``sqlite_master`` queries. The
+    questions being asked - which tables exist, which columns they have, which
+    indexes are defined - are identical; only the SQLite-specific way of
+    asking them was ever the problem.
+    """
+    from sqlalchemy import inspect
+
+    return inspect(connection)
+
+
 def _columns(connection: Connection, table: str) -> set[str]:
-    return {row[1] for row in connection.exec_driver_sql(f'PRAGMA table_info("{table}")')}
+    return {column["name"] for column in _inspector(connection).get_columns(table)}
+
+
+def _index_names(connection: Connection) -> set[str]:
+    """Every index name across the tables this service depends on.
+
+    The Inspector reports indexes per table rather than globally, which is
+    the one real difference from the old ``sqlite_master`` sweep. Asking only
+    about the tables in _REQUIRED_COLUMNS is not a narrowing of the check -
+    every name in _REQUIRED_INDEXES belongs to one of them - and it avoids
+    enumerating unrelated tables on a shared database.
+
+    A UNIQUE constraint is reported separately from an index by some
+    dialects, so those names are folded in too: on PostgreSQL a unique index
+    created by ``Index(..., unique=True)`` appears as an index, but one
+    created by a UniqueConstraint appears as a constraint, and the service
+    cares that the lookup is indexed, not which DDL spelled it.
+    """
+    inspector = _inspector(connection)
+    found: set[str] = set()
+    for table in _REQUIRED_COLUMNS:
+        try:
+            found.update(index["name"] for index in inspector.get_indexes(table)
+                         if index.get("name"))
+            found.update(
+                constraint["name"]
+                for constraint in inspector.get_unique_constraints(table)
+                if constraint.get("name")
+            )
+        except Exception:
+            # A table that cannot be introspected is already fatal below; not
+            # raising here keeps the failure attributable to the missing
+            # table rather than to introspection.
+            continue
+    return found
 
 
 def _validate_schema_and_state(connection: Connection) -> str:
-    tables = {
-        row[0]
-        for row in connection.exec_driver_sql(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        )
-    }
+    inspector = _inspector(connection)
+    tables = set(inspector.get_table_names())
     if not set(_REQUIRED_COLUMNS) <= tables:
         raise _configuration_failure()
     for table, required in _REQUIRED_COLUMNS.items():
         if not required <= _columns(connection, table):
             raise _configuration_failure()
-    indexes = {
-        row[0]
-        for row in connection.exec_driver_sql(
-            "SELECT name FROM sqlite_master WHERE type = 'index'"
-        )
-    }
-    if not _REQUIRED_INDEXES <= indexes:
+    if not _REQUIRED_INDEXES <= _index_names(connection):
         raise _configuration_failure()
     ledger = connection.execute(
         text("SELECT name FROM schema_migrations WHERE version = :version"),
@@ -244,8 +299,19 @@ def _validate_schema_and_state(connection: Connection) -> str:
         or state_row.legacy_verification_enabled != _EXPECTED_LEGACY_FLAG.get(state_row.state)
     ):
         raise _configuration_failure()
-    if connection.exec_driver_sql("PRAGMA foreign_key_check").first() is not None:
-        raise _configuration_failure()
+    # PRAGMA foreign_key_check sweeps the whole database for rows whose
+    # foreign key points at nothing. It exists because SQLite will HAPPILY
+    # store such a row when enforcement is off, so an installation can be
+    # sitting on broken references and look fine.
+    #
+    # PostgreSQL cannot reach that state: every FK is checked as the
+    # statement runs and a violating row is rejected at write time. There is
+    # no equivalent sweep because there is nothing to sweep for. Skipping it
+    # is not a relaxed check on PostgreSQL - it is the same guarantee,
+    # enforced earlier.
+    if connection.dialect.name == "sqlite":
+        if connection.exec_driver_sql("PRAGMA foreign_key_check").first() is not None:
+            raise _configuration_failure()
     return state_row.state
 
 
@@ -443,7 +509,13 @@ def _hash_candidates(
                 WHERE c.token_format = :token_format
                   AND c.hash_key_version = :key_version
                   AND c.token_hash = :token_hash
-                  AND (:public_id IS NULL OR c.public_id = :public_id)
+                  -- CAST, because PostgreSQL cannot infer a bare parameter's
+                  -- type when its only use is "$n IS NULL" and refuses with
+                  -- "could not determine data type of parameter". SQLite
+                  -- infers per value and accepted it, so this was invisible
+                  -- until the first real PostgreSQL handshake.
+                  AND (CAST(:public_id AS VARCHAR) IS NULL
+                       OR c.public_id = CAST(:public_id AS VARCHAR))
                 LIMIT 2
                 """
             ),
@@ -528,9 +600,15 @@ def authenticate_receiver_credential(
     )
     try:
         with engine.connect() as connection:
-            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
-            if connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() != 1:
-                raise _configuration_failure()
+            # SQLite has to be ASKED to enforce foreign keys, per connection,
+            # and this service refuses to authenticate on a connection where
+            # the request did not take effect. PostgreSQL enforces them
+            # unconditionally and rejects the PRAGMA as a syntax error, so
+            # asking would turn a guarantee into a crash.
+            if connection.dialect.name == "sqlite":
+                connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+                if connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() != 1:
+                    raise _configuration_failure()
             state = _validate_schema_and_state(connection)
             if state in {"backfilled", "dual_verify"}:
                 _validate_backfilled_fleet(connection)
