@@ -2859,6 +2859,109 @@ def receiver_filter_options(db: Session = Depends(get_db),
 # contracts wearing one name. See admin_search.py.
 
 
+def _store_admin_query(db: Session, user: HQUser, *, q=None, city=None, region=None,
+                       include_inactive: bool = False, include_archived: bool = False):
+    """The one narrowing Store Management search AND its filter options use.
+
+    Shared deliberately. When the list and the dropdown are built by two
+    different queries they drift, and the way they drift is that a scoped
+    account discovers an out-of-scope Zone by opening a menu.
+    """
+    query = db.query(Store)
+
+    # A permanently deleted Store never appears here, under any flag. Unlike
+    # archived, there is no switch that reveals it: its history stays reachable
+    # through the rows that reference it, never through this operational list.
+    query = query.filter(
+        (Store.lifecycle_state.is_(None)) | (Store.lifecycle_state != "deleted"))
+    if not include_inactive:
+        query = query.filter(Store.is_active.is_(True))
+    if not include_archived:
+        query = query.filter(
+            (Store.lifecycle_state.is_(None)) | (Store.lifecycle_state != "archived"))
+
+    if city:
+        query = query.filter(Store.city == city)
+    if region:
+        query = query.filter(Store.region == region)
+
+    term = like_term(q)
+    if term:
+        # like_term escapes % and _ so a literal one searches for itself
+        # instead of quietly matching the whole catalog.
+        query = query.filter(
+            Store.store_code.ilike(term, escape="\\")
+            | Store.store_name.ilike(term, escape="\\"))
+
+    # Per-user Store/City/Zone scope, exactly as GET /stores applies it. None
+    # means unrestricted; an empty frozenset is a real "nothing", not "all".
+    scope = resolve_store_scope(engine, user)
+    if scope is not None:
+        query = query.filter(Store.id.in_(scope) if scope else Store.id.in_([-1]))
+    return query
+
+
+@api.get("/stores/search")
+def search_stores(
+    q: Optional[str] = None,
+    city: Optional[str] = None,
+    region: Optional[str] = None,
+    include_inactive: bool = False,
+    include_archived: bool = False,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("menu.stores.view")),
+):
+    """Filtered, paginated Store Management.
+
+    Deliberately a separate path from ``GET /api/stores``: that endpoint
+    returns a bare array which the Broadcast Console, the Playwright mocks and
+    the tooling all depend on, and adding a second response shape behind a
+    flag would be two contracts wearing one name.
+
+    Lifecycle only. Nothing here reports a Receiver as online or offline -
+    that is Receiver Status's job, and it comes from live WebSocket state
+    rather than from a Store row.
+    """
+    page, page_size = normalize_paging(page, page_size)
+    query = _store_admin_query(db, user, q=q, city=city, region=region,
+                               include_inactive=include_inactive,
+                               include_archived=include_archived)
+    total = query.count()
+    rows = apply_paging(query.order_by(Store.store_code), page, page_size).all()
+    return Page(items=rows, total=total, page=page, page_size=page_size).as_dict(
+        lambda row: {
+            "id": row.id,
+            "store_code": row.store_code,
+            "store_name": row.store_name,
+            "city": row.city,
+            "region": row.region,
+            "is_online_store": bool(row.is_online_store),
+            "is_active": bool(row.is_active),
+            "lifecycle_state": row.lifecycle_state or "active",
+        })
+
+
+@api.get("/stores/filter-options")
+def store_filter_options(
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("menu.stores.view")),
+):
+    """Zone/City options drawn from the SAME scoped narrowing the search uses.
+
+    Built from the shared query rather than from the visible page, so the
+    dropdown offers every Zone this account may reach and not merely the ones
+    that happen to be on screen - and never one it may not.
+    """
+    rows = _store_admin_query(db, user, include_inactive=True,
+                              include_archived=True).all()
+    return {
+        "regions": sorted({row.region for row in rows if row.region}),
+        "cities": sorted({row.city for row in rows if row.city}),
+    }
+
+
 @api.get("/logs/search")
 def search_logs(
     q: Optional[str] = None,

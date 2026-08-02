@@ -130,6 +130,11 @@ EXPECTED: dict[str, object] = {
     # Stores. Reading the list is how a VIEWER sees which shops are online;
     # create/update/archive are now separate actions.
     "list_stores": "menu.stores.view",
+    "search_stores": "menu.stores.view",
+    # Same permission as the list it filters, and the same Store Scope. A
+    # search that needed a weaker permission than the list would be a way to
+    # read the catalog without being allowed to see it.
+    "store_filter_options": "menu.stores.view",
     "stores_meta": "menu.stores.view",
     "create_store": "stores.create",
     "update_store": "stores.update",
