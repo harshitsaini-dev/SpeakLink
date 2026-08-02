@@ -81,6 +81,11 @@ TABLE_ORDER = [
     "user_store_scope",
     "store_scope_audit_events",
     "broadcast_targets",
+    # After both stores and broadcast_sessions, which it references. Its
+    # partial unique index travels with the schema, not with the rows, so a
+    # migrated copy enforces the one-Store-one-broadcast rule exactly as the
+    # source did.
+    "broadcast_store_leases",
     "receiver_credentials",
     "receiver_store_primary_device",
     "receiver_credential_events",
@@ -96,6 +101,7 @@ SEQUENCE_TABLES = [
     "receiver_enrollment_codes", "broadcast_sessions",
     "receiver_events", "receiver_devices", "user_permission_overrides",
     "user_store_scope", "store_scope_audit_events", "broadcast_targets",
+    "broadcast_store_leases",
     "receiver_credentials", "receiver_credential_events",
 ]
 

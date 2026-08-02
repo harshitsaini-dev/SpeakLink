@@ -298,6 +298,32 @@ store_deletion_events = Table(
 )
 
 
+#: Which live Broadcast Session currently holds which Store
+#: (broadcast_reservation.py).
+#:
+#: One Store must never process two live broadcasts at once - two
+#: announcements over one set of speakers is worse than either alone. That rule
+#: is enforced by a PARTIAL UNIQUE INDEX on store_id WHERE released_at IS NULL,
+#: created alongside this table, and not by the application logic in front of
+#: it. A released row is kept rather than deleted, which is why the uniqueness
+#: has to be partial: a plain UNIQUE(store_id) would let a Store be broadcast
+#: to exactly once, ever.
+#:
+#: Written only at session lifecycle boundaries. Never per audio chunk.
+broadcast_store_leases = Table(
+    "broadcast_store_leases", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("session_id", Integer, nullable=False),
+    Column("store_id", Integer, nullable=False),
+    Column("acquired_at", String(40), nullable=False),
+    Column("released_at", String(40)),
+    ForeignKeyConstraint(["session_id"], ["broadcast_sessions.id"],
+                         name="fk_broadcast_store_lease_session"),
+    ForeignKeyConstraint(["store_id"], ["stores.id"],
+                         name="fk_broadcast_store_lease_store"),
+)
+
+
 #: Irreversible User deletion audit (user_deletion.py). Mirrors
 #: store_deletion_events: the actor, what was destroyed, and how much history
 #: still points at it - never a password, a hash or a token.
