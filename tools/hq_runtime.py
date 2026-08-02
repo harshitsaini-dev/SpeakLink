@@ -105,6 +105,11 @@ HEALTH_TIMEOUT_SECONDS = 3.0
 #: broken backend into a spawn loop.
 DEFAULT_MAX_ATTEMPTS = 6
 
+#: Consecutive missed health probes before a running child is replaced. One
+#: miss is a blip; restarting on the first one is what let a slow backend be
+#: joined by a second that could not own the port.
+MISSED_PROBES_BEFORE_RESTART = 3
+
 #: Exit codes. Task Scheduler records these, and an operator reads them in the
 #: task history, so a supervisor that gave up must never hand back zero.
 EXIT_OK = 0
@@ -499,6 +504,35 @@ def descendant_pids(pid: int) -> "list[int]":
     return found
 
 
+def _reap_child_tree(child, *, log=None) -> None:
+    """Terminate one child AND its descendants, deepest first.
+
+    Used by supervise_child before every retry. A child that failed to become
+    healthy may still be alive and still own the port, so retrying without
+    reaping is how the cutover produced a permanent restart loop.
+
+    Ownership is established by parent link (see descendant_pids), never by
+    process name: an HQ desk runs other Python, and matching on "python.exe"
+    would stop somebody's editor.
+    """
+    pid = getattr(child, "pid", None)
+    if pid is None:
+        return
+    _terminate_descendants(pid, log=log)
+    try:
+        child.terminate()
+    except Exception:
+        pass
+    try:
+        child.wait(timeout=10)
+    except Exception:
+        try:
+            child.kill()
+        except Exception:
+            if log:
+                log.warning("could not stop child pid %s", pid)
+
+
 def _terminate_descendants(pid: int, *, log=None) -> int:
     """Stop a child's own descendants, deepest first, before the child itself."""
     stopped = 0
@@ -582,15 +616,56 @@ class ChildOutcome:
     state: RuntimeState
     attempts: int
     detail: str = ""
+    #: The child that became healthy, so the caller supervises the process
+    #: that is actually serving rather than whichever one it started last.
+    child: object = None
+
+
+#: How long a freshly started child may take to answer before the attempt is
+#: abandoned. This is NOT the health-probe timeout: HEALTH_TIMEOUT_SECONDS
+#: still bounds each individual request. This bounds how long a child that is
+#: ALIVE but not yet answering is left alone to finish starting.
+#:
+#: 60 s because start-up against Supabase runs its migrations over the network
+#: - about ten seconds measured from Delhi - and a machine under load is
+#: slower still. Against local SQLite the child answers immediately and none
+#: of this budget is spent.
+STARTUP_GRACE_SECONDS = 60.0
+
+#: How often to re-ask a starting child whether it is ready yet.
+STARTUP_POLL_SECONDS = 1.0
 
 
 def supervise_child(*, name: str, start, is_alive, health, max_attempts: int = 5,
-                    sleep=None, random_value=None, policy: "BackoffPolicy | None" = None
+                    sleep=None, random_value=None, policy: "BackoffPolicy | None" = None,
+                    startup_grace_seconds: float = STARTUP_GRACE_SECONDS,
+                    poll_seconds: float = STARTUP_POLL_SECONDS,
+                    reap=None, monotonic=None,
                     ) -> ChildOutcome:
     """Start a child until it is HEALTHY, or give up and say so.
 
-    Giving up matters. A permanently broken backend that is respawned for ever
-    fills the disk with logs, and buries the one line that says why.
+    EXACTLY ONE CHILD IS ALIVE AT A TIME, and that is the whole point.
+
+    The previous version spawned a new child on every attempt and asked for
+    health ONCE, immediately. A backend that needed ten seconds to answer -
+    which is what start-up against a remote database costs - was therefore
+    declared failed while it was still starting, and a second child was
+    spawned on top of it. The first one won the race for the port; the second
+    died; and the supervisor spent the rest of its life restarting a child
+    that could never bind. HQ reported READY throughout.
+
+    So each attempt now:
+
+    1. starts ONE child;
+    2. leaves it alone while it is alive and inside the startup grace, asking
+       only whether it has started answering yet;
+    3. reaps it - the whole process tree - if it exits early or runs out of
+       grace, BEFORE any retry, because a child that is merely unresponsive
+       still owns the port;
+    4. only then backs off and tries again.
+
+    Giving up still matters. A permanently broken backend respawned for ever
+    fills the disk with logs and buries the one line that says why.
     """
     if sleep is None:
         import time
@@ -600,15 +675,44 @@ def supervise_child(*, name: str, start, is_alive, health, max_attempts: int = 5
         import random as _random
 
         random_value = _random.random
+    if monotonic is None:
+        import time
+
+        monotonic = time.monotonic
+    if reap is None:
+        reap = _reap_child_tree
     policy = policy or BackoffPolicy()
 
     healthy_state = (RuntimeState.BACKEND_HEALTHY if name == "backend"
                      else RuntimeState.READY)
 
+    # The grace is bounded by a POLL COUNT as well as by the clock, and the
+    # count is what actually terminates the loop. Bounding on elapsed time
+    # alone means an injected no-op sleep never advances anything, so a test
+    # supervising a never-healthy child spins for a real minute per attempt -
+    # which is how this fix first made the runtime suite take ten minutes.
+    max_polls = max(1, int(startup_grace_seconds / poll_seconds))
+
     for attempt in range(1, max_attempts + 1):
         child = start()
-        if is_alive(child) and health():
-            return ChildOutcome(state=healthy_state, attempts=attempt)
+        deadline = monotonic() + startup_grace_seconds
+
+        for poll in range(max_polls + 1):
+            if not is_alive(child):
+                break
+            if health():
+                return ChildOutcome(state=healthy_state, attempts=attempt, child=child)
+            if poll >= max_polls or monotonic() >= deadline:
+                break
+            sleep(poll_seconds)
+
+        # Either it died, or it never answered. Both leave a process tree that
+        # may still hold the port, so both are reaped before anything else.
+        try:
+            reap(child)
+        except Exception:  # pragma: no cover - reaping must never mask the retry
+            pass
+
         if attempt < max_attempts:
             sleep(policy.delay(attempt, random_value=random_value))
 
@@ -680,13 +784,128 @@ def start_logging(profile: RuntimeProfile):
 # beats a second copy that quietly drifts from this one.
 
 
+#: One Windows Job Object owning every child this supervisor starts.
+#:
+#: WHY THIS IS NEEDED AT ALL
+#:
+#: ``stop()`` reaps the children properly - but only when it RUNS. Task
+#: Scheduler's Stop, and any hard kill of EchoCastHQRuntime.exe, terminate the
+#: supervisor without giving it a chance to clean up. Three times during this
+#: work that left uvicorn and spa_server.py alive, still holding ports 8000 and
+#: 3000, with no parent - so the next start could not bind and an operator had
+#: to hunt PIDs by hand.
+#:
+#: A Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE moves that guarantee
+#: into the kernel: when the last handle to the job closes - which happens
+#: automatically when this process dies, however it dies - Windows terminates
+#: every process in the job. No cooperation from the dying supervisor required.
+#:
+#: It is scoped to processes THIS supervisor started. Nothing else is ever
+#: assigned to the job, so no unrelated python.exe can be caught by it.
+_JOB_HANDLE = None
+
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+
+
+def ensure_child_job(log=None):
+    """Create (once) the job that owns every child. Returns a handle or None.
+
+    Returns None on non-Windows and on any failure: containment is defence in
+    depth, and a supervisor that refused to start because it could not create
+    a job object would be a worse outcome than the orphans it prevents.
+    """
+    global _JOB_HANDLE
+    if _JOB_HANDLE is not None or sys.platform != "win32":
+        return _JOB_HANDLE
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            return None
+
+        class _BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.POINTER(wintypes.ULONG)),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [("ReadOperationCount", ctypes.c_uint64),
+                        ("WriteOperationCount", ctypes.c_uint64),
+                        ("OtherOperationCount", ctypes.c_uint64),
+                        ("ReadTransferCount", ctypes.c_uint64),
+                        ("WriteTransferCount", ctypes.c_uint64),
+                        ("OtherTransferCount", ctypes.c_uint64)]
+
+        class _ExtendedLimits(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", _BasicLimits),
+                        ("IoInfo", _IoCounters),
+                        ("ProcessMemoryLimit", ctypes.c_size_t),
+                        ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                        ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        limits = _ExtendedLimits()
+        limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            handle, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits), ctypes.sizeof(limits),
+        ):
+            return None
+        _JOB_HANDLE = handle
+        if log:
+            log.info("child containment job created; children die with this runtime")
+        return _JOB_HANDLE
+    except Exception:
+        if log:
+            log.warning("child containment job unavailable; relying on stop() alone")
+        return None
+
+
+def assign_to_child_job(child, log=None) -> bool:
+    """Put one spawned child into the containment job. Best effort."""
+    handle = ensure_child_job(log=log)
+    pid = getattr(child, "pid", None)
+    if handle is None or pid is None or sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        PROCESS_SET_QUOTA, PROCESS_TERMINATE = 0x0100, 0x0001
+        process = kernel32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
+        if not process:
+            return False
+        try:
+            return bool(kernel32.AssignProcessToJobObject(handle, process))
+        finally:
+            kernel32.CloseHandle(process)
+    except Exception:
+        return False
+
+
 def spawn_child(command: list, env: dict):
     """Start one child with no console and no inherited standard streams.
 
     The streams are discarded rather than piped: nobody reads them, and a full
     pipe buffer would silently wedge the child weeks into a deployment.
+
+    The child is then assigned to the containment job, so that killing this
+    supervisor - by Task Scheduler, by Task Manager, by anything - takes its
+    children with it instead of stranding them on the ports.
     """
-    return subprocess.Popen(
+    child = subprocess.Popen(
         command,
         env=env,
         stdin=subprocess.DEVNULL,
@@ -694,6 +913,8 @@ def spawn_child(command: list, env: dict):
         stderr=subprocess.DEVNULL,
         **child_process_options(),
     )
+    assign_to_child_job(child)
+    return child
 
 
 # ===========================================================================
@@ -720,6 +941,8 @@ class HQRuntime:
         self._watch_interval = watch_interval
         self._children: dict = {}
         self._restarts: dict = {"backend": 0, "frontend": 0}
+        #: Consecutive missed probes per child, reset by any good probe.
+        self._missed: dict = {"backend": 0, "frontend": 0}
 
     # -- the injectable edges -------------------------------------------------
     def _pause(self, seconds: float) -> None:
@@ -794,8 +1017,29 @@ class HQRuntime:
     def watch_once(self) -> RuntimeState:
         for name in ("backend", "frontend"):
             child = self._children.get(name)
-            if child is not None and child.poll() is None and self._healthy(name):
+            alive = child is not None and child.poll() is None
+
+            if alive and self._healthy(name):
+                # A good probe clears the strike count: only CONSECUTIVE
+                # misses mean anything.
+                self._missed[name] = 0
                 continue
+
+            if alive:
+                # Alive but did not answer. One missed probe is a blip - a GC
+                # pause, a momentarily busy event loop, a slow database round
+                # trip - and restarting on the first miss is what produced a
+                # second backend racing the first for the port. Only a
+                # sustained silence counts as a fault.
+                self._missed[name] += 1
+                if self._missed[name] < MISSED_PROBES_BEFORE_RESTART:
+                    if self._log:
+                        self._log.info(
+                            "the %s missed a health probe (%s/%s); leaving it alone",
+                            name, self._missed[name], MISSED_PROBES_BEFORE_RESTART)
+                    continue
+
+            self._missed[name] = 0
             self._restarts[name] += 1
             if self._restarts[name] > self._max_attempts:
                 return self._record(
@@ -805,6 +1049,14 @@ class HQRuntime:
                 )
             if self._log:
                 self._log.warning("the %s stopped answering; restarting it", name)
+            # Reap FIRST. A child that is alive but silent still owns its port,
+            # and starting a replacement on top of it is how one slow backend
+            # became a permanent restart loop.
+            if child is not None:
+                try:
+                    _reap_child_tree(child, log=self._log)
+                except Exception:
+                    pass
             self._start_one(name)
         return self._record(RuntimeState.READY)
 
