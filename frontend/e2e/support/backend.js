@@ -275,6 +275,38 @@ async function mockBackend(page, options = {}) {
     const param = (name) => url.searchParams.get(name);
     const flag = (name) => param(name) === 'true';
 
+    if (method === 'GET' && path === '/stores/filter-options') {
+      const visible = state.stores.filter((x) => x.lifecycle_state !== 'deleted');
+      return route.fulfill(json({
+        regions: [...new Set(visible.map((x) => x.region))].sort(),
+        cities: [...new Set(visible.map((x) => x.city))].sort(),
+      }));
+    }
+
+    if (method === 'GET' && path === '/stores/search') {
+      if (state.storesListStatus !== 200) {
+        return route.fulfill(json({ detail: 'You do not have permission to view this.' },
+                                  state.storesListStatus));
+      }
+      // A permanently deleted Store never appears, under any flag.
+      let rows = state.stores.filter((x) => x.lifecycle_state !== 'deleted');
+      if (!flag('include_inactive')) rows = rows.filter((x) => x.is_active !== false);
+      if (!flag('include_archived')) {
+        rows = rows.filter((x) => (x.lifecycle_state || 'active') !== 'archived');
+      }
+      if (q) rows = rows.filter((x) =>
+        `${x.store_code} ${x.store_name}`.toLowerCase().includes(q));
+      if (param('region')) rows = rows.filter((x) => x.region === param('region'));
+      if (param('city')) rows = rows.filter((x) => x.city === param('city'));
+      return route.fulfill(json(paged(rows.map((x) => ({
+        id: x.id, store_code: x.store_code, store_name: x.store_name,
+        city: x.city, region: x.region,
+        is_online_store: !!x.is_online_store,
+        is_active: x.is_active !== false,
+        lifecycle_state: x.lifecycle_state || 'active',
+      })))));
+    }
+
     if (method === 'GET' && path === '/receivers/filter-options') {
       const visible = state.stores.filter((s) => s.lifecycle_state !== 'deleted');
       return route.fulfill(json({

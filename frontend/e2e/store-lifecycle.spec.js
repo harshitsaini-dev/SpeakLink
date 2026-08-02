@@ -241,7 +241,11 @@ test.describe('Secrets and accessibility', () => {
     // test's name. The stores route is then overridden on top of it.
     await mockBackend(page);
     let failNext = true;
-    await page.route('**/api/stores?*', async (route) => {
+    // Store Management now loads through /stores/search - the server-side
+    // filtered endpoint - so that is what has to fail for this test to be
+    // about anything. The intent is unchanged: a load failure must be
+    // reported, must not leak internals, and must recover.
+    await page.route('**/api/stores/search*', async (route) => {
       if (failNext) {
         failNext = false;
         return route.fulfill({
@@ -253,14 +257,14 @@ test.describe('Secrets and accessibility', () => {
     });
 
     await page.goto('/stores');
-    await expect(page.getByTestId('stores-error')).toBeVisible();
-    const message = (await page.getByTestId('stores-error').textContent()) || '';
+    await expect(page.getByTestId('list-error')).toBeVisible();
+    const message = (await page.getByTestId('list-error').textContent()) || '';
     expect(message.toLowerCase()).not.toContain('sql');
     expect(message.toLowerCase()).not.toContain('traceback');
     expect(message.toLowerCase()).not.toContain('503');
 
     await page.getByTestId('stores-refresh-btn').click();
-    await expect(page.getByTestId('store-mgmt-row-UN')).toBeVisible();
-    await expect(page.getByTestId('stores-error')).toHaveCount(0);
+    await expect(page.getByTestId('edit-store-UN')).toBeVisible();
+    await expect(page.getByTestId('list-error')).toHaveCount(0);
   });
 });

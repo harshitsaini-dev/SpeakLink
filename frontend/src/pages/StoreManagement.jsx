@@ -3,7 +3,8 @@ import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { Plus, RefreshCw, KeyRound, MonitorSmartphone, Pencil, Power, Archive, ArchiveRestore, Trash2, ShieldAlert } from "lucide-react";
-import StatusBadge from "@/components/StatusBadge";
+import { useAdminList } from "@/lib/adminList";
+import { FilterBar, SearchInput, FilterSelect, ListState, Pager } from "@/components/AdminFilters";
 
 // A Store is never deleted. It owns Receiver Devices, broadcast sessions,
 // targets and events; removing the row would destroy the only record of what
@@ -36,30 +37,38 @@ function LifecycleBadge({ state }) {
 
 export default function StoreManagement() {
   const { can } = useAuth();
-  const [stores, setStores] = React.useState([]);
+  // Server-side, like every other admin screen. The catalog is 44 Stores
+  // today and is expected to grow; filtering it in React would mean the
+  // narrowing an operator sees and the narrowing the backend enforces are
+  // two different things, and a scoped account could be shown a total that
+  // includes Stores it may not open.
+  //
+  // include_inactive/include_archived default to true here because Store
+  // Management is precisely where a disabled or archived Store must remain
+  // visible - that is not true of the Broadcast Console.
+  const list = useAdminList("/stores/search", {
+    q: "", region: "", city: "",
+    include_inactive: true, include_archived: true,
+  });
+  const stores = list.items;
+  const [options, setOptions] = React.useState({ regions: [], cities: [] });
   const [showAdd, setShowAdd] = React.useState(false);
   const [editing, setEditing] = React.useState(null);
   const [error, setError] = React.useState("");
-  const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState("");
   const [deleting, setDeleting] = React.useState(null);
   const [tombstoning, setTombstoning] = React.useState(null);
 
-  const load = async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const { data } = await api.get("/stores", {
-        params: { include_inactive: true, include_archived: true },
-      });
-      setStores(Array.isArray(data) ? data : []);
-    } catch (e) {
-      setError("Stores could not be loaded. Try again.");
-    } finally {
-      setLoading(false);
-    }
-  };
-  React.useEffect(() => { load(); }, []);
+  const load = list.reload;
+
+  React.useEffect(() => {
+    // Scoped options from the server, not derived from the visible page: a
+    // Zone this account may reach should be offered even when no Store from
+    // it happens to be on screen.
+    api.get("/stores/filter-options")
+      .then(({ data }) => setOptions(data))
+      .catch(() => { /* the list's own error state already reports a failure */ });
+  }, []);
 
   const act = async (key, request) => {
     setBusy(key);
@@ -118,6 +127,18 @@ export default function StoreManagement() {
 
       {error && <div data-testid="stores-error" role="alert" className="text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div>}
 
+      <FilterBar onClear={list.clearFilters} activeCount={list.activeCount}
+                 total={list.total} loading={list.loading}>
+        <SearchInput value={list.filters.q} onChange={(v) => list.setFilter("q", v)}
+                     placeholder="Search Store code or name…" testId="stores-search" />
+        <FilterSelect label="Zone" testId="stores-zone" allLabel="All Zones"
+                      value={list.filters.region} options={options.regions}
+                      onChange={(v) => list.setFilter("region", v)} />
+        <FilterSelect label="City" testId="stores-city" allLabel="All Cities"
+                      value={list.filters.city} options={options.cities}
+                      onChange={(v) => list.setFilter("city", v)} />
+      </FilterBar>
+
       <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
@@ -128,18 +149,19 @@ export default function StoreManagement() {
               <th className="px-3 py-2">Zone</th>
               <th className="px-3 py-2">Type</th>
               <th className="px-3 py-2">Lifecycle</th>
-              <th className="px-3 py-2">Status</th>
+              {/* No Receiver status column. A Store row cannot honestly
+                  report whether a Receiver is connected - that is live
+                  WebSocket state and belongs to Receiver Status, which
+                  derives it from the connection manager rather than from a
+                  database column that goes stale the moment HQ stops. */}
               <th className="px-3 py-2 text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {loading && (
-              <tr><td colSpan={8} data-testid="stores-loading" className="px-3 py-6 text-center text-slate-500">Loading…</td></tr>
-            )}
-            {!loading && stores.length === 0 && (
-              <tr><td colSpan={8} data-testid="stores-empty" className="px-3 py-6 text-center text-slate-500">No Stores yet.</td></tr>
-            )}
-            {stores.map((s) => {
+            <ListState loading={list.loading} error={list.error}
+                       empty={!stores.length} colSpan={7} onRetry={list.reload}
+                       emptyText="No Stores match these filters. Clear them to see everything in this account's Scope." />
+            {!list.loading && !list.error && stores.map((s) => {
               const state = lifecycleOf(s);
               const archived = state === "ARCHIVED";
               return (
@@ -150,7 +172,6 @@ export default function StoreManagement() {
                   <td className="px-3 py-2">{s.region}</td>
                   <td className="px-3 py-2 text-xs text-slate-600">{s.is_online_store ? "Online" : "Physical"}</td>
                   <td className="px-3 py-2"><LifecycleBadge state={state}/></td>
-                  <td className="px-3 py-2">{archived ? <span className="text-xs text-slate-400">—</span> : <StatusBadge status={s.status}/>}</td>
                   <td className="px-3 py-2 text-right space-x-1 whitespace-nowrap">
                     {/* The Store id, not a credential. Enrolment lives on that page. */}
                     <Link data-testid={`devices-${s.store_code}`} to={`/stores/${s.id}/devices`} title="Receiver Devices" aria-label={`Receiver Devices for ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-blue-50"><MonitorSmartphone size={12}/></Link>
@@ -193,6 +214,8 @@ export default function StoreManagement() {
             })}
           </tbody>
         </table>
+        <Pager page={list.page} pages={list.pages} total={list.total}
+               hasMore={list.hasMore} onPage={list.setPage} />
       </div>
 
       {deleting && (
