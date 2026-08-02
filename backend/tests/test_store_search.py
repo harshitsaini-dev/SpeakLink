@@ -180,43 +180,43 @@ def test_zone_and_search_combine_rather_than_replace_each_other(client):
         assert row["region"] == first["region"]
 
 
-def test_an_inactive_store_is_hidden_until_asked_for(client):
+def test_a_disabled_store_is_hidden_from_the_default_view_and_found_by_its_own_selection(client):
+    """One control, not two overlapping flags - see the lifecycle tests in
+    test_store_lifecycle_filter_and_device_visibility.py."""
     owner = sign_in(client)
     target = search(client, owner)["items"][0]
     client.post(f"/api/stores/{target['id']}/disable", headers=owner)
 
     assert target["id"] not in {r["id"] for r in search(client, owner)["items"]}
-    shown = search(client, owner, include_inactive=True)
+    shown = search(client, owner, lifecycle="disabled")
     assert target["id"] in {r["id"] for r in shown["items"]}
 
 
-def test_an_archived_store_is_hidden_until_asked_for(client):
+def test_an_archived_store_is_hidden_from_the_default_view_and_found_by_its_own_selection(client):
     owner = sign_in(client)
     target = search(client, owner)["items"][1]
     client.post(f"/api/stores/{target['id']}/archive", headers=owner)
 
     assert target["id"] not in {r["id"] for r in search(client, owner)["items"]}
-    # Archiving also deactivates, so revealing an archived Store needs both
-    # flags - the same rule GET /stores has always had.
-    shown = search(client, owner, include_archived=True, include_inactive=True)
+    shown = search(client, owner, lifecycle="archived")
     assert target["id"] in {r["id"] for r in shown["items"]}
 
 
 # ===========================================================================
 # The tombstone rule
 # ===========================================================================
-def test_a_permanently_deleted_store_is_hidden_under_every_flag(client):
-    """Unlike archived, there is no flag that reveals it. That asymmetry is
-    the design: archiving is reversible and deletion is not."""
+def test_a_permanently_deleted_store_is_hidden_under_every_selection(client):
+    """Unlike archived, there is no selection that reveals it. That asymmetry
+    is the design: archiving is reversible and deletion is not."""
     owner = sign_in(client)
-    target = search(client, owner)["items"][2]
+    target = search(client, owner, lifecycle="all_current")["items"][2]
     response = client.post(f"/api/stores/{target['id']}/delete-permanently",
                            headers=owner,
                            json={"confirm": target["store_code"], "acknowledged": True})
     assert response.status_code == 200, response.text
 
-    for extra in ({}, {"include_inactive": True}, {"include_archived": True},
-                  {"include_inactive": True, "include_archived": True}):
+    for extra in ({}, {"lifecycle": "all_current"}, {"lifecycle": "active"},
+                  {"lifecycle": "disabled"}, {"lifecycle": "archived"}):
         body = search(client, owner, **extra)
         assert target["id"] not in {r["id"] for r in body["items"]}, (
             f"a deleted Store appeared with {extra}")
