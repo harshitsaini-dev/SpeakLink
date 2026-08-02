@@ -1468,3 +1468,65 @@ tests passed while writing to the wrong schema, because nothing they
 asserted was about *where* they were writing. If a test suite's safety
 depends on a boundary, something must assert the boundary - otherwise the
 suite will report success from the wrong side of it.
+
+---
+
+## SQLite forgives what PostgreSQL enforces, and that is a production bug generator
+
+The admin-management round passed 2716 SQLite tests and then failed seven
+times on the first real PostgreSQL run. Every one of those seven would have
+worked perfectly in development and broken only in production. They are worth
+learning as a family, because they share one shape.
+
+**The family.** SQLite is permissive by design: it has no boolean type, it
+infers types per value rather than per column, and its dialect carries
+extensions nobody else implements. PostgreSQL is strict about all three. So
+these compile and run on SQLite and are rejected outright by PostgreSQL:
+
+| Written | SQLite | PostgreSQL |
+|---|---|---|
+| `WHERE is_active = 1` | fine - 1 *is* true | `column is of type boolean but expression is of type integer` |
+| the same `:now` bound to a `VARCHAR` and a `TIMESTAMP` column | fine - types are per value | `inconsistent types deduced for parameter $2` |
+| `PRAGMA table_info(stores)` | the standard way to inspect | `syntax error at or near "PRAGMA"` |
+| `PRAGMA foreign_keys=ON` | required, or FKs are not enforced | syntax error - PostgreSQL always enforces |
+| `CREATE TABLE ... id INTEGER PRIMARY KEY AUTOINCREMENT` | fine | `AUTOINCREMENT` does not exist |
+| `LIKE 'morning%'` for a case-insensitive search | matches - ASCII `LIKE` ignores case | matches **nothing** - `LIKE` is case-sensitive |
+
+That last one is the nastiest, because it does not raise. It returns zero
+rows and looks like "no results".
+
+**Where they hurt most.** Two of the seven were in `ensure_*_schema`
+functions that run at **every start-up**. Those would not have degraded a
+feature; HQ would not have booted at all. A defect in a migration is
+categorically worse than a defect in a feature, because it fails before
+anything can report why.
+
+**The fixes, and why these ones.**
+
+* **Bind a Python `bool`, do not branch on dialect.** `{"active": True}`
+  renders as `1` on SQLite and `TRUE` on PostgreSQL because SQLAlchemy already
+  knows the difference. `if dialect == "sqlite"` around a literal works too,
+  and then there are two code paths to keep in step forever. There was
+  already one such branch in `server.py`, which is how we know the trap was
+  known - and it had been fixed in exactly one of the five places it existed.
+* **Use the Inspector, never `PRAGMA`.** `inspect(engine).get_columns(...)`
+  answers "does this column exist" on either engine.
+* **Give each column its own bind parameter** when their types differ.
+  PostgreSQL deduces one type per placeholder; sharing `:now` between a
+  `VARCHAR` and a `TIMESTAMP` is ambiguous and it says so.
+* **Define tables once, portably.** `postgres_schema` already held a portable
+  `Table` for `store_deletion_events`; the raw `CREATE TABLE ... AUTOINCREMENT`
+  beside it simply predated it. `Table.create(bind=..., checkfirst=True)`
+  emits correct DDL for whichever engine is connected.
+* **Guard `PRAGMA foreign_key_check`** rather than deleting it. On SQLite it
+  is what makes the integrity guard real; on PostgreSQL reaching the line at
+  all already proves integrity held, because constraints are checked as each
+  statement runs.
+
+**The meta-lesson, which is the same one this guide keeps arriving at.** A
+passing test suite proves the code works *in the environment the suite runs
+in*. Dual-database support is not "does it start" - it is a property that has
+to be exercised against the real second engine, on the real code paths,
+before anyone claims it. Seven defects survived 2716 tests because those
+tests all asked SQLite. The number of tests was never the issue; the number
+of *engines* was.

@@ -261,3 +261,100 @@ RC12 + SQLite remains authoritative. The production Supabase project holds
 a verified snapshot only. Anything written to RC12 after the snapshot is
 not in PostgreSQL, so the cutover procedure in section 7 must re-run the
 migration into a freshly emptied production database as its delta step.
+
+## 10. Real-PostgreSQL validation of the admin-management round
+
+Run against a **disposable** Supabase TEST project, never production. The
+identity gate below is what makes that claim checkable rather than trusted.
+
+### Which project, and how it is proved
+
+Two independent signals, both required, before a single destructive
+statement runs:
+
+1. **Fingerprint.** `sha256("postgres.<project-ref>")[:16]`, compared against
+   the documented production value `e720ac35878a1d7b`. Note the convention:
+   it hashes the **full pooler username**, not the bare project-ref. Hashing
+   the ref alone gives a different value and will look like a mismatch.
+2. **Read-only inventory.** An empty `public` schema, no leftover
+   `speaklink_test_*` schemas, and no `public.stores`. A fingerprint says
+   *which* project; only an inventory notices production data restored into a
+   project that carries a test ref.
+
+If either is ambiguous, stop. Do not run tests.
+
+### Passing the URL to the tests
+
+The test project's Session Pooler URI lives at:
+
+```
+%LOCALAPPDATA%\SpeakLink\persistent-lan-server\keys\test-postgres-url.txt
+```
+
+Read it into the test process's own environment as `TEST_POSTGRES_URL`.
+Do **not** use `set TEST_POSTGRES_URL=... && pytest`: that puts the password
+on a command line, visible to any process listing and recorded in shell
+history. The machine environment is never modified.
+
+**Build the test URI from the TEST project's own connection string.** Taking
+the production URI and editing only the project-ref leaves the *production
+password* in a second file - it cannot authenticate, and it duplicates the
+production credential onto disk. That mistake has already been made once.
+
+If a password contains `%`, `@`, `#`, `/` or `:` it must be percent-encoded
+in a URI, or the parse silently produces a different username and password
+than intended. Choosing an alphanumeric database password avoids the whole
+class of problem.
+
+### What is validated
+
+`backend/tests/test_postgres_admin_management.py` (29 tests) covers the
+User and Device tombstones, login refusal by both `is_active` and
+`session_version`, credential revocation, primary-assignment removal with no
+auto-promotion, History archive/unarchive/permanent delete, Logs
+archive/permanent delete, the audit surviving the purge it records,
+structured log entity fields, per-screen search and filter semantics,
+filter-based Select All Filtered, the filter indexes, the lifecycle and
+tombstone columns, and foreign-key behaviour.
+
+It deliberately does not drive the FastAPI HTTP layer: those routes are
+proven by the SQLite suite, and an application engine pointed at this
+project would resolve to `public` rather than to the generated test schema -
+which is the exact accident the fixture exists to prevent.
+
+### Seven defects this round found
+
+All PostgreSQL-only, all invisible to the 2716-test SQLite suite:
+
+| File | Defect |
+|---|---|
+| `user_deletion.py` | `is_active = 1` in a WHERE, and `is_active = 0` in the tombstone UPDATE |
+| `store_deletion.py` | `is_active = 0`; one bind parameter shared by a `VARCHAR` and a `TIMESTAMP`; `CREATE TABLE ... AUTOINCREMENT`; unguarded `PRAGMA foreign_key_check` |
+| `store_lifecycle.py` | `PRAGMA table_info` |
+| `user_lifecycle.py` | `PRAGMA table_info` |
+| `receiver_migration_transition_service.py` | `s.is_active = 1` |
+
+The two `PRAGMA table_info` sites are the serious ones: they run at every
+start-up, so **HQ would not have booted against PostgreSQL at all**. The
+cutover would have failed at boot rather than at a feature.
+
+See `docs/learning-guide.md` for the full family of SQLite-vs-PostgreSQL
+differences and why a bound Python `bool` is preferred over a dialect branch.
+
+### Required cleanup evidence
+
+After the run, all four must hold:
+
+* `0` leaked `speaklink_test_*` schemas;
+* `0` tables in `public`;
+* Supabase-managed schemas (`auth`, `storage`, `realtime`, `extensions`,
+  `graphql`, `vault`) present and carrying no SpeakLink tables;
+* production untouched.
+
+### Production check is READ-ONLY
+
+Verify production separately and without writing: `SET TRANSACTION READ ONLY`,
+then confirm the fingerprint, that the rotated credential connects, that the
+snapshot still reads (22 tables = 19 source-backed + 3 feature-branch,
+45 Stores, 3 Users, 5 Devices), that Store 31 (Bindapur) is present and
+active, and that its primary Device identity is unchanged.
