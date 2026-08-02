@@ -75,6 +75,7 @@ from store_scope import (
     resolve_store_scope,
     set_user_scope,
 )
+from broadcast_reconciliation import reconcile_orphaned_broadcasts
 from broadcast_reservation import (
     StoreBusyError,
     StoreNotInScopeError,
@@ -649,6 +650,28 @@ def startup_event():
     except Exception:
         logger.warning("Role or lifecycle backfill after seeding failed", exc_info=False)
         _write_log(db, "info", "EchoCast Live server started")
+
+    # Close broadcasts orphaned by a previous process, BEFORE this one can
+    # accept a new start. The schema exists by now, and nothing has served a
+    # request yet, so this is the only moment where "every live session in the
+    # database is an orphan" is reliably true.
+    #
+    # Deliberately NOT wrapped in a warn-and-continue. An unreleased lease is
+    # a Store that answers STORE_BUSY to every future broadcast for ever, and
+    # a warning printed next to "startup complete" is exactly how that would
+    # go unnoticed until somebody tried to broadcast to it. The runtime is
+    # empty at this point by construction; passing it explicitly keeps the
+    # reconciler's contract honest rather than assuming emptiness.
+    reconciliation = reconcile_orphaned_broadcasts(
+        engine, active_session_ids=manager.broadcasts.active_session_ids())
+    if reconciliation.changed_anything:
+        _write_log(
+            db, "warn",
+            f"Startup reconciliation closed "
+            f"{len(reconciliation.orphaned_session_ids)} interrupted "
+            f"broadcast(s) and released {reconciliation.released_leases} "
+            f"Store lease(s)")
+
     logger.info("EchoCast Live startup complete")
 
 
