@@ -1179,7 +1179,6 @@ def search_receiver_devices(
     is_primary: Optional[bool] = None,
     lifecycle: Optional[str] = None,
     include_archived: bool = True,
-    include_deleted: bool = False,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     db: Session = Depends(get_db),
@@ -1189,7 +1188,13 @@ def search_receiver_devices(
 
     archived and deleted are different states and are reported separately in
     ``lifecycle``: an archived Device can be restored, a permanently deleted
-    one never can. Deleted Devices are hidden unless asked for.
+    one never can.
+
+    A permanently deleted Device is NEVER returned here, under any query
+    parameter. There is deliberately no include_deleted: an opt-in is a thing
+    that can be left on, mistyped into a URL, or remembered by a stale
+    bookmark, and this endpoint feeds the operational screens. Read tombstones
+    through /receiver-devices/{public_id}/deletion-events instead.
     """
     page, page_size = normalize_paging(page, page_size)
     where = ["1=1"]
@@ -1207,8 +1212,17 @@ def search_receiver_devices(
         params["store_id"] = store_id; where.append("d.store_id = :store_id")
     if status_f:
         params["status_f"] = status_f; where.append("d.status = :status_f")
-    if not include_deleted:
-        where.append("d.deleted_at IS NULL")
+    # UNCONDITIONAL, and the only unconditional clause here. This endpoint is
+    # operational, a permanently deleted Device is not, and there is therefore
+    # no parameter that may bring one back. Making it opt-out was the defect:
+    # RC18 removed the UI control that sent include_deleted, but the parameter
+    # survived and a hand-crafted ?include_deleted=true still returned every
+    # tombstone on the live system. A capability nobody can reach through the
+    # product is still a capability.
+    #
+    # The row is untouched - see /receiver-devices/{public_id}/deletion-events
+    # for the audit trail, which is where a tombstone is supposed to be read.
+    where.append("d.deleted_at IS NULL")
     if not include_archived:
         where.append("d.archived_at IS NULL")
     if lifecycle in (None, "", "all_current"):
@@ -1217,7 +1231,11 @@ def search_receiver_devices(
         # nobody chose.
         pass
     elif lifecycle == "deleted":
-        where.append("d.deleted_at IS NOT NULL")
+        # Not an error, and deliberately not a 400: 'deleted' is a state this
+        # endpoint knows about and simply never has anything to say about.
+        # Returning an empty page says that without pretending the caller
+        # asked something meaningless.
+        where.append("1 = 0")
     elif lifecycle == "archived":
         where.append("d.archived_at IS NOT NULL AND d.deleted_at IS NULL")
     elif lifecycle == "active":
