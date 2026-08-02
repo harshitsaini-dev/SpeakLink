@@ -4624,3 +4624,108 @@ The rule this earns: **never point a test harness at a port on a machine
 running live HQ without checking who owns it first.** Playwright's
 `reuseExistingServer` makes this worse, not better, because it will silently
 adopt whatever answers.
+
+---
+
+## Supabase cutover attempt: BLOCKED by the Receiver authentication service
+
+The final cutover was authorised and attempted. It stopped before any
+destructive operation. **Production Supabase was not reset, not migrated and
+not written to.** Live HQ is back up on SQLite and unchanged.
+
+### The blocker
+
+`receiver_auth_service.authenticate_receiver_credential` is the single
+function every Receiver WebSocket handshake goes through. Its first
+precondition is:
+
+```python
+if engine.dialect.name != "sqlite" or _database_path(engine) == PROTECTED_DATABASE_PATH.resolve():
+    raise _configuration_failure()
+```
+
+**It refuses any engine that is not SQLite.** Not degrades - refuses. So
+`RC14 + Supabase` produces an HQ that boots, serves the admin UI, and cannot
+authenticate a single Store Receiver. That is the worst possible shape of
+failure, because everything an operator can see looks healthy.
+
+The same function is SQLite-only in four further places, all unconditional:
+
+| Line | Construct | On PostgreSQL |
+|---|---|---|
+| 531-533 | `PRAGMA foreign_keys=ON` / `PRAGMA foreign_keys` | syntax error |
+| 205 | `PRAGMA table_info("<table>")` | syntax error |
+| 211, 222 | `SELECT ... FROM sqlite_master` | relation does not exist |
+| 247 | `PRAGMA foreign_key_check` | syntax error |
+
+### And two tables the migration tool does not carry
+
+The auth service also reads `schema_migrations` and
+`receiver_credential_migration_state` to decide the credential verification
+mode (currently `hash_only`). Neither table is in
+`migrate_sqlite_to_postgres.TABLE_ORDER`, so neither would reach PostgreSQL
+even once the dialect checks are fixed. Frozen SQLite holds one row in each.
+
+### Why the earlier PostgreSQL round did not catch this
+
+The 57 PostgreSQL tests exercise the schema, the service modules and the
+query semantics. They do not drive the Receiver WebSocket handshake, and
+`test_postgres_admin_management.py` says so in its own docstring. This is
+exactly the gap recorded in the cutover plan as "Stage A5 - RC14 has not been
+proven to boot and operate against PostgreSQL at runtime level, only at
+test-suite level". That assumption turned out to be false, and it was false
+in the one subsystem that must never break.
+
+**Test count is not coverage of a code path nobody called.**
+
+### What was done, and what was not
+
+| Phase | Outcome |
+|---|---|
+| 0 Safety | PASS - RC14 31/31, fingerprint `e720ac35878a1d7b`, no active broadcast |
+| 1 Reset tool | DONE - `tools/reset_postgres_destination.py` + 13 tests |
+| 2 Freeze SQLite | DONE - task stopped, two orphaned uvicorn processes from the 11:33 double-start also stopped, quiescence proved by two samples 5 s apart |
+| 3 Final backup | DONE - SQLite backup API, `integrity_check ok`, 0 FK violations |
+| 4 Reset production | **NOT RUN** |
+| 5 Migration | **NOT RUN** |
+| 6-9 | **NOT RUN** |
+| 10 Rollback | DONE - HQ restarted on SQLite, `READY`, backend and frontend HTTP 200 |
+
+### Frozen SQLite counts (the backup is the immutable source when this resumes)
+
+796 rows across 21 tables: 45 stores, 3 hq_users, 16 broadcast_sessions,
+105 broadcast_targets, 149 receiver_events, 339 system_logs, 5
+receiver_devices, 6 receiver_credentials, 1 receiver_store_primary_device,
+24 permissions, 57 role_permissions, 2 user_permission_overrides, 0
+user_store_scope, 1 store_deletion_events, 12 store_scope_audit_events,
+12 receiver_enrollment_codes, 12 receiver_credential_events, 3
+permission_audit_events, 2 login_security_state, 1
+receiver_credential_migration_state, 1 schema_migrations.
+
+The three feature-branch tables (`user_deletion_events`,
+`device_deletion_events`, `admin_deletion_events`) do not exist in SQLite and
+would migrate as empty, as previously recorded.
+
+### Bindapur
+
+Store 31 was online at Phase 0 and disconnected at 09:11:45 UTC when HQ was
+stopped - expected in a maintenance window. It had **not** reconnected after
+~2.5 minutes of polling, which is past the Agent's 60 s maximum backoff. HQ
+itself is healthy (backend HTTP 200), so the cause is Store-side or VPN-side
+and needs an operator check on the Store PC. No Receiver was re-enrolled and
+no credential was rotated.
+
+### What has to happen before this can be retried
+
+1. Make the Receiver authentication path dialect-aware - the four SQLite-only
+   constructs and the hard `dialect.name != "sqlite"` refusal. This is the
+   highest-risk code in the product and needs its own round with real
+   PostgreSQL tests driving an actual handshake, not a schema check.
+2. Add `schema_migrations` and `receiver_credential_migration_state` to
+   `TABLE_ORDER` (with their FK position), or decide deliberately that the
+   PostgreSQL side re-derives them at start-up.
+3. Rebuild and verify a new RC carrying those fixes. **RC14 cannot perform
+   this cutover.**
+4. Prove the whole thing at runtime against the disposable TEST project
+   before touching production: HQ start-up, `READY`, and one real Receiver
+   handshake.
