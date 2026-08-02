@@ -186,6 +186,7 @@ from receiver_enrollment_codes import (
 from audio_protocol import build_prepare_message
 from auth import verify_password, hash_password, create_access_token, get_current_user
 from seed import seed_admin, seed_stores
+from audio_streaming import DEFAULT_STORE_QUEUE_CAPACITY
 from ws_manager import manager
 from receiver_connection_inventory import ReceiverConnectionInventoryError
 from receiver_runtime_auth import (
@@ -1821,9 +1822,7 @@ def update_store(store_id: int, payload: StoreUpdate, db: Session = Depends(get_
 def _live_store_ids() -> set[int]:
     """Stores currently receiving a live broadcast, so one cannot be pulled out
     from under an announcement the people in it are listening to."""
-    if not manager.is_live():
-        return set()
-    return set(manager.live_target_store_ids)
+    return manager.live_store_ids()
 
 
 def _lifecycle_action(transition, store_id: int, user: HQUser, *, use_live_guard: bool = True):
@@ -2323,11 +2322,12 @@ async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = 
     # cannot leave a lease behind.
     _refuse_busy_stores(db, user, target_store_ids)
 
-    # The single-broadcast gate. Still here on purpose: concurrent live
-    # sessions need the per-session audio manager, which is a later change.
-    # The reservation below is already correct for that world.
-    if manager.is_live():
-        raise HTTPException(status_code=409, detail="A broadcast is already live")
+    # The old single-broadcast gate stood here. It is gone: several sessions
+    # may now be live at once, each owning its own queues and microphone
+    # socket. What prevents two broadcasts reaching one Store is the
+    # broadcast_store_leases unique index claimed below - a database
+    # invariant rather than a process-local flag, so it survives a restart and
+    # cannot be raced.
 
     # Claim every target Store, or none of them, BEFORE anything is marked
     # live or any Receiver is told to play. All-or-nothing is the operationally
@@ -2370,7 +2370,8 @@ async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = 
     db.commit()
     db.refresh(session)
 
-    manager.start_live_session(session.id, target_store_ids)
+    await manager.start_live_session(session.id, target_store_ids,
+                                     owner_user_id=session.started_by)
     # Send PREPARE then PLAY to online targets. PREPARE carries the negotiated
     # audio format so the Receiver can run its real FFmpeg/codec checks before
     # reporting READY. Audio is only meaningful after that acknowledgement.
@@ -2396,36 +2397,50 @@ async def _end_session(db: Session, session: BroadcastSession, final_status: str
             t.play_status = "stopped"
             t.stopped_at = now
     db.commit()
-    # Broadcast stop to receivers. For emergency stop, notify ALL connected
-    # receivers as a safety net; for normal stop, notify only targeted ones.
+    # STOP goes to THIS session's own targets, read from its own rows. It used
+    # to be read from the singleton live_target_store_ids, which with
+    # concurrent sessions would mean stopping whichever Stores the most recent
+    # broadcast happened to list - silencing somebody else's announcement.
+    stop_ids = {t.store_id for t in targets}
     if broadcast_to_all:
-        stop_ids = set(manager.live_target_store_ids) | set(manager.receivers.keys())
-    else:
-        stop_ids = set(manager.live_target_store_ids)
+        # Emergency safety net: tell every connected Receiver to stop, whatever
+        # it was doing. Deliberately wider than this session.
+        stop_ids |= set(manager.receivers.keys())
     for sid_ in stop_ids:
         await manager.send_to_receiver(sid_, {"type": "stop", "session_id": session.id, "reason": reason})
-    # Close every bounded Store audio queue and cancel its sender task before
-    # clearing live state, so no orphan queue or task survives the session.
-    await manager.stop_audio_fanout()
-    manager.stop_live_session()
+    # Closes only this session's queues and pump tasks, and closes only its own
+    # broadcaster socket - every other live session keeps its operator and its
+    # audio.
+    await manager.stop_live_session(session.id)
     # Release ONLY this session's Stores. Scoped by session id rather than by
     # store id: releasing by Store could free one another session is
     # legitimately broadcasting to, and the symptom would be a second campaign
     # arriving on speakers that were already busy.
     release_session_leases(engine, session_id=session.id)
-    # Force-close the active broadcaster WS so its slot is freed immediately
-    if manager.active_broadcaster_ws is not None:
-        try:
-            await manager.active_broadcaster_ws.close(code=1000)
-        except Exception:
-            pass
     await manager.notify_dashboards({"type": "session_ended", "session_id": session.id, "status": final_status})
 
 
 @api.post("/broadcast/sessions/{sid}/stop", response_model=SessionOut)
 async def stop_session(sid: int, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.STOP_BROADCAST))):
+    """Stop YOUR OWN broadcast. Never anybody else's.
+
+    Ownership is checked for EVERY role, including OWNER. Until now this route
+    checked only that the caller held STOP_BROADCAST, so with one global
+    broadcast it was harmless - there was only one thing to stop, and usually
+    your own. With concurrent sessions the same code is a cross-user kill: any
+    holder of STOP_BROADCAST could silence another operator mid-announcement
+    by passing their session id, which is a small guessable integer.
+
+    Stopping somebody else's broadcast is a real operational need, but it is a
+    deliberate, audited, separately-permissioned act - Emergency Stop - not a
+    side effect of knowing a number.
+
+    The refusal is 404, identical to an unknown session. A 403 would confirm
+    that a session with that id exists and belongs to somebody else, which
+    turns this route into an oracle for enumerating other people's broadcasts.
+    """
     session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
-    if not session:
+    if not session or session.started_by != user.id:
         raise HTTPException(status_code=404, detail="Session not found")
     if session.status != "live":
         raise HTTPException(status_code=400, detail=f"Session not live (status={session.status})")
@@ -2454,35 +2469,70 @@ def read_audio_metrics(user: HQUser = Depends(require(Permission.VIEW_STATUS))):
     token, no Device credential, no connection id - and a test asserts that
     rather than trusting this docstring.
     """
-    per_store = manager.audio_metrics()
+    per_session = manager.audio_metrics()
+    rows = []
+    for session_id, per_store in sorted(per_session.items()):
+        for _store_id, metrics in sorted(per_store.items()):
+            # session_id is carried on every row: with concurrent broadcasts,
+            # "store 12 is dropping audio" is not answerable without knowing
+            # which broadcast it was dropping.
+            rows.append({"session_id": session_id, **dict(metrics)})
     return {
-        "capacity": manager.audio_fanout.capacity,
-        "store_count": len(per_store),
-        "stores": [dict(metrics) for _store_id, metrics in sorted(per_store.items())],
+        "capacity": DEFAULT_STORE_QUEUE_CAPACITY,
+        "session_count": len(per_session),
+        "store_count": len(rows),
+        "stores": rows,
     }
 
 
 @api.post("/broadcast/emergency-stop")
 async def emergency_stop(db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.EMERGENCY_STOP))):
-    session = None
-    if manager.live_session_id:
-        session = db.query(BroadcastSession).filter(BroadcastSession.id == manager.live_session_id).first()
-    if session and session.status == "live":
-        await _end_session(db, session, "emergency_stopped", reason="emergency", broadcast_to_all=True)
-        _write_log(db, "error", f"EMERGENCY STOP triggered by {user.username} on session #{session.id}")
-        return {"ok": True, "session_id": session.id}
-    # No live session â€” still broadcast a STOP to all receivers for safety
+    """Stop every live broadcast.
+
+    MINIMALLY ADAPTED, not rewritten. With one global broadcast this ended
+    "the" session; it now ends all of them, which is what the words already
+    meant. The full Emergency Stop work - its own permission split, the audit
+    event, the idempotency contract and the UI separation - is a later
+    checkpoint and is deliberately not attempted here.
+    """
+    stopped = []
+    for session_id in manager.broadcasts.active_session_ids():
+        session = db.query(BroadcastSession).filter(
+            BroadcastSession.id == session_id).first()
+        if session and session.status == "live":
+            await _end_session(db, session, "emergency_stopped",
+                               reason="emergency", broadcast_to_all=True)
+            stopped.append(session.id)
+    if stopped:
+        _write_log(db, "error", f"EMERGENCY STOP triggered by {user.username} "
+                                f"on session(s) {stopped}")
+        return {"ok": True, "session_ids": stopped,
+                "session_id": stopped[0]}
+    # Nothing live - still tell every connected Receiver to stop, as a safety
+    # net against a Store left playing by a session this process has no record
+    # of (a restart, for instance).
     for sid_ in list(manager.receivers.keys()):
         await manager.send_to_receiver(sid_, {"type": "stop", "reason": "emergency"})
     _write_log(db, "warn", f"Emergency stop invoked with no live session by {user.username}")
-    return {"ok": True, "session_id": None}
+    return {"ok": True, "session_ids": [], "session_id": None}
 
 
 @api.get("/broadcast/current")
 def current_broadcast(db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.VIEW_STATUS))):
-    if not manager.live_session_id:
+    """The caller's OWN live broadcast.
+
+    Owner-scoped now that several can be live at once. Returning "the" live
+    session would hand every viewer another operator's campaign name and
+    target list, which is exactly the disclosure the ownership-visibility
+    permission exists to gate - and that permission is a later checkpoint, so
+    until it lands this answers only about your own.
+    """
+    own = [sid for sid in manager.broadcasts.active_session_ids()
+           if manager.broadcasts.owner_of(sid) == user.id]
+    if not own:
         return {"live": False}
-    session = db.query(BroadcastSession).filter(BroadcastSession.id == manager.live_session_id).first()
+    session = db.query(BroadcastSession).filter(
+        BroadcastSession.id == own[0]).first()
     if not session:
         return {"live": False}
     targets = db.query(BroadcastTarget).filter(BroadcastTarget.session_id == session.id).all()
@@ -3477,20 +3527,22 @@ async def ws_receiver(websocket: WebSocket):
             finally:
                 db.close()
 
-        # If a session is currently live and this store is a target -> send PLAY immediately
-        if (
-            connection_manager.is_live()
-            and store_id in connection_manager.live_target_store_ids
-        ):
-            connection_manager.prepare_receiver_session(
-                store_id,
-                connection_manager.live_session_id,
-            )
+        # If a broadcast is reaching this Store, send PLAY immediately so a
+        # Receiver that reconnected mid-announcement rejoins it.
+        #
+        # Which broadcast is asked for by Store rather than assumed: with
+        # concurrent sessions there is no such thing as "the" live session, and
+        # telling a Receiver to rejoin the wrong one would have it play - and
+        # acknowledge against - a campaign that was never targeting it. At most
+        # one session can match, because the Store lease makes that true.
+        rejoining_session_id = connection_manager.broadcasts.session_id_for_store(store_id)
+        if rejoining_session_id is not None:
+            connection_manager.prepare_receiver_session(store_id, rejoining_session_id)
             await connection_manager.send_to_receiver(
                 store_id,
                 {
                     "type": "play",
-                    "session_id": connection_manager.live_session_id,
+                    "session_id": rejoining_session_id,
                 },
             )
 
@@ -3643,8 +3695,9 @@ async def ws_hq(websocket: WebSocket, ticket: str = Query(...)):
 
 
 @app.websocket("/api/ws/broadcaster")
-async def ws_broadcaster(websocket: WebSocket, ticket: str = Query(...)):
-    """HQ mic audio uplink. Only one active broadcaster allowed.
+async def ws_broadcaster(websocket: WebSocket, ticket: str = Query(...),
+                         session_id: int = Query(...)):
+    """HQ mic audio uplink, bound to exactly ONE broadcast session.
 
     THE MOST PRIVILEGED SOCKET IN THE SYSTEM, and it used to be the least
     guarded: it redeemed a ticket, THREW THE USER ID AWAY, and accepted audio.
@@ -3653,11 +3706,20 @@ async def ws_broadcaster(websocket: WebSocket, ticket: str = Query(...)):
     push arbitrary audio to the loudspeakers of every targeted Store, or occupy
     this single slot and deny it to whoever was allowed to use it.
 
-    Two checks now, deliberately both: the ticket must have been minted FOR this
-    socket (so a dashboard ticket is refused), and the account it was minted for
-    must STILL hold START_BROADCAST when the handshake arrives. A permission
-    verified only at mint time is verified once, and an operator can be demoted
-    or disabled in the seconds between minting and connecting.
+    Three checks now, deliberately all three: the ticket must have been minted
+    FOR this socket (so a dashboard ticket is refused), the account it was
+    minted for must STILL hold START_BROADCAST when the handshake arrives (a
+    permission verified only at mint time is verified once, and an operator can
+    be demoted in the seconds between minting and connecting), and the session
+    named in the URL must be LIVE AND OWNED BY THAT ACCOUNT.
+
+    The third is what stops the URL-editing attack. The socket used to discard
+    every trace of which broadcast it belonged to and stream into whatever the
+    singleton currently targeted, so with concurrent sessions any valid ticket
+    holder could have fed audio into somebody else's announcement by changing a
+    number. The session id is supplied by the browser and is therefore never
+    trusted for anything except lookup: ownership is re-read from the database
+    and compared against the authenticated account.
     """
     # A single-use ticket, not a reusable JWT: Uvicorn logs this URL in full.
     try:
@@ -3675,10 +3737,26 @@ async def ws_broadcaster(websocket: WebSocket, ticket: str = Query(...)):
             await websocket.close(code=4403)
             return
 
+    # Ownership, re-read rather than taken from the URL. 4404 for "not yours
+    # or not live" without distinguishing the two: telling a caller which one
+    # it was would confirm that somebody else's session exists.
+    with SessionLocal() as db:
+        session = db.query(BroadcastSession).filter(
+            BroadcastSession.id == session_id).first()
+        if (session is None or session.status != "live"
+                or session.started_by != int(user_id)):
+            await websocket.close(code=4404)
+            return
+
     await websocket.accept()
-    ok = await manager.set_broadcaster(websocket)
+    ok = await manager.broadcasts.attach_broadcaster(
+        session_id, websocket, owner_user_id=int(user_id))
     if not ok:
-        await websocket.send_text('{"type":"error","message":"Another broadcaster is already active"}')
+        # This session already has a microphone. The first socket keeps it:
+        # replacing it would let a second tab evict the operator who is
+        # mid-announcement.
+        await websocket.send_text(
+            '{"type":"error","message":"This broadcast already has an active microphone"}')
         await websocket.close(code=4409)
         return
 
@@ -3689,19 +3767,26 @@ async def ws_broadcaster(websocket: WebSocket, ticket: str = Query(...)):
                 break
             data = msg.get("bytes")
             if data is not None:
-                await manager.fanout_audio(data)
+                # Routed by THIS socket's session, never by a global target
+                # set - which is what kept one operator's audio out of
+                # another's Stores.
+                await manager.fanout_audio(session_id, data)
             # text messages ignored for now
     except WebSocketDisconnect:
         pass
     except Exception as e:
         logger.warning(f"Broadcaster WS error: {e}")
     finally:
-        await manager.clear_broadcaster(websocket)
-        # Safety: if session still live when broadcaster drops, auto-stop it
-        if manager.is_live():
+        # Detach FIRST, and only if this socket still holds the slot, so a late
+        # cleanup from a superseded socket cannot evict its replacement.
+        detached = await manager.broadcasts.detach_broadcaster(session_id, websocket)
+        # Safety: if THIS session is still live when its microphone drops, stop
+        # it. Only this one - every other broadcast keeps running.
+        if detached and manager.is_live(session_id):
             db = SessionLocal()
             try:
-                session = db.query(BroadcastSession).filter(BroadcastSession.id == manager.live_session_id).first()
+                session = db.query(BroadcastSession).filter(
+                    BroadcastSession.id == session_id).first()
                 if session and session.status == "live":
                     await _end_session(db, session, "ended", reason="broadcaster_disconnected")
                     _write_log(db, "warn", f"Session #{session.id} auto-stopped: broadcaster disconnected")
