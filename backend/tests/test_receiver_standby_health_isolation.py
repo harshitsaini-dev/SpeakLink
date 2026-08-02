@@ -365,11 +365,11 @@ def test_a_standby_receives_no_audio_even_while_acknowledging(both):
         manager.apply_receiver_payload(
             STORE, _ack("heartbeat", 2), NOW, device_id=STANDBY_DEVICE
         )
-        manager.start_live_session(SESSION, {STORE})
+        await manager.start_live_session(SESSION, {STORE}, owner_user_id=1)
         for index in range(6):
-            await manager.fanout_audio(bytes([index]) * 64)
+            await manager.fanout_audio(SESSION, bytes([index]) * 64)
         await asyncio.sleep(0.2)
-        await manager.stop_audio_fanout()
+        await manager.stop_live_session(SESSION)
 
     asyncio.run(scenario())
 

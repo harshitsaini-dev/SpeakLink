@@ -161,7 +161,7 @@ async def close_receiver(websocket, task):
     await asyncio.wait_for(task, timeout=1)
 
 
-def create_active_target(runtime, store_id):
+async def create_active_target(runtime, store_id):
     with runtime.db.SessionLocal() as db:
         user = db.query(runtime.models.HQUser).order_by(runtime.models.HQUser.id).first()
         session = runtime.models.BroadcastSession(
@@ -184,7 +184,15 @@ def create_active_target(runtime, store_id):
         db.commit()
         session_id = session.id
         target_id = target.id
-    runtime.manager.start_live_session(session_id, {store_id})
+        # Read inside the Session: the ORM object is detached once this block
+        # exits, and touching .id afterwards raises DetachedInstanceError.
+        owner_id = user.id
+    # start_live_session, not broadcasts.start: the manager-level call also
+    # runs prepare_receiver_session, which activates the session on the Store's
+    # snapshot. Without it every acknowledgement carrying this session_id is
+    # correctly rejected as WRONG_SESSION, and the snapshot never moves.
+    await runtime.manager.start_live_session(
+        session_id, {store_id}, owner_user_id=owner_id)
     return session_id, target_id
 
 
@@ -291,7 +299,7 @@ def test_receiver_ready_updates_readiness_only(runtime, store):
 def test_audio_receiving_updates_live_snapshot(runtime, store):
     async def scenario():
         websocket, task = await open_receiver(runtime, store)
-        session_id, _ = create_active_target(runtime, store.id)
+        session_id, _ = await create_active_target(runtime, store.id)
         await websocket.send_receiver_message(
             acknowledgement(
                 "receiver_ready",
@@ -322,7 +330,7 @@ def test_audio_receiving_updates_live_snapshot(runtime, store):
 def test_playback_confirmed_updates_target_at_server_receipt_time(runtime, store):
     async def scenario():
         websocket, task = await open_receiver(runtime, store)
-        session_id, _ = create_active_target(runtime, store.id)
+        session_id, _ = await create_active_target(runtime, store.id)
         await websocket.send_receiver_message(
             acknowledgement(
                 "receiver_ready",
@@ -390,7 +398,7 @@ def test_invalid_session_speaker_or_store_claim_is_safely_rejected(
 ):
     async def scenario():
         websocket, task = await open_receiver(runtime, store)
-        session_id, _ = create_active_target(runtime, store.id)
+        session_id, _ = await create_active_target(runtime, store.id)
         await websocket.send_receiver_message(
             acknowledgement(
                 "receiver_ready",
@@ -486,7 +494,7 @@ def test_stale_and_offline_boundaries_update_live_snapshot(runtime, store):
 def test_disconnect_clears_readiness_and_playback_confirmation(runtime, store):
     async def scenario():
         websocket, task = await open_receiver(runtime, store)
-        session_id, _ = create_active_target(runtime, store.id)
+        session_id, _ = await create_active_target(runtime, store.id)
         await websocket.send_receiver_message(
             acknowledgement(
                 "receiver_ready",
@@ -518,7 +526,7 @@ def test_disconnect_clears_readiness_and_playback_confirmation(runtime, store):
 def test_matching_stopped_acknowledgement_updates_snapshot_and_target(runtime, store):
     async def scenario():
         websocket, task = await open_receiver(runtime, store)
-        session_id, _ = create_active_target(runtime, store.id)
+        session_id, _ = await create_active_target(runtime, store.id)
         await websocket.send_receiver_message(
             acknowledgement(
                 "receiver_ready",
@@ -570,7 +578,7 @@ def test_device_and_playback_errors_remain_distinct(runtime, store):
         await close_receiver(websocket, task)
 
         websocket, task = await open_receiver(runtime, store)
-        session_id, _ = create_active_target(runtime, store.id)
+        session_id, _ = await create_active_target(runtime, store.id)
         await websocket.send_receiver_message(
             acknowledgement(
                 "receiver_ready",
