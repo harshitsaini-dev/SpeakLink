@@ -4206,3 +4206,70 @@ raw INSERTs omitted `is_online_store`/`status`, which have Python-side
 ORM defaults but no server defaults - harmless for the migration tool,
 which copies every column explicitly, but a real difference between
 ORM-mediated and raw-SQL writes.
+
+## Supabase region change and the production snapshot
+
+The first production candidate was created in the wrong region and has been
+rejected. Three projects have existed; identify them by the non-secret
+project-ref fingerprint (sha256, first 16 hex) - never by hostname, which
+two projects in one region share:
+
+* `94778c6f130c34c1` - disposable test infrastructure (polluted by an
+  accidental seed, later used deliberately for real-PostgreSQL tests);
+* `faee6d157d5f03d3` - **rejected, wrong region**. A full verified
+  migration was completed into it before the region problem surfaced. Must
+  not be used for cutover;
+* `e720ac35878a1d7b` - **the production database**, correct region, holds
+  the verified snapshot.
+
+`system_identifier` is not a discriminator on Supabase: projects are
+provisioned from a common base image and share it. Freshness was proven
+instead by the project-ref fingerprint plus zero SpeakLink statements in an
+otherwise-populated `extensions.pg_stat_statements` (618 rows of the
+project's own provisioning queries).
+
+### Snapshot contents and verification
+
+Source: a fresh SQLite backup of live RC12 (`speaklink-20260801-pre-supabase-
+region-migration.db`, SHA-256 `A300D48FCE7F3306C7C15F9E4EBF016F574F2F6F6A
+3BFD8AB0D398632E3C3162`, integrity ok, FK 0, taken with no broadcast live).
+
+All 19 source-backed tables match exactly. Three tables exist only on the
+admin-management feature branch and migrated as **NEW_SCHEMA_EMPTY** (0
+rows): `user_deletion_events`, `device_deletion_events`,
+`admin_deletion_events`. That is correct - the live RC12 database does not
+contain them, and inventing rows for them would be fabrication.
+
+Bindapur remains Store id 31 with Device
+`3b1ff11f-0b18-4f56-b911-30f036cbddd9` active and primary. RBAC roles,
+permission overrides, scope audit history and the AYUSHK tombstone (with
+its deletion audit row and three broadcast-target history rows) all
+survived. Zero orphans across ten FK relationships, zero duplicate
+store_code/public_id/username/primary-per-Store, and every sequence
+resumes past its migrated MAX(id).
+
+### A correction about sequence verification
+
+An earlier round verified sequences by calling `nextval` inside a
+transaction it then rolled back, and called that non-destructive. That was
+wrong: `nextval` is explicitly non-transactional and a rollback does not
+give the number back. The consequence was harmless - one skipped id - but
+the claim was false. Sequence state is now read with
+`SELECT last_value, is_called FROM <sequence>`, which allocates nothing.
+
+### Migrated RBAC reflects RC12, not the feature branch
+
+`permissions` (24) and `role_permissions` (57) were copied from the RC12
+source, so the migrated matrix is RC12's. The five permission codes the
+admin-management branch adds are not present yet. That is expected and
+self-correcting: `ensure_permission_schema` re-seeds the catalog
+additively at startup, so whichever RC is eventually installed will add
+them on first boot.
+
+### Live HQ unchanged
+
+RC12 + SQLite remains authoritative. No RC was installed, `hq-runtime.json`
+was not modified, `APP_ENV` was not switched, and nothing was pushed. The
+Supabase project holds a verified snapshot only - anything written to RC12
+after the snapshot is not in it, so the cutover must re-run the migration
+as its delta step.

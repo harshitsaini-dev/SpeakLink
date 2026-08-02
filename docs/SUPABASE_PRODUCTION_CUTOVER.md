@@ -202,3 +202,62 @@ but is not automatically replayed). For this reason the first pilot
 cutover window should be short and deliberately supervised - broadcast a
 handful of test sessions, confirm everything above, and only then trust
 the window to widen.
+
+## 9. Region change: which Supabase project is the real one
+
+Three Supabase projects have existed during this work. Only the third is
+the production database. Non-secret fingerprints (sha256 of the
+project-ref, first 16 hex) are recorded so the right one can be
+identified without ever writing a URL, project-ref or password into Git:
+
+| project-ref fingerprint | role |
+|---|---|
+| `94778c6f130c34c1` | **Disposable test infrastructure.** Polluted by an accidental seed and later used deliberately for real-PostgreSQL compatibility tests. Never production. |
+| `faee6d157d5f03d3` | **Rejected — wrong region.** A full verified migration was performed into it before the region problem was noticed. It must not be used for cutover. |
+| `e720ac35878a1d7b` | **The production database.** Correct region. Holds the verified snapshot. |
+
+The host fingerprint is a weaker signal than the project-ref: two projects
+in the same region share a pooler host, and the rejected project is the
+one whose host differs. Identify a project by its **project-ref**
+fingerprint.
+
+`system_identifier` is NOT a discriminator on Supabase - projects are
+provisioned from a common base image and share it. What distinguishes a
+fresh project reliably is (a) the project-ref fingerprint and (b) the
+absence of SpeakLink statements in `extensions.pg_stat_statements` while
+that view is otherwise populated with the project's own provisioning
+queries.
+
+### Snapshot verified in the production project
+
+Migrated from a fresh SQLite backup of the live RC12 database. All 19
+source-backed tables match exactly; the three tables that exist only on
+the admin-management feature branch migrated as **NEW_SCHEMA_EMPTY** (0
+rows), which is correct - the live RC12 database does not contain them.
+
+Bindapur is Store id 31 with Device
+`3b1ff11f-0b18-4f56-b911-30f036cbddd9` active and primary. RBAC roles,
+permission overrides, scope audit history and the AYUSHK tombstone (with
+its deletion audit row and broadcast history) all survived. Zero orphans
+across ten FK relationships, zero duplicate identities, and every
+sequence resumes past its migrated MAX(id).
+
+### Sequence verification, and a correction
+
+Sequence state is inspected with `SELECT last_value, is_called FROM
+<sequence>` - a plain read of the sequence relation. It does **not**
+allocate a value.
+
+An earlier round verified sequences by calling `nextval` inside a
+transaction that was then rolled back, and described that as
+non-destructive. That was wrong: **`nextval` is explicitly
+non-transactional**, and a rolled-back transaction still consumes the
+number. The consequence was harmless (one id skipped) but the claim was
+not true, and the catalog read above is what should be used.
+
+### Live HQ is still SQLite
+
+RC12 + SQLite remains authoritative. The production Supabase project holds
+a verified snapshot only. Anything written to RC12 after the snapshot is
+not in PostgreSQL, so the cutover procedure in section 7 must re-run the
+migration into a freshly emptied production database as its delta step.
