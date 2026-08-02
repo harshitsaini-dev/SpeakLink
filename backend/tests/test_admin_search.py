@@ -259,7 +259,8 @@ def test_select_all_filtered_means_every_match_not_just_the_visible_page(client)
                          json={"ids": every_id, "confirm": "DELETE",
                                "acknowledged": True,
                                "filters": {"q": "purge me"}}).json()
-    assert result == {"requested": 6, "affected": 6, "skipped": 0, "failed": 0}
+    assert (result["requested"], result["affected"],
+            result["skipped"], result["failed"]) == (6, 6, 0, 0)
 
     remaining = search_history(client, owner)
     assert {i["campaign_name"] for i in remaining["items"]} == {"keep me"}

@@ -173,6 +173,9 @@ EXPECTED: dict[str, object] = {
     "search_logs": "menu.logs.view",
     "search_broadcast_history": "menu.history.view",
     "search_users": "menu.users.view",
+    "search_receiver_status": "menu.receivers.view",
+    "receiver_filter_options": "menu.receivers.view",
+    "search_receiver_devices": "menu.receivers.view",
 }
 
 #: Routes that take no HTTP session, each for a stated reason.
