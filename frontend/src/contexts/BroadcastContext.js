@@ -30,11 +30,47 @@ export function BroadcastProvider({ children }) {
   const guardRef = useRef(null);
   if (!guardRef.current) guardRef.current = createBeforeUnloadGuard();
 
+  // The permission-aware view of EVERY live broadcast, redacted server-side.
+  // See GET /api/broadcast/active: `mine` is your own in full, `busy_store_ids`
+  // is Scope-filtered and says only that a Store is unavailable, and `sessions`
+  // carries owner/campaign ONLY for accounts holding broadcast.view_ownership.
+  // The frontend never reconstructs what the backend withheld.
+  const [active, setActive] = useState({
+    mine: null, sessions: [], busy_store_ids: [], may_view_ownership: false,
+  });
+
+  // Which active-state request is the current one. Responses can arrive out of
+  // order - a request issued during a Start can land after the refresh that
+  // followed it - and applying the older one would show a Store as free
+  // moments after the backend told us it was taken.
+  const activeRequestId = useRef(0);
+
+  const loadActive = useCallback(async () => {
+    const mine = ++activeRequestId.current;
+    try {
+      const { data } = await api.get("/broadcast/active");
+      if (mine !== activeRequestId.current) return null;   // superseded
+      setActive({
+        mine: data?.mine ?? null,
+        sessions: data?.sessions ?? [],
+        busy_store_ids: data?.busy_store_ids ?? [],
+        may_view_ownership: Boolean(data?.may_view_ownership),
+      });
+      return data;
+    } catch {
+      // The caller's own error handling owns the message; leaving the last
+      // known state in place is better than blanking the console on one
+      // failed poll.
+      return null;
+    }
+  }, []);
+
   const load = useCallback(async () => {
     const { data } = await api.get("/broadcast/current");
     setCurrent(data);
+    await loadActive();
     return data;
-  }, []);
+  }, [loadActive]);
 
   // Poll while signed in, independent of which page is mounted, so LIVE state
   // and the receiver acknowledgement counts stay fresh even on pages other
@@ -114,7 +150,30 @@ export function BroadcastProvider({ children }) {
       );
     }
 
-    await api.post(`/broadcast/sessions/${session.id}/start`);
+    try {
+      await api.post(`/broadcast/sessions/${session.id}/start`);
+    } catch (failure) {
+      // STORE_BUSY: somebody claimed one of these Stores between this browser
+      // rendering them as free and this request arriving. The local busy state
+      // is advisory; the backend's answer is authoritative.
+      //
+      // Nothing local was started yet - no microphone, no socket - and nothing
+      // must be: the whole selection was refused, so broadcasting to "the rest"
+      // would put a campaign on air half-targeted without the operator knowing.
+      await loadActive();
+      const detail = failure?.response?.data?.detail;
+      if (detail && detail.code === "STORE_BUSY") {
+        const conflict = new Error(
+          detail.message ||
+          "One or more selected Stores are currently in use by another broadcast."
+        );
+        conflict.storeBusy = true;
+        conflict.busyStoreIds = detail.busy_store_ids || [];
+        conflict.busyStoreCodes = detail.busy_store_codes || [];
+        throw conflict;
+      }
+      throw failure;
+    }
 
     setBroadcasterStatus("waiting for receiver readiness");
     const readyIds = await waitForReceiverReady(ids);
@@ -145,15 +204,30 @@ export function BroadcastProvider({ children }) {
     if (broadcasterRef.current) {
       await broadcasterRef.current.stop();
     }
-    await bc.start();
+    try {
+      await bc.start();
+    } catch (failure) {
+      // A failed start must not leave the microphone open. bc.start() acquires
+      // a MediaStream before it opens the socket, so an error anywhere after
+      // that point leaves the browser's recording indicator lit with nothing
+      // listening - the operator would reasonably believe they were on air.
+      try { await bc.stop(); } catch { /* already torn down */ }
+      setMeter(0);
+      setBroadcasterStatus("idle");
+      throw failure;
+    }
     broadcasterRef.current = bc;
     await load();
-  }, [load, waitForReceiverReady]);
+  }, [load, loadActive, waitForReceiverReady]);
 
   const stopBroadcast = useCallback(async () => {
     setError("");
-    if (current?.session?.id) {
-      await api.post(`/broadcast/sessions/${current.session.id}/stop`);
+    // MY session, named explicitly. Never a global stop: the backend refuses
+    // anyone else's anyway, but sending an id that is not ours would be a
+    // request we had no business making.
+    const sessionId = active.mine?.session_id ?? current?.session?.id;
+    if (sessionId) {
+      await api.post(`/broadcast/sessions/${sessionId}/stop`);
     }
     if (broadcasterRef.current) {
       await broadcasterRef.current.stop();
@@ -162,11 +236,39 @@ export function BroadcastProvider({ children }) {
     setMeter(0);
     setBroadcasterStatus("idle");
     await load();
-  }, [current, load]);
+  }, [active, current, load]);
 
   const emergencyStop = useCallback(async () => {
     setError("");
-    await api.post("/broadcast/emergency-stop");
+    let response;
+    try {
+      response = await api.post("/broadcast/emergency-stop");
+    } catch (failure) {
+      // Stop this browser's own microphone regardless: whatever happened
+      // server-side, an operator who pressed EMERGENCY STOP must not be left
+      // holding a live microphone.
+      if (broadcasterRef.current) {
+        try { await broadcasterRef.current.stop(); } catch { /* */ }
+        broadcasterRef.current = null;
+      }
+      setMeter(0);
+      setBroadcasterStatus("idle");
+      await load();
+
+      const detail = failure?.response?.data?.detail;
+      if (detail && detail.code === "EMERGENCY_STOP_INCOMPLETE") {
+        const partial = new Error(
+          "SOME BROADCASTS ARE STILL LIVE. " +
+          (detail.message || "Not every broadcast could be stopped.")
+        );
+        partial.emergencyIncomplete = true;
+        partial.stoppedSessionIds = detail.stopped_session_ids || [];
+        partial.failedSessionIds = detail.failed_session_ids || [];
+        throw partial;
+      }
+      throw failure;
+    }
+
     if (broadcasterRef.current) {
       await broadcasterRef.current.stop();
       broadcasterRef.current = null;
@@ -174,10 +276,18 @@ export function BroadcastProvider({ children }) {
     setMeter(0);
     setBroadcasterStatus("idle");
     await load();
+    return response?.data ?? null;
   }, [load]);
 
   const value = {
     current, load, isLive,
+    active, loadActive,
+    // Advisory only - the backend's STORE_BUSY is authoritative. A Store this
+    // account's own broadcast is using is NOT "busy" to them; it is theirs.
+    isStoreBusyForOthers: (storeId) => (
+      (active.busy_store_ids || []).includes(storeId)
+      && !(active.mine?.target_store_ids || []).includes(storeId)
+    ),
     meter, broadcasterStatus, error, setError,
     startBroadcast, stopBroadcast, emergencyStop,
     hasActiveBroadcaster: () => Boolean(broadcasterRef.current),
