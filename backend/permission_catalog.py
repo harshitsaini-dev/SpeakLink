@@ -219,6 +219,62 @@ class OwnerOverrideRefused(RuntimeError):
         super().__init__("OWNER permissions cannot be overridden.")
 
 
+class RightsEscalationRefused(RuntimeError):
+    """The actor tried to hand out authority they do not hold, or to edit
+    their own rights.
+
+    These two guards did not exist while ``users.permissions.manage`` was
+    unreachable: both routes were gated on "is this account literally OWNER",
+    and an OWNER already holds every permission, so there was nothing to
+    escalate TO. Making the permission real for ADMIN is exactly what creates
+    the possibility, so the guards arrive in the same change.
+
+    Owned by this module rather than shared with ``rbac`` so that reloading
+    either module cannot produce two classes of the same name and silently
+    stop an ``except`` clause from matching.
+    """
+
+
+class SelfRightsEditRefused(RightsEscalationRefused):
+    """An account may not edit its own permission overrides.
+
+    Not because self-editing is always dangerous - removing one of your own
+    permissions is harmless - but because distinguishing the harmless case
+    costs a rule nobody can hold in their head, and the dangerous case is
+    total: an ADMIN with Manage User Rights who may edit themselves can grant
+    themselves every remaining permission in one request. OWNER is unaffected;
+    OWNER already holds everything and has nothing to grant itself.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "You cannot change your own permissions. Ask another authorised "
+            "account to make this change."
+        )
+
+
+class GrantBeyondActorRefused(RightsEscalationRefused):
+    """An actor may only grant what the actor effectively holds.
+
+    Without this, Manage User Rights would be the single most powerful
+    permission in the product: an ADMIN denied ``users.delete_permanently``
+    could simply ALLOW it on a BROADCASTER account and sign in as nobody at
+    all - the restriction would be decorative. The rule keeps the permission
+    meaningful as delegation rather than as a bypass.
+
+    Deliberately one-directional. Granting a permission the actor lacks is
+    refused; REVOKING one is not, because taking authority away can never
+    raise the actor's own, and an administrator who can see a permission
+    should be able to withdraw it.
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(
+            f"You cannot grant a permission you do not hold yourself: {code}."
+        )
+        self.code = code
+
+
 def ensure_permission_schema(engine: Engine) -> None:
     """Additive and idempotent. Never touches ``user_permission_overrides``
     or ``permission_audit_events`` once created - those hold operator
@@ -456,19 +512,46 @@ def set_permission_overrides(
     changes: list[dict],
 ) -> list[dict]:
     """Apply a batch of {code, effect} changes for one user, audited one row
-    at a time. Refuses the whole batch (no partial write) if any code is
-    unknown or the target is an OWNER - the caller already gated this to
-    OWNER-only actors (``require_super_admin``), so this is a second,
-    independent check against narrowing an OWNER's rights, not the only one.
+    at a time.
+
+    Refuses the WHOLE batch - no partial write - if any code is unknown, the
+    target is an OWNER, the actor is editing itself, or the actor is trying to
+    grant a permission it does not effectively hold. All four are checked
+    before the transaction opens, so a refusal leaves nothing behind.
+
+    The route above is gated on ``users.permissions.manage``. That guard
+    answers "may this account manage rights at all"; the guards here answer
+    "may it make THIS change", which is a different question and cannot be
+    expressed as a single permission. Both are server-side, and neither
+    depends on the frontend having hidden a control.
     """
     if target_role is Role.OWNER:
         raise OwnerOverrideRefused()
+
+    actor_id = getattr(actor, "id", None)
+    if actor_id is not None and actor_id == target_user_id:
+        raise SelfRightsEditRefused()
 
     parsed: list[tuple[str, Effect]] = []
     for change in changes:
         code = change["code"]
         _require_known_code(code)
         parsed.append((code, Effect(change["effect"])))
+
+    # What the actor may hand out. OWNER resolves to the full catalog, so this
+    # is a no-op for the account that could already do anything; it bites only
+    # for a delegated ADMIN, which is the case it exists for.
+    actor_role = parse_role(getattr(actor, "role", None))
+    if actor_role is not Role.OWNER:
+        # The same resolver every request uses, so what an actor may delegate
+        # is by construction what it may itself do - including any DENY
+        # override placed on the actor.
+        actor_permissions = resolve_effective_permissions(engine, actor)
+        for code, effect in parsed:
+            # Only ALLOW is checked. DENY and INHERIT can only ever reduce the
+            # target's authority, and reducing is not escalation.
+            if effect is Effect.ALLOW and code not in actor_permissions:
+                raise GrantBeyondActorRefused(code)
 
     now = datetime.now(timezone.utc).isoformat()
     audit_rows: list[dict] = []

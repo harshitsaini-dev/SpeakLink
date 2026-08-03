@@ -65,6 +65,7 @@ from rbac import (
 )
 from permission_catalog import (
     OwnerOverrideRefused,
+    RightsEscalationRefused,
     UnknownPermissionCode,
     describe_user_permissions,
     ensure_permission_schema,
@@ -2142,19 +2143,55 @@ def read_user_dependencies(user_id: int,
 
 # ---- per-user permission overrides -----------------------------------------
 #
-# Reserved for OWNER, the same way restoring an archived Store is
-# (`require_super_admin`) - not `require("users.permissions.manage")`, on
-# purpose. `users.permissions.manage` is a role-default flag ADMIN never gets;
-# gating these two routes on `require_super_admin` instead means the check is
-# "is this account literally OWNER right now", independent of the override
-# system these very routes edit. An override can never grant an ADMIN a path
-# to grant themselves more.
+# Gated on `users.permissions.manage` - the permission whose UI label is
+# "Manage User Rights".
+#
+# These two routes used to require `require_super_admin`, a literal "is this
+# account OWNER" test. That made the permission inert: an OWNER could grant
+# Manage User Rights to an ADMIN, the ADMIN's effective permission set really
+# did contain it, and the ADMIN still got 403 here - a granted right with no
+# effect anywhere in the product.
+#
+# The original reasoning was sound about the risk and wrong about the remedy.
+# The risk is that whoever edits rights can raise their own; the remedy is to
+# forbid raising your own, not to forbid everyone but OWNER. So the role test
+# is replaced by the capability, and the escalation guards it was standing in
+# for are now explicit and enforced in `set_permission_overrides`:
+#
+#   * an OWNER target is never overridden        (OwnerOverrideRefused)
+#   * nobody edits their own rights              (SelfRightsEditRefused)
+#   * nobody grants what they do not hold        (GrantBeyondActorRefused)
+#   * the role hierarchy decides who is a valid target (below)
+#
+# Together those are strictly stronger than the old check, because they also
+# constrain an OWNER-granted ADMIN rather than assuming no such account exists.
+def _require_may_manage_rights_of(actor: HQUser, target_role: Role) -> None:
+    """Server-side target hierarchy for rights management.
+
+    Reuses `rbac.may_manage_role` - the same matrix that already decides who
+    may create, edit, disable or archive whom - rather than inventing a second
+    hierarchy that could drift from it. ADMIN may therefore manage the rights
+    of a BROADCASTER or VIEWER, and not of another ADMIN or an OWNER, which is
+    exactly the existing policy for every other User Management action.
+    """
+    actor_role = parse_role(actor.role)
+    if actor_role is None or not may_manage_role(actor_role, target_role):
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to manage this account's rights.",
+        )
+
+
 @api.get("/users/{user_id}/permissions")
-def read_user_permission_overrides(user_id: int, user: HQUser = Depends(require_super_admin)):
+def read_user_permission_overrides(
+    user_id: int,
+    user: HQUser = Depends(require("users.permissions.manage")),
+):
     existing = _user_or_404(user_id)
     role = parse_role(existing["role"])
     if role is None:
         raise HTTPException(status_code=400, detail="That account has no recognised role.")
+    _require_may_manage_rights_of(user, role)
     return {
         "user_id": user_id,
         "role": role.value,
@@ -2167,12 +2204,13 @@ def write_user_permission_overrides(
     user_id: int,
     payload: PermissionOverridesUpdate,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require_super_admin),
+    user: HQUser = Depends(require("users.permissions.manage")),
 ):
     existing = _user_or_404(user_id)
     role = parse_role(existing["role"])
     if role is None:
         raise HTTPException(status_code=400, detail="That account has no recognised role.")
+    _require_may_manage_rights_of(user, role)
     try:
         audit_rows = set_permission_overrides(
             engine,
@@ -2183,6 +2221,10 @@ def write_user_permission_overrides(
         )
     except OwnerOverrideRefused as refusal:
         raise HTTPException(status_code=409, detail=str(refusal))
+    # 403, not 400: these are authorisation refusals, not malformed input. The
+    # request was well formed and this actor may not make it.
+    except RightsEscalationRefused as refusal:
+        raise HTTPException(status_code=403, detail=str(refusal))
     except UnknownPermissionCode as refusal:
         raise HTTPException(status_code=400, detail=str(refusal))
     # The audit table already has the durable, queryable record; this log line

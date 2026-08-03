@@ -43,6 +43,25 @@ export function AuthProvider({ children }) {
     })();
   }, [loadPermissions]);
 
+  // Re-ask when the tab regains focus.
+  //
+  // The backend resolves permissions from the database on every request, so a
+  // grant takes effect there immediately - but this Set was fetched once at
+  // sign-in and never again. An OWNER could grant "Manage User Rights", the
+  // ADMIN's next API call would have succeeded, and the button enabling it
+  // stayed hidden until they happened to sign out and back in. The permission
+  // looked broken when only the cache was stale.
+  //
+  // Focus is the right trigger because it is exactly when the operator has
+  // come back to the window after being told a right was granted. It costs one
+  // request, never fires while they are typing, and needs no polling.
+  useEffect(() => {
+    if (!getToken()) return undefined;
+    const onFocus = () => { loadPermissions(); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [loadPermissions]);
+
   const login = async (username, password) => {
     const { data } = await api.post("/auth/login", { username, password });
     setToken(data.access_token);

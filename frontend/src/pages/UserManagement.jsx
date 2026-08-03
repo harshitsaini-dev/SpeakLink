@@ -335,10 +335,17 @@ export default function UserManagement() {
                         <Trash2 size={14} /> Delete
                       </button>
                     )}
-                    {/* Only OWNER may reach the endpoint this opens; the button
-                        is hidden for the same reason the endpoint refuses an
-                        OWNER target - OWNER's rights are never overridden. */}
-                    {isSuperAdmin && row.role !== "OWNER" && (
+                    {/* Shown by CAPABILITY, not by role name.
+                        `isSuperAdmin` stood here, which is why granting an
+                        ADMIN "Manage User Rights" changed nothing they could
+                        see: the permission was real, the button was still
+                        keyed to `myRole === "OWNER"`.
+                        `allowed` is the same role-hierarchy check every other
+                        action in this row uses, so an ADMIN sees Rights on a
+                        BROADCASTER and not on another ADMIN - and the server
+                        enforces that again regardless of what renders here. */}
+                    {allowed && can("users.permissions.manage")
+                      && row.role !== "OWNER" && row.id !== me?.id && (
                       <button type="button" disabled={busy} onClick={() => setEditingRights(row)}
                               className="inline-flex items-center gap-1 rounded border px-2 py-1"
                               data-testid={`rights-${row.username}`}>
