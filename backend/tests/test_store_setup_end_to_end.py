@@ -50,6 +50,21 @@ os.environ.setdefault(
 from tools import store_setup_core as core  # noqa: E402
 from tools.receiver_credential_store import FakeCredentialProtector  # noqa: E402
 
+
+def _authorized():
+    """Proof that the Settings Password was entered.
+
+    These tests exercise enrolment and removal, not the gate - the gate has
+    its own file - so they construct the authorization directly instead of
+    driving a password dialog.
+    """
+    from datetime import datetime, timezone
+
+    from tools.store_setup_core import SettingsAuthorization
+
+    return SettingsAuthorization(granted_at=datetime.now(timezone.utc))
+
+
 RUNTIME_MODULES = ("server", "db", "models", "schemas", "auth", "seed", "ws_manager")
 
 
@@ -278,7 +293,7 @@ def test_the_full_first_run_chain_reaches_connected(fresh, tmp_path):
     # 2 & 3. A real code, redeemed through the real enrol route.
     code = _create_code(fresh)
     transport = _RealBackendTransport(fresh)
-    enrolment = core.redeem_enrollment(
+    enrolment = core.redeem_enrollment(authorization=_authorized(), 
         backend_url="http://192.168.4.134:8000", code=code,
         device_name="Counter PC", hostname="TILL-1",
         credential_path=credential_path, protector=protector,
@@ -345,14 +360,14 @@ def test_the_same_code_cannot_be_redeemed_twice(fresh, tmp_path):
     protector = FakeCredentialProtector("e2e-computer")
     code = _create_code(fresh)
 
-    first = core.redeem_enrollment(
+    first = core.redeem_enrollment(authorization=_authorized(), 
         backend_url="https://hq.example.com", code=code, device_name="A", hostname="A",
         credential_path=tmp_path / "a.bin", protector=protector,
         transport=_RealBackendTransport(fresh),
     )
     assert first.state is core.EnrolmentUiState.ENROLLED
 
-    second = core.redeem_enrollment(
+    second = core.redeem_enrollment(authorization=_authorized(), 
         backend_url="https://hq.example.com", code=code, device_name="B", hostname="B",
         credential_path=tmp_path / "b.bin", protector=protector,
         transport=_RealBackendTransport(fresh),
@@ -376,7 +391,7 @@ def test_an_unreachable_hq_fails_the_connection_test_and_stops_there(fresh):
 
 
 def test_an_invalid_code_is_refused_generically(fresh, tmp_path):
-    result = core.redeem_enrollment(
+    result = core.redeem_enrollment(authorization=_authorized(), 
         backend_url="https://hq.example.com", code="ECHO-NOPE-NOPE",
         device_name="A", hostname="A", credential_path=tmp_path / "a.bin",
         protector=FakeCredentialProtector("e2e-computer"),
@@ -393,7 +408,7 @@ def test_an_already_enrolled_computer_never_spends_a_code(fresh, tmp_path):
     code = _create_code(fresh)
     transport = _RealBackendTransport(fresh)
 
-    result = core.redeem_enrollment(
+    result = core.redeem_enrollment(authorization=_authorized(), 
         backend_url="https://hq.example.com", code=code, device_name="A", hostname="A",
         credential_path=credential_path,
         protector=FakeCredentialProtector("e2e-computer"), transport=transport,
@@ -402,7 +417,7 @@ def test_an_already_enrolled_computer_never_spends_a_code(fresh, tmp_path):
     assert transport.urls == [], "the code must not be sent at all"
 
     # And the code is still good, because it was never spent.
-    fine = core.redeem_enrollment(
+    fine = core.redeem_enrollment(authorization=_authorized(), 
         backend_url="https://hq.example.com", code=code, device_name="B", hostname="B",
         credential_path=tmp_path / "fresh.bin",
         protector=FakeCredentialProtector("e2e-computer"),
@@ -471,7 +486,7 @@ def test_a_credential_that_cannot_be_written_is_reported_not_hidden(fresh, tmp_p
         def unprotect(self, payload: bytes) -> bytes:
             raise OSError("nor unseal it")
 
-    result = core.redeem_enrollment(
+    result = core.redeem_enrollment(authorization=_authorized(), 
         backend_url="https://hq.example.com", code=code, device_name="A", hostname="A",
         credential_path=tmp_path / "unwritable.bin", protector=_RefusingProtector(),
         transport=_RealBackendTransport(fresh),

@@ -39,6 +39,40 @@ os.environ.setdefault(
 from tools.receiver_credential_store import FakeCredentialProtector  # noqa: E402
 from tools.store_enrolment_state import EnrolmentAssessment, EnrolmentVerdict  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _settings_password_unlocked(monkeypatch):
+    """Stand in for the operator typing the Settings Password.
+
+    Every mutating GUI handler asks through ONE module-level helper, so
+    replacing that one function unlocks them all. If a handler ever compares a
+    password itself, this stops working - which is the point.
+    """
+    from tools import store_setup_gui as gui
+    from tools.store_setup_core import SettingsAuthorization
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(
+        gui, "_ask_settings_authorization",
+        lambda parent, app, action: SettingsAuthorization(
+            granted_at=datetime.now(timezone.utc)))
+
+
+
+def _authorized():
+    """Proof that the Settings Password was entered.
+
+    These tests exercise enrolment and removal, not the gate - the gate has
+    its own file - so they construct the authorization directly instead of
+    driving a password dialog.
+    """
+    from datetime import datetime, timezone
+
+    from tools.store_setup_core import SettingsAuthorization
+
+    return SettingsAuthorization(granted_at=datetime.now(timezone.utc))
+
+
 try:
     import tkinter as tk
 
@@ -231,7 +265,7 @@ def test_removing_the_old_enrolment_calls_the_safe_replacement(tmp_path, state_r
 
     monkeypatch.setattr(gui, "replace_local_enrolment", fake_replace)
     monkeypatch.setattr(gui, "confirm_removal", lambda parent: True)
-    monkeypatch.setattr(gui, "stop_receiver_task", lambda: None)
+    monkeypatch.setattr(gui, "stop_receiver_task", lambda authorization: None)
 
     app = build_app(tmp_path, assessment=stale_assessment(), state_root=state_root)
     try:
@@ -269,7 +303,7 @@ def test_after_removal_the_wizard_returns_to_welcome(tmp_path, state_root, monke
     monkeypatch.setattr(gui, "replace_local_enrolment",
                         lambda **k: ReplacementResult(ok=True, detail="done"))
     monkeypatch.setattr(gui, "confirm_removal", lambda parent: True)
-    monkeypatch.setattr(gui, "stop_receiver_task", lambda: None)
+    monkeypatch.setattr(gui, "stop_receiver_task", lambda authorization: None)
 
     app = build_app(tmp_path, assessment=stale_assessment(), state_root=state_root)
     try:
@@ -287,7 +321,7 @@ def test_the_real_replacement_preserves_logs_and_removes_the_credential(tmp_path
     from tools import store_setup_gui as gui
 
     monkeypatch.setattr(gui, "confirm_removal", lambda parent: True)
-    monkeypatch.setattr(gui, "stop_receiver_task", lambda: None)
+    monkeypatch.setattr(gui, "stop_receiver_task", lambda authorization: None)
 
     app = build_app(tmp_path, assessment=stale_assessment(), state_root=state_root)
     try:

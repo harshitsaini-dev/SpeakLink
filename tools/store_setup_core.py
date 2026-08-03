@@ -253,10 +253,24 @@ def redeem_enrollment(
     allow_insecure_private_lan: bool = False,
     expected_hq_host: "str | None" = None,
     transport=None,
+    authorization=None,
 ) -> EnrolmentUiResult:
     """Spend the code once. The Store sees only a generic failure; the reason
     stays out of this process's own hands, because the backend never sends it
-    to an unauthenticated caller in the first place."""
+    to an unauthenticated caller in the first place.
+
+    PROTECTED. Enrolment writes this computer's Device identity, so it is a
+    configuration mutation like any other. The fresh-setup wizard establishes
+    the Settings Password BEFORE it reaches this step, which is why an
+    unconditional gate does not trap a new machine: by the time enrolment
+    runs, an authorization exists. Re-enrolling an already-installed Store
+    goes through the same gate, which is the case this protects.
+
+    Automatic Device AUTHENTICATION and reconnect are a different thing
+    entirely and never come near here - they use the stored credential and are
+    the Agent's business, not the Store Kit's.
+    """
+    _require_authorization(authorization, "Enrolling this computer")
     try:
         outcome = enrol(
             backend_url=backend_url,
@@ -797,7 +811,10 @@ def restart_receiver(*, task_name: str = DEFAULT_TASK_NAME, timeout_seconds: flo
                      run=None, sleep=time.sleep, clock=time.monotonic) -> TaskActionResult:
     """Stop, then start, the verified task - never a broad process kill - and
     wait for literal CONNECTED. A restarted process is not proof it worked."""
-    stop_result = stop_receiver(task_name=task_name, run=run, _internal=True)
+    # The primitive, not the protected entry point: a restart is one operation
+    # and must not ask for the password twice. Restarting changes no
+    # configuration, so it is not itself a protected mutation.
+    stop_result = _stop_receiver_task(task_name=task_name, run=run)
     if not stop_result.ok:
         return TaskActionResult(state=InstallState.INSTALL_FAILED, detail=stop_result.detail)
     started = _run_powershell_script(_manage_task_script(),
@@ -821,24 +838,37 @@ class StopResult:
     detail: str
 
 
-def stop_receiver(*, task_name: str = DEFAULT_TASK_NAME, run=None,
-                  authorization=None, _internal: bool = False) -> StopResult:
-    """Stop only the verified task. Never touches the credential or the task
-    registration itself.
+def _stop_receiver_task(*, task_name: str = DEFAULT_TASK_NAME, run=None) -> StopResult:
+    """Stop the verified task. THE PRIMITIVE, WITH NO AUTHORIZATION IN IT.
 
-    Protected because a stopped Receiver is a silent Store until somebody
-    starts it again - the outcome this product exists to prevent. ``_internal``
-    is for restart_receiver, which stops and immediately starts as one
-    already-authorized operation; it is not a bypass anything outside this
-    module can reach meaningfully.
+    Private on purpose, and this shape replaced an earlier ``_internal=True``
+    argument on the public stop_receiver. That flag was a real defect: an
+    authorization check whose bypass is an ordinary keyword argument is not an
+    authorization check, because anything able to call the function could pass
+    it. Naming a separate private primitive means the public entry point has
+    no bypass parameter to discover.
+
+    It is still reachable by a determined caller inside this process - Python
+    has no private functions - but it is no longer part of the callable API,
+    and a test asserts stop_receiver itself refuses.
     """
-    if not _internal:
-        _require_authorization(authorization, "Stopping the Receiver")
     result = _run_powershell_script(_manage_task_script(),
                                     ["-TaskName", task_name, "-Action", "Stop"], run=run)
     if result.returncode != 0:
         return StopResult(ok=False, detail=(result.stdout + result.stderr).strip()[-1000:])
     return StopResult(ok=("STOPPED" in result.stdout), detail=result.stdout.strip())
+
+
+def stop_receiver(*, task_name: str = DEFAULT_TASK_NAME, run=None,
+                  authorization=None) -> StopResult:
+    """Stop only the verified task. Never touches the credential or the task
+    registration itself.
+
+    Protected because a stopped Receiver is a silent Store until somebody
+    starts it again - the outcome this product exists to prevent.
+    """
+    _require_authorization(authorization, "Stopping the Receiver")
+    return _stop_receiver_task(task_name=task_name, run=run)
 
 
 def change_audio_output(*, device, config_path=None, task_name: str = DEFAULT_TASK_NAME,

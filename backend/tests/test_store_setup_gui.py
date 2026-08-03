@@ -24,6 +24,25 @@ from tools import store_setup_core as core  # noqa: E402
 from tools.receiver_credential_store import FakeCredentialProtector  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _settings_password_unlocked(monkeypatch):
+    """Stand in for the operator typing the Settings Password.
+
+    Every mutating GUI handler asks through ONE module-level helper, so
+    replacing that one function unlocks them all. If a handler ever compares a
+    password itself, this stops working - which is the point.
+    """
+    from tools import store_setup_gui as gui
+    from tools.store_setup_core import SettingsAuthorization
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(
+        gui, "_ask_settings_authorization",
+        lambda parent, app, action: SettingsAuthorization(
+            granted_at=datetime.now(timezone.utc)))
+
+
+
 #: Proof that the Settings Password was entered. These tests exercise the
 #: MUTATION, not the gate - the gate has its own file - so they construct the
 #: authorization directly rather than typing a password each time.
