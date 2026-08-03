@@ -40,6 +40,7 @@ import argparse
 import hashlib
 import json
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -73,9 +74,17 @@ FORBIDDEN_DIRS = {".venv", "node_modules", "__pycache__", "recordings", ".git"}
 #: Content patterns. A real Device credential and a real enrolment code have
 #: recognisable shapes, and a developer's home directory is a path that will
 #: not exist on a till.
+#:
+#: The credential pattern requires the prefix FOLLOWED BY MATERIAL, matching
+#: tools/receiver_agent.py's _CREDENTIAL_PATTERN. Searching for the bare
+#: prefix flagged the installer and verifier scripts, which contain it inside
+#: their OWN leak-detection patterns - a script that checks for a leaked
+#: credential is the opposite of a leaked credential, and a scanner that
+#: cannot tell those apart is one an operator learns to override.
 FORBIDDEN_CONTENT = (
-    b"speaklink_rcv_v1",
-    rb"C:\Users\admin",
+    rb"speaklink_rcv_v1\.[A-Za-z0-9._\-]+",
+    rb"ECHO(-[A-Z0-9]{4}){2,}",
+    rb"C:\\Users\\admin",
 )
 
 #: The executables a Store actually needs, and their required icon.
@@ -182,9 +191,13 @@ def audit_tree(root: Path) -> list[str]:
             except OSError:
                 continue
             for pattern in FORBIDDEN_CONTENT:
-                if pattern in blob:
+                match = re.search(pattern, blob)
+                if match:
+                    # The MATCH is never printed - it would be the very
+                    # credential this refuses to ship. The pattern and the file
+                    # are enough to act on.
                     findings.append(
-                        f"forbidden content {pattern!r} in {relative}")
+                        f"forbidden content matching {pattern.decode()} in {relative}")
 
     # Every SpeakLink executable must carry the SpeakLink icon, and the
     # background one must be windowless.

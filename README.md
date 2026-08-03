@@ -1,9 +1,7 @@
-# Here are your Instructions
-
 # SpeakLink
 
-SpeakLink is a live retail announcement system intended to send audio from an
-HQ browser dashboard to receivers in approximately 40 stores.
+SpeakLink is a live retail announcement system: audio goes from an HQ browser
+dashboard to Receiver PCs in around 40 stores.
 
 ```text
 HQ Browser -> React Dashboard -> FastAPI Server -> Secure WebSocket
@@ -11,23 +9,135 @@ HQ Browser -> React Dashboard -> FastAPI Server -> Secure WebSocket
            -> Amplifier -> Store Speakers
 ```
 
-This repository currently contains the HQ React application and FastAPI
-backend. The Windows Receiver Agent is not part of the verified baseline yet.
-See `PROJECT_STATE.md` for the precise verification status and known limits.
+---
+
+## Running HQ (the current way)
+
+HQ is **repository-native**. The folder you have IS the installation - there is
+no installer, nothing is copied into AppData, and HQ registers no Windows
+Scheduled Task.
+
+### Windows
+
+1. Copy or clone this repository somewhere you can write to.
+2. Copy `.env.example` to `.env`.
+3. Fill in `ADMIN_USERNAME`, `ADMIN_PASSWORD` and `JWT_SECRET`.
+4. Double-click **`start.bat`** (or run it from a terminal).
+5. Open the URL it prints - by default `http://localhost:8000/`.
+
+Then `stop.bat` and `restart.bat` as needed.
+
+The first start creates a repo-local virtual environment and installs the
+pinned requirements, so it takes a few minutes. Later starts do not.
+
+### Cloud / Linux / macOS
+
+The `.bat` files are **Windows convenience wrappers only**. Every decision
+lives in the cross-platform launcher, so any OS can run:
+
+```bash
+python tools/speaklink_server.py run        # foreground - for systemd, a
+                                           # container, or a process manager
+python tools/speaklink_server.py status
+```
+
+`run` stays in the foreground deliberately: whatever supervises it (systemd, a
+container runtime) should own restarts. Build the frontend in CI and ship the
+`frontend/build` directory - serving it needs only Python, so Node and Yarn are
+build-time requirements, not runtime ones.
+
+### What lives where
+
+```text
+repo/
+    .env                 your configuration (gitignored)
+    .env.example         the template
+    start.bat            Windows wrappers around the launcher
+    stop.bat
+    restart.bat
+    build-store-receiver.bat
+    backend/             FastAPI application
+    frontend/            React application
+    tools/
+        speaklink_server.py       the cross-platform launcher
+    data/                EVERYTHING LIVE - gitignored
+        speaklink.db      the SQLite database
+        keys/            signing secret, Receiver key container
+        logs/
+        runtime/         PID and state files
+```
+
+Backing HQ up is "copy `data/`". Nothing in it is ever committed.
+
+### One origin
+
+One Uvicorn worker serves the API, the WebSocket endpoints and the built React
+app on the same origin, so production has no CORS to configure and the same
+build works whether you open it by IP, by hostname or through a cloud name.
+CORS support remains for two-port development, where the React dev server on
+3000 talks to the API on 8000.
+
+### The first administrator
+
+`ADMIN_USERNAME` and `ADMIN_PASSWORD` are used **once**, when the database does
+not yet exist. After that they are ignored: changing them cannot reset a live
+account or create a second Owner, because account state belongs to User
+Management once it exists. If they are missing when a database has to be
+created, startup refuses - there is no default login anywhere in this product.
+
+---
+
+## Store Receiver
+
+The Store Receiver stays Windows-specific, and keeps its Windows Scheduled Task
+- a till has nobody to start anything, and Windows session 0 has no audio
+endpoint.
+
+Build the kit to take to a Store:
+
+```
+build-store-receiver.bat
+```
+
+That produces one versioned ZIP in `artifacts/` with a manifest, SHA-256
+checksums, the setup wizard, the Receiver, the windowless background Receiver
+and the installer scripts. **Extract it to a short path** on the Store PC (for
+example `C:\SpeakLink`): the package is deeply nested and a long extraction path
+can exceed the Windows 260-character limit, which shows up as a DLL failing to
+load.
+
+---
+
+## Legacy HQ deployment (rollback only)
+
+The previous HQ deployment installed into `%LOCALAPPDATA%\SpeakLink\hq-app`
+and started from an "SpeakLink HQ Runtime" Scheduled Task. Those scripts are
+still present and still supported **as the rollback path** while repo-native
+operation is being proven on the live machine:
+
+```text
+scripts/Install-SpeakLinkHQAutoStart.ps1     LEGACY HQ deployment
+scripts/Repair-SpeakLinkHQAutoStart.ps1      LEGACY HQ deployment
+scripts/Test-SpeakLinkHQAutoStart.ps1        LEGACY HQ deployment
+scripts/Uninstall-SpeakLinkHQAutoStart.ps1   LEGACY HQ deployment
+tools/hq_runtime.py                         LEGACY HQ deployment
+```
+
+Do not delete them until the live HQ has been migrated to repo-native mode and
+accepted. The Store Receiver scripts in `scripts/` are NOT legacy - they are
+the current, supported Store flow.
+
+---
 
 ## Windows prerequisites
 
 - Git
-- Python 3.12 (the verified local version is 3.12.10)
-- Node.js compatible with Create React App
-- Yarn 1.x (the verified local version is 1.22.22)
-- FFmpeg on `PATH` for future receiver/audio work (verified locally with 8.1.2)
-- PowerShell
+- Python 3.11+ (the verified local version is 3.12.10)
+- Node.js and Yarn 1.x - **only to build the frontend**
+- FFmpeg - only to build the Store Receiver package
+- PowerShell - only for the Store Receiver build and install scripts
 
-Keep the repository in a path you can write to. The current verified checkout
-uses `C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)`.
-
-## Backend setup
+## Developer setup (two-port mode)
 
 Run these commands from the repository root in PowerShell:
 
