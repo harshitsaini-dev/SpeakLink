@@ -88,12 +88,17 @@ EXPECTED: dict[str, object] = {
     # Store: it is the action an attacker who took an ADMIN account would use
     # to take an OWNER one.
     "reset_hq_user_password": "OWNER",
-    # Per-user permission overrides: OWNER only, and enforced by the same
-    # require_super_admin gate as reset_hq_user_password - independent of the
-    # override system these routes edit, so an override can never grant an
-    # ADMIN a path to grant themselves more.
-    "read_user_permission_overrides": "OWNER",
-    "write_user_permission_overrides": "OWNER",
+    # Per-user permission overrides: the permission whose label is "Manage
+    # User Rights", NOT a role test.
+    #
+    # These were "OWNER", enforced by require_super_admin. That made the
+    # permission inert - an OWNER could grant it to an ADMIN and the ADMIN
+    # still got 403 - so the role test was replaced by the capability, and the
+    # escalation guards it stood in for became explicit: an OWNER target is
+    # refused, self-editing is refused, granting a permission the actor does
+    # not hold is refused, and rbac.may_manage_role decides valid targets.
+    "read_user_permission_overrides": "users.permissions.manage",
+    "write_user_permission_overrides": "users.permissions.manage",
     "read_user_store_scope": "OWNER",
     "write_user_store_scope": "OWNER",
 
@@ -153,6 +158,10 @@ EXPECTED: dict[str, object] = {
     # to the fine-grained code before this test ever observes it - see
     # server._COARSE_TO_FINE - so the expectations here are the codes actually
     # enforced.
+    # The broadcast TARGET catalog. Deliberately menu.broadcast.view and not
+    # menu.stores.view: Store MANAGEMENT visibility must not decide whether an
+    # operator can see the Stores they may broadcast to.
+    "list_broadcast_target_stores": "menu.broadcast.view",
     "create_session": "broadcast.start",
     "start_session": "broadcast.start",
     "stop_session": "broadcast.stop",
