@@ -6,10 +6,14 @@ SUPER ADMIN genuinely needs: an account that STARTED BROADCASTS and appears
 as the actor in audit history, removed permanently from operation while
 every one of those historical rows stays exactly as readable as it was.
 
-The model mirrors the Store tombstone: the ``hq_users`` row is never
-deleted, because ``broadcast_sessions.started_by`` and both audit tables
-reference it by id and losing that would erase the record of what somebody
-did in order to erase the fact that they existed.
+The model USED to mirror the Store tombstone - the row stayed and was
+marked deleted - and that kept the username reserved for ever, which an
+operator eventually hit as "the username 'admin' is already in use" for an
+account they had deleted months earlier.
+
+The row is now really deleted. History survives because each broadcast keeps
+an immutable snapshot of who ran it and the pointer is nulled, rather than
+because a hidden row is propping the reference up.
 
 Nothing here touches the protected database.
 """
@@ -123,10 +127,14 @@ def test_broadcast_history_started_by_a_deleted_user_remains_readable(client):
 
     from sqlalchemy import text
     with client.server_module.engine.connect() as c:
-        started_by = c.execute(
-            text("SELECT started_by FROM broadcast_sessions WHERE id = :i"),
-            {"i": session_id}).scalar_one()
-    assert started_by == user_id, "the historical actor reference must survive"
+        row = c.execute(
+            text("SELECT started_by, started_by_username FROM broadcast_sessions "
+                 "WHERE id = :i"), {"i": session_id}).first()
+    # The POINTER is cleared - a dangling id would be reissued to the next
+    # account created, handing them somebody else's broadcast.
+    assert row.started_by is None
+    # The IDENTITY survives as a snapshot, which is what keeps history readable.
+    assert row.started_by_username == "caster"
 
 
 # ===========================================================================
@@ -172,19 +180,28 @@ def test_a_deleted_user_cannot_be_restored(client):
     user_id = make_user(client, owner, "norestore")
     delete_user(client, owner, user_id, confirm="norestore")
 
-    assert client.post(f"/api/users/{user_id}/restore", headers=owner).status_code == 409
-    assert client.post(f"/api/users/{user_id}/enable", headers=owner).status_code == 409
+    # 404 rather than 409: there is no row left to refuse a transition on.
+    # That is the honest answer once deletion is real.
+    assert client.post(f"/api/users/{user_id}/restore", headers=owner).status_code == 404
+    assert client.post(f"/api/users/{user_id}/enable", headers=owner).status_code == 404
 
 
-def test_a_deleted_username_cannot_be_reused(client):
+def test_a_deleted_username_becomes_reusable(client):
+    """The defect this feature exists to fix.
+
+    The old tombstone kept the row, so the UNIQUE index kept the name, so an
+    account an operator had permanently deleted made its username unusable for
+    ever. Deleting means the name is free again.
+    """
     owner = sign_in(client)
     user_id = make_user(client, owner, "takenname")
     delete_user(client, owner, user_id, confirm="takenname")
 
     resp = client.post("/api/users", headers=owner, json={
-        "username": "takenname", "display_name": "Impostor",
+        "username": "takenname", "display_name": "A Different Person",
         "role": "ADMIN", "password": PASSWORD})
-    assert resp.status_code == 409
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["id"] != user_id, "the new account must be a new identity"
 
 
 # ===========================================================================

@@ -333,7 +333,14 @@ def test_user_search_by_name_role_and_state(client):
     assert {u["username"] for u in by_role["items"]} == {"bob"}
 
 
-def test_a_permanently_deleted_user_is_absent_from_search_by_default(client):
+def test_a_permanently_deleted_user_is_absent_from_search_entirely(client):
+    """Not "absent by default" - absent, full stop.
+
+    This used to assert that include_deleted=True brought the account back,
+    which was true while permanent deletion left a tombstoned row behind. The
+    row is now really deleted, so there is nothing for any parameter to
+    reveal, and a hand-crafted include_deleted must not resurrect it either.
+    """
     owner = sign_in(client)
     created = client.post("/api/users", headers=owner, json={
         "username": "ghost", "display_name": "Ghost",
@@ -344,9 +351,17 @@ def test_a_permanently_deleted_user_is_absent_from_search_by_default(client):
     default = client.get("/api/users/search", headers=owner).json()
     assert "ghost" not in {u["username"] for u in default["items"]}
 
-    with_deleted = client.get("/api/users/search", headers=owner,
-                              params={"include_deleted": True}).json()
-    assert "ghost" in {u["username"] for u in with_deleted["items"]}
+    # The retired parameter cannot bring it back, however it is spelled.
+    forced = client.get("/api/users/search", headers=owner,
+                        params={"include_deleted": True, "page_size": 200}).json()
+    assert "ghost" not in {u["username"] for u in forced["items"]}
+
+    # And the account is genuinely gone rather than filtered.
+    from sqlalchemy import text
+    with client.server_module.engine.connect() as c:
+        remaining = c.execute(text("SELECT COUNT(*) FROM hq_users WHERE username = 'ghost'")
+                              ).scalar_one()
+    assert remaining == 0
 
 
 # ===========================================================================
