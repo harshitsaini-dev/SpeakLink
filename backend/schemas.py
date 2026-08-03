@@ -300,15 +300,21 @@ class SessionCreate(BaseModel):
 class TargetOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
-    store_id: int
+    # Nullable since a Store can be permanently deleted for real. The pointer
+    # is cleared rather than left dangling because stores has no AUTOINCREMENT:
+    # a stale id would be reissued to the next Store created, silently moving
+    # this historical target onto a different shop.
+    store_id: Optional[int] = None
     play_status: str
     command_sent_at: Optional[datetime] = None
     started_playing_at: Optional[datetime] = None
     stopped_at: Optional[datetime] = None
     error_message: Optional[str] = None
-    #: Populated by the endpoint from the Store row, which is NEVER removed
-    #: even after a permanent delete (see store_deletion.py) - so history
-    #: keeps showing a real name/code instead of a bare id or a blank field.
+    #: Populated by the endpoint from the Store row while it exists, and from
+    #: the snapshot written onto this row when the Store was permanently
+    #: deleted - so history keeps showing a real code instead of a bare id,
+    #: and keeps showing the OLD Store's code even if a new Store later reuses
+    #: it. See store_permanent_delete.py.
     store_code: Optional[str] = None
     store_name: Optional[str] = None
     store_deleted: bool = False

@@ -182,7 +182,16 @@ class BroadcastTarget(Base):
     __tablename__ = "broadcast_targets"
     id = Column(Integer, primary_key=True)
     session_id = Column(Integer, ForeignKey("broadcast_sessions.id"), nullable=False, index=True)
-    store_id = Column(Integer, ForeignKey("stores.id"), nullable=False, index=True)
+    # Nullable because a Store can be permanently deleted for real (see
+    # store_permanent_delete.py). The pointer is cleared and the snapshots
+    # below carry the identity - stores has no AUTOINCREMENT, so a dangling id
+    # would be reissued to the next Store created and this historical target
+    # would silently move onto a different shop.
+    store_id = Column(Integer, ForeignKey("stores.id"), nullable=True, index=True)
+    #: Immutable record of which Store this target was, written at the moment
+    #: that Store was permanently deleted.
+    store_code_snapshot = Column(String(50), nullable=True)
+    store_name_snapshot = Column(String(200), nullable=True)
     play_status = Column(String(30), default="pending", nullable=False)  # pending|playing|stopped|failed
     command_sent_at = Column(DateTime, nullable=True)
     started_playing_at = Column(DateTime, nullable=True)
