@@ -64,7 +64,13 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
     PermissionDefinition("broadcast.emergency_stop", "Broadcast",
                         "Emergency Stop ALL Broadcasts"),
     PermissionDefinition("broadcast.view_ownership", "Broadcast",
-                        "View Active Broadcast Owners"),
+                        "Active Broadcasts - View Broadcaster"),
+    PermissionDefinition("broadcast.active_view", "Broadcast",
+                        "Active Broadcasts - View Page"),
+    PermissionDefinition("broadcast.view_targets", "Broadcast",
+                        "Active Broadcasts - View Stores"),
+    PermissionDefinition("broadcast.stop_any", "Broadcast",
+                        "Active Broadcasts - Stop Other Broadcast"),
 
     PermissionDefinition("menu.stores.view", "Stores", "View Store Management"),
     PermissionDefinition("stores.create", "Stores", "Create Store"),
@@ -132,6 +138,20 @@ _ALL_CODES = frozenset(PERMISSION_CODES)
 #: broadcast.view_ownership is not here either. Knowing a Store is busy is
 #: operational information a Broadcaster needs; knowing WHOSE campaign is
 #: using it is not.
+#:
+#: The three Active Broadcast management codes are likewise absent, and each
+#: for its own reason rather than as one "supervision" bundle:
+#:
+#:   broadcast.active_view   - opening the supervision page at all
+#:   broadcast.view_targets  - the EXACT Stores another operator is using
+#:   broadcast.stop_any      - silencing one specific other operator
+#:
+#: They are deliberately independent. Holding stop_any does not reveal Store
+#: names, holding view_targets does not reveal who owns the broadcast, and
+#: neither implies the other - a supervisor may be trusted to end a broadcast
+#: on a Store they administer without being told which campaign or which
+#: colleague it belonged to. Bundling them would make the finest-grained
+#: question ("who may see what") answerable only at the coarsest grain.
 _BROADCAST_CODES = frozenset({
     "menu.broadcast.view", "broadcast.start", "broadcast.stop",
 })
