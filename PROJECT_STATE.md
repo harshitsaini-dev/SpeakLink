@@ -5329,3 +5329,31 @@ of them by default.
 ### Not done
 
 Not installed anywhere. No Task Scheduler change, no Store deployment, no push.
+
+---
+
+## Active Broadcast Management (feature/active-broadcast-management)
+
+Concurrent broadcasts were working, but a privileged operator could not see
+which exact Stores each broadcaster was using, and the cross-user list sat
+inside Broadcast Console where 20+ simultaneous broadcasts made the page
+unusable.
+
+Supervision moved to its own page at `/active-broadcasts`. Broadcast Console
+keeps a single compact badge whose height does not change with the number of
+live broadcasts. See `docs/ACTIVE_BROADCAST_MANAGEMENT.md`.
+
+Three new permission codes — `broadcast.active_view`,
+`broadcast.view_targets`, `broadcast.stop_any` — join the existing
+`broadcast.view_ownership`, `broadcast.stop` and `broadcast.emergency_stop`.
+None implies another: `stop_any` reveals no Store names and no owner
+identity, and Emergency Stop All is untouched and still independent. OWNER and
+ADMIN hold all three by default; BROADCASTER and VIEWER hold none. Per-user
+ALLOW/DENY works through the existing rights editor with no SQLite editing.
+
+Also closed here: `GET /api/broadcast/active` was returning
+`sessions[].target_store_ids` to any `view_ownership` holder, which made
+ownership visibility a back door to target visibility. Exact ids now require
+`broadcast.view_targets`.
+
+Additive only — no schema change, no migration. Live RC19 was not touched.
