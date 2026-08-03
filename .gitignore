@@ -285,3 +285,31 @@ build/pyi-work/
 !scripts/*.exe
 build/pyi-dist-*/
 build/pyi-work-*/
+
+# ==================================================
+# Repo-native HQ runtime (tools/echocast_server.py)
+# ==================================================
+# The repository IS the installation, so HQ's live data sits in <repo>/data
+# for operator simplicity - one folder to back up. None of it may ever be
+# committed: it is the database, the signing secret, the Receiver key
+# container, the logs and the PID/runtime state of a real installation.
+# The CONTENTS are ignored rather than the directory itself: git does not
+# descend into an ignored directory, so `/data/` followed by `!data/.gitkeep`
+# silently keeps the placeholder out too, and a fresh clone then has no data
+# folder at all.
+/data/*
+!/data/.gitkeep
+
+# Belt and braces for the individual kinds, in case a data directory is
+# relocated with ECHOCAST_DATA_DIR and ends up somewhere else in the tree.
+**/echocast.db
+**/echocast.db-wal
+**/echocast.db-shm
+**/receiver-hmac-keys.bin
+**/jwt-secret.txt
+**/settings-password.json
+**/hq.pid
+**/hq-state.json
+**/requirements.stamp
+
+# The one tracked thing under data/, so the folder exists in a fresh clone.
