@@ -752,10 +752,38 @@ async function mockBackend(page, options = {}) {
       return route.fulfill(json({ ok: true, deleted: { id, store_code: store.store_code } }));
     }
 
-    // History-preserving permanent delete: a tombstone, never a row removal.
-    // Mirrors backend/store_deletion.py - the Store disappears from the
-    // ordinary list (its lifecycle_state becomes 'deleted') but the row and
-    // every dependency count stay exactly as they were.
+    // TRUE permanent delete: the row really goes and the Store Code is freed.
+    // Mirrors backend/store_permanent_delete.py.
+    //
+    // This used to tombstone - lifecycle_state became 'deleted' and the row
+    // stayed - which kept the Store Code reserved for ever. That is exactly
+    // the defect the operator hit with AYUSHK.
+    // Creating a Store. Mirrors the real uniqueness rule (case-sensitive on
+    // store_code, and only against Stores that still EXIST) and the real id
+    // rule: a high-water mark, never `length + 1`, because reusing a deleted
+    // Store's id is how old history rebinds to a new shop.
+    if (method === 'POST' && path === '/stores') {
+      const body = request.postDataJSON() || {};
+      if (state.stores.some((s) => s.store_code === body.store_code)) {
+        return route.fulfill(json({ detail: 'store_code already exists' }, 409));
+      }
+      state.nextStoreId = Math.max(
+        state.nextStoreId || 0, ...state.stores.map((s) => s.id), 0) + 1;
+      const created = {
+        id: state.nextStoreId,
+        store_code: body.store_code,
+        store_name: body.store_name,
+        city: body.city || 'TESTVILLE',
+        region: body.region || 'TEST ZONE',
+        is_online_store: false,
+        is_active: true,
+        lifecycle_state: 'active',
+        status: 'offline',
+      };
+      state.stores = [...state.stores, created];
+      return route.fulfill(json(created, 201));
+    }
+
     const storeTombstone = path.match(/^\/stores\/(\d+)\/delete-permanently$/);
     if (method === 'POST' && storeTombstone) {
       const id = Number(storeTombstone[1]);
@@ -770,21 +798,21 @@ async function mockBackend(page, options = {}) {
         return route.fulfill(json({
           detail: `The typed confirmation did not match. Type the Store code exactly: ${store.store_code}` }, 409));
       }
-      if (store.lifecycle_state === 'deleted') {
-        return route.fulfill(json({ detail: 'This Store was already permanently deleted.' }, 409));
-      }
       // A new object, never a mutation of the shared fixture - state.stores
       // defaults to the module-level STORES array by reference, and
       // mutating one of its elements in place would leak into every other
       // test that reuses that fixture.
-      const tombstoned = { ...store, lifecycle_state: 'deleted', is_active: false };
-      state.stores = state.stores.map((s) => (s.id === id ? tombstoned : s));
-      state.transitions.push({ action: 'tombstone', id });
+      // The row goes, and everything that belonged only to it goes with it -
+      // a later Store reusing the code must inherit nothing.
+      state.stores = state.stores.filter((s) => s.id !== id);
+      state.storeDevices = state.storeDevices || {};
+      delete state.storeDevices[id];
+      state.transitions.push({ action: 'permanently-deleted', id });
       return route.fulfill(json({
         ok: true, store_id: id, store_code: store.store_code, store_name: store.store_name,
-        dependency_counts: { broadcast_targets: 0, receiver_devices: 0,
-                             receiver_events: 0, receiver_enrollment_codes: 0 },
-        device_public_ids: [], credentials_revoked: 0, enrollment_codes_revoked: 0,
+        row_deleted: true, store_code_released: true,
+        devices_detached: 0, credentials_revoked: 0,
+        live_removed: {}, history_detached: {},
       }));
     }
 
