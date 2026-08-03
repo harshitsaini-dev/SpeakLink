@@ -40,7 +40,8 @@ for _candidate in (REPOSITORY_ROOT, REPOSITORY_ROOT / "backend"):
 # directory - which is why the packaged wizard went looking for
 # _internalrtifacts and _internal\scripts and an operator was told to
 # hand-create them. See tools/resource_paths.
-from tools import resource_paths  # noqa: E402
+from tools import resource_paths
+from tools import store_kit_settings_password as settings_password  # noqa: E402
 
 from tools.audio_receiver_pilot import hidden_child_process_options  # noqa: E402
 from tools.receiver_agent import (  # noqa: E402
@@ -89,6 +90,53 @@ class ConnectionState(str, Enum):
     INSECURE_PUBLIC_URL_REFUSED = "INSECURE_PUBLIC_URL_REFUSED"
     PRIVATE_LAN_WARNING = "PRIVATE_LAN_WARNING"
 
+
+
+# ===========================================================================
+# Settings Password authorization
+# ===========================================================================
+#: Every MUTATING Store Kit action passes through this one gate.
+#:
+#: A dataclass rather than a bare boolean because it makes the proof travel
+#: with the call: a function that requires a SettingsAuthorization cannot be
+#: invoked by a caller that never verified anything, and the type is the
+#: reminder. Scattering `if password == ...` beside each button is how one
+#: button ends up unguarded, and the GUI is not the security boundary -
+#: anything reaching these helpers directly is gated here too.
+#:
+#: It deliberately carries NO password. Once verification has happened the
+#: plaintext has no further use, and an object holding it would be an object
+#: that eventually gets logged or pickled into a diagnostics bundle.
+@dataclass(frozen=True, slots=True)
+class SettingsAuthorization:
+    """Proof that somebody entered the correct Settings Password."""
+
+    granted_at: datetime
+
+
+def authorize_settings(password: str, *, verifier_path=None) -> SettingsAuthorization:
+    """Verify the Settings Password and return proof, or raise.
+
+    Raises SettingsPasswordNotSet when this Store has never had one - which is
+    the upgrade case, and must NOT read as "allowed". The caller establishes
+    one first.
+    """
+    settings_password.require_authorization(verifier_path, password)
+    return SettingsAuthorization(granted_at=datetime.now(timezone.utc))
+
+
+def _require_authorization(authorization, action: str) -> None:
+    """Refuse a mutating action that carries no proof.
+
+    Deliberately a hard refusal rather than a default of None-means-allowed:
+    a new mutating helper that forgets to demand authorization should fail
+    loudly the first time it is called, not quietly protect nothing.
+    """
+    if not isinstance(authorization, SettingsAuthorization):
+        raise settings_password.SettingsPasswordRefused(
+            f"{action} changes this Store's configuration and needs the "
+            "Settings Password."
+        )
 
 @dataclass(frozen=True, slots=True)
 class ConnectionResult:
@@ -725,10 +773,11 @@ class RepairResult:
 
 
 def repair_installation(*, package_path, task_name: str = DEFAULT_TASK_NAME,
-                        run=None) -> RepairResult:
+                        run=None, authorization=None) -> RepairResult:
     """Invoke the existing, tested Repair-SpeakLinkStoreReceiver.ps1. It already
     preserves the credential, config, selected output and logs - not
     reimplemented here."""
+    _require_authorization(authorization, "Repairing the installation")
     script = resource_paths.script("Repair-SpeakLinkStoreReceiver.ps1", required=False)
     result = _run_powershell_script(script, ["-PackagePath", str(package_path),
                                              "-TaskName", task_name], run=run,
@@ -748,7 +797,7 @@ def restart_receiver(*, task_name: str = DEFAULT_TASK_NAME, timeout_seconds: flo
                      run=None, sleep=time.sleep, clock=time.monotonic) -> TaskActionResult:
     """Stop, then start, the verified task - never a broad process kill - and
     wait for literal CONNECTED. A restarted process is not proof it worked."""
-    stop_result = stop_receiver(task_name=task_name, run=run)
+    stop_result = stop_receiver(task_name=task_name, run=run, _internal=True)
     if not stop_result.ok:
         return TaskActionResult(state=InstallState.INSTALL_FAILED, detail=stop_result.detail)
     started = _run_powershell_script(_manage_task_script(),
@@ -772,9 +821,19 @@ class StopResult:
     detail: str
 
 
-def stop_receiver(*, task_name: str = DEFAULT_TASK_NAME, run=None) -> StopResult:
+def stop_receiver(*, task_name: str = DEFAULT_TASK_NAME, run=None,
+                  authorization=None, _internal: bool = False) -> StopResult:
     """Stop only the verified task. Never touches the credential or the task
-    registration itself."""
+    registration itself.
+
+    Protected because a stopped Receiver is a silent Store until somebody
+    starts it again - the outcome this product exists to prevent. ``_internal``
+    is for restart_receiver, which stops and immediately starts as one
+    already-authorized operation; it is not a bypass anything outside this
+    module can reach meaningfully.
+    """
+    if not _internal:
+        _require_authorization(authorization, "Stopping the Receiver")
     result = _run_powershell_script(_manage_task_script(),
                                     ["-TaskName", task_name, "-Action", "Stop"], run=run)
     if result.returncode != 0:
@@ -783,10 +842,14 @@ def stop_receiver(*, task_name: str = DEFAULT_TASK_NAME, run=None) -> StopResult
 
 
 def change_audio_output(*, device, config_path=None, task_name: str = DEFAULT_TASK_NAME,
-                        run=None, timeout_seconds: float = 30.0) -> TaskActionResult:
+                        run=None, timeout_seconds: float = 30.0,
+                        authorization=None) -> TaskActionResult:
     """Save the newly confirmed selector, then restart so it takes effect.
     Never saves before Test Sound + the heard confirmation - that gate lives
     in the GUI, which only calls this after both have happened."""
+    # Verified BEFORE anything is read or written, so a refusal leaves the
+    # last-known-good configuration byte-identical.
+    _require_authorization(authorization, "Changing the audio output device")
     path = Path(config_path) if config_path is not None else default_config_path()
     existing = load_config(path) or ReceiverConfig()
     updated = ReceiverConfig(
@@ -874,10 +937,12 @@ class UninstallResult:
     detail: str
 
 
-def uninstall_receiver(*, task_name: str = DEFAULT_TASK_NAME, run=None) -> UninstallResult:
+def uninstall_receiver(*, task_name: str = DEFAULT_TASK_NAME, run=None,
+                      authorization=None) -> UninstallResult:
     """Invoke the existing, tested Uninstall-SpeakLinkStoreReceiver.ps1. It
     already preserves the credential, config and logs by default and never
     revokes the HQ Device - not reimplemented here."""
+    _require_authorization(authorization, "Uninstalling the Receiver")
     script = resource_paths.script("Uninstall-SpeakLinkStoreReceiver.ps1", required=False)
     result = _run_powershell_script(script, ["-TaskName", task_name], run=run, timeout=120.0)
     if result.returncode != 0:
@@ -885,10 +950,14 @@ def uninstall_receiver(*, task_name: str = DEFAULT_TASK_NAME, run=None) -> Unins
     return UninstallResult(ok=True, detail="uninstalled; credential, config and logs preserved")
 
 
-def replace_device_identity(*, credential_path, confirmation_word: str) -> bool:
+def replace_device_identity(*, credential_path, confirmation_word: str,
+                            authorization=None) -> bool:
     """Delete the local credential ONLY on an exact typed confirmation. Never
     revokes the HQ Device - an administrator does that separately, and the
     caller is told so before this runs."""
+    # Authorization first, then the typed confirmation. Both are required:
+    # the password says WHO, the typed word says THEY MEANT IT.
+    _require_authorization(authorization, "Replacing the Device identity")
     if confirmation_word.strip().lower() != CONFIRMATION_WORD:
         return False
     return remove_local_credential(credential_path, confirm=lambda _prompt: CONFIRMATION_WORD)

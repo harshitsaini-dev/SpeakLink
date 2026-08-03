@@ -20,6 +20,7 @@ for _candidate in (REPOSITORY_ROOT, REPOSITORY_ROOT / "backend"):
         sys.path.insert(0, str(_candidate))
 
 from tools import resource_paths  # noqa: E402
+from tools import store_kit_settings_password as settings_password
 from tools import store_setup_core as core  # noqa: E402
 from tools.receiver_credential_store import (  # noqa: E402
     DeviceCredentialProtector,
@@ -58,7 +59,7 @@ def confirm_removal(parent) -> bool:
 def stop_receiver_task() -> None:
     """Stop only the SpeakLink Store Receiver, never anything else on the PC."""
     try:
-        core.stop_receiver()
+        core.stop_receiver(authorization=authorization, )
     except Exception:
         # A Receiver that is already stopped, or a task that was never
         # installed, is not a reason to refuse to clean up a stale identity.
@@ -105,6 +106,13 @@ class StoreSetupApp(tk.Tk):
         self._current: "ttk.Frame | None" = None
 
         self.state_root = Path(state_root) if state_root else self.credential_path.parent
+        # The local Settings Password verifier, beside the Receiver's own
+        # state. Derived from credential_path rather than resolved
+        # independently so a test that redirects one redirects both - a test
+        # profile that reached the REAL verifier would be a test that can lock
+        # a technician out of a live Store.
+        self.settings_password_path = (
+            self.credential_path.parent / settings_password.VERIFIER_FILENAME)
 
         # A package that cannot install is reported ONCE, in words, before the
         # operator invests any time in it - rather than failing halfway through
@@ -812,6 +820,9 @@ class RerunScreen(ttk.Frame):
 
     # -- Repair -------------------------------------------------------------
     def _repair(self) -> None:
+        authorization = self._authorize("Repairing the installation")
+        if authorization is None:
+            return
         self._busy("REPAIRING...")
 
         def work():
@@ -819,7 +830,7 @@ class RerunScreen(ttk.Frame):
                 package_path = core.locate_verified_receiver_package()
             except core.NoVerifiedReceiverPackage as failure:
                 return core.RepairResult(ok=False, detail=str(failure))
-            return core.repair_installation(package_path=package_path)
+            return core.repair_installation(authorization=authorization, package_path=package_path)
 
         def done(result: "core.RepairResult"):
             self.status_var.set(("REPAIRED: " if result.ok else "REPAIR FAILED: ") + result.detail)
@@ -866,6 +877,9 @@ class RerunScreen(ttk.Frame):
         self._run(work, done)
 
     def _stop(self) -> None:
+        authorization = self._authorize("Stopping the Receiver")
+        if authorization is None:
+            return
         self._busy("STOPPING...")
 
         def work():
@@ -927,12 +941,57 @@ class RerunScreen(ttk.Frame):
         self._busy("UNINSTALLING...")
 
         def work():
-            return core.uninstall_receiver()
+            return core.uninstall_receiver(authorization=authorization)
 
         def done(result: "core.UninstallResult"):
             self.status_var.set(result.detail)
 
         self._run(work, done)
+
+
+    # -- Settings Password ------------------------------------------------
+    def _authorize(self, action: str):
+        """Ask for the Settings Password once, and return the proof.
+
+        ONE place. Every mutating handler calls this and passes the result to
+        core; nothing compares a password itself, because a comparison beside
+        a button is how one button ends up unguarded.
+
+        Returns None when the operator cancels or gets it wrong, and the
+        caller must then do nothing at all - not a partial save, not a
+        restart.
+
+        A Store that has never had a Settings Password is sent to establish
+        one first. That is the upgrade path: an existing Receiver keeps
+        running untouched, and the password is demanded the first time
+        somebody tries to CHANGE something.
+        """
+        from tkinter import simpledialog
+
+        if not settings_password.is_configured(self.app.settings_password_path):
+            self.status_var.set(
+                f"{action} needs a Settings Password, and this Store does not "
+                "have one yet. Use Set Settings Password first. The Receiver "
+                "keeps running normally in the meantime."
+            )
+            return None
+        entered = simpledialog.askstring(
+            "Settings Password",
+            f"{action}.\n\nEnter the Settings Password:",
+            show="*", parent=self,
+        )
+        if not entered:
+            self.status_var.set("Cancelled. Nothing was changed.")
+            return None
+        try:
+            return core.authorize_settings(
+                entered, verifier_path=self.app.settings_password_path)
+        except settings_password.SettingsPasswordError as refusal:
+            # The refusal text never contains what was typed.
+            self.status_var.set(str(refusal))
+            return None
+        finally:
+            entered = None
 
     # -- Replace Device Identity ----------------------------------------
     def _replace_identity(self) -> None:
@@ -951,9 +1010,13 @@ class RerunScreen(ttk.Frame):
                 "Replace Device Identity again."
             )
             return
+        authorization = self._authorize("Replacing the Device identity")
+        if authorization is None:
+            return
         self.confirm_var.set("")
         removed = core.replace_device_identity(
-            credential_path=self.app.credential_path, confirmation_word=typed)
+            credential_path=self.app.credential_path, confirmation_word=typed,
+            authorization=authorization)
         if removed:
             self.app.go_to_connection()
         else:

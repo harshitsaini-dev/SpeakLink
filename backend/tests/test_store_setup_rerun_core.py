@@ -22,6 +22,18 @@ from tools import store_setup_core as core  # noqa: E402
 from tools.receiver_credential_store import FakeCredentialProtector  # noqa: E402
 from tools.windows_audio_devices import OutputDevice  # noqa: E402
 
+
+#: Proof that the Settings Password was entered. These tests exercise the
+#: MUTATION, not the gate - the gate has its own file - so they construct the
+#: authorization directly rather than typing a password each time.
+def _authorized():
+    from datetime import datetime, timezone
+
+    from tools.store_setup_core import SettingsAuthorization
+
+    return SettingsAuthorization(granted_at=datetime.now(timezone.utc))
+
+
 VALID_CREDENTIAL = "speaklink_rcv_v1.11111111-1111-1111-1111-111111111111." + "A" * 43
 
 
@@ -119,14 +131,14 @@ def test_status_snapshot_never_carries_the_credential(tmp_path, monkeypatch):
 # repair_installation
 # ===========================================================================
 def test_repair_reports_ok_on_success(tmp_path):
-    result = core.repair_installation(
+    result = core.repair_installation(authorization=_authorized(), 
         package_path=tmp_path / "pkg",
         run=lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout="repaired"))
     assert result.ok is True
 
 
 def test_repair_reports_failure_without_raising(tmp_path):
-    result = core.repair_installation(
+    result = core.repair_installation(authorization=_authorized(), 
         package_path=tmp_path / "pkg",
         run=lambda *a, **k: _FakeCompletedProcess(returncode=1, stdout="", stderr="boom"))
     assert result.ok is False
@@ -193,13 +205,13 @@ def test_a_spawned_process_alone_never_counts_as_restart_success(tmp_path, monke
 # stop_receiver
 # ===========================================================================
 def test_stop_reports_success():
-    result = core.stop_receiver(
+    result = core.stop_receiver(authorization=_authorized(), 
         run=lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout="STOPPED\n"))
     assert result.ok is True
 
 
 def test_stop_reports_failure_without_raising():
-    result = core.stop_receiver(
+    result = core.stop_receiver(authorization=_authorized(), 
         run=lambda *a, **k: _FakeCompletedProcess(returncode=1, stdout="", stderr="not ours"))
     assert result.ok is False
     assert "not ours" in result.detail
@@ -216,7 +228,7 @@ def test_change_audio_output_saves_before_restarting(tmp_path, monkeypatch):
 
     device = OutputDevice(index=2, name="Realtek(R) Audio", host_api="MME",
                           max_output_channels=2, default_samplerate=48000, is_default=False)
-    core.change_audio_output(
+    core.change_audio_output(authorization=_authorized(), 
         device=device, config_path=config_path,
         run=lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout="STARTED\n"),
         timeout_seconds=1,
@@ -289,7 +301,7 @@ def test_open_log_folder_refuses_an_unexpected_path(tmp_path, monkeypatch):
 def test_replace_identity_requires_the_exact_confirmation_word(tmp_path):
     protector = FakeCredentialProtector("t")
     credential_path = _enroll(tmp_path, protector)
-    assert core.replace_device_identity(credential_path=credential_path,
+    assert core.replace_device_identity(authorization=_authorized(), credential_path=credential_path,
                                         confirmation_word="yes please") is False
     assert credential_path.exists(), "a wrong confirmation must not remove the credential"
 
@@ -297,6 +309,6 @@ def test_replace_identity_requires_the_exact_confirmation_word(tmp_path):
 def test_replace_identity_removes_the_credential_on_exact_confirmation(tmp_path):
     protector = FakeCredentialProtector("t")
     credential_path = _enroll(tmp_path, protector)
-    assert core.replace_device_identity(
+    assert core.replace_device_identity(authorization=_authorized(), 
         credential_path=credential_path, confirmation_word=core.CONFIRMATION_WORD) is True
     assert not credential_path.exists()
