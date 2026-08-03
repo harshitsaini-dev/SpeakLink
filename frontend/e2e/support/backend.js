@@ -475,10 +475,9 @@ async function mockBackend(page, options = {}) {
       }
 
       if (method === 'GET' && path === '/users/search') {
-        let rows = state.users;
-        if (!flag('include_deleted')) {
-          rows = rows.filter((r) => (r.lifecycle_state || 'active') !== 'deleted');
-        }
+        // No include_deleted branch: a permanently deleted account has no row,
+        // so there is nothing any parameter could reveal.
+        let rows = state.users.filter((r) => (r.lifecycle_state || 'active') !== 'deleted');
         if (q) rows = rows.filter((r) =>
           `${r.username} ${r.display_name}`.toLowerCase().includes(q));
         if (param('role')) rows = rows.filter((r) => r.role === param('role'));
@@ -493,9 +492,14 @@ async function mockBackend(page, options = {}) {
         return route.fulfill(json(paged(rows)));
       }
 
-      // History-preserving permanent deletion: a tombstone, never a removal.
-      // Mirrors backend/user_deletion.py - the row survives so every history
-      // entry naming this account stays readable, and there is no restore.
+      // TRUE permanent deletion: the row really goes. Mirrors
+      // backend/user_permanent_delete.py.
+      //
+      // This used to tombstone - the row stayed, marked deleted - which kept
+      // the username reserved for ever and left the account on screen with
+      // Rights, Scope and Reset Password beside it. The account is now
+      // removed, its rights and Store Scope go with it, and its username
+      // becomes available again.
       const userTombstone = path.match(/^\/users\/(\d+)\/delete-permanently$/);
       if (method === 'POST' && userTombstone) {
         const id = Number(userTombstone[1]);
@@ -514,21 +518,32 @@ async function mockBackend(page, options = {}) {
           return route.fulfill(json({ detail: 'You cannot delete your own account.' }, 409));
         }
         if (row.role === 'OWNER'
-            && state.users.filter((c) => c.role === 'OWNER'
-                                    && c.lifecycle_state !== 'deleted').length <= 1) {
+            && state.users.filter((c) => c.role === 'OWNER').length <= 1) {
           return route.fulfill(json({ detail: 'This is the last SUPER ADMIN.' }, 409));
         }
-        state.users = state.users.map((c) => (c.id === id
-          ? { ...c, lifecycle_state: 'deleted', is_active: false } : c));
-        return route.fulfill(json({ ok: true, user_id: id, username: row.username }));
+        // The row goes, and so does everything that belonged only to it - a
+        // later account reusing the username must inherit nothing.
+        state.users = state.users.filter((c) => c.id !== id);
+        state.userScope = state.userScope || {};
+        delete state.userScope[id];
+        state.userRights = state.userRights || {};
+        delete state.userRights[id];
+        return route.fulfill(json({ ok: true, user_id: id, username: row.username,
+                                    row_deleted: true, username_released: true }));
       }
       if (method === 'POST' && path === '/users') {
         const body = JSON.parse(request.postData() || '{}');
         if (state.users.some((row) => row.username.toLowerCase() === (body.username || '').toLowerCase())) {
           return route.fulfill(json({ detail: `The username '${body.username}' is already in use.` }, 409));
         }
+        // A high-water mark, never `length + 1`: reusing a deleted id is
+        // exactly how an old broadcast rebinds to a new person. Mirrors the
+        // AUTOINCREMENT the real hq_users table now uses.
+        state.nextUserId = Math.max(
+          state.nextUserId || 0,
+          ...state.users.map((r) => r.id), 0) + 1;
         const created = {
-          id: state.users.length + 1, username: body.username,
+          id: state.nextUserId, username: body.username,
           display_name: body.display_name, role: body.role,
           is_active: true, lifecycle_state: 'active',
         };

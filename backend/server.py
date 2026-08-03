@@ -131,7 +131,12 @@ from user_deletion import (
     UserDeletionRefused,
     ensure_user_deletion_schema,
     list_user_deletion_events,
-    permanently_delete_user_with_history,
+)
+from user_permanent_delete import (
+    PermanentDeletionRefused,
+    ensure_user_permanent_delete_schema,
+    permanently_delete_user,
+    purge_legacy_user_tombstones,
 )
 from user_schema import UserSchemaError, ensure_user_auth_schema
 from user_lifecycle import (
@@ -626,6 +631,35 @@ def startup_event():
     except Exception:
         logger.warning("User deletion table could not be prepared", exc_info=False)
 
+    # TRUE permanent deletion: owner snapshots on broadcast_sessions, and the
+    # nullability the historical references need so a deleted account's row can
+    # actually leave the table. See user_permanent_delete.py.
+    #
+    # ERROR rather than a warning if it fails: without this schema a permanent
+    # delete cannot release the username, which is the whole defect being
+    # fixed, and a quiet warning is how that reaches an operator as "the
+    # username is already in use" months later.
+    try:
+        ensure_user_permanent_delete_schema(engine)
+    except Exception:
+        logger.error("User permanent-delete schema could not be prepared - "
+                     "permanently deleting an account will not release its "
+                     "username until this is resolved", exc_info=True)
+
+    # Accounts the OLD tombstone design marked deleted but left in the table,
+    # still holding their usernames. Finishing that decision is a migration,
+    # not a new one: only lifecycle_state='deleted' is touched, never an
+    # archived or active account. Idempotent - once the rows are gone there is
+    # nothing left to match.
+    try:
+        purged = purge_legacy_user_tombstones(engine)
+        if purged["purged"]:
+            logger.info("Released %s username(s) from legacy permanent-delete "
+                        "tombstones: %s", purged["purged"],
+                        ", ".join(purged["usernames"]))
+    except Exception:
+        logger.error("Legacy user tombstones could not be migrated", exc_info=True)
+
     try:
         ensure_device_deletion_schema(engine)
     except Exception:
@@ -931,18 +965,21 @@ def search_users(
     scope_store_id: Optional[int] = None,
     scope_city: Optional[str] = None,
     scope_region: Optional[str] = None,
-    include_deleted: bool = False,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     user: HQUser = Depends(require("menu.users.view")),
 ):
     """Filtered, paginated User Management.
 
-    Permanently deleted accounts are excluded unless include_deleted, and
-    there is deliberately no restore path for them anywhere.
+    There is no include_deleted parameter any more, and its absence is the
+    point. Permanent deletion used to leave a tombstoned row that this flag
+    could reveal; deletion is now real, so there is nothing left to reveal and
+    a flag promising otherwise would be a control that can never do anything.
+    Accounts that still exist - active and archived - are selected with
+    `state`.
     """
     page, page_size = normalize_paging(page, page_size)
-    records = list_users(engine, include_deleted=include_deleted)
+    records = list_users(engine, include_deleted=False)
 
     needle = (q or "").strip().lower()
     if needle:
@@ -2160,13 +2197,25 @@ class UserTombstoneRequest(BaseModel):
 def tombstone_user(user_id: int, payload: UserTombstoneRequest,
                    db: Session = Depends(get_db),
                    user: HQUser = Depends(require("users.delete_permanently"))):
-    """Permanently remove an account from operational SpeakLink even though it
-    is the recorded actor in Broadcast and audit history.
+    """Permanently delete an account. The row really goes.
 
-    The hq_users row is never deleted - see user_deletion.py - so every
-    broadcast_sessions.started_by and audit reference stays valid and
-    readable. The account is tombstoned instead: it cannot sign in, its live
-    sessions end immediately, and it can never be restored.
+    This used to tombstone: the hq_users row stayed, marked deleted, so that
+    broadcast and audit references remained valid. It kept history readable
+    and it kept the username reserved for ever - which meant an account an
+    operator had permanently deleted still occupied the namespace, still
+    appeared in User Management, and still offered Rights, Scope and Reset
+    Password. That is a hidden account, not a deleted one.
+
+    Now the row is deleted and history is made independent of it first: each
+    broadcast keeps an immutable snapshot of who ran it, and every historical
+    pointer is set to NULL. NULL matters rather than merely being tidy -
+    hq_users has no AUTOINCREMENT, so a dangling id would be handed to the
+    next account created and that person would silently inherit somebody
+    else's broadcasts. See user_permanent_delete.py.
+
+    The account's live security state - permission overrides and Store Scope -
+    is deleted with it, so a later account reusing the username inherits
+    nothing.
 
     Distinct from DELETE /users/{id}/permanently, which only ever removes an
     account nothing has ever referenced.
@@ -2178,17 +2227,18 @@ def tombstone_user(user_id: int, payload: UserTombstoneRequest,
         )
     existing = _user_or_404(user_id)
     try:
-        result = permanently_delete_user_with_history(
+        result = permanently_delete_user(
             engine, user_id=user_id, typed_confirmation=payload.confirm,
             actor_user_id=user.id,
         )
-    except UserDeletionRefused as refusal:
+    except (PermanentDeletionRefused, UserDeletionRefused) as refusal:
         raise HTTPException(status_code=409, detail=str(refusal))
     _write_log(
         db, "warn",
         f"USER_PERMANENTLY_DELETED user_id={result.user_id} "
         f"username={result.username} role={result.role} "
-        f"history={result.history_counts} by={user.username}",
+        f"security_removed={result.security_rows_removed} "
+        f"history_detached={result.history_rows_detached} by={user.username}",
     )
     return {
         "ok": True,
@@ -2196,7 +2246,10 @@ def tombstone_user(user_id: int, payload: UserTombstoneRequest,
         "username": result.username,
         "role": result.role,
         "deleted_at": result.deleted_at,
-        "history_counts": result.history_counts,
+        "row_deleted": True,
+        "username_released": True,
+        "security_removed": result.security_rows_removed,
+        "history_detached": result.history_rows_detached,
     }
 
 
