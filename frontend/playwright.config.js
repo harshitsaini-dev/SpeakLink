@@ -16,6 +16,17 @@
 
 const { defineConfig, devices } = require('@playwright/test');
 
+// The dev server port, overridable so the suite can run BESIDE a live HQ.
+//
+// An installed HQ binds 3000 on the machine's LAN address. Create React App
+// asks "is anything on port 3000" without asking which interface, sees that
+// binding, and refuses to start - so on the HQ machine the whole suite was
+// unrunnable unless the live frontend was stopped first, which is exactly
+// what a test run must never require. Set ECHOCAST_E2E_PORT to move the test
+// server out of the way. The default is unchanged.
+const PORT = process.env.ECHOCAST_E2E_PORT || '3000';
+const ORIGIN = `http://localhost:${PORT}`;
+
 module.exports = defineConfig({
   testDir: './e2e',
   timeout: 30_000,
@@ -28,7 +39,7 @@ module.exports = defineConfig({
   reporter: [['list']],
 
   use: {
-    baseURL: 'http://localhost:3000',
+    baseURL: ORIGIN,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'off',
@@ -53,7 +64,7 @@ module.exports = defineConfig({
 
   webServer: {
     command: 'yarn start',
-    url: 'http://localhost:3000',
+    url: ORIGIN,
     // Reuse the operator's dev server if one is already up, so running these
     // tests never disturbs a pilot in progress.
     reuseExistingServer: true,
@@ -62,6 +73,7 @@ module.exports = defineConfig({
     stderr: 'pipe',
     env: {
       BROWSER: 'none',
+      PORT,
       // Every request is intercepted by page.route, so this value only has to
       // be a well-formed URL - no backend is contacted.
       REACT_APP_BACKEND_URL: 'http://localhost:8000',

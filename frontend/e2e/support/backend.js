@@ -77,7 +77,8 @@ const OPERATOR = { id: 1, username: 'pilot-operator', role: 'admin' };
 // here would silently hide every button in every existing spec.
 const ALL_PERMISSION_CODES = [
   'menu.broadcast.view', 'broadcast.start', 'broadcast.stop', 'broadcast.emergency_stop',
-  'broadcast.view_ownership',
+  'broadcast.view_ownership', 'broadcast.active_view', 'broadcast.view_targets',
+  'broadcast.stop_any',
   'menu.stores.view', 'stores.create', 'stores.update', 'stores.archive',
   'stores.delete_permanently',
   'menu.receivers.view', 'devices.enrollment.create', 'devices.primary.assign',
@@ -98,10 +99,11 @@ const DEFAULT_ROLE_PERMISSIONS = {
   OWNER: ALL_PERMISSION_CODES,
   ADMIN: ALL_PERMISSION_CODES.filter(
     (c) => c !== 'users.permissions.manage' && !DESTRUCTIVE_CODES.includes(c)),
-  // broadcast.emergency_stop and broadcast.view_ownership are NOT here, and
-  // must not drift back: one stops every other operator's broadcast, the
-  // other reveals whose broadcast holds a Store. Mirrors
-  // permission_catalog.DEFAULT_ROLE_PERMISSIONS.
+  // broadcast.emergency_stop, broadcast.view_ownership and the three Active
+  // Broadcast supervision codes are NOT here, and must not drift back: one
+  // stops every other operator's broadcast, one reveals whose broadcast holds
+  // a Store, and the others open, expose and interrupt other operators' work.
+  // Mirrors permission_catalog.DEFAULT_ROLE_PERMISSIONS.
   BROADCASTER: ['menu.broadcast.view', 'broadcast.start', 'broadcast.stop',
                 'menu.history.view', 'menu.receivers.view',
                 'menu.stores.view'],
@@ -879,12 +881,147 @@ async function mockBackend(page, options = {}) {
           owner_username: s.owner_username,
           owner_display_name: s.owner_display_name,
           started_at: s.started_at,
-          target_store_ids: s.target_store_ids,
+          // Exact targets need broadcast.view_targets of their own. Ownership
+          // visibility used to carry them, which made it a back door to
+          // target visibility.
+          ...(state.permissions.includes('broadcast.view_targets')
+            ? { target_store_ids: s.target_store_ids } : {}),
           target_store_count: s.target_store_ids.length,
         })) : [],
         busy_store_ids: busy,
         may_view_ownership: mayViewOwnership,
+        may_view_targets: state.permissions.includes('broadcast.view_targets'),
+        // Withheld entirely from accounts that may not open the supervision
+        // page - the number itself is a disclosure.
+        may_manage_active: state.permissions.includes('broadcast.active_view'),
+        active_count: state.permissions.includes('broadcast.active_view')
+          ? state.activeSessions.length : null,
       }));
+    }
+
+    // ---- Active Broadcasts supervision -------------------------------------
+    // Shaped exactly like GET /api/broadcast/active-management. Redaction
+    // happens HERE, as on the real server: a field the caller may not see is
+    // never built, so a spec that finds it on screen has found a real leak.
+    if (method === 'GET' && path === '/broadcast/active-management') {
+      if (!state.permissions.includes('broadcast.active_view')) {
+        return route.fulfill(json(
+          { detail: 'You do not have permission to view this.' }, 403));
+      }
+      const mayOwn = state.permissions.includes('broadcast.view_ownership');
+      const mayTargets = state.permissions.includes('broadcast.view_targets');
+      const params = new URL(request.url()).searchParams;
+      const term = (params.get('q') || '').trim().toLowerCase();
+      const ownerFilter = params.get('owner') || 'all';
+      const sort = params.get('sort') || 'newest';
+      const page = Number(params.get('page') || 1);
+      const pageSize = Number(params.get('page_size') || 20);
+
+      let rows = state.activeSessions.map((s) => ({
+        session_id: s.session_id,
+        campaign_name: s.campaign_name,
+        started_at: s.started_at,
+        status: 'live',
+        target_store_count: s.target_store_ids.length,
+        is_mine: s.owner_username === state.operator.username,
+        _owner: s,
+      }));
+
+      if (ownerFilter === 'mine') rows = rows.filter((r) => r.is_mine);
+      if (ownerFilter === 'others') rows = rows.filter((r) => !r.is_mine);
+
+      if (term) {
+        rows = rows.filter((r) => {
+          const hay = [r.campaign_name];
+          if (mayOwn || r.is_mine) {
+            hay.push(r._owner.owner_username, r._owner.owner_display_name);
+          }
+          if (mayTargets) {
+            (r._owner.target_store_names || []).forEach((n) => hay.push(n));
+          }
+          return hay.filter(Boolean).some((v) => v.toLowerCase().includes(term));
+        });
+      }
+
+      rows.sort((a, b) => (sort === 'newest'
+        ? String(b.started_at).localeCompare(String(a.started_at))
+        : String(a.started_at).localeCompare(String(b.started_at))));
+
+      const total = rows.length;
+      const window = rows.slice((page - 1) * pageSize, page * pageSize);
+      return route.fulfill(json({
+        items: window.map((r) => {
+          const row = {
+            session_id: r.session_id,
+            campaign_name: r.campaign_name,
+            started_at: r.started_at,
+            status: r.status,
+            target_store_count: r.target_store_count,
+            is_mine: r.is_mine,
+          };
+          if (mayOwn || r.is_mine) {
+            row.owner_user_id = r._owner.owner_user_id;
+            row.owner_username = r._owner.owner_username;
+            row.owner_display_name = r._owner.owner_display_name;
+          }
+          return row;
+        }),
+        total,
+        page,
+        page_size: pageSize,
+        pages: Math.ceil(total / pageSize),
+        has_more: page * pageSize < total,
+        meta: {
+          may_view_ownership: mayOwn,
+          may_view_targets: mayTargets,
+          may_stop_any: state.permissions.includes('broadcast.stop_any'),
+        },
+      }));
+    }
+
+    const storesMatch = path.match(/^\/broadcast\/active-management\/(\d+)\/stores$/);
+    if (method === 'GET' && storesMatch) {
+      if (!state.permissions.includes('broadcast.active_view')
+          || !state.permissions.includes('broadcast.view_targets')) {
+        return route.fulfill(json(
+          { detail: 'You do not have permission to view the Stores of a broadcast.' }, 403));
+      }
+      const found = state.activeSessions.find(
+        (s) => s.session_id === Number(storesMatch[1]));
+      if (!found) return route.fulfill(json({ detail: 'No such active broadcast' }, 404));
+      return route.fulfill(json({
+        session_id: found.session_id,
+        campaign_name: found.campaign_name,
+        started_at: found.started_at,
+        target_store_count: found.target_store_ids.length,
+        stores: found.target_store_ids.map((id) => {
+          const store = STORES.find((s) => s.id === id) || {};
+          return { store_id: id, store_code: store.store_code,
+                   store_name: store.store_name };
+        }),
+        ...(state.permissions.includes('broadcast.view_ownership')
+          ? { owner_user_id: found.owner_user_id,
+              owner_username: found.owner_username,
+              owner_display_name: found.owner_display_name } : {}),
+      }));
+    }
+
+    const stopMatch = path.match(/^\/broadcast\/active-management\/(\d+)\/stop$/);
+    if (method === 'POST' && stopMatch) {
+      const id = Number(stopMatch[1]);
+      const found = state.activeSessions.find((s) => s.session_id === id);
+      if (!found) return route.fulfill(json({ detail: 'No such active broadcast' }, 404));
+      const isMine = found.owner_username === state.operator.username;
+      if (!state.permissions.includes('broadcast.active_view')
+          || (!isMine && !state.permissions.includes('broadcast.stop_any'))) {
+        return route.fulfill(json(
+          { detail: "You do not have permission to stop another operator's broadcast." },
+          403));
+      }
+      // ONLY the named session. Every other broadcast stays live - the
+      // property that separates this from Emergency Stop All.
+      state.activeSessions = state.activeSessions.filter((s) => s.session_id !== id);
+      return route.fulfill(json({ ok: true, session_id: id, status: 'ended' }));
     }
 
     if (method === 'POST' && path === '/broadcast/emergency-stop') {
