@@ -34,6 +34,12 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_dynamic_libs
 
 REPOSITORY_ROOT = Path(SPECPATH).resolve()
+
+#: The EchoCast Windows icon, derived from the website favicon by
+#: tools/build_windows_icon.py. One asset for every shipped executable: a
+#: build that quietly fell back to PyInstaller's default icon would put a
+#: Python logo on a Store PC desktop.
+ICON = str(REPOSITORY_ROOT / "assets" / "echocast.ico")
 BACKEND = REPOSITORY_ROOT / "backend"
 TOOLS = REPOSITORY_ROOT / "tools"
 
@@ -125,6 +131,7 @@ console_executable = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
+    icon=ICON,
     codesign_identity=None,
     entitlements_file=None,
 )
@@ -147,6 +154,11 @@ background_executable = EXE(
     disable_windowed_traceback=True,
     argv_emulation=False,
     target_arch=None,
+    # Branded too. It is windowless, but it is the process an operator sees in
+    # Task Manager and the one Task Scheduler lists - both show the executable
+    # icon, and a Python logo there says the machine is running something other
+    # than EchoCast.
+    icon=ICON,
     codesign_identity=None,
     entitlements_file=None,
 )

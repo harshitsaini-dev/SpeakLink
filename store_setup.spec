@@ -11,6 +11,12 @@
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(SPECPATH)
+
+#: The EchoCast Windows icon, derived from the website favicon by
+#: tools/build_windows_icon.py. One asset for every shipped executable: a
+#: build that quietly fell back to PyInstaller's default icon would put a
+#: Python logo on a Store PC desktop.
+ICON = str(REPOSITORY_ROOT / "assets" / "echocast.ico")
 BACKEND = REPOSITORY_ROOT / "backend"
 TOOLS = REPOSITORY_ROOT / "tools"
 
@@ -63,6 +69,7 @@ setup_executable = EXE(
     disable_windowed_traceback=True,
     argv_emulation=False,
     target_arch=None,
+    icon=ICON,
     codesign_identity=None,
     entitlements_file=None,
 )
