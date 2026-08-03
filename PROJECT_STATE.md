@@ -5142,3 +5142,78 @@ local_audio_pilot and the staging smoke. No acoustic claim is made anywhere.
 
 Result artifacts are JSON written to a scratch directory and are not
 committed.
+
+---
+
+## Store Kit Settings Password (2026-08-03)
+
+A local password protecting Store Kit CONFIGURATION on a Store PC. It is not
+the HQ login, not the Device credential, not an enrolment code, not the HMAC
+key, and **not required to receive announcements**.
+
+### Protected (authorization required in the CORE, not just the GUI)
+
+Change Audio Output · Repair · Stop Receiver · Uninstall · Replace Device
+Identity · Enrol / re-enrol · Remove stale enrolment.
+
+Replace Device Identity needs the password **and** the typed confirmation
+word; neither substitutes for the other.
+
+### Unprotected, deliberately
+
+Status · health · Receiver state · HQ reachability · selected output device ·
+current HQ address · redacted diagnostics and export · log folder · task
+state · Test Sound · Restart. A signature test asserts no read-only helper
+ever grows an `authorization` parameter.
+
+And every runtime path: auto-start, credential load, HQ authentication,
+reconnect, heartbeat, PREPARE, playback, STOP.
+
+### Design
+
+`settings-password.json` beside the Receiver's own state, written
+tmp-then-replace. **scrypt** (n=2¹⁴, r=8, p=1, 32-byte key, 16-byte
+per-install salt), algorithm and parameters recorded for future migration.
+Chosen over bcrypt because the Store Kit is PyInstaller-frozen and scrypt is
+standard library.
+
+**No DPAPI, deliberately.** DPAPI protects secrets that must be recovered; a
+verifier is one-way. `CURRENT_USER` would also bind it to the sealing
+identity, and the Store Kit may run as a different Windows user than the
+Agent.
+
+### Upgrade
+
+An existing Store has no verifier: the Receiver keeps running, read-only
+screens work, and the first protected change directs the operator to set a
+password. No default is ever created.
+
+### Corrupt verifier
+
+Settings changes fail closed. The file is never deleted, rewritten, or offered
+a reset — that would make corrupting it the way past the password. The
+Receiver keeps running and keeps playing.
+
+### Recovery boundary — FINAL
+
+**There is no in-app Forgot or Reset Password**, no master password, no
+recovery code, no security question. Recovery is an authorized Windows
+Administrator / support procedure: deleting `settings-password.json` only.
+That procedure must never delete `config.json`, `receiver-credential.bin` or
+logs, and must never auto re-enrol. Afterwards the next protected change
+requires establishing a new password.
+
+**Honest limit:** a Windows Administrator already owns the filesystem. This is
+app-level protection against ordinary unauthorized Store users, not a boundary
+against the machine's administrator.
+
+### Totals
+
+Store Kit 181 + 20 new · backend **2933 passed, 0 failed** · frontend 112 ·
+Playwright 249 · build clean.
+
+### Known limitation
+
+GUI journey coverage (A–F) is not written: protection is proven at the core
+and by structural tests, but the Tkinter dialog flows themselves are not
+driven end to end.
