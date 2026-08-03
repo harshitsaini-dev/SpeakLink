@@ -84,6 +84,7 @@ from broadcast_reservation import (
     release_session_leases,
     reserve_stores_for_session,
 )
+import active_broadcast_management as abm
 from enrolment_refusal import classify_enrolment_refusal
 from deletion_safety import (
     DeletionRefused,
@@ -2613,6 +2614,8 @@ def active_broadcasts(db: Session = Depends(get_db),
     """
     scope = resolve_store_scope(engine, user)
     may_see_owners = has_permission_code(engine, user, "broadcast.view_ownership")
+    may_see_targets = has_permission_code(engine, user, abm.TARGETS_CODE)
+    may_manage = has_permission_code(engine, user, abm.PAGE_CODE)
 
     busy = active_busy_store_ids(engine, scope=scope)
 
@@ -2648,7 +2651,7 @@ def active_broadcasts(db: Session = Depends(get_db),
             continue
 
         owner = db.query(HQUser).filter(HQUser.id == live.owner_user_id).first()
-        others.append({
+        entry = {
             "session_id": session.id,
             "campaign_name": session.campaign_name,
             "owner_user_id": live.owner_user_id,
@@ -2656,16 +2659,256 @@ def active_broadcasts(db: Session = Depends(get_db),
             "owner_display_name": owner.display_name if owner else None,
             "started_at": session.started_at.isoformat()
             if session.started_at else None,
-            "target_store_ids": visible_targets,
             "target_store_count": len(visible_targets),
-        })
+        }
+        # The EXACT Stores of somebody else's broadcast are a separate
+        # disclosure from who owns it, and now have their own permission.
+        # This route used to send target_store_ids to every view_ownership
+        # holder, which made ownership visibility a back door to target
+        # visibility - the exact leak broadcast.view_targets exists to
+        # prevent. The count survives because a Broadcaster already learns
+        # occupancy from busy_store_ids.
+        if may_see_targets:
+            entry["target_store_ids"] = visible_targets
+        others.append(entry)
 
     return {
         "mine": mine,
         "sessions": others,
         "busy_store_ids": sorted(busy),
         "may_view_ownership": may_see_owners,
+        "may_view_targets": may_see_targets,
+        # A compact count for the console badge, so Broadcast Console can say
+        # "Active Broadcasts: 17 - View" without rendering 17 rows. Present
+        # only for accounts that may open the supervision page at all;
+        # otherwise the number itself would disclose how many broadcasts
+        # exist to somebody with no right to know.
+        "active_count": (len(manager.broadcasts.active_session_ids())
+                         if may_manage else None),
+        "may_manage_active": may_manage,
     }
+
+
+def _active_management_rows(db: Session, user: HQUser, visibility) -> list:
+    """The shared row build. One active-truth source, one scope intersection.
+
+    Both the list and the per-session routes go through here so a session can
+    never be visible on one and absent from the other.
+    """
+    scope = resolve_store_scope(engine, user)
+    store_cache: dict[int, object] = {}
+
+    def store_lookup(store_id: int):
+        if store_id not in store_cache:
+            store_cache[store_id] = db.query(Store).filter(Store.id == store_id).first()
+        return store_cache[store_id]
+
+    return abm.collect_active_rows(
+        runtime=manager.broadcasts,
+        session_lookup=lambda sid: db.query(BroadcastSession).filter(
+            BroadcastSession.id == sid).first(),
+        owner_lookup=lambda uid: db.query(HQUser).filter(HQUser.id == uid).first(),
+        store_lookup=store_lookup,
+        scope=scope,
+        viewer_user_id=user.id,
+    )
+
+
+@api.get("/broadcast/active-management")
+def active_management_list(
+    q: str | None = None,
+    owner: str = "all",
+    owner_user_id: int | None = None,
+    store_id: int | None = None,
+    sort: str = abm.SORT_NEWEST,
+    page: int = 1,
+    page_size: int = abm.DEFAULT_PAGE_SIZE,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require(abm.PAGE_CODE)),
+):
+    """The Active Broadcasts supervision list. Metadata only, never targets.
+
+    Deliberately does NOT return each session's Stores even to a caller
+    holding view_targets: 50 sessions x every target is the payload the
+    operator specifically asked us not to send, and the exact Stores have
+    their own route. What view_targets buys here is the right to ASK for that
+    detail, and to search and filter by Store.
+
+    Unauthorized filters are refused rather than ignored. A store_id filter
+    silently dropped for somebody without view_targets would return the
+    unfiltered list, which they would reasonably read as "these are the
+    broadcasts on that Store".
+    """
+    visibility = abm.resolve_visibility(engine, user)
+    rows = _active_management_rows(db, user, visibility)
+    try:
+        rows = abm.filter_and_sort(
+            rows,
+            visibility=visibility,
+            search=q,
+            owner_filter=owner,
+            owner_user_id=owner_user_id,
+            store_id=store_id,
+            sort=sort,
+        )
+    except abm.OwnershipVisibilityDenied:
+        raise HTTPException(status_code=403,
+                            detail="You do not have permission to filter by broadcaster.")
+    except abm.TargetVisibilityDenied:
+        raise HTTPException(status_code=403,
+                            detail="You do not have permission to filter by Store.")
+
+    window, total, resolved_page, resolved_size = abm.paginate(
+        rows, page=page, page_size=page_size)
+    pages = (total + resolved_size - 1) // resolved_size if resolved_size else 0
+    return {
+        "items": [row.serialize(visibility) for row in window],
+        "total": total,
+        "page": resolved_page,
+        "page_size": resolved_size,
+        "pages": pages,
+        "has_more": resolved_page * resolved_size < total,
+        "meta": visibility.as_dict(),
+    }
+
+
+@api.get("/broadcast/active-management/{sid}/stores")
+def active_management_stores(sid: int, db: Session = Depends(get_db),
+                             user: HQUser = Depends(require(abm.PAGE_CODE))):
+    """The EXACT Stores of one live broadcast.
+
+    Separate route, separate permission, and a hard refusal rather than an
+    empty list - an empty list would be indistinguishable from a broadcast
+    with no in-scope Stores, and would teach the caller that the session
+    exists either way.
+
+    Store names come from the Store rows the session actually targets, never
+    from Receiver Device names: a Device is named by whoever enrolled it, may
+    be renamed, tombstoned or shared, and is not the authority on which Store
+    a broadcast reached.
+    """
+    visibility = abm.resolve_visibility(engine, user)
+    if not visibility.may_view_targets:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to view the Stores of a broadcast.")
+
+    rows = _active_management_rows(db, user, visibility)
+    row = next((r for r in rows if r.session_id == sid), None)
+    if row is None:
+        # 404 for "not live" and for "not visible to you" alike, so this
+        # cannot be used to probe which session ids exist.
+        raise HTTPException(status_code=404, detail="No such active broadcast")
+
+    return {
+        "session_id": row.session_id,
+        "campaign_name": row.campaign_name,
+        "started_at": row.started_at,
+        # Scope-intersected, like every other Store list in this application.
+        "stores": [target.as_dict() for target in row.visible_targets],
+        "target_store_count": len(row.visible_targets),
+        **({"owner_user_id": row.owner_user_id,
+            "owner_username": row.owner_username,
+            "owner_display_name": row.owner_display_name}
+           if visibility.may_view_ownership or row.is_mine else {}),
+    }
+
+
+@api.post("/broadcast/active-management/{sid}/stop")
+async def active_management_stop(sid: int, db: Session = Depends(get_db),
+                                 user: HQUser = Depends(require(abm.PAGE_CODE))):
+    """Stop ONE named broadcast, which may belong to somebody else.
+
+    NOT Emergency Stop. Emergency Stop ends every broadcast estate-wide and
+    keeps its own permission; this ends exactly the session named in the URL
+    and leaves every other one on air. They are different operations with
+    different blast radii, and conflating them is how an operator intending
+    to silence one Store silences forty-four.
+
+    Three independent gates for a cross-owner stop:
+
+      broadcast.active_view  - already enforced by the dependency
+      broadcast.stop_any     - the power to reach across owners
+      Store Scope            - covering EVERY target, not merely the visible
+                               ones, because Stop ends the whole session
+
+    Deliberately does NOT require view_targets. Ending a broadcast on Stores
+    you administer is a legitimate act for a supervisor who is not entitled
+    to know which campaign or which colleague it belonged to - so the ACTION
+    is permitted while the DETAIL stays hidden, and the confirmation the
+    client renders is built from whatever it was allowed to read.
+
+    Own sessions keep the ordinary rule and need only broadcast.stop, so a
+    Broadcaster with no supervision rights at all can still stop their own
+    broadcast from the Console.
+    """
+    visibility = abm.resolve_visibility(engine, user)
+    rows = _active_management_rows(db, user, visibility)
+    row = next((r for r in rows if r.session_id == sid), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such active broadcast")
+
+    if row.is_mine:
+        # Your own broadcast: the existing permission, unchanged. stop_any is
+        # not required and must not become required, or this page would
+        # regress own-stop for every ordinary Broadcaster.
+        if not has_permission_code(engine, user, "broadcast.stop"):
+            raise HTTPException(status_code=403,
+                                detail="You do not have permission to stop a broadcast.")
+    else:
+        if not visibility.may_stop_any:
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have permission to stop another operator's broadcast.")
+        scope = resolve_store_scope(engine, user)
+        outside = abm.stop_scope_refusal(row, scope)
+        if outside:
+            # The COUNT of out-of-scope Stores, never their ids or names: the
+            # caller is not entitled to learn which Stores they cannot see.
+            _write_log(db, "warn",
+                       f"Cross-owner stop REFUSED (out of scope): actor_user_id={user.id} "
+                       f"session_id={sid} outside_store_count={len(outside)}")
+            raise HTTPException(
+                status_code=403,
+                detail=(f"This broadcast reaches {len(outside)} Store(s) outside your "
+                        "Store Scope. Stopping it would end the broadcast on all of "
+                        "them, so it was refused."))
+
+    session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
+    if session is None or session.status != "live":
+        raise HTTPException(status_code=404, detail="No such active broadcast")
+
+    target_count = len(row.all_target_store_ids)
+    try:
+        await _end_session(db, session, "ended", reason="stopped_by_supervisor")
+    except Exception:
+        # Never report STOPPED because a command was sent. Cleanup is what
+        # releases the leases and closes the audio path; if it failed the
+        # broadcast may still be live, and saying otherwise would leave an
+        # operator believing a Store is silent when it is not.
+        db.rollback()
+        logger.exception("Selected stop failed for session %s", sid)
+        _write_log(db, "error",
+                   f"Cross-owner stop FAILED: actor_user_id={user.id} "
+                   f"session_id={sid} target_owner_user_id={row.owner_user_id}")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "STOP_FAILED",
+                    "message": "This broadcast could not be stopped and may still be "
+                               "live. Refresh the list and try again.",
+                    "session_id": sid})
+
+    db.refresh(session)
+    # Audited through the existing system-log infrastructure. Ids and counts
+    # only - no password, no token, no Device credential, no audio.
+    if row.is_mine:
+        _write_log(db, "info", f"Session #{sid} stopped by owner {user.username}")
+    else:
+        _write_log(db, "warn",
+                   f"CROSS-OWNER STOP: actor_user_id={user.id} actor={user.username} "
+                   f"stopped session_id={sid} owner_user_id={row.owner_user_id} "
+                   f"target_store_count={target_count} result=ended")
+    return {"ok": True, "session_id": sid, "status": session.status}
 
 
 @api.get("/broadcast/current")
