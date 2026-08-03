@@ -5514,3 +5514,104 @@ row bound to it. `integrity_check ok`, `foreign_key_check` clean.
 
 Development and acceptance only. The live HQ was not restarted and its Store
 table was not migrated.
+
+---
+
+## RBAC permission boundaries — two operator-found bugs
+
+Branch `fix/rbac-permission-boundaries`. Both defects had the same shape: a
+permission that resolved correctly and then was not honoured at the boundary
+that mattered.
+
+### Bug 1 — Store Management visibility decided Broadcast target visibility
+
+An operator without **View Store Management** (`menu.stores.view`) also lost
+the Store list in Broadcast Console.
+
+Root cause: the Console built its target table from `GET /api/stores`, which is
+guarded by `menu.stores.view`. The fetch returned 403 and the table rendered
+empty with nothing on screen to explain it. One administrative permission was
+deciding an operational capability.
+
+Neither obvious fix was acceptable. Widening `menu.stores.view` would have
+granted broadcasters the full administrative Store representation; dropping the
+guard on `/api/stores` would have done the same thing.
+
+**Separation.** `GET /api/broadcast/target-stores` is a distinct catalog gated
+on `menu.broadcast.view` — the permission that already governs the Console —
+returning only the seven fields the Console draws:
+
+    id, store_code, store_name, city, region, is_online_store, status
+
+`is_active`, `lifecycle_state`, `created_at` and `last_seen` are deliberately
+absent: a Store that is not targetable simply is not in the list, so no caller
+has to interpret a lifecycle string and none can learn that an archived Store
+exists.
+
+Store Scope is applied by the same `resolve_store_scope` used by
+`/api/stores`, including the `None`-vs-empty distinction, so an out-of-scope
+Store is absent from the response rather than filtered in the client.
+Targeting eligibility is unchanged: active only, archived excluded, deleted
+excluded unconditionally.
+
+**Bonus scope leak fixed.** Regions and cities now derive from the Stores in
+the same response. `GET /api/stores/meta/regions-cities` applies no scope
+filter at all, so a scoped broadcaster's dropdowns previously named regions
+they could not broadcast to.
+
+### Bug 2 — "Manage User Rights" did nothing
+
+An OWNER granted an ADMIN **Manage User Rights** and the ADMIN still could not
+manage them.
+
+Root cause, in two independent places:
+
+* `GET`/`PUT /api/users/{id}/permissions` required `require_super_admin` — a
+  literal "is this account OWNER" test — not `users.permissions.manage`.
+* `UserManagement.jsx` gated the Rights button on `myRole === "OWNER"`, so even
+  a working endpoint would have been unreachable.
+
+The original reasoning was right about the risk and wrong about the remedy. The
+risk is that whoever edits rights can raise their own; the answer is to forbid
+raising your own, not to forbid everyone but OWNER.
+
+**Exact permission code:** `users.permissions.manage`. ADMIN does not hold it
+by role default — `DEFAULT_ROLE_PERMISSIONS[ADMIN]` subtracts it — so it is
+reached only through an explicit per-user ALLOW, which is the intended
+delegation path.
+
+**Escalation protections**, all server-side and all refusing the whole batch:
+
+| Guard | Effect |
+|---|---|
+| `OwnerOverrideRefused` (pre-existing) | an OWNER's rights are never overridden |
+| `SelfRightsEditRefused` | nobody edits their own rights |
+| `GrantBeyondActorRefused` | nobody grants a permission they do not hold |
+| `rbac.may_manage_role` | ADMIN manages BROADCASTER/VIEWER, never ADMIN or OWNER |
+
+Revoking a permission the actor lacks is deliberately still allowed: taking
+authority away cannot raise the actor's own.
+
+Store Scope routes keep their OWNER-only reservation — out of scope for this
+fix.
+
+**Propagation.** Effective permissions are resolved from the database on every
+backend request, so the grant took effect there immediately. Only the React
+`AuthContext` Set was stale — fetched once at sign-in — which is what made a
+working permission look broken until the operator signed out and back in. It is
+now re-fetched when the tab regains focus.
+
+### Tests
+
+18 new backend tests, 9 new frontend unit tests, 8 new Playwright specs,
+including the cross-bug regression matrix (User A / B / C). The RBAC endpoint
+matrix records both the new route and the intentional permission change.
+
+Totals: backend **3164 passed**, 89 skipped; frontend units **154 passed**;
+Playwright **284 passed**; production build OK; `compileall` OK; `pip check`
+clean.
+
+### Not deployed
+
+Development and acceptance only. The live HQ was not restarted and no database
+migration was required — this change adds no column and no table.

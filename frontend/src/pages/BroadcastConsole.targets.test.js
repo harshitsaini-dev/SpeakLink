@@ -16,9 +16,9 @@ import { render, screen, act, cleanup, fireEvent } from "@testing-library/react"
 import BroadcastConsole from "./BroadcastConsole";
 
 const STORES = [
-  { id: 101, store_code: "BP", store_name: "Bindapur", city: "DELHI",
+  { id: 101, store_code: "BP", store_name: "Testville North", city: "DELHI",
     region: "NORTH", is_online_store: false, status: "online" },
-  { id: 102, store_code: "RG", store_name: "Rajgarh", city: "DELHI",
+  { id: 102, store_code: "RG", store_name: "Testville South", city: "DELHI",
     region: "NORTH", is_online_store: false, status: "offline" },
 ];
 
