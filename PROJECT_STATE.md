@@ -5417,3 +5417,51 @@ Still installed, still running, untouched. The AppData installer, repair,
 verify and uninstall scripts plus `tools/hq_runtime.py` are marked LEGACY in
 the README and kept as the rollback path. Migration of the live machine is a
 separate, later checkpoint.
+
+---
+
+## True User permanent delete (feature/true-user-permanent-delete)
+
+User Management showed accounts as "permanently deleted" that still had Rights,
+Scope and Reset Password beside them, and their usernames could never be reused
+— `"The username 'admin' is already in use."` for an account deleted months
+earlier.
+
+The old design tombstoned the row rather than deleting it, so the UNIQUE index
+kept the name. Deletion is now real: the row goes, the username is released,
+and the account's permission overrides and Store Scope go with it. Archive is
+untouched and still reserves its username, because an archived account can come
+back. See `docs/USER_ACCOUNT_DELETION.md`.
+
+### The trap that shaped the design
+
+`hq_users.id` was `INTEGER PRIMARY KEY` with no `AUTOINCREMENT`, so SQLite
+reissues `max(id) + 1`. Live broadcast session #2 was started by user id 3
+(`broadcaster`, tombstoned) — deleting that row and creating any new account
+would have handed the new person id 3 and, with it, that broadcast. Two
+defences now: ownership is an immutable snapshot on the broadcast row rather
+than a join, and `hq_users` uses `AUTOINCREMENT` so a released id is never
+reissued.
+
+Historical references (`broadcast_sessions`, both audit tables,
+`receiver_enrollment_codes`) were `NOT NULL`, so the migration relaxes them —
+on SQLite via the documented table rebuild, bracketed by `foreign_keys=OFF`
+for the DDL only and followed by a `foreign_key_check` that raises rather than
+reporting success. Deletion itself runs with foreign keys fully on.
+
+### Proven on a copy of the live database
+
+Two tombstones (`admin` id 1, `broadcaster` id 3) purged; active account
+untouched; archived accounts untouched (none present); 4 broadcast sessions,
+11 targets, 12 scope-audit rows, 16 enrolment codes and 10 admin-audit rows all
+preserved; `integrity_check ok`, `foreign_key_check` clean; idempotent on a
+second run. Both usernames recreated successfully as **ids 4 and 5** — never
+reusing 1 or 3 — with zero inherited overrides or scope, and no historical
+session bound to a live account.
+
+### Not deployed
+
+Development and acceptance only. The live HQ was not restarted and its User
+table was not migrated; the visible `admin`/`broadcaster` tombstones are still
+present live and will be released by the one-time startup migration at the next
+controlled restart checkpoint.
