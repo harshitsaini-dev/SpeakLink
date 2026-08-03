@@ -17,7 +17,9 @@ from datetime import datetime, timezone
 from typing import List, Optional, Set
 
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -4219,6 +4221,58 @@ def allowed_cors_origins() -> list[str]:
     return origins
 
 
+class UnhandledErrorAsApiResponse(BaseHTTPMiddleware):
+    """Turn an unhandled exception into an honest API error.
+
+    WHY THIS EXISTS - AND WHY IT IS ADDED **BEFORE** THE CORS MIDDLEWARE
+
+    Starlette's ServerErrorMiddleware sits OUTSIDE every middleware added with
+    ``add_middleware``, including CORS. So when a route raised, the 500 that
+    reached the browser had never passed through CORSMiddleware and carried no
+    ``Access-Control-Allow-Origin`` header. Chrome then reported, truthfully
+    but very unhelpfully:
+
+        No 'Access-Control-Allow-Origin' header is present on the requested
+        resource.
+
+    An operator reads that as "the CORS configuration is broken" and goes
+    looking in the wrong place entirely - which is exactly what happened with
+    Broadcast History permanent deletion, where the real fault was a foreign
+    key constraint. A backend defect must never disguise itself as a transport
+    problem.
+
+    ``add_middleware`` inserts at the FRONT of the user middleware list, so the
+    LAST one added ends up outermost. This is therefore registered first and
+    CORS second, which puts CORS outside it: the JSON response produced here
+    passes back out through CORSMiddleware and gets its headers like any
+    ordinary response.
+
+    The response body stays deliberately bare. The exception text can carry a
+    file path, a SQL statement or a column value, and none of that belongs in
+    a browser. The detail goes to the log, where an operator can find it.
+    """
+
+    async def dispatch(self, request, call_next):
+        try:
+            return await call_next(request)
+        except Exception:                                   # noqa: BLE001
+            logger.exception("Unhandled error serving %s %s",
+                             request.method, request.url.path)
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "detail": {
+                        "code": "INTERNAL_ERROR",
+                        "message": "That action could not be completed because "
+                                   "of a server error. It has been logged.",
+                    }
+                },
+            )
+
+
+# Order matters - see the docstring above. This one first...
+app.add_middleware(UnhandledErrorAsApiResponse)
+# ...so that this one ends up outside it and can add headers to its response.
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
