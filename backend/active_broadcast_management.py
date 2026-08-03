@@ -221,6 +221,18 @@ def collect_active_rows(
                 store_name=store.store_name,
             ))
 
+        is_mine = live.owner_user_id == viewer_user_id
+        # A broadcast that touches NONE of this viewer's Stores is not their
+        # business, and listing it - even with a zero count and no owner -
+        # would disclose that it exists. Scope narrows which Stores exist for
+        # an account, so a session entirely outside it must not appear at all.
+        #
+        # Your own broadcast is the deliberate exception: it stays visible
+        # even if a later scope change excluded its Stores, because a row you
+        # cannot see is a broadcast you cannot find your way back to.
+        if not is_mine and scope is not None and not in_scope_ids:
+            continue
+
         owner = owner_lookup(live.owner_user_id)
         rows.append(ActiveRow(
             session_id=session_id,
@@ -233,7 +245,7 @@ def collect_active_rows(
             owner_display_name=getattr(owner, "display_name", None) if owner else None,
             visible_targets=targets,
             all_target_store_ids=all_targets,
-            is_mine=live.owner_user_id == viewer_user_id,
+            is_mine=is_mine,
         ))
     return rows
 

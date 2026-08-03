@@ -53,10 +53,20 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "test-only-secret-value-for-this-module")
     monkeypatch.setenv("ADMIN_USERNAME", "founder")
     monkeypatch.setenv("ADMIN_PASSWORD", PASSWORD)
+    # Reloaded so this module's engine points at THIS test's database.
+    #
+    # receiver_enrollment_api is deliberately NOT in this list, unlike the
+    # older broadcast fixtures it was adapted from. Reloading it replaces its
+    # EnrollmentRefused class with a new object, while
+    # test_receiver_enrollment_service.py still holds a reference to the
+    # original from collection time - so its `except api.EnrollmentRefused`
+    # stops matching the exception actually raised, and its concurrency test
+    # reports every thread as UNEXPECTED. Nothing here enrols a Device, so
+    # there is no reason to reload it and every reason not to.
     for name in [m for m in list(sys.modules) if m in (
             "server", "db", "models", "seed", "auth", "rbac", "user_lifecycle",
             "schemas", "permission_catalog", "admin_records", "admin_search",
-            "user_deletion", "device_deletion", "receiver_enrollment_api",
+            "user_deletion", "device_deletion",
             "store_scope", "ws_manager", "broadcast_runtime",
             "broadcast_reservation", "active_broadcast_management")]:
         sys.modules.pop(name, None)
@@ -630,3 +640,51 @@ def test_no_permission_implies_another(client, estate):
     targets_body = client.get(LIST_URL, headers=only_targets).json()
     assert targets_body["meta"]["may_view_ownership"] is False
     assert targets_body["meta"]["may_stop_any"] is False
+
+
+def test_19b_a_session_entirely_outside_scope_is_not_listed_at_all(client, estate):
+    """Scope decides which broadcasts EXIST for this account.
+
+    A row with a zero count and no owner still says "a broadcast is happening
+    somewhere you cannot see", which is a disclosure. Alice broadcasts to
+    catalog[0]; a viewer scoped to catalog[1] must not learn of it.
+    """
+    headers, user_id = _viewer(client, estate, "broadcast.view_ownership")
+    scope_to_stores(client, estate["owner"], user_id, [estate["catalog"][1]["id"]])
+
+    body = client.get(LIST_URL, headers=headers).json()
+    listed = {row["session_id"] for row in body["items"]}
+    assert estate["sessions"]["alice"] not in listed
+    assert estate["sessions"]["carol"] not in listed
+    # Only Bob's, which does touch catalog[1].
+    assert listed == {estate["sessions"]["bob"]}
+    assert body["total"] == 1, "the total counted a broadcast outside the viewer's scope"
+
+
+def test_19c_an_out_of_scope_session_cannot_be_opened_or_stopped(client, estate):
+    """The list hides it, and so must every other route - otherwise the id is
+    still reachable by anybody who guesses a small integer."""
+    headers, user_id = _viewer(client, estate, "broadcast.view_targets",
+                               "broadcast.stop_any")
+    scope_to_stores(client, estate["owner"], user_id, [estate["catalog"][1]["id"]])
+    hidden = estate["sessions"]["alice"]
+
+    assert client.get(f"{LIST_URL}/{hidden}/stores", headers=headers).status_code == 404
+    assert client.post(f"{LIST_URL}/{hidden}/stop", headers=headers).status_code == 404
+
+
+def test_19d_my_own_broadcast_stays_visible_even_if_scope_excludes_it(client, estate):
+    """The deliberate exception. A row you cannot see is a broadcast you
+    cannot find your way back to."""
+    alice_id = make_user(client, estate["owner"], "alice-scoped")
+    grant(client, estate["owner"], alice_id, "broadcast.active_view")
+    headers = sign_in(client, "alice-scoped")
+    own = start_broadcast(client, headers, "Mine", [estate["catalog"][6]["id"]])
+
+    # Scope the account to a Store its own broadcast does NOT target.
+    scope_to_stores(client, estate["owner"], alice_id, [estate["catalog"][1]["id"]])
+
+    body = client.get(LIST_URL, headers=sign_in(client, "alice-scoped")).json()
+    mine = [row for row in body["items"] if row["session_id"] == own]
+    assert mine, "the account lost sight of its own live broadcast"
+    assert mine[0]["is_mine"] is True
