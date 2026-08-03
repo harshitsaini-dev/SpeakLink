@@ -5270,3 +5270,62 @@ ways.
 ### Not done in this checkpoint
 
 No release candidate built or installed. Live RC18 untouched.
+
+---
+
+## Release candidate RC19 (2026-08-03) — built, verified, NOT installed
+
+Built from `921543b` on `release/0.1.0-rc19`. Live RC18 remains installed.
+
+### Versions, from the repository's own convention
+
+Two independent lines, both taken from the existing artifact names and build
+script defaults — not invented:
+
+| Component | Previous | This candidate |
+|---|---|---|
+| HQ | `0.1.0-rc18` (installed) | **`0.1.0-rc19`** |
+| Store Setup | `1.1.0-rc3` | **`1.1.0-rc4`** |
+| Receiver | `1.0.0` (commit-stamped) | `1.0.0-921543b` |
+
+### Packages
+
+| Package | Size | Primary binary SHA-256 |
+|---|---|---|
+| `EchoCastHQ-0.1.0-rc19-921543b-20260803-113250` | 24.6 MB | `EchoCastHQRuntime.exe` `88ADE947…D016A9` |
+| `EchoCastStoreSetup-1.1.0-rc4-921543b-20260803-113423` | 282.0 MB | `EchoCastStoreSetup.exe` `61144CA5…6089DE` |
+| `EchoCastReceiver-1.0.0-921543b-20260803-113331` | 254.1 MB | — |
+
+HQ package verified **31/31**. All four EchoCast executables carry the icon
+(16/32/48/192); `ffmpeg.exe` is third-party and deliberately untouched.
+
+### Migration: additive only
+
+One new table (`broadcast_store_leases`) and two new permission codes
+(`broadcast.emergency_stop` relabelled, `broadcast.view_ownership` added).
+Nothing is dropped or rewritten; `_reseed_permission_catalog` already rewrites
+`role_permissions` from code on every start.
+
+**Upgrade proven on an isolated copy** of an RC18-era database (via the SQLite
+backup API, never the live file): 3 users, 45 Stores, 9 Devices and 10
+credentials all preserved, leases table created, `integrity_check ok`.
+Startup run twice — byte-identical outcome.
+
+The simulation also confirmed a safety behaviour: startup **refuses** when the
+Receiver key container is missing while Devices are enrolled, rather than
+minting a new one and silently invalidating every credential.
+
+### Rollback boundary
+
+HQ rollback = reinstall the RC18 package. The persistent profile
+(`persistent-lan-server`) is never written by the installer, so SQLite data,
+logs and configuration survive. `broadcast_store_leases` is additive and
+simply goes unused by RC18 — no downgrade migration is required.
+
+Store rollback preserves the Device credential, `config.json`,
+`settings-password.json` and logs; the uninstall script already preserves all
+of them by default.
+
+### Not done
+
+Not installed anywhere. No Task Scheduler change, no Store deployment, no push.
