@@ -50,6 +50,7 @@ export default function BroadcastConsole() {
     current, load: loadBroadcast, isLive, meter, broadcasterStatus,
     error, setError, startBroadcast: startBroadcastAudio,
     stopBroadcast: stopBroadcastAudio, emergencyStop: emergencyStopAudio,
+    active, isStoreBusyForOthers,
   } = useBroadcast();
 
   const [stores, setStores] = React.useState([]);
@@ -62,6 +63,11 @@ export default function BroadcastConsole() {
   const [campaign, setCampaign] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [confirmOpen, setConfirmOpen] = React.useState(false);
+  // Emergency Stop gets its OWN confirmation, deliberately not the ordinary
+  // Start/Stop dialog: it terminates every operator's broadcast, and reusing a
+  // dialog somebody clicks through routinely is how that becomes a reflex.
+  const [emergencyConfirmOpen, setEmergencyConfirmOpen] = React.useState(false);
+  const [emergencyResult, setEmergencyResult] = React.useState(null);
   const [micTest, setMicTest] = React.useState({ on: false, level: 0 });
   const testAudioRef = React.useRef(null);
 
@@ -157,10 +163,28 @@ export default function BroadcastConsole() {
 
   const emergencyStop = async () => {
     setBusy(true);
+    setEmergencyResult(null);
     try {
-      await emergencyStopAudio();
-    } catch (e) { setError(e?.response?.data?.detail || e.message); }
-    finally { setBusy(false); }
+      const outcome = await emergencyStopAudio();
+      const count = (outcome?.session_ids || []).length;
+      setEmergencyResult({
+        ok: true,
+        message: count
+          ? `Emergency Stop: ${count} broadcast${count === 1 ? "" : "s"} stopped.`
+          : "Emergency Stop: there were no active broadcasts.",
+      });
+    } catch (e) {
+      // A partial failure must never read as success. The operator has to know
+      // that something is still on air so they can act on it.
+      if (e?.emergencyIncomplete) {
+        setEmergencyResult({ ok: false, message: e.message });
+      }
+      setError(e?.response?.data?.detail?.message
+               || e?.response?.data?.detail || e.message);
+    } finally {
+      setBusy(false);
+      setEmergencyConfirmOpen(false);
+    }
   };
 
   const startedAtIso = current?.session?.started_at || null;
@@ -228,10 +252,10 @@ export default function BroadcastConsole() {
             <button
               data-testid="emergency-stop-btn"
               disabled={busy}
-              onClick={emergencyStop}
+              onClick={() => setEmergencyConfirmOpen(true)}
               className="h-24 mt-3 w-full text-lg sm:text-2xl font-bold bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:bg-red-300 text-white rounded-lg shadow-md border border-red-800 uppercase tracking-widest flex items-center justify-center gap-3 transition-all"
             >
-              <AlertOctagon size={26} /> Emergency Stop
+              <AlertOctagon size={26} /> Emergency Stop All
             </button>
           ) : (
             <p className="mt-3 text-xs text-red-800">
@@ -240,6 +264,89 @@ export default function BroadcastConsole() {
           )}
         </div>
       </div>
+
+      {/* MY ACTIVE BROADCAST */}
+      {active?.mine && (
+        <div data-testid="my-active-broadcast"
+             className="border border-blue-200 bg-blue-50/60 rounded-md shadow-sm p-4">
+          <div className="text-xs font-bold uppercase tracking-[0.15em] text-blue-900">
+            Your Active Broadcast
+          </div>
+          <div className="mt-2 flex flex-wrap items-baseline gap-x-6 gap-y-1">
+            <span data-testid="my-active-campaign" className="text-lg font-semibold text-slate-900">
+              {active.mine.campaign_name}
+            </span>
+            <span className="text-xs text-slate-600">
+              Started <span data-testid="my-active-started">{active.mine.started_at || "—"}</span>
+            </span>
+            <span className="text-xs text-slate-600">
+              <span data-testid="my-active-target-count">{active.mine.target_store_count}</span>
+              {" "}Store{active.mine.target_store_count === 1 ? "" : "s"}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* ACTIVE BROADCASTS - only for accounts holding broadcast.view_ownership.
+          Without that permission the backend sends an EMPTY sessions list, not
+          redacted stubs, so there is deliberately nothing here to render: even
+          the NUMBER of other broadcasts is withheld. This panel is view-only -
+          there is no Stop beside somebody else's broadcast, because ordinary
+          Stop is own-session-only and the one cross-owner control is Emergency
+          Stop All. */}
+      {active?.may_view_ownership && (
+        <div data-testid="active-broadcasts-panel"
+             className="border border-slate-200 bg-white rounded-md shadow-sm p-4">
+          <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-700">
+            Active Broadcasts
+          </div>
+          {active.sessions.length === 0 ? (
+            <p data-testid="active-broadcasts-empty" className="mt-2 text-sm text-slate-500">
+              No other operator is broadcasting.
+            </p>
+          ) : (
+            <table className="mt-2 w-full text-sm">
+              <thead className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
+                <tr>
+                  <th className="px-2 py-1">Broadcast</th>
+                  <th className="px-2 py-1">Owner</th>
+                  <th className="px-2 py-1">Started</th>
+                  <th className="px-2 py-1">Stores</th>
+                </tr>
+              </thead>
+              <tbody>
+                {active.sessions.map((s) => (
+                  <tr key={s.session_id} data-testid={`active-session-${s.session_id}`}
+                      className="border-b border-slate-100">
+                    <td className="px-2 py-1 font-medium"
+                        data-testid={`active-campaign-${s.session_id}`}>{s.campaign_name}</td>
+                    <td className="px-2 py-1" data-testid={`active-owner-${s.session_id}`}>
+                      {s.owner_display_name || s.owner_username}
+                    </td>
+                    <td className="px-2 py-1 text-xs text-slate-600">{s.started_at || "—"}</td>
+                    {/* The count comes from the API and is already narrowed to
+                        this viewer's Store Scope. It is NOT recomputed here and
+                        never shows a total the viewer may not see. */}
+                    <td className="px-2 py-1 text-xs"
+                        data-testid={`active-target-count-${s.session_id}`}>
+                      {s.target_store_count}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {emergencyResult && (
+        <div role="alert" data-testid="emergency-result"
+             className={`rounded-md border px-3 py-2 text-sm ${emergencyResult.ok
+               ? "border-slate-300 bg-slate-50 text-slate-800"
+               : "border-red-400 bg-red-100 text-red-900 font-semibold"}`}>
+          {emergencyResult.message}
+        </div>
+      )}
 
       {/* CONTROLS */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -404,16 +511,38 @@ export default function BroadcastConsole() {
                 const isTarget = targetIds.includes(s.id);
                 const t = targetsById.get(s.id);
                 const playStatus = isLive && isTarget ? (t?.play_status || "pending") : "—";
+                // Held by SOMEBODY ELSE's broadcast. A Store carrying this
+                // account's own broadcast is not "busy" to them - it is theirs,
+                // and marking it unavailable would be nonsense on their own
+                // console.
+                const busyElsewhere = isStoreBusyForOthers(s.id);
                 return (
-                  <tr key={s.id} data-testid={`store-row-${s.store_code}`} className={`border-b border-slate-100 even:bg-slate-50/50 ${isTarget ? "bg-blue-50/40" : ""}`}>
+                  <tr key={s.id} data-testid={`store-row-${s.store_code}`} className={`border-b border-slate-100 even:bg-slate-50/50 ${isTarget ? "bg-blue-50/40" : ""} ${busyElsewhere ? "bg-amber-50/60" : ""}`}>
                     {targetMode === "selected" && (
                       <td className="px-3 py-2">
                         <input type="checkbox" data-testid={`store-checkbox-${s.store_code}`}
-                               checked={selectedIds.has(s.id)} onChange={() => toggleStore(s.id)} disabled={isLive}
+                               checked={selectedIds.has(s.id)} onChange={() => toggleStore(s.id)}
+                               disabled={isLive || busyElsewhere}
+                               title={busyElsewhere
+                                 ? `${s.store_code} is currently in use by another broadcast.`
+                                 : undefined}
                                className="w-4 h-4"/>
                       </td>
                     )}
-                    <td className="px-3 py-2 font-mono text-xs text-slate-700">{s.store_code}</td>
+                    <td className="px-3 py-2 font-mono text-xs text-slate-700">
+                      {s.store_code}
+                      {busyElsewhere && (
+                        // Deliberately says WHAT, never WHO. Naming the other
+                        // operator or their campaign here would publish a
+                        // directory of everyone's live broadcasts to anyone
+                        // who can open this page.
+                        <span data-testid={`store-busy-${s.store_code}`}
+                              title={`${s.store_code} is currently in use by another broadcast.`}
+                              className="ml-2 inline-block rounded border border-amber-400 bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-900">
+                          In use
+                        </span>
+                      )}
+                    </td>
                     <td className="px-3 py-2 text-slate-900 font-medium">{s.store_name}</td>
                     <td className="px-3 py-2 text-slate-600">{s.city} · <span className="text-slate-500">{s.region}</span></td>
                     <td className="px-3 py-2"><StatusBadge status={s.status} testid={`store-status-${s.store_code}`} /></td>
@@ -433,6 +562,38 @@ export default function BroadcastConsole() {
       </div>
 
       {/* Confirm Modal */}
+      {emergencyConfirmOpen && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+             data-testid="emergency-confirm-modal">
+          <div className="bg-white rounded-lg w-full max-w-md p-5 space-y-3">
+            <h3 className="font-bold text-red-900 uppercase tracking-wide">
+              Stop all active broadcasts?
+            </h3>
+            <p className="text-sm text-slate-800">
+              This stops <strong>every active EchoCast broadcast</strong>, including
+              broadcasts started by other operators - not only your own. Every
+              targeted Store is told to stop and every Store is released.
+            </p>
+            <p className="text-xs text-slate-600">
+              EchoCast cannot confirm that a speaker has fallen silent. This sends
+              the stop command and releases the Stores.
+            </p>
+            <div className="flex gap-2 pt-1">
+              <button type="button" data-testid="emergency-cancel-btn"
+                      onClick={() => setEmergencyConfirmOpen(false)}
+                      className="flex-1 px-4 py-2 border border-slate-300 rounded-md text-sm">
+                Cancel
+              </button>
+              <button type="button" data-testid="emergency-confirm-btn" disabled={busy}
+                      onClick={emergencyStop}
+                      className="flex-1 px-4 py-2 bg-red-700 text-white rounded-md text-sm font-bold uppercase disabled:opacity-50">
+                {busy ? "Stopping…" : "Stop All Broadcasts"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {confirmOpen && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" data-testid="confirm-modal">
           <div className="bg-white rounded-md shadow-xl max-w-md w-full p-6">
