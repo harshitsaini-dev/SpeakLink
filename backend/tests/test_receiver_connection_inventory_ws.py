@@ -489,11 +489,20 @@ def test_inventory_does_not_change_credential_schema_or_raw_store_identity(runti
 
     asyncio.run(scenario())
     after_schema = _schema_signature(runtime)
+
+    # The property this test exists for: opening and closing a Receiver socket
+    # changes NO schema and does not re-issue the Store's token.
     assert before_schema == after_schema
     assert _health(runtime, store.id)[0] == before_token
-    assert "receiver_credentials" not in after_schema
-    assert "receiver_credential_migration_state" not in after_schema
-    assert "schema_migrations" not in after_schema
+
+    # This used to also assert that receiver_credentials and friends were
+    # ABSENT, as a proxy for "the credential migration has not been run here".
+    # That premise stopped being true when the migration moved into startup so
+    # a repository-native deployment creates a complete database on first boot
+    # (see backend/server.py). Their presence or absence says nothing about
+    # whether THIS socket changed anything - the before/after comparison above
+    # is the actual assertion, and it holds either way.
+    assert isinstance(after_schema, tuple)
 
 
 def test_new_manager_is_empty_process_local_state(runtime):
