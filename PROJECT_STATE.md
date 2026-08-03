@@ -5217,3 +5217,56 @@ Playwright 249 · build clean.
 GUI journey coverage (A–F) is not written: protection is proven at the core
 and by structural tests, but the Tkinter dialog flows themselves are not
 driven end to end.
+
+---
+
+## Windows executable branding and Goal A+B acceptance (2026-08-03)
+
+### Every shipped executable carries the website icon
+
+`assets/echocast.ico`, composed by `tools/build_windows_icon.py` from
+`frontend/public` — the three entries already inside the website `favicon.ico`
+(16/32/48) reused byte for byte, plus `android-chrome-192x192.png` embedded as
+a PNG entry. A test asserts the website entries appear unchanged, so a
+lookalike cannot drift in.
+
+| Executable | Spec | Icon verified in the built file |
+|---|---|---|
+| EchoCastHQRuntime.exe | `hq_runtime.spec` | 16, 32, 48, 192 |
+| EchoCastReceiver.exe | `receiver_agent.spec` | 16, 32, 48, 192 |
+| EchoCastReceiverBackground.exe | `receiver_agent.spec` | 16, 32, 48, 192 |
+| EchoCastStoreSetup.exe | `store_setup.spec` | 16, 32, 48, 192 |
+
+**No 256 entry**: producing one would require resampling the 512 PNG, and
+there is no image library here. Windows scales the 192 entry. Nothing is
+claimed about what Explorer *draws* — shell icon caching was not touched.
+
+The website favicon is unchanged and survives the production build.
+
+### Frozen proofs
+
+`EchoCastStoreSetup.exe` bundles `store_kit_settings_password`.
+`EchoCastReceiver.exe` does **not** — an independent, packaging-level proof
+that Receiver playback has no dependency on the Settings Password. The frozen
+Receiver runs from an isolated copy: `--version` → 0, audio-device enumeration
+works.
+
+### The bug the GUI journeys caught
+
+`authorize_settings` called `datetime.now()` with no module-level import, so
+the first time an operator typed a **correct** password it would have raised
+`NameError`. Every core test passed because they construct the authorization
+directly. Only the operator's real path reached it.
+
+### Totals
+
+Store Kit 223 · journeys 18 · branding 15 · Goal A regression 122 · backend
+**2966 passed** · frontend 112 · Playwright 249 · build clean.
+
+`test_concurrent_redemption_enrols_exactly_one_device` failed in the full run
+and passes 32/32 in isolation — the known pre-existing flake, reported both
+ways.
+
+### Not done in this checkpoint
+
+No release candidate built or installed. Live RC18 untouched.
