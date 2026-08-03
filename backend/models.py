@@ -150,7 +150,15 @@ class BroadcastSession(Base):
     __tablename__ = "broadcast_sessions"
     id = Column(Integer, primary_key=True)
     campaign_name = Column(String(255), nullable=False)
-    started_by = Column(Integer, ForeignKey("hq_users.id"), nullable=False)
+    # Nullable because an account can be permanently deleted for real (see
+    # user_permanent_delete.py). The pointer is cleared and the two snapshot
+    # columns below carry the identity instead - hq_users has no AUTOINCREMENT,
+    # so a dangling id would be handed to the next account created and that
+    # person would inherit these broadcasts without a single error anywhere.
+    started_by = Column(Integer, ForeignKey("hq_users.id"), nullable=True)
+    #: Immutable record of who ran it, written when their account is deleted.
+    started_by_username = Column(String(100), nullable=True)
+    started_by_display_name = Column(String(200), nullable=True)
     started_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
     status = Column(String(30), default="pending", nullable=False, index=True)

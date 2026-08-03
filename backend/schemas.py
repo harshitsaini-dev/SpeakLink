@@ -322,7 +322,17 @@ class SessionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     campaign_name: str
-    started_by: int
+    # Nullable since accounts can be permanently deleted for real. The id is
+    # cleared rather than left dangling because hq_users has no AUTOINCREMENT:
+    # a stale id would be reissued to the next account created, silently
+    # transferring somebody's broadcasts to a different person.
+    started_by: Optional[int] = None
+    #: Who ran it, snapshotted when their account was deleted. This is what
+    #: keeps Broadcast History readable afterwards, and it is deliberately a
+    #: snapshot rather than a join - matching on a reusable id or a reusable
+    #: username is exactly how history rebinds to the wrong person.
+    started_by_username: Optional[str] = None
+    started_by_display_name: Optional[str] = None
     started_at: Optional[datetime]
     ended_at: Optional[datetime]
     status: str
