@@ -5108,8 +5108,10 @@ were never touched.
 | Scenario | CPU (of 1 core) | RSS peak | Max queue depth | Drops | Stop | Verdict |
 |---|---|---|---|---|---|---|
 | 5 Stores / 2 sessions | 1.5% | 84 MB | 1 | 0 | 39 ms | GREEN |
+| 10 Stores / 2 sessions | 1.2% | 86 MB | 1 | 0 | 62 ms | GREEN |
 | 10 Stores / 5 sessions | 1.8% | 87 MB | 1 | 0 | 87 ms | GREEN |
 | 20 Stores / 5 sessions | 3.0% | 90 MB | 1 | 0 | 110 ms | GREEN |
+| 40 Stores / 5 sessions | 3.7% | 98 MB | 1 | 0 | 123 ms | GREEN |
 | 40 Stores / 10 sessions | 5.1% | 99 MB | 1 | 0 | 188 ms | GREEN |
 | 40 Stores / 7 uneven (12/8/6/5/4/3/2) | 4.6% | 98 MB | 1 | 0 | 143 ms | GREEN |
 | **Soak: 40 Stores / 10 sessions / 10 min** | 3.8% | 100 MB | 1 | 0 | 166 ms | GREEN |
