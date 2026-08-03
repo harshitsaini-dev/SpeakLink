@@ -66,6 +66,8 @@ from datetime import datetime, timezone
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
+from sqlite_schema_surgery import drop_not_null, make_ids_never_reused
+
 
 class PermanentDeletionRefused(RuntimeError):
     """The account was not deleted. Never carries a credential or a hash.
@@ -124,151 +126,6 @@ class PermanentDeletionResult:
 # ---------------------------------------------------------------------------
 # schema
 # ---------------------------------------------------------------------------
-def _column_is_not_null(engine: Engine, table: str, column: str) -> bool:
-    for entry in inspect(engine).get_columns(table):
-        if entry["name"] == column:
-            return not entry.get("nullable", True)
-    return False
-
-
-def _sqlite_rebuild(connection, table: str, columns: tuple[str, ...]) -> None:
-    """Relax NOT NULL on SQLite, which cannot ALTER a column.
-
-    The documented table rebuild: create the replacement, copy every row,
-    drop the original, rename, recreate the indexes.
-
-    The new definition is derived from the CURRENT one by removing only the
-    NOT NULL token from the named columns, so nothing else about the table -
-    its other constraints, its column order, its foreign keys - is invented
-    here or can drift from what the database actually had.
-    """
-    ddl = connection.execute(
-        text("SELECT sql FROM sqlite_master WHERE type='table' AND name = :t"),
-        {"t": table}).scalar_one()
-
-    rebuilt = ddl
-    for column in columns:
-        # Only the column's own definition line, matched on its leading name,
-        # so a NOT NULL belonging to a different column is never touched.
-        for pattern in (f"\t{column} INTEGER NOT NULL", f" {column} INTEGER NOT NULL"):
-            rebuilt = rebuilt.replace(pattern, pattern.replace(" NOT NULL", ""))
-    if rebuilt == ddl:
-        return
-
-    indexes = [
-        row.sql for row in connection.execute(
-            text("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name = :t "
-                 "AND sql IS NOT NULL"),
-            {"t": table}).all()
-    ]
-
-    temporary = f"{table}__rebuild"
-    connection.exec_driver_sql(
-        rebuilt.replace(f"CREATE TABLE {table}", f"CREATE TABLE {temporary}", 1))
-    column_names = [row[1] for row in
-                    connection.exec_driver_sql(f"PRAGMA table_info('{table}')").all()]
-    joined = ", ".join(f'"{name}"' for name in column_names)
-    connection.exec_driver_sql(
-        f"INSERT INTO {temporary} ({joined}) SELECT {joined} FROM {table}")
-    connection.exec_driver_sql(f"DROP TABLE {table}")
-    connection.exec_driver_sql(f"ALTER TABLE {temporary} RENAME TO {table}")
-    for statement in indexes:
-        connection.exec_driver_sql(statement)
-
-
-def _sqlite_make_user_ids_never_reused(engine: Engine) -> bool:
-    """Give ``hq_users.id`` AUTOINCREMENT so a deleted id is never reissued.
-
-    WHY THIS IS PART OF DELETION AND NOT A TIDY-UP
-
-    ``INTEGER PRIMARY KEY`` alone means SQLite assigns ``max(id) + 1``. Delete
-    the highest-numbered account and the very next account created receives
-    that exact id - a different human being, holding a number that history,
-    audit rows and any external record still associate with the person who was
-    deleted. The snapshots elsewhere in this module stop Broadcast History
-    rebinding, but they cannot stop an operator reading an old audit row that
-    names user 3 and looking up who user 3 is today.
-
-    AUTOINCREMENT keeps a high-water mark in ``sqlite_sequence`` that only ever
-    rises, so a released id stays released. PostgreSQL sequences already behave
-    this way, which is why this is SQLite-only.
-
-    Returns True when the table was rebuilt.
-    """
-    with engine.connect() as connection:
-        ddl = connection.execute(
-            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='hq_users'")
-        ).scalar_one_or_none()
-    if not ddl or "AUTOINCREMENT" in ddl.upper():
-        return False
-
-    # SQLite requires the exact form `INTEGER PRIMARY KEY AUTOINCREMENT` on the
-    # column itself, so the separate table-level `PRIMARY KEY (id)` clause has
-    # to fold into the column definition - taking its comma with it, or the
-    # rebuilt CREATE TABLE ends in a dangling comma and will not parse.
-    import re
-
-    rebuilt = re.sub(r"\bid INTEGER NOT NULL\b",
-                     "id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT", ddl, count=1)
-    rebuilt = re.sub(r",\s*PRIMARY KEY\s*\(\s*id\s*\)", "", rebuilt, count=1)
-
-    if ("AUTOINCREMENT" not in rebuilt.upper()
-            or re.search(r"PRIMARY KEY\s*\(\s*id\s*\)", rebuilt)):
-        # The definition was not the shape expected. Leave it alone rather than
-        # rebuild a users table from a guess - ids being reusable is a much
-        # smaller problem than a malformed hq_users.
-        return False
-
-    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as pragma:
-        pragma.exec_driver_sql("PRAGMA foreign_keys=OFF")
-    try:
-        with engine.begin() as connection:
-            indexes = [r.sql for r in connection.execute(
-                text("SELECT sql FROM sqlite_master WHERE type='index' AND "
-                     "tbl_name='hq_users' AND sql IS NOT NULL")).all()]
-            columns = [r[1] for r in
-                       connection.exec_driver_sql("PRAGMA table_info('hq_users')").all()]
-            joined = ", ".join(f'"{c}"' for c in columns)
-            connection.exec_driver_sql(
-                rebuilt.replace("CREATE TABLE hq_users", "CREATE TABLE hq_users__rebuild", 1))
-            connection.exec_driver_sql(
-                f"INSERT INTO hq_users__rebuild ({joined}) SELECT {joined} FROM hq_users")
-            connection.exec_driver_sql("DROP TABLE hq_users")
-            connection.exec_driver_sql("ALTER TABLE hq_users__rebuild RENAME TO hq_users")
-            for statement in indexes:
-                connection.exec_driver_sql(statement)
-            # The high-water mark. Copying the rows into an AUTOINCREMENT table
-            # already makes SQLite record one, and ALTER TABLE RENAME carries
-            # it across - this only guarantees the floor, for the case where
-            # the table was empty and no sequence row was written at all.
-            #
-            # sqlite_sequence has no UNIQUE constraint on `name`, so ON CONFLICT
-            # is not available here; UPDATE-then-INSERT is the portable form.
-            highest = connection.execute(
-                text("SELECT COALESCE(MAX(id), 0) FROM hq_users")).scalar_one()
-            updated = connection.execute(
-                text("UPDATE sqlite_sequence SET seq = :s WHERE name = 'hq_users' "
-                     "AND seq < :s"), {"s": highest}).rowcount
-            existing_row = connection.execute(
-                text("SELECT COUNT(*) FROM sqlite_sequence WHERE name = 'hq_users'")
-            ).scalar_one()
-            if not existing_row:
-                connection.execute(
-                    text("INSERT INTO sqlite_sequence (name, seq) VALUES ('hq_users', :s)"),
-                    {"s": highest})
-    finally:
-        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as pragma:
-            pragma.exec_driver_sql("PRAGMA foreign_keys=ON")
-
-    with engine.connect() as connection:
-        violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
-    if violations:
-        raise RuntimeError(
-            "Rebuilding hq_users for non-reusable ids introduced foreign key "
-            f"violations: {violations[:5]}")
-    return True
-
-
 def ensure_user_permanent_delete_schema(engine: Engine) -> None:
     """Additive columns, plus the nullability the deletion needs. Idempotent.
 
@@ -296,64 +153,11 @@ def ensure_user_permanent_delete_schema(engine: Engine) -> None:
                         f"ALTER TABLE broadcast_sessions ADD COLUMN {column} {sql_type}")
 
     # ---- ids that are never reissued --------------------------------------
-    if engine.dialect.name == "sqlite" and "hq_users" in existing_tables:
-        _sqlite_make_user_ids_never_reused(engine)
+    if "hq_users" in existing_tables:
+        make_ids_never_reused(engine, "hq_users")
 
     # ---- nullability on the historical references -------------------------
-    pending = {}
-    for table, columns in HISTORY_REFERENCES.items():
-        if table not in existing_tables:
-            continue
-        needing = tuple(c for c in columns if _column_is_not_null(engine, table, c))
-        if needing:
-            pending[table] = needing
-    if not pending:
-        return
-
-    if engine.dialect.name != "sqlite":
-        with engine.begin() as connection:
-            for table, columns in pending.items():
-                for column in columns:
-                    connection.exec_driver_sql(
-                        f"ALTER TABLE {table} ALTER COLUMN {column} DROP NOT NULL")
-        return
-
-    # SQLite: the documented table rebuild.
-    #
-    # WHY foreign_keys IS TURNED OFF HERE, AND WHY THAT IS NOT THE FORBIDDEN
-    # KIND
-    #
-    # `DROP TABLE broadcast_sessions` is refused while foreign keys are on,
-    # because broadcast_targets and broadcast_store_leases point at it - even
-    # though the very next statement puts an identical table back. SQLite's
-    # own "Making Other Kinds Of Table Schema Changes" procedure therefore
-    # brackets the rebuild with the pragma off.
-    #
-    # That is a different act from switching the constraint off so a DELETE
-    # can violate it. Nothing is deleted here, every row is copied across, and
-    # the pragma is restored and then a full `foreign_key_check` is run - if
-    # the rebuild introduced a single violation this RAISES and the database
-    # is left for a human rather than reported as migrated. The permanent
-    # deletion itself runs with foreign keys fully on.
-    #
-    # The pragma is a no-op inside a transaction, so it is issued on an
-    # autocommit connection either side of the transactional rebuild.
-    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as pragma:
-        pragma.exec_driver_sql("PRAGMA foreign_keys=OFF")
-    try:
-        with engine.begin() as connection:
-            for table, columns in pending.items():
-                _sqlite_rebuild(connection, table, columns)
-    finally:
-        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as pragma:
-            pragma.exec_driver_sql("PRAGMA foreign_keys=ON")
-
-    with engine.connect() as connection:
-        violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
-    if violations:
-        raise RuntimeError(
-            "The user-deletion schema migration introduced foreign key "
-            f"violations and was not completed cleanly: {violations[:5]}")
+    drop_not_null(engine, HISTORY_REFERENCES)
 
 
 # ---------------------------------------------------------------------------
