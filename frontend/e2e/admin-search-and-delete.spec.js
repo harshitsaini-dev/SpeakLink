@@ -234,7 +234,7 @@ test.describe('User Management', () => {
     await expect(page.getByTestId('user-row-rahul')).toHaveCount(0);
   });
 
-  test('permanent deletion needs the typed username, and leaves no Restore behind',
+  test('permanent deletion needs the typed username, and removes the account entirely',
        async ({ page }) => {
     const state = await mockBackend(page, { operator: OWNER });
     await page.goto('/users');
@@ -256,14 +256,18 @@ test.describe('User Management', () => {
     expect(state.deletePermanentlyCalls[0].body)
       .toMatchObject({ confirm: 'rahul', acknowledged: true });
 
-    // Visible only on request, marked unmistakably, and with no way back.
-    await page.getByTestId('users-include-deleted').selectOption('yes');
-    const row = page.getByTestId('user-row-rahul');
-    await expect(row).toContainText(/permanently deleted/i);
-    await expect(row).toContainText(/cannot be restored/i);
-    await expect(row.getByTestId('restore-rahul')).toHaveCount(0);
-    await expect(row.getByTestId('enable-rahul')).toHaveCount(0);
-    await expect(row.getByTestId('purge-rahul')).toHaveCount(0);
+    // GONE, not hidden. This used to assert that a "show deleted accounts"
+    // filter brought the row back marked "permanently deleted" - which was
+    // true while deletion left a tombstoned row behind, and was exactly what
+    // kept the username reserved for ever. There is no such filter now,
+    // because there is no row for it to reveal.
+    await expect(page.getByTestId('users-include-deleted')).toHaveCount(0);
+    await expect(page.getByTestId('user-row-rahul')).toHaveCount(0);
+    await expect(page.locator('tbody')).not.toContainText('permanently deleted');
+
+    // Searching for it by name finds nothing either.
+    await page.getByTestId('users-search').fill('rahul');
+    await expect(page.getByTestId('user-row-rahul')).toHaveCount(0);
   });
 
   test('an ADMIN is not offered permanent deletion at all', async ({ page }) => {
