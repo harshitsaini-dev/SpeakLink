@@ -87,7 +87,6 @@ export default function UserManagement() {
   const list = useAdminList("/users/search", {
     q: "", role: "", state: "",
     scope_store_id: "", scope_city: "", scope_region: "",
-    include_deleted: false,
   });
   const users = list.items;
   const [scopeOptions, setScopeOptions] = React.useState({ regions: [], cities: [], stores: [] });
@@ -153,7 +152,9 @@ export default function UserManagement() {
         <div>
           <h1 className="text-2xl font-semibold">User Management</h1>
           <p className="text-sm text-slate-500">
-            Accounts are archived, never deleted, so the record of who did what stays readable.
+            Archive an account when it may need to be restored later. Permanent deletion
+            removes the account and cannot be undone — its username becomes available again,
+            and historical audit records remain.
           </p>
           {/* Said here rather than only in a refusal message, so an ADMIN
               understands why a control is missing instead of thinking the page
@@ -224,10 +225,12 @@ export default function UserManagement() {
         <FilterSelect label="Zone Scope" testId="users-scope-region" allLabel="Any Zone"
                       value={list.filters.scope_region} options={scopeOptions.regions}
                       onChange={(v) => list.setFilter("scope_region", v)} />
-        <FilterSelect label="Deleted" testId="users-include-deleted" allLabel="Hide deleted"
-                      value={list.filters.include_deleted ? "yes" : ""}
-                      options={[{ value: "yes", label: "Show deleted accounts" }]}
-                      onChange={(v) => list.setFilter("include_deleted", v === "yes")} />
+        {/* There is deliberately no "show deleted accounts" control. Permanent
+            deletion removes the row, so such a filter could never return
+            anything - and a control that can never do anything is worse than
+            no control, because an operator reasonably concludes the account is
+            still there somewhere. Accounts that DO still exist are selected
+            with State above. */}
       </FilterBar>
 
       <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
@@ -247,10 +250,12 @@ export default function UserManagement() {
                        emptyText="No accounts match these filters." />
             {!list.loading && !list.error && users.map((row) => {
               const mine = me && row.id === me.id;
+              // `deleted` is no longer a state this list can contain: permanent
+              // deletion removes the row, so the backend has nothing to send.
+              // The check is kept as a belt-and-braces guard for a database
+              // that has not yet had the one-time tombstone migration applied -
+              // such a row must still offer no actions.
               const purged = row.lifecycle_state === "deleted";
-              // A permanently deleted account is a tombstone kept so history
-              // stays readable. Nothing may be done to it - and in particular
-              // there is no Restore anywhere on this page for one.
               const allowed = canManage(row.role) && !mine && !purged;
               return (
                 <tr key={row.id} className="border-t" data-testid={`user-row-${row.username}`}>
@@ -264,7 +269,7 @@ export default function UserManagement() {
                   <td className="px-3 space-x-2 text-right">
                     {purged && (
                       <span className="text-xs text-slate-500" data-testid={`purged-${row.username}`}>
-                        Kept only so history stays readable. This cannot be restored.
+                        Awaiting removal. Restart HQ to release this username.
                       </span>
                     )}
                     {/* Editing a name is not a lock-out, so it is offered for
@@ -421,7 +426,7 @@ export default function UserManagement() {
           title={`Permanently delete ${purging.username}?`}
           count={1} countNoun="account"
           confirmWord={purging.username}
-          warning="The account is signed out everywhere immediately and can never sign in or be restored. Its username stays reserved and its rows in Broadcast History and the audit trail stay readable — that is the point of keeping the record."
+          warning="This permanently removes the account. It is signed out everywhere immediately, cannot be restored, and its rights and Store Scope are deleted with it. Its username becomes available for a completely new account, which will be a different person with a different ID. Broadcast History and the audit trail remain readable and stay attached to the old account."
           busy={busy} error={purgeError}
           onCancel={() => { setPurging(null); setPurgeError(""); }}
           onConfirm={async ({ typed, acknowledged }) => {
