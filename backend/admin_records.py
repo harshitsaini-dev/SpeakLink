@@ -155,12 +155,27 @@ def archive_sessions(engine: Engine, *, session_ids: list[int],
 def delete_sessions_permanently(engine: Engine, *, session_ids: list[int],
                                 actor_user_id: int,
                                 filters: dict | None = None) -> BulkResult:
-    """Really remove broadcast sessions and their targets. Irreversible.
+    """Really remove broadcast sessions and everything that belongs to them.
 
-    ``broadcast_targets`` is the only table referencing a session, and a
-    target has no meaning without its session, so it goes with it. Nothing
-    else is touched - a Store, a User and a Receiver Device all outlive the
-    campaign that mentioned them.
+    Two tables reference a session, and both are PART of it rather than
+    independent records: ``broadcast_targets`` (which Stores it addressed)
+    and ``broadcast_store_leases`` (which Stores it held while live). Neither
+    means anything without its session, so both go with it. Nothing else is
+    touched - a Store, a User and a Receiver Device all outlive the campaign
+    that mentioned them.
+
+    THE LEASE TABLE WAS MISSED WHEN IT WAS ADDED
+
+    ``broadcast_store_leases`` arrived with concurrent broadcasts and carries
+    a foreign key to ``broadcast_sessions``. This function was not updated,
+    so with ``PRAGMA foreign_keys=ON`` deleting any session that had actually
+    RUN raised IntegrityError. It went unnoticed because a session that was
+    only ever created - never started - holds no lease and deletes cleanly,
+    which is precisely the shape most tests had.
+
+    Leases are deleted rather than preserved deliberately: they are runtime
+    occupancy bookkeeping, not history. The administrative record of the
+    deletion lives in ``admin_deletion_events``, which this cannot touch.
     """
     result = BulkResult(requested=len(session_ids))
     if not session_ids:
@@ -175,6 +190,10 @@ def delete_sessions_permanently(engine: Engine, *, session_ids: list[int],
                 continue
             connection.execute(
                 text("DELETE FROM broadcast_targets WHERE session_id = :i"),
+                {"i": session_id})
+            # Before the session row, or the foreign key refuses the delete.
+            connection.execute(
+                text("DELETE FROM broadcast_store_leases WHERE session_id = :i"),
                 {"i": session_id})
             connection.execute(
                 text("DELETE FROM broadcast_sessions WHERE id = :i"), {"i": session_id})
