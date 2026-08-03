@@ -201,6 +201,11 @@ async function mockBackend(page, options = {}) {
     // *Status option in this file.
     storeUpdateStatus: options.storeUpdateStatus || 200,
     storesListStatus: options.storesListStatus || 200,
+    // Per-user Store scope for the broadcast target catalog. null means
+    // unrestricted, matching resolve_store_scope's own None-vs-empty rule:
+    // an empty ARRAY is a real answer ("scoped to nothing"), never widened.
+    scopedStoreIds: options.scopedStoreIds === undefined
+      ? null : options.scopedStoreIds,
     sessionCreateStatus: options.sessionCreateStatus || 200,
     users: options.users || HQ_USERS.map((row) => ({ ...row })),
     usersStatus: options.usersStatus || 200,
@@ -892,6 +897,35 @@ async function mockBackend(page, options = {}) {
 
     if (method === 'GET' && path === '/stores/meta/regions-cities') {
       return route.fulfill(json({ regions: ['UN ZONE'], cities: ['UN ZONE'] }));
+    }
+
+    // The broadcast TARGET catalog. Gated on menu.broadcast.view here, exactly
+    // as the real endpoint is, and deliberately NOT on menu.stores.view - that
+    // coupling is the defect these routes exist to prove is gone. Store Scope
+    // is applied server-side there; `state.scopedStoreIds` stands in for it.
+    if (method === 'GET' && path === '/broadcast/target-stores') {
+      if (!state.permissions.includes('menu.broadcast.view')) {
+        return route.fulfill(json(
+          { detail: 'You do not have permission to perform this action.' }, 403,
+        ));
+      }
+      const targetable = state.stores.filter(
+        (s) => (s.lifecycle_state || 'active') === 'active'
+          && (state.scopedStoreIds === null
+              || state.scopedStoreIds.includes(s.id)),
+      );
+      // Only the fields the Console draws - the same seven the real
+      // BroadcastTargetStoreOut carries, so a leak here would fail there too.
+      const stores = targetable.map((s) => ({
+        id: s.id, store_code: s.store_code, store_name: s.store_name,
+        city: s.city, region: s.region,
+        is_online_store: Boolean(s.is_online_store), status: s.status,
+      }));
+      return route.fulfill(json({
+        stores,
+        regions: [...new Set(stores.map((s) => s.region).filter(Boolean))].sort(),
+        cities: [...new Set(stores.map((s) => s.city).filter(Boolean))].sort(),
+      }));
     }
 
     if (method === 'GET' && path === '/broadcast/current') {
