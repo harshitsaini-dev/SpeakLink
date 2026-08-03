@@ -33,6 +33,7 @@ from models import (
 from schemas import (
     LoginRequest, LoginResponse, UserOut,
     StoreCreate, StoreUpdate, StoreOut, StoresMetaOut,
+    BroadcastTargetStoreOut, BroadcastTargetsOut,
     SessionCreate, SessionOut, SessionDetailOut, TargetOut,
     SystemLogOut,
     EnrollmentCodeRequest, EnrollmentCodeResponse, EnrollmentCodeStatusOut,
@@ -2353,6 +2354,76 @@ def stores_meta(db: Session = Depends(get_db), user: HQUser = Depends(require("m
 
 
 # ================ BROADCAST ================
+@api.get("/broadcast/target-stores", response_model=BroadcastTargetsOut)
+def list_broadcast_target_stores(
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("menu.broadcast.view")),
+):
+    """The Stores this account may point a broadcast at.
+
+    WHY THIS EXISTS AS ITS OWN ENDPOINT
+
+    Broadcast Console used to build its target list from ``GET /api/stores``,
+    which is guarded by ``menu.stores.view`` - "View Store Management". That
+    made one administrative permission decide an operational capability: an
+    operator with Start Broadcast but without Store Management opened the
+    Console and found an empty table, because the Store fetch behind it had
+    already returned 403. Nothing in the Console said so.
+
+    The two are genuinely different questions. Managing Stores is about the
+    records; targeting Stores is about the estate. Someone can reasonably be
+    trusted to broadcast to the shops in their region without also being
+    trusted to rename, archive or delete them.
+
+    The fix is not to widen ``menu.stores.view``, and not to drop the guard on
+    ``/api/stores`` - both would hand the full administrative Store
+    representation to every broadcaster. It is this: a separate catalog, gated
+    on the permission that already governs the Console, returning only the
+    fields the Console draws.
+
+    WHAT IT DOES NOT CHANGE
+
+    Store Scope. It is applied here exactly as ``GET /api/stores`` applies it,
+    through the same ``resolve_store_scope`` - including the distinction
+    between ``None`` (unrestricted) and an empty set (scoped to nothing, which
+    stays nothing). A scoped broadcaster sees no more here than they did
+    before, and an out-of-scope Store is absent from the response no matter
+    how the request is crafted, because the filter is in the query rather than
+    in the client.
+
+    Targeting eligibility also stays as it was: active Stores only, archived
+    excluded, permanently deleted excluded unconditionally. This endpoint
+    decides who may ask, not which Stores are eligible.
+    """
+    query = db.query(Store).filter(Store.is_active.is_(True))
+    # Archived is retired-but-recoverable and has never been targetable;
+    # deleted is unconditional. Both conditions are written the same way as in
+    # list_stores so the two lists cannot drift apart.
+    query = query.filter(
+        (Store.lifecycle_state.is_(None)) | (Store.lifecycle_state != "archived")
+    )
+    query = query.filter(
+        (Store.lifecycle_state.is_(None)) | (Store.lifecycle_state != "deleted")
+    )
+    scope = resolve_store_scope(engine, user)
+    if scope is not None:
+        query = query.filter(Store.id.in_(scope) if scope else Store.id.in_([-1]))
+
+    stores = query.order_by(Store.store_code).all()
+    # Same live-status reflection the Console already relied on: the stored
+    # column is only authoritative for playing/error.
+    online_ids = manager.online_store_ids()
+    for store in stores:
+        if store.status not in ("playing", "error"):
+            store.status = "online" if store.id in online_ids else "offline"
+
+    return BroadcastTargetsOut(
+        stores=[BroadcastTargetStoreOut.model_validate(s) for s in stores],
+        regions=sorted({s.region for s in stores if s.region}),
+        cities=sorted({s.city for s in stores if s.city}),
+    )
+
+
 def _resolve_targets(db: Session, payload: SessionCreate, user: HQUser) -> List[Store]:
     q = db.query(Store).filter(Store.is_active.is_(True))
     mode = payload.target_mode

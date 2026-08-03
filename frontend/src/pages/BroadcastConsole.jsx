@@ -72,12 +72,22 @@ export default function BroadcastConsole() {
   const [micTest, setMicTest] = React.useState({ on: false, level: 0 });
   const testAudioRef = React.useRef(null);
 
+  // The broadcast TARGET catalog, not the administrative Store list.
+  //
+  // This used to be GET /stores plus GET /stores/meta/regions-cities, both of
+  // which require "View Store Management". An operator allowed to broadcast
+  // but not to manage Stores therefore got 403 on both, and this page rendered
+  // an empty table with no explanation. Targeting and management are separate
+  // capabilities, so they now have separate endpoints; this one is gated on
+  // the same permission that opens the Console.
+  //
+  // Regions and cities arrive in the same response, derived from the very
+  // Stores listed here, so a scoped operator's dropdowns can no longer offer a
+  // region they have no Store in.
   const load = React.useCallback(async () => {
-    const [{ data: s }, { data: m }] = await Promise.all([
-      api.get("/stores"),
-      api.get("/stores/meta/regions-cities"),
-    ]);
-    setStores(s); setMeta(m);
+    const { data } = await api.get("/broadcast/target-stores");
+    setStores(data.stores || []);
+    setMeta({ regions: data.regions || [], cities: data.cities || [] });
     await loadBroadcast();
   }, [loadBroadcast]);
 

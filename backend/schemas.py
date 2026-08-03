@@ -288,6 +288,57 @@ class StoresMetaOut(BaseModel):
     cities: List[str]
 
 
+class BroadcastTargetStoreOut(BaseModel):
+    """One Store as a BROADCAST TARGET - not as an administrative record.
+
+    Deliberately a smaller shape than ``StoreOut``, because the two answer
+    different questions. ``StoreOut`` answers "what may a Store administrator
+    know about this Store"; this answers "what does the Console need in order
+    to point a broadcast at it". Those overlap, but the moment they are the
+    same model, every field added for the management page is silently
+    published to every broadcaster too.
+
+    So the fields here are exactly the ones Broadcast Console renders or
+    filters on, and nothing else. ``is_active`` and ``lifecycle_state`` are
+    absent because a Store that is not targetable simply is not in the list -
+    the caller never has to interpret a lifecycle string, and cannot learn
+    that an archived Store exists. ``created_at`` and ``last_seen`` are absent
+    because the Console shows neither.
+
+    ``receiver_token`` was already gone from ``StoreOut`` and is of course not
+    here; the point of this model is that a future field added over there
+    cannot arrive here by accident.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    store_code: str
+    store_name: str
+    city: str
+    region: str
+    is_online_store: bool
+    #: Live connection state (online/offline/playing/error) - the same value
+    #: the Console's status badge already showed from ``GET /api/stores``.
+    status: str
+
+
+class BroadcastTargetsOut(BaseModel):
+    """The Console's whole target catalog in one response.
+
+    Regions and cities are derived from the Stores in ``stores`` rather than
+    queried separately, which is what makes them correct for a scoped
+    account. ``GET /api/stores/meta/regions-cities`` lists every region and
+    city in the estate with no Store-scope filter at all - harmless for the
+    management page an OWNER opens, but it meant a scoped broadcaster's
+    Region and City dropdowns named places they could not broadcast to.
+    Deriving them here cannot drift from the list they filter.
+    """
+
+    stores: List[BroadcastTargetStoreOut]
+    regions: List[str]
+    cities: List[str]
+
+
 class SessionCreate(BaseModel):
     campaign_name: str = Field(..., min_length=1, max_length=255)
     target_mode: str  # all|selected|region|city|online_only
