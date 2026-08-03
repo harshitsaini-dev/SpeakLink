@@ -101,7 +101,12 @@ from deletion_safety import (
 from store_deletion import (
     StoreDeletionRefused,
     list_store_deletion_events,
-    permanently_delete_store_with_history,
+)
+from store_permanent_delete import (
+    StorePermanentDeletionRefused,
+    ensure_store_permanent_delete_schema,
+    permanently_delete_store,
+    purge_legacy_store_tombstones,
 )
 from admin_search import (
     BulkSelectionError,
@@ -581,6 +586,31 @@ def startup_event():
         ensure_store_lifecycle_schema(engine)
     except Exception:
         logger.warning("Store lifecycle column could not be prepared", exc_info=False)
+
+    # TRUE permanent Store deletion: Store Code snapshots on the history rows,
+    # non-reusable Store ids, and the nullability those historical references
+    # need so a deleted Store's row can actually leave the table.
+    #
+    # ERROR rather than a warning: without this schema a permanent delete
+    # cannot release the Store Code, which is the whole defect being fixed.
+    try:
+        ensure_store_permanent_delete_schema(engine)
+    except Exception:
+        logger.error("Store permanent-delete schema could not be prepared - "
+                     "permanently deleting a Store will not release its Store "
+                     "Code until this is resolved", exc_info=True)
+
+    # Stores the OLD tombstone design marked deleted but left in the table,
+    # still holding their Store Codes. Only lifecycle_state='deleted' is
+    # touched - never an archived or active Store. Idempotent.
+    try:
+        purged_stores = purge_legacy_store_tombstones(engine)
+        if purged_stores["purged"]:
+            logger.info("Released %s Store Code(s) from legacy permanent-delete "
+                        "tombstones: %s", purged_stores["purged"],
+                        ", ".join(purged_stores["store_codes"]))
+    except Exception:
+        logger.error("Legacy Store tombstones could not be migrated", exc_info=True)
 
     # One nullable column recording which Device a redemption produced. Left
     # NULL for every code redeemed before it existed, and NULL means "not
@@ -2028,15 +2058,30 @@ class StoreTombstoneRequest(BaseModel):
 def tombstone_store(store_id: int, payload: StoreTombstoneRequest,
                     db: Session = Depends(get_db),
                     user: HQUser = Depends(require("stores.delete_permanently"))):
-    """Permanently remove a Store from operational EchoCast even though it has
-    history. The row is never deleted - see store_deletion.py - so every
-    Broadcast Target, Receiver event, Device and enrollment code that refers
-    to it stays exactly as readable as it was.
+    """Permanently delete a Store. The row really goes, and the code is freed.
 
-    stores.delete_permanently defaults to SUPER ADMIN/OWNER only. This is
-    deliberately a different, stronger action than DELETE /stores/{id}
-    /permanently, which only ever removes a Store nothing has ever
-    referenced.
+    This used to tombstone: the row stayed, marked deleted, so every history
+    row referring to it stayed valid. It kept history readable and it kept the
+    Store Code reserved for ever - an operator who permanently deleted AYUSHK
+    could never create AYUSHK again, and store_deletion.py said so in its own
+    docstring.
+
+    Now the row is deleted and history is made independent of it first: each
+    Broadcast Target, Receiver event and Device keeps a snapshot of the Store
+    Code, and every historical pointer is nulled. NULL matters rather than
+    being tidy - stores has no AUTOINCREMENT, so a dangling id would be handed
+    to the next Store created and that Store would silently inherit somebody
+    else's history.
+
+    The old Store's Receiver identity is neutralised in the same transaction:
+    credentials revoked, Devices retired and detached, and the legacy
+    receiver_token dies with the row. A Receiver holding the old Store's
+    credential cannot authenticate as the new Store that reuses its code.
+
+    Refused while a broadcast is on air on that Store - deleting it would
+    silence somebody else's announcement as a side effect.
+
+    stores.delete_permanently defaults to SUPER ADMIN/OWNER only.
     """
     if not payload.acknowledged:
         raise HTTPException(
@@ -2044,19 +2089,19 @@ def tombstone_store(store_id: int, payload: StoreTombstoneRequest,
             detail="The 'this Store cannot be restored' acknowledgement is required.",
         )
     try:
-        result = permanently_delete_store_with_history(
+        result = permanently_delete_store(
             engine, store_id=store_id, typed_confirmation=payload.confirm,
             actor_user_id=user.id, live_store_ids=_live_store_ids(),
         )
-    except StoreDeletionRefused as refusal:
+    except (StorePermanentDeletionRefused, StoreDeletionRefused) as refusal:
         raise HTTPException(status_code=409, detail=str(refusal))
     _write_log(
         db, "warn",
         f"STORE_PERMANENTLY_DELETED store_id={result.store_id} "
-        f"code={result.store_code} history_counts={result.dependency_counts} "
-        f"devices={len(result.device_public_ids)} "
+        f"code={result.store_code} devices_detached={result.devices_detached} "
         f"credentials_revoked={result.credentials_revoked} "
-        f"enrollment_codes_revoked={result.enrollment_codes_revoked} "
+        f"live_removed={result.live_rows_removed} "
+        f"history_detached={result.history_rows_detached} "
         f"by={user.username}",
     )
     return {
@@ -2065,10 +2110,12 @@ def tombstone_store(store_id: int, payload: StoreTombstoneRequest,
         "store_code": result.store_code,
         "store_name": result.store_name,
         "deleted_at": result.deleted_at,
-        "dependency_counts": result.dependency_counts,
-        "device_public_ids": result.device_public_ids,
+        "row_deleted": True,
+        "store_code_released": True,
+        "devices_detached": result.devices_detached,
         "credentials_revoked": result.credentials_revoked,
-        "enrollment_codes_revoked": result.enrollment_codes_revoked,
+        "live_removed": result.live_rows_removed,
+        "history_detached": result.history_rows_detached,
     }
 
 
@@ -3124,6 +3171,15 @@ def session_detail(sid: int, db: Session = Depends(get_db), user: HQUser = Depen
             target_out.store_code = t.store.store_code
             target_out.store_name = t.store.store_name
             target_out.store_deleted = t.store.lifecycle_state == "deleted"
+        else:
+            # The Store was permanently deleted. Its identity was snapshotted
+            # onto this row at that moment, which is what keeps history
+            # readable - and deliberately what is read here rather than a
+            # lookup by code, because a DIFFERENT Store may now be using that
+            # code and this target has nothing to do with it.
+            target_out.store_code = getattr(t, "store_code_snapshot", None)
+            target_out.store_name = getattr(t, "store_name_snapshot", None)
+            target_out.store_deleted = True
         enriched.append(target_out)
     out.targets = enriched
     return out
