@@ -5357,3 +5357,63 @@ ownership visibility a back door to target visibility. Exact ids now require
 `broadcast.view_targets`.
 
 Additive only — no schema change, no migration. Live RC19 was not touched.
+
+---
+
+## Repo-native HQ runtime (refactor/repo-native-hq-runtime)
+
+HQ no longer installs into `%LOCALAPPDATA%` and no longer starts from a Windows
+Scheduled Task. The repository IS the installation: copy the folder, write one
+`.env`, run `start.bat` (Windows) or `python tools/echocast_server.py run`
+(anywhere). Live data lives in `<repo>/data`, gitignored.
+
+`tools/echocast_server.py` owns every decision - configuration, dependency
+bootstrap, PID ownership, health checks - so the `.bat` files are thin wrappers
+and a POSIX host loses only the double-click. Stop is targeted: the recorded
+pid is believed only when the state file also says this repository started it
+and the process is still alive.
+
+One Uvicorn worker now serves `/api`, the WebSocket routes and the built React
+app on one origin, so production has no CORS. The frontend decides same-origin
+at runtime by comparing the page's port with the API port, so one build works
+from any hostname. Two-port development keeps its restricted CORS.
+
+### Proven in an isolated clean room
+
+Fresh tree with no data, no `.env`, no venv, no build: refuses to start with no
+credentials and creates nothing; then bootstraps to READY, creating 25 tables,
+the Receiver credential schema, 33 permission codes including the Active
+Broadcast ones, the 44-store canonical catalog and one OWNER with a bcrypt
+hash. Second start with a DIFFERENT `ADMIN_USERNAME`/`ADMIN_PASSWORD` changed
+nothing - same single Owner, same hash, 44 stores, and the original credentials
+still the only ones that work. Copied to a different path with a different
+folder name and started there unchanged.
+
+### Two defects found by that test
+
+* `backend/requirements.txt` could not be installed on a fresh machine:
+  `emergentintegrations==0.2.0` is not on PyPI and `litellm` was pinned to a
+  third-party wheel URL. Neither is imported and neither was in the working
+  virtual environment - template scaffold. Removed.
+* The Receiver Credential Lifecycle tables were created only by running
+  `migrations.py` by hand. Correct when every HQ was migrated from an older
+  database; wrong for a new machine that creates its database on first start,
+  where enrolment would have failed against tables that never existed. Now run
+  at startup, idempotently.
+
+### Broadcast History permanent delete
+
+Fixed first, as its own commit. `broadcast_store_leases` referenced
+`broadcast_sessions` and `delete_sessions_permanently` never deleted the lease
+rows, so deleting any session that had actually been on air raised
+IntegrityError. The browser reported a missing CORS header because Starlette's
+ServerErrorMiddleware sits outside CORSMiddleware - the CORS configuration was
+never at fault. Unhandled exceptions are now converted to a JSON 500 inside the
+CORS layer so a backend fault cannot disguise itself as a transport problem.
+
+### Legacy RC19
+
+Still installed, still running, untouched. The AppData installer, repair,
+verify and uninstall scripts plus `tools/hq_runtime.py` are marked LEGACY in
+the README and kept as the rollback path. Migration of the live machine is a
+separate, later checkpoint.
