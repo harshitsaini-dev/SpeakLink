@@ -3,7 +3,14 @@
  *
  * The console renders three things it did not before: a busy marker on Stores
  * another broadcast holds, a panel for your own live broadcast, and - only for
- * accounts holding broadcast.view_ownership - a panel naming other operators.
+ * accounts holding broadcast.active_view - a COMPACT BADGE linking to the
+ * Active Broadcasts page.
+ *
+ * That badge replaced a full cross-user table. The table was readable with one
+ * concurrent broadcast and unusable with twenty, and it grew without bound
+ * behind the controls an operator actually came to the Console for. The tests
+ * below therefore assert both halves: that the old list is gone, and that the
+ * badge's height does not depend on the number of live broadcasts.
  *
  * The privacy tests here assert on the RENDERED DOM rather than on props,
  * because the failure being guarded against is a name reaching a screen. They
@@ -12,7 +19,7 @@
  * how it becomes a reflex.
  */
 import React from "react";
-import { render, screen, act, fireEvent } from "@testing-library/react";
+import { render, screen, act, fireEvent, cleanup } from "@testing-library/react";
 import BroadcastConsole from "./BroadcastConsole";
 
 const STORES = [
@@ -25,6 +32,16 @@ const STORES = [
 let mockBroadcast;
 let mockPermissions;
 
+// react-router-dom 7 ships ESM only, which CRA's jest cannot resolve. The
+// Console needs exactly one thing from it - Link - so it is stubbed as the
+// anchor it renders anyway. The href assertion below is therefore still a
+// real assertion about the destination, and the actual routing is proven in
+// the Playwright suite where a real browser resolves it.
+// `virtual` because jest still RESOLVES a mocked module path, and resolving
+// this one is the very thing that fails.
+jest.mock("react-router-dom", () => ({
+  Link: ({ to, children, ...rest }) => <a href={to} {...rest}>{children}</a>,
+}), { virtual: true });
 jest.mock("@/contexts/BroadcastContext", () => ({
   useBroadcast: () => mockBroadcast,
 }));
@@ -43,6 +60,7 @@ const { api } = require("@/lib/api");
 function baseBroadcast(overrides = {}) {
   const active = {
     mine: null, sessions: [], busy_store_ids: [], may_view_ownership: false,
+    may_view_targets: false, may_manage_active: false, active_count: null,
     ...(overrides.active || {}),
   };
   return {
@@ -165,59 +183,66 @@ test("no panel when I am not broadcasting", async () => {
 });
 
 // ===========================================================================
-// The privileged panel
+// The compact badge that replaced the cross-user list
 // ===========================================================================
-test("an ordinary Broadcaster gets no Active Broadcasts panel at all", async () => {
+// The Console used to render every other operator's broadcast as table rows.
+// That was readable at one concurrent broadcast and unusable at twenty: the
+// page where somebody speaks into a microphone was growing without bound
+// behind the controls they came for. Supervision moved to its own page.
+test("the cross-user Active Broadcast list is gone from the Console", async () => {
   await renderConsole({
-    active: { busy_store_ids: [101], may_view_ownership: false, sessions: [] },
-  });
+    active: {
+      busy_store_ids: [101], may_view_ownership: true, may_manage_active: true,
+      active_count: 3,
+      sessions: [{ session_id: 3, campaign_name: "Alice Campaign",
+                   owner_username: "alice", target_store_count: 1 }],
+    },
+  }, ["broadcast.start", "broadcast.stop", "broadcast.view_ownership",
+      "broadcast.active_view"]);
 
   expect(screen.queryByTestId("active-broadcasts-panel")).toBeNull();
+  expect(screen.queryByTestId("active-session-3")).toBeNull();
+  // Even when the context still carries a session, the Console must not name
+  // the operator - that belongs on the supervision page now.
+  expect(document.body.textContent.toLowerCase()).not.toContain("alice campaign");
 });
 
-test("a privileged viewer sees owner and campaign", async () => {
+test("an account without active_view gets no badge and no count", async () => {
   await renderConsole({
-    active: {
-      busy_store_ids: [101], may_view_ownership: true,
-      sessions: [{ session_id: 3, campaign_name: "Alice Campaign",
-                   owner_username: "alice", owner_display_name: "Alice",
-                   started_at: "2026-08-03T10:00:00+00:00",
-                   target_store_ids: [101], target_store_count: 1 }],
-    },
-  }, ["broadcast.start", "broadcast.stop", "broadcast.view_ownership"]);
+    active: { busy_store_ids: [101], may_manage_active: false, active_count: null },
+  });
 
-  expect(screen.getByTestId("active-broadcasts-panel")).toBeTruthy();
-  expect(screen.getByTestId("active-campaign-3").textContent).toBe("Alice Campaign");
-  expect(screen.getByTestId("active-owner-3").textContent).toBe("Alice");
+  expect(screen.queryByTestId("active-broadcasts-badge")).toBeNull();
 });
 
-test("the privileged panel shows the backend's visible count, not a recomputed one", async () => {
+test("the badge shows the backend's count and links to the page", async () => {
   await renderConsole({
-    active: {
-      busy_store_ids: [101], may_view_ownership: true,
-      // A Scope-narrowed answer: one visible target, count 1, even though the
-      // broadcast really reaches more. The UI must not "helpfully" correct it.
-      sessions: [{ session_id: 3, campaign_name: "Alice Campaign",
-                   owner_username: "alice", target_store_ids: [101],
-                   target_store_count: 1 }],
-    },
-  }, ["broadcast.start", "broadcast.view_ownership"]);
+    active: { busy_store_ids: [101], may_manage_active: true, active_count: 17 },
+  }, ["broadcast.start", "broadcast.stop", "broadcast.active_view"]);
 
-  expect(screen.getByTestId("active-target-count-3").textContent).toBe("1");
+  expect(screen.getByTestId("active-broadcasts-badge")).toBeTruthy();
+  expect(screen.getByTestId("active-broadcasts-count").textContent).toBe("17");
+  expect(screen.getByTestId("active-broadcasts-link").getAttribute("href"))
+    .toBe("/active-broadcasts");
 });
 
-test("there is no Stop button beside another operator's broadcast", async () => {
-  await renderConsole({
-    active: {
-      may_view_ownership: true,
-      sessions: [{ session_id: 3, campaign_name: "Alice Campaign",
-                   owner_username: "alice", target_store_ids: [101],
-                   target_store_count: 1 }],
-    },
-  }, ["broadcast.start", "broadcast.stop", "broadcast.view_ownership"]);
+test("the Console is the same height with 50 broadcasts as with 1", async () => {
+  // The property the operator actually asked for, asserted as a property
+  // rather than a screenshot: the badge renders ONE element whatever the
+  // count says, so the page cannot grow with concurrency.
+  const rowsAt = async (count) => {
+    cleanup();   // two renders into one document would find two badges
+    await renderConsole({
+      active: { busy_store_ids: [], may_manage_active: true, active_count: count },
+    }, ["broadcast.start", "broadcast.stop", "broadcast.active_view"]);
+    const badge = screen.getByTestId("active-broadcasts-badge");
+    return badge.querySelectorAll("*").length;
+  };
 
-  const panel = screen.getByTestId("active-broadcasts-panel");
-  expect(panel.querySelectorAll("button").length).toBe(0);
+  const withOne = await rowsAt(1);
+  const withFifty = await rowsAt(50);
+  expect(withFifty).toBe(withOne);
+  expect(screen.getByTestId("active-broadcasts-count").textContent).toBe("50");
 });
 
 // ===========================================================================

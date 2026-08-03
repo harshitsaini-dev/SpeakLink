@@ -159,6 +159,22 @@ EXPECTED: dict[str, object] = {
     "emergency_stop": "broadcast.emergency_stop",
     "active_broadcasts": "menu.broadcast.view",
     "current_broadcast": "menu.broadcast.view",
+
+    # Active Broadcasts supervision. All three are guarded by the PAGE
+    # permission, and the finer questions - may I see the broadcaster, the
+    # Stores, or stop somebody else's session - are answered inside each
+    # handler, because they shape the RESPONSE rather than deciding whether
+    # the route may be called at all. A single route-level permission cannot
+    # express "you may call this but will be told less", which is exactly
+    # what these endpoints do.
+    #
+    # broadcast.view_targets additionally gates active_management_stores as a
+    # hard refusal inside the handler, and broadcast.stop_any gates the
+    # cross-owner branch of active_management_stop. Both have their own tests
+    # in test_active_broadcast_management.py.
+    "active_management_list": "broadcast.active_view",
+    "active_management_stores": "broadcast.active_view",
+    "active_management_stop": "broadcast.active_view",
     "broadcast_history": "menu.history.view",
     "session_detail": "menu.history.view",
 

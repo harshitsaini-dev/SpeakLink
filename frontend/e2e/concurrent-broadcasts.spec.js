@@ -134,48 +134,58 @@ test('a Broadcaster has no Emergency Stop control', async ({ browser }) => {
 // ===========================================================================
 // SCENARIO 5 - the privileged view
 // ===========================================================================
-test('an Admin sees every active broadcast with its owner', async ({ browser }) => {
+// The cross-user list these tests used to assert has MOVED to
+// /active-broadcasts - see active-broadcasts.spec.js, which proves the
+// supervision page itself. What belongs here is the Console's own behaviour:
+// a compact badge and nothing more, whatever else is on air.
+test('an Admin gets a compact badge on the Console, not a list of broadcasts',
+     async ({ browser }) => {
   const admin = await operator(browser, {
     username: 'priya', role: 'ADMIN',
     activeSessions: [ALICE_SESSION, BOB_SESSION],
   });
   await admin.page.goto('/console');
 
-  const panel = admin.page.getByTestId('active-broadcasts-panel');
-  await expect(panel).toBeVisible();
-  await expect(admin.page.getByTestId('active-campaign-31'))
-    .toHaveText('Alice Diwali Offers');
-  await expect(admin.page.getByTestId('active-owner-31')).toHaveText('Alice Kumar');
-  await expect(admin.page.getByTestId('active-campaign-32'))
-    .toHaveText('Bob Evening Reminder');
+  await expect(admin.page.getByTestId('active-broadcasts-badge')).toBeVisible();
+  await expect(admin.page.getByTestId('active-broadcasts-count')).toHaveText('2');
+
+  // The old panel and its rows are gone.
+  await expect(admin.page.getByTestId('active-broadcasts-panel')).toHaveCount(0);
+  await expect(admin.page.getByTestId('active-campaign-31')).toHaveCount(0);
 
   await admin.context.close();
 });
 
-test('the privileged panel offers no Stop for somebody else\'s broadcast',
+test('the Console names no other operator, even for a privileged Admin',
      async ({ browser }) => {
   const admin = await operator(browser, {
     username: 'priya', role: 'ADMIN', activeSessions: [ALICE_SESSION, BOB_SESSION],
   });
   await admin.page.goto('/console');
 
-  const panel = admin.page.getByTestId('active-broadcasts-panel');
-  await expect(panel).toBeVisible();
-  // View-only. Cross-owner termination is Emergency Stop All and nothing else.
-  await expect(panel.locator('button')).toHaveCount(0);
+  // Ownership visibility is real, but it belongs on the supervision page.
+  // The Console is for broadcasting, and it stays that size.
+  const body = await admin.page.textContent('body');
+  expect(body).not.toContain('Alice Kumar');
+  expect(body).not.toContain('Bob Evening Reminder');
 
   await admin.context.close();
 });
 
-test('the privileged panel shows only the count the API returned',
+test('the Console badge offers no Stop for somebody else\'s broadcast',
      async ({ browser }) => {
   const admin = await operator(browser, {
-    username: 'priya', role: 'ADMIN',
-    activeSessions: [{ ...ALICE_SESSION, target_store_ids: [1] }],
+    username: 'priya', role: 'ADMIN', activeSessions: [ALICE_SESSION, BOB_SESSION],
   });
   await admin.page.goto('/console');
 
-  await expect(admin.page.getByTestId('active-target-count-31')).toHaveText('1');
+  const badge = admin.page.getByTestId('active-broadcasts-badge');
+  await expect(badge).toBeVisible();
+  // A link to the supervision page, never an action. Cross-owner termination
+  // is a deliberate act performed there, with its own permission.
+  await expect(badge.locator('button')).toHaveCount(0);
+  await expect(badge.getByTestId('active-broadcasts-link')).toBeVisible();
+
   await admin.context.close();
 });
 
@@ -210,7 +220,9 @@ test('confirming Emergency Stop clears every active broadcast', async ({ browser
   await expect(admin.page.getByTestId('emergency-result')).toContainText('2');
   // The Stores are free again, so nothing reads as busy.
   await expect(admin.page.getByTestId('store-busy-UN')).toHaveCount(0);
-  await expect(admin.page.getByTestId('active-broadcasts-empty')).toBeVisible();
+  // And the badge falls to zero - the count comes from the same active-truth
+  // source the supervision page reads.
+  await expect(admin.page.getByTestId('active-broadcasts-count')).toHaveText('0');
 
   await admin.context.close();
 });
@@ -225,7 +237,9 @@ test('cancelling Emergency Stop leaves every broadcast alone', async ({ browser 
   await admin.page.getByTestId('emergency-cancel-btn').click();
 
   await expect(admin.page.getByTestId('emergency-confirm-modal')).toHaveCount(0);
-  await expect(admin.page.getByTestId('active-campaign-31')).toBeVisible();
+  // Nothing was stopped: both broadcasts are still counted.
+  await expect(admin.page.getByTestId('active-broadcasts-count')).toHaveText('2');
+  await expect(admin.page.getByTestId('store-busy-UN')).toBeVisible();
 
   await admin.context.close();
 });
@@ -258,15 +272,17 @@ test('an Admin denied Emergency Stop does not get the button', async ({ browser 
   const admin = await operator(browser, {
     username: 'priya', role: 'ADMIN',
     permissions: ['menu.broadcast.view', 'broadcast.start', 'broadcast.stop',
-                  'broadcast.view_ownership', 'menu.stores.view',
-                  'menu.receivers.view', 'menu.history.view'],
+                  'broadcast.view_ownership', 'broadcast.active_view',
+                  'menu.stores.view', 'menu.receivers.view', 'menu.history.view'],
     activeSessions: [ALICE_SESSION],
   });
   await admin.page.goto('/console');
 
   await expect(admin.page.getByTestId('emergency-stop-btn')).toHaveCount(0);
-  // The ownership permission is unaffected - the capabilities are separate.
-  await expect(admin.page.getByTestId('active-broadcasts-panel')).toBeVisible();
+  // The other capabilities are unaffected - they are separate permissions,
+  // and denying the estate-wide one narrows nothing else.
+  await expect(admin.page.getByTestId('active-broadcasts-badge')).toBeVisible();
+  await expect(admin.page.getByTestId('nav-active-broadcasts')).toBeVisible();
 
   await admin.context.close();
 });
