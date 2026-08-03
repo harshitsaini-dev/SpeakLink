@@ -5465,3 +5465,52 @@ Development and acceptance only. The live HQ was not restarted and its User
 table was not migrated; the visible `admin`/`broadcaster` tombstones are still
 present live and will be released by the one-time startup migration at the next
 controlled restart checkpoint.
+
+---
+
+## True Store permanent delete (feature/true-store-permanent-delete)
+
+The same defect as the User one, in a second place. An operator permanently
+deleted the Store AYUSHK; it vanished from the list, and adding a Store with
+code AYUSHK was then refused with `store_code already exists`.
+`store_deletion.py` tombstoned the row and said so in its own docstring — the
+code was "never handed out to a new Store afterward".
+
+Deletion is now real: the row goes, the Store Code is released, and the
+replacement is a different Store. See `docs/STORE_DELETION.md`.
+
+### The trap, again
+
+`stores.id` had no `AUTOINCREMENT`. The live tombstones were ids 58, 59 and 60
+with **60 the maximum**, so deleting it and adding any Store would have handed
+the replacement id 60 plus every history row pointing there. Fixed the same
+way as Users: snapshot-based history plus `AUTOINCREMENT`.
+
+The two SQLite schema operations both features need — `drop_not_null` and
+`make_ids_never_reused` — are now in `sqlite_schema_surgery.py` rather than
+duplicated. Extracting them exposed a latent bug: the temporary-table rename
+used a plain string replace of `CREATE TABLE <name>` and silently missed the
+tables SQLAlchemy emits with a **quoted** name, which would have half-applied
+a migration.
+
+### Receiver identity
+
+A reused Store Code must not resurrect a Store's Receivers. Credentials are
+revoked by *status* (what authentication filters on, not merely a timestamp),
+Devices retired and detached with a code snapshot, enrolment codes backdated,
+and the `receiver_token` dies with the row.
+
+### Proven on a copy of the live database
+
+3 tombstones purged (58 `AYUSHK`, 59 `test`, 60 `ayushk`), stores 47 → 44,
+active 44 unchanged, archived unchanged. Device 5 detached and retired with
+snapshot `AYUSHK`; 29 Receiver events and 2 enrolment codes detached with
+history intact; audit preserved; idempotent. AYUSHK recreated as **id 61** —
+never reusing 58, 59 or 60 — with zero inherited Devices, credentials,
+enrolment codes, scopes or leases, its own `receiver_token`, and no historical
+row bound to it. `integrity_check ok`, `foreign_key_check` clean.
+
+### Not deployed
+
+Development and acceptance only. The live HQ was not restarted and its Store
+table was not migrated.
