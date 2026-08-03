@@ -5065,3 +5065,36 @@ what survived that intersection, so a scoped Admin cannot infer how many
 Stores they are not allowed to see.
 
 Normal Stop remains own-session-only for every role including OWNER.
+
+### The multi-broadcast console (2026-08-03)
+
+The UI no longer treats "a broadcast exists" as "I cannot broadcast".
+`GET /api/broadcast/active` is the source of truth and its redaction is
+respected exactly: `mine` in full, Scope-filtered `busy_store_ids` that say
+only that a Store is unavailable, and `sessions` with owner and campaign only
+for accounts holding `broadcast.view_ownership`.
+
+A busy Store is marked **IN USE** and cannot be selected. The badge says what,
+never who. Without the ownership permission there is no Active Broadcasts
+panel at all - not an anonymised one, because the server withholds even the
+number of other broadcasts.
+
+The privileged panel is view-only: no Stop beside another operator's
+broadcast, asserted by a test that counts buttons. `target_store_count` is
+printed as the API returned it, never recomputed, so a scoped Admin cannot
+infer how many Stores they may not see.
+
+**EMERGENCY STOP ALL** has its own confirmation naming other operators, and a
+partial failure renders a high-visibility error rather than a success. A
+STORE_BUSY start is fully refused - no microphone, no socket, no local live
+state - and a failed microphone start stops the half-started broadcaster.
+
+Proven with 112 frontend unit tests and 249 Playwright tests, including three
+operators live at once in three separate browser contexts, each seeing only
+their own broadcast.
+
+### Remaining before release
+
+The load matrix (2/5/10 concurrent sessions across 5-40 Stores), the Store Kit
+Settings Password, and release packaging. Live RC18 remains untouched and no
+new build has been installed.

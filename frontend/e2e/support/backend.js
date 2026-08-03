@@ -77,6 +77,7 @@ const OPERATOR = { id: 1, username: 'pilot-operator', role: 'admin' };
 // here would silently hide every button in every existing spec.
 const ALL_PERMISSION_CODES = [
   'menu.broadcast.view', 'broadcast.start', 'broadcast.stop', 'broadcast.emergency_stop',
+  'broadcast.view_ownership',
   'menu.stores.view', 'stores.create', 'stores.update', 'stores.archive',
   'stores.delete_permanently',
   'menu.receivers.view', 'devices.enrollment.create', 'devices.primary.assign',
@@ -97,8 +98,12 @@ const DEFAULT_ROLE_PERMISSIONS = {
   OWNER: ALL_PERMISSION_CODES,
   ADMIN: ALL_PERMISSION_CODES.filter(
     (c) => c !== 'users.permissions.manage' && !DESTRUCTIVE_CODES.includes(c)),
+  // broadcast.emergency_stop and broadcast.view_ownership are NOT here, and
+  // must not drift back: one stops every other operator's broadcast, the
+  // other reveals whose broadcast holds a Store. Mirrors
+  // permission_catalog.DEFAULT_ROLE_PERMISSIONS.
   BROADCASTER: ['menu.broadcast.view', 'broadcast.start', 'broadcast.stop',
-                'broadcast.emergency_stop', 'menu.history.view', 'menu.receivers.view',
+                'menu.history.view', 'menu.receivers.view',
                 'menu.stores.view'],
   VIEWER: ['menu.broadcast.view', 'menu.stores.view', 'menu.receivers.view',
            'menu.history.view', 'menu.logs.view'],
@@ -221,6 +226,12 @@ async function mockBackend(page, options = {}) {
     //: the distinction is invisible in the resulting list either way.
     bulkCalls: [],
     deletePermanentlyCalls: [],
+    //: Live broadcasts, as GET /broadcast/active would report them.
+    //: Each entry: {session_id, campaign_name, owner_username,
+    //: owner_display_name, owner_user_id, started_at, target_store_ids}.
+    activeSessions: options.activeSessions || [],
+    //: Makes emergency stop answer EMERGENCY_STOP_INCOMPLETE.
+    emergencyStopIncomplete: options.emergencyStopIncomplete || false,
   };
 
   await page.route('**/api/**', async (route) => {
@@ -840,6 +851,59 @@ async function mockBackend(page, options = {}) {
 
     if (method === 'GET' && path === '/broadcast/current') {
       return route.fulfill(json(state.current));
+    }
+
+    // Shaped exactly like GET /api/broadcast/active. The REDACTION happens
+    // here, as it does on the real server: without broadcast.view_ownership
+    // the sessions list is EMPTY rather than filled with anonymised stubs,
+    // because a stub still discloses how many other broadcasts exist.
+    if (method === 'GET' && path === '/broadcast/active') {
+      const mayViewOwnership = state.permissions.includes('broadcast.view_ownership');
+      const me = state.operator;
+      const mine = state.activeSessions.find((s) => s.owner_username === me.username) || null;
+      const others = state.activeSessions.filter((s) => s.owner_username !== me.username);
+      const busy = [];
+      state.activeSessions.forEach((s) => busy.push(...s.target_store_ids));
+      return route.fulfill(json({
+        mine: mine ? {
+          session_id: mine.session_id,
+          campaign_name: mine.campaign_name,
+          started_at: mine.started_at,
+          target_store_ids: mine.target_store_ids,
+          target_store_count: mine.target_store_ids.length,
+        } : null,
+        sessions: mayViewOwnership ? others.map((s) => ({
+          session_id: s.session_id,
+          campaign_name: s.campaign_name,
+          owner_user_id: s.owner_user_id,
+          owner_username: s.owner_username,
+          owner_display_name: s.owner_display_name,
+          started_at: s.started_at,
+          target_store_ids: s.target_store_ids,
+          target_store_count: s.target_store_ids.length,
+        })) : [],
+        busy_store_ids: busy,
+        may_view_ownership: mayViewOwnership,
+      }));
+    }
+
+    if (method === 'POST' && path === '/broadcast/emergency-stop') {
+      if (!state.permissions.includes('broadcast.emergency_stop')) {
+        return route.fulfill(json(
+          { detail: 'You do not have permission to perform this action.' }, 403));
+      }
+      if (state.emergencyStopIncomplete) {
+        return route.fulfill(json({ detail: {
+          code: 'EMERGENCY_STOP_INCOMPLETE',
+          message: 'Some broadcasts could not be stopped and may still be live.',
+          stopped_session_ids: [state.activeSessions[0]?.session_id].filter(Boolean),
+          failed_session_ids: [state.activeSessions[1]?.session_id].filter(Boolean),
+        } }, 500));
+      }
+      const stopped = state.activeSessions.map((s) => s.session_id);
+      state.activeSessions = [];
+      state.current = { live: false, session: null, targets: [], ready_receivers: [] };
+      return route.fulfill(json({ ok: true, session_ids: stopped }));
     }
 
     if (method === 'POST' && path === '/broadcast/sessions') {
