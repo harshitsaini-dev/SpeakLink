@@ -28,6 +28,21 @@ from tools.receiver_credential_store import FakeCredentialProtector  # noqa: E40
 from tools.windows_audio_devices import OutputDevice  # noqa: E402
 
 
+def _authorized():
+    """Proof that the Settings Password was entered.
+
+    These tests exercise ENROLMENT, not the authorization gate - that has
+    its own file - so they construct the proof directly. Separate tests
+    below assert an unauthorized call is refused.
+    """
+    from datetime import datetime, timezone
+
+    from tools.store_setup_core import SettingsAuthorization
+
+    return SettingsAuthorization(granted_at=datetime.now(timezone.utc))
+
+
+
 # ===========================================================================
 # Screen 1 - HQ connection
 # ===========================================================================
@@ -105,7 +120,7 @@ def test_a_successful_enrolment_reports_enrolled(tmp_path):
             return 201, {"device_public_id": "dev-123", "store_id": 7,
                         "credential": "speaklink_rcv_v1.11111111-1111-1111-1111-111111111111.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
 
-    result = core.redeem_enrollment(
+    result = core.redeem_enrollment(authorization=_authorized(), 
         backend_url="https://hq.example.com",
         code="ECHO-TEST-CODE",
         device_name="till-1",
@@ -123,7 +138,7 @@ def test_a_refused_code_is_generic_to_the_caller(tmp_path):
         def post_json(self, url, payload, *, timeout):
             return 410, {"detail": "expired"}
 
-    result = core.redeem_enrollment(
+    result = core.redeem_enrollment(authorization=_authorized(), 
         backend_url="https://hq.example.com",
         code="ECHO-EXPIRED-CODE",
         device_name="till-1",
@@ -148,7 +163,7 @@ def test_an_already_enrolled_computer_is_refused_without_spending_the_code(tmp_p
             called.append(1)
             return 201, {}
 
-    result = core.redeem_enrollment(
+    result = core.redeem_enrollment(authorization=_authorized(), 
         backend_url="https://hq.example.com", code="ECHO-A-CODE",
         device_name="till-1", hostname="TILL-1",
         credential_path=credential_path, protector=FakeCredentialProtector("test-computer"),

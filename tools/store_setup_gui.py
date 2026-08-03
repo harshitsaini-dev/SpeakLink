@@ -56,14 +56,144 @@ def confirm_removal(parent) -> bool:
         parent=parent, default="no"))
 
 
-def stop_receiver_task() -> None:
-    """Stop only the SpeakLink Store Receiver, never anything else on the PC."""
+def stop_receiver_task(authorization) -> None:
+    """Stop only the SpeakLink Store Receiver, never anything else on the PC.
+
+    Takes the authorization rather than reaching for one: this runs as part of
+    replacing a stale enrolment, which is already a protected flow, and the
+    proof travels with the call so this helper cannot become a way to stop a
+    Receiver without one.
+    """
     try:
-        core.stop_receiver(authorization=authorization, )
+        core.stop_receiver(authorization=authorization)
     except Exception:
         # A Receiver that is already stopped, or a task that was never
         # installed, is not a reason to refuse to clean up a stale identity.
         pass
+
+
+def _ask_settings_authorization(parent, app, action: str):
+    """Ask for the Settings Password once and return proof, or None.
+
+    ONE function, used by every screen. A comparison written beside a button
+    is how one button ends up unguarded, and the GUI is not the security
+    boundary anyway - core refuses an unauthorized call regardless.
+
+    Returns None when the operator cancels, gets it wrong, or the Store has no
+    Settings Password yet; the caller must then do nothing at all. A Store
+    with no password is sent to establish one rather than being let through,
+    which is the upgrade path.
+    """
+    from tkinter import simpledialog
+
+    if not settings_password.is_configured(app.settings_password_path):
+        messagebox.showinfo(
+            "Settings Password required",
+            f"{action} needs a Settings Password, and this Store does not have "
+            "one yet.\n\nUse the Set Settings Password action first. The "
+            "Receiver keeps running normally in the meantime.",
+            parent=parent)
+        return None
+    if not settings_password.read_verifier(app.settings_password_path)["readable"]:
+        messagebox.showerror(
+            "Settings Password unreadable",
+            "The Settings Password file cannot be read. Settings changes are "
+            "blocked. The Receiver continues running with its current "
+            "configuration. Contact an authorized administrator or support "
+            "operator.",
+            parent=parent)
+        return None
+
+    entered = simpledialog.askstring(
+        "Settings Password", f"{action}. Enter the Settings Password:",
+        show="*", parent=parent)
+    if not entered:
+        return None
+    try:
+        return core.authorize_settings(
+            entered, verifier_path=app.settings_password_path)
+    except settings_password.SettingsPasswordError as refusal:
+        # A small delay after a wrong attempt, in the GUI only. It never
+        # touches the Receiver Agent, and nothing is persisted - a counter on
+        # disk could be abused to deny a Store its own settings.
+        import time as _time
+
+        _time.sleep(0.75)
+        messagebox.showerror("Settings Password", str(refusal), parent=parent)
+        return None
+    finally:
+        entered = None
+
+
+def set_settings_password(parent, app) -> bool:
+    """Establish the FIRST Settings Password on this Store.
+
+    Changes nothing else: no config write, no credential touch, no Receiver
+    restart. Refuses over an existing or corrupt verifier, so this can never
+    become a reset.
+    """
+    from tkinter import simpledialog
+
+    first = simpledialog.askstring(
+        "Set Settings Password",
+        "Choose a Settings Password for this Store PC. "
+        f"At least {settings_password.MINIMUM_LENGTH} characters. It protects "
+        "configuration changes only - the Receiver keeps playing "
+        "announcements without it.",
+        show="*", parent=parent)
+    if not first:
+        return False
+    second = simpledialog.askstring(
+        "Set Settings Password", "Confirm the Settings Password:",
+        show="*", parent=parent)
+    try:
+        settings_password.establish_password(
+            app.settings_password_path, first, second or "")
+    except settings_password.SettingsPasswordError as refusal:
+        messagebox.showerror("Set Settings Password", str(refusal), parent=parent)
+        return False
+    finally:
+        first = second = None
+    messagebox.showinfo(
+        "Set Settings Password",
+        "The Settings Password is set. Nothing else changed - the Receiver, "
+        "its Device identity and its configuration are untouched.",
+        parent=parent)
+    return True
+
+
+def change_settings_password(parent, app) -> bool:
+    """Replace a known Settings Password. Verifies before writing anything."""
+    from tkinter import simpledialog
+
+    current = simpledialog.askstring(
+        "Change Settings Password", "Current Settings Password:",
+        show="*", parent=parent)
+    if not current:
+        return False
+    new = simpledialog.askstring(
+        "Change Settings Password", "New Settings Password:",
+        show="*", parent=parent)
+    if not new:
+        return False
+    confirm = simpledialog.askstring(
+        "Change Settings Password", "Confirm the new Settings Password:",
+        show="*", parent=parent)
+    try:
+        settings_password.change_password(
+            app.settings_password_path, current, new, confirm or "")
+    except settings_password.SettingsPasswordError as refusal:
+        messagebox.showerror("Change Settings Password", str(refusal), parent=parent)
+        return False
+    finally:
+        current = new = confirm = None
+    messagebox.showinfo(
+        "Change Settings Password",
+        "The Settings Password has been changed. The Receiver, its Device "
+        "identity and its configuration are unchanged.",
+        parent=parent)
+    return True
+
 
 DEFAULT_HQ_URL = "http://192.168.4.134:8000"
 WINDOW_TITLE = "SpeakLink Store Setup"
@@ -352,11 +482,21 @@ class EnrolmentScreen(ttk.Frame):
         credential_path = self.app.credential_path
         protector = self.app.protector
 
+        # Enrolment writes this computer's Device identity. On a fresh Store
+        # the wizard has already established a Settings Password, so this
+        # simply asks for it; on an existing Store this is the gate in front of
+        # re-enrolment.
+        authorization = _ask_settings_authorization(
+            self, self.app, "Enrolling this computer")
+        if authorization is None:
+            self.status_var.set("Cancelled. Nothing was enrolled.")
+            return
         self.status_var.set("ENROLLING...")
         self.enroll_button.config(state="disabled")
 
         def work():
             return core.redeem_enrollment(
+                authorization=authorization,
                 backend_url=backend_url,
                 code=code,
                 device_name=device_name,
@@ -1099,11 +1239,22 @@ class _AudioOutputDialog(tk.Toplevel):
 
     def _save_and_restart(self) -> None:
         device = self._selected_device()
+        # Authorization is asked for BEFORE anything is saved or restarted, and
+        # it is additional to - never a replacement for - the existing Test
+        # Sound and "I heard it" confirmation. A password proves who; hearing
+        # the tone proves the speaker actually works.
+        authorization = _ask_settings_authorization(
+            self, self.app, "Changing the audio output device")
+        if authorization is None:
+            self.status_var.set("Cancelled. Nothing was changed.")
+            self.save_button.config(state="normal")
+            return
         self.status_var.set("SAVING AND RESTARTING...")
         self.save_button.config(state="disabled")
 
         def work():
-            return core.change_audio_output(device=device)
+            return core.change_audio_output(device=device,
+                                            authorization=authorization)
 
         def done(result: "core.TaskActionResult"):
             self.status_var.set(f"{result.state.value}: {result.detail}")
@@ -1239,6 +1390,14 @@ class OldEnrolmentScreen(ttk.Frame):
         if not confirm_removal(self):
             self.status_var.set("Nothing was changed.")
             return
+        # Removing a stale enrolment deletes this computer's local identity, so
+        # it is a protected mutation like every other. Asked BEFORE the Yes/No
+        # is acted on, so a refusal leaves the old enrolment exactly as it was.
+        authorization = _ask_settings_authorization(
+            self, self.app, "Removing the old enrolment")
+        if authorization is None:
+            self.status_var.set("Nothing was changed.")
+            return
         self.remove_button.config(state="disabled")
         self.status_var.set("Removing the old setup...")
         state_root = self.app.state_root
@@ -1247,7 +1406,7 @@ class OldEnrolmentScreen(ttk.Frame):
         def work():
             # Stopped first: a running Receiver holding the old credential would
             # keep trying to authenticate against an HQ that already rejected it.
-            stop_receiver_task()
+            stop_receiver_task(authorization)
             return replace_local_enrolment(state_root=state_root,
                                            assessment=assessment)
 
