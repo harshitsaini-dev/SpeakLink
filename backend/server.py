@@ -19,7 +19,8 @@ from typing import List, Optional, Set
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import FileResponse, JSONResponse
+from starlette.staticfiles import StaticFiles
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -523,6 +524,43 @@ def _write_log(db: Session, level: str, message: str):
 @app.on_event("startup")
 def startup_event():
     Base.metadata.create_all(bind=engine)
+
+    # The Receiver Credential Lifecycle tables - Devices, credentials, their
+    # event log and the migration state row.
+    #
+    # These used to be created only by running migrations.py by hand, which was
+    # right when every HQ was migrated once from an older database by a
+    # documented runbook. It is wrong for a repository-native deployment, where
+    # a brand-new machine creates its database on first start and there is no
+    # earlier state to migrate FROM: without this, the database came up looking
+    # healthy and complete, and the first attempt to enrol a Store Receiver
+    # failed against tables that had never been created.
+    #
+    # Safe on every boot rather than only on a fresh one: the migration records
+    # itself in schema_migrations and returns immediately when it is already
+    # applied, so an existing HQ pays one SELECT for it.
+    #
+    # SQLite only, by design - the PostgreSQL schema comes from
+    # postgres_schema.py instead - so a Postgres deployment skips it rather
+    # than failing.
+    if engine.dialect.name == "sqlite":
+        try:
+            from migrations import (
+                ProtectedDatabaseError,
+                run_receiver_credential_phase_one,
+            )
+            run_receiver_credential_phase_one(engine)
+        except ProtectedDatabaseError:
+            # The historical development database, which is migrated only under
+            # an explicit maintenance opt-in. Not an error here.
+            logger.info("Receiver credential schema: protected database, skipped")
+        except Exception:
+            # ERROR, not warning: enrolment cannot work without these tables,
+            # and a quiet warning is how that reaches a Store instead of an
+            # operator.
+            logger.error("Receiver credential schema could not be prepared - "
+                         "enrolling a Store Receiver will fail until this is "
+                         "resolved", exc_info=True)
 
     # Additive and idempotent - a new table, no ALTER on anything that already
     # exists - so it is safe on every boot rather than needing a maintenance
@@ -4280,3 +4318,82 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ===========================================================================
+# The built React application, served by this same process
+# ===========================================================================
+#: Where the production build lives. Set by the repo-native launcher; absent in
+#: development and in the legacy two-port layout, where a separate server (the
+#: CRA dev server, or tools/spa_server.py) serves the frontend instead.
+FRONTEND_BUILD_ENV = "ECHOCAST_FRONTEND_BUILD"
+
+
+def _mount_frontend(application: FastAPI) -> Path | None:
+    """Serve the SPA from this process, on this origin.
+
+    WHY THIS IS WORTH DOING
+
+    The legacy layout ran two servers on two ports, which made every browser
+    request cross-origin and put CORS on the critical path of an internal LAN
+    tool. One origin removes that entire class of problem from production: no
+    preflight, no allow-list to keep in step with the machine's address, and no
+    "it works until somebody opens it by hostname instead of IP".
+
+    ORDER MATTERS
+
+    This runs AFTER app.include_router(api), so /api/* and the WebSocket routes
+    are matched first and a catch-all here can never shadow them. A request for
+    an unknown /api path must still be a JSON 404 from the router, not the HTML
+    index - an operator debugging a typo in an endpoint should not be handed a
+    web page that looks like it worked.
+
+    WHY A CATCH-ALL AND NOT StaticFiles(html=True) AT "/"
+
+    React Router owns paths like /active-broadcasts that exist only in the
+    browser. A plain static mount answers 404 for them, so a reload or a
+    bookmark breaks. Real files are served when they exist; everything else
+    falls through to index.html and the router sorts it out.
+    """
+    configured = os.environ.get(FRONTEND_BUILD_ENV, "").strip()
+    if not configured:
+        return None
+    build = Path(configured).expanduser().resolve()
+    index = build / "index.html"
+    if not index.is_file():
+        raise RuntimeError(
+            f"{FRONTEND_BUILD_ENV} points at {build}, which has no index.html. "
+            "Build the frontend first."
+        )
+
+    # Hashed assets under /static are immutable by construction - the filename
+    # changes whenever the content does - so they are safe to cache hard.
+    application.mount(
+        "/static", StaticFiles(directory=str(build / "static")), name="static")
+
+    @application.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        # /api is the router's. If execution reaches here with an /api path, the
+        # router already declined it, and the honest answer is 404 - never the
+        # SPA, which would turn a mistyped endpoint into an HTML page and a very
+        # confusing bug report.
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+
+        # A real file, if there is one - favicon.ico, manifest.json, robots.txt.
+        # Resolved and then checked to be INSIDE the build directory, so a
+        # crafted path cannot escape it.
+        if full_path:
+            candidate = (build / full_path).resolve()
+            if candidate.is_file() and build in candidate.parents:
+                return FileResponse(str(candidate))
+
+        return FileResponse(str(index))
+
+    return build
+
+
+FRONTEND_BUILD_DIR = _mount_frontend(app)
+if FRONTEND_BUILD_DIR:
+    logger.info("Serving the React application from %s on this origin",
+                FRONTEND_BUILD_DIR)

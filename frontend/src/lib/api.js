@@ -59,7 +59,13 @@ function currentLocation() {
   // Guarded so importing this module cannot throw where there is no DOM - a
   // server-side render or a bare unit test should degrade, not crash.
   if (typeof window === "undefined" || !window.location) {
-    return { hostname: "localhost", protocol: "http:" };
+    // Shaped like a real Location, including port and host, because the
+    // same-origin decision reads both. A partial stub here would silently
+    // choose same-origin for a page that has no origin at all.
+    return {
+      hostname: "localhost", protocol: "http:",
+      port: "", host: "localhost",
+    };
   }
   return window.location;
 }
@@ -70,6 +76,32 @@ function currentLocation() {
  * Exported so the resolution can be tested directly rather than inferred from
  * whatever `API_BASE` happens to be.
  */
+/**
+ * Was this page served by the same process that serves the API?
+ *
+ * In repo-native mode one Uvicorn worker serves /api, the WebSocket routes and
+ * the built React app on ONE origin, so every request can be relative and
+ * production needs no CORS at all. In the legacy two-port layout - and under
+ * the CRA dev server - the page comes from a frontend-only port while the API
+ * answers elsewhere, so its origin must still be constructed.
+ *
+ * The test is "did this page arrive on the API's own port", NOT "did it arrive
+ * on some port that isn't the dev server's". The looser version quietly
+ * reclassified an https page on the default port - a static host in front of a
+ * separate API, which is a real deployment - as same-origin, and broke it.
+ * Matching the API port states the condition exactly and leaves every other
+ * shape on the path it already used.
+ *
+ * Deciding from the PORT the page came from rather than from a build-time flag
+ * is what lets one bundle work unchanged whether it is opened as
+ * http://192.168.x.x:8000, http://hostname:8000 or a cloud hostname. A
+ * build-time constant describing a runtime fact is the exact defect the long
+ * note above this function records.
+ */
+function pageCameFromApiServer(location) {
+  return String(location.port || "") === BACKEND_PORT;
+}
+
 export function resolveBackendUrl(location = currentLocation()) {
   const configured = String(process.env.REACT_APP_BACKEND_URL || "").trim();
   const pageIsLoopback = isLoopback(location.hostname);
@@ -89,6 +121,10 @@ export function resolveBackendUrl(location = currentLocation()) {
       return candidate;
     }
   }
+
+  // Same origin: an empty base, so every request is relative. This is the
+  // repo-native production path, and it is why that mode needs no CORS at all.
+  if (pageCameFromApiServer(location)) return "";
 
   // Same scheme as the page. An https page loading an http API is blocked by the
   // browser as mixed content, which presents as a silent network failure.
@@ -145,6 +181,9 @@ export function isNetworkError(err) {
 
 /** The backend host to name in a "cannot reach the server" message. */
 export function backendDisplayHost() {
+  // Same-origin: the server the page came from IS the backend, so that is the
+  // honest thing to name. An empty string would produce "cannot reach ".
+  if (!BACKEND_URL) return currentLocation().host || "this server";
   try {
     return new URL(BACKEND_URL).host;
   } catch (error) {
@@ -155,6 +194,15 @@ export function backendDisplayHost() {
 export function wsUrl(path) {
   // http -> ws and https -> wss, taken from the resolved backend origin rather
   // than from the page, so an override governs both or neither.
+  //
+  // Same-origin leaves BACKEND_URL empty, and a WebSocket URL cannot be
+  // relative the way an XHR path can - it must carry a scheme and a host - so
+  // it is built from the page's own location, which is the same server.
+  if (!BACKEND_URL) {
+    const location = currentLocation();
+    const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    return `${scheme}//${location.host}/api${path}`;
+  }
   const base = BACKEND_URL.replace(/^http/, "ws");
   return `${base}/api${path}`;
 }
