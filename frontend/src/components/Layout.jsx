@@ -1,11 +1,15 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { Radio, LayoutDashboard, Store as StoreIcon, History, Radar, HardDrive, ScrollText, Users, KeyRound, LogOut, Menu, X } from "lucide-react";
+import { Radio, LayoutDashboard, Store as StoreIcon, History, Radar, HardDrive, ScrollText, Users, KeyRound, LogOut, Menu, X, Signal } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { MENU_PERMISSION_BY_PATH } from "@/lib/menuPermissions";
 
 const NAV = [
   { to: "/console", label: "Broadcast Console", icon: LayoutDashboard, testid: "nav-console" },
+  // Supervision, not broadcasting. Hidden unless broadcast.active_view is
+  // held - and ProtectedRoute blocks the URL independently, because a hidden
+  // link is presentation and never a boundary.
+  { to: "/active-broadcasts", label: "Active Broadcasts", icon: Signal, testid: "nav-active-broadcasts" },
   { to: "/stores", label: "Store Management", icon: StoreIcon, testid: "nav-stores" },
   { to: "/history", label: "Broadcast History", icon: History, testid: "nav-history" },
   { to: "/receivers", label: "Receiver Status", icon: Radar, testid: "nav-receivers" },

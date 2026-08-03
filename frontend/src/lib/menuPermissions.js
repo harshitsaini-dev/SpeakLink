@@ -9,6 +9,10 @@
  */
 export const MENU_PERMISSION_BY_PATH = {
   "/console": "menu.broadcast.view",
+  // Its own permission, not menu.broadcast.view: supervising everybody's
+  // broadcasts is a different capability from running your own, and an
+  // ordinary Broadcaster holds the second without the first.
+  "/active-broadcasts": "broadcast.active_view",
   "/stores": "menu.stores.view",
   "/history": "menu.history.view",
   "/receivers": "menu.receivers.view",
@@ -22,7 +26,7 @@ export const MENU_PERMISSION_BY_PATH = {
 
 /** The route a signed-in account should land on if its current one is denied. */
 export const FIRST_ALLOWED_ROUTE = [
-  "/console", "/stores", "/history", "/receivers", "/logs", "/users",
+  "/console", "/active-broadcasts", "/stores", "/history", "/receivers", "/logs", "/users",
 ];
 
 export function firstAllowedRoute(can) {

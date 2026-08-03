@@ -37,6 +37,7 @@ export function BroadcastProvider({ children }) {
   // The frontend never reconstructs what the backend withheld.
   const [active, setActive] = useState({
     mine: null, sessions: [], busy_store_ids: [], may_view_ownership: false,
+    may_view_targets: false, may_manage_active: false, active_count: null,
   });
 
   // Which active-state request is the current one. Responses can arrive out of
@@ -55,6 +56,12 @@ export function BroadcastProvider({ children }) {
         sessions: data?.sessions ?? [],
         busy_store_ids: data?.busy_store_ids ?? [],
         may_view_ownership: Boolean(data?.may_view_ownership),
+        may_view_targets: Boolean(data?.may_view_targets),
+        // Drives the compact Console badge only. Null when the account may
+        // not open the supervision page - the backend withholds the number
+        // itself rather than sending it for the UI to hide.
+        may_manage_active: Boolean(data?.may_manage_active),
+        active_count: data?.active_count ?? null,
       });
       return data;
     } catch {
