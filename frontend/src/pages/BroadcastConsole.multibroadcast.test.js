@@ -97,9 +97,13 @@ beforeEach(() => {
   // Create React App sets resetMocks, which strips an implementation passed to
   // jest.fn(impl) before every test and leaves api.get returning undefined.
   api.get.mockImplementation((path) => {
-    if (path === "/stores") return Promise.resolve({ data: STORES });
-    if (path === "/stores/meta/regions-cities") {
-      return Promise.resolve({ data: { regions: ["NORTH"], cities: ["DELHI"] } });
+    // The Console reads the broadcast TARGET catalog, not the administrative
+    // Store list: /stores is gated on "View Store Management", which used to
+    // make an operator without that permission see an empty table here.
+    if (path === "/broadcast/target-stores") {
+      return Promise.resolve({
+        data: { stores: STORES, regions: ["NORTH"], cities: ["DELHI"] },
+      });
     }
     return Promise.resolve({ data: {} });
   });
