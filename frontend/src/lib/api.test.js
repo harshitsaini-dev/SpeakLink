@@ -50,6 +50,7 @@ function loadApi({ href, hostname, protocol, port, backendUrl }) {
     hostname,
     protocol,
     port: port || "",
+    host: `${hostForHref}${port ? `:${port}` : ""}`,
     pathname: "/login",
   };
 
@@ -261,4 +262,66 @@ test("the backend port can be configured without naming a host", () => {
   // repository already says.
   expect(api.API_BASE).toBe("http://192.168.4.134:8000/api");
   expect(api.BACKEND_PORT).toBe("8000");
+});
+
+// ===========================================================================
+// Same-origin repo-native mode
+// ===========================================================================
+// One Uvicorn worker serves /api, the WebSocket routes and the built React
+// app on ONE origin. Every request is then relative, which is why repo-native
+// production needs no CORS at all - and why the same bundle works unchanged
+// from any hostname.
+test("a page served by the API itself uses relative URLs", () => {
+  const api = loadApi({ hostname: "192.168.4.134", protocol: "http:", port: "8000" });
+
+  expect(api.BACKEND_URL).toBe("");
+  expect(api.API_BASE).toBe("/api");
+});
+
+test("same-origin works from any hostname without rebuilding", () => {
+  for (const hostname of ["192.168.1.50", "hq.internal", "speaklink.example.com"]) {
+    const api = loadApi({ hostname, protocol: "http:", port: "8000" });
+    expect(api.API_BASE).toBe("/api");
+  }
+});
+
+test("the same-origin socket is built from the page's own host", () => {
+  const api = loadApi({ hostname: "hq.internal", protocol: "http:", port: "8000" });
+  expect(api.wsUrl("/ws/hq")).toBe("ws://hq.internal:8000/api/ws/hq");
+});
+
+test("an https same-origin page gets a wss socket", () => {
+  const api = loadApi({ hostname: "hq.example.com", protocol: "https:", port: "8000" });
+  expect(api.wsUrl("/ws/hq")).toBe("wss://hq.example.com:8000/api/ws/hq");
+});
+
+test("the legacy two-port layout still names the API origin explicitly", () => {
+  // The CRA dev server, and the legacy HQ where a static server served the
+  // build on 3000 while the API answered on 8000. This must not regress -
+  // it is the rollback path while repo-native mode is being proven.
+  const api = loadApi({ hostname: "192.168.4.134", protocol: "http:", port: "3000" });
+
+  expect(api.BACKEND_URL).toBe("http://192.168.4.134:8000");
+  expect(api.API_BASE).toBe("http://192.168.4.134:8000/api");
+  expect(api.wsUrl("/ws/hq")).toBe("ws://192.168.4.134:8000/api/ws/hq");
+});
+
+test("a static host on the default port still reaches the separate API", () => {
+  // port "" is not the API port, so this is NOT treated as same-origin.
+  const api = loadApi({ hostname: "hq.example.com", protocol: "https:", port: "" });
+  expect(api.BACKEND_URL).toBe("https://hq.example.com:8000");
+});
+
+test("same-origin names the real host in a cannot-reach message", () => {
+  const api = loadApi({ hostname: "hq.internal", protocol: "http:", port: "8000" });
+  // Never an empty string, which would render "cannot reach ".
+  expect(api.backendDisplayHost()).toBe("hq.internal:8000");
+});
+
+test("an explicit override still wins over same-origin", () => {
+  const api = loadApi({
+    hostname: "hq.internal", protocol: "http:", port: "8000",
+    backendUrl: "http://api.internal:9000",
+  });
+  expect(api.BACKEND_URL).toBe("http://api.internal:9000");
 });
