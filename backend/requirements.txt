@@ -1,3 +1,16 @@
+# emergentintegrations and litellm were removed on the repo-native checkpoint.
+#
+# Neither is imported anywhere in backend/ or tools/, and neither was present
+# in the virtual environment that has been running this product - so they were
+# scaffold left over from the project template, not dependencies.
+#
+# They had to go because they made this file uninstallable from scratch:
+# emergentintegrations==0.2.0 is not on PyPI at all, and litellm was pinned to
+# a wheel URL on a third-party asset host. A requirements file that cannot be
+# installed on a new machine defeats the point of a repository-native
+# deployment, where recreating the environment from these pins IS the
+# portability story. Nothing that the product imports was changed or upgraded.
+
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.1
 aiosignal==1.4.0
@@ -20,7 +33,6 @@ distro==1.9.0
 dnspython==2.8.0
 ecdsa==0.19.2
 email-validator==2.3.0
-emergentintegrations==0.2.0
 execnet==2.1.2
 fastapi==0.110.1
 fastuuid==0.14.0
@@ -56,7 +68,6 @@ jq==1.11.0
 jsonschema-specifications==2025.9.1
 jsonschema==4.26.0
 librt==0.12.0
-litellm @ https://customer-assets.emergentagent.com/internal-asset/library/litellm-1.80.0-py3-none-any.whl#sha256=adf398c513273de9341f61822296c6b2145f7f2dc4a69daf3ac04829f5bde3f8
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 mccabe==0.7.0
