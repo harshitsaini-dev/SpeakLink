@@ -6,9 +6,17 @@ import { Plus, RefreshCw, KeyRound, MonitorSmartphone, Pencil, Power, Archive, A
 import { useAdminList } from "@/lib/adminList";
 import { FilterBar, SearchInput, FilterSelect, ListState, Pager } from "@/components/AdminFilters";
 
-// A Store is never deleted. It owns Receiver Devices, broadcast sessions,
-// targets and events; removing the row would destroy the only record of what
-// was announced where. "Archive" retires it and keeps all of that readable.
+// Archive and Permanent Delete are different things and must stay different.
+//
+// ARCHIVE retires a Store, keeps its row, and keeps its Store Code reserved,
+// because it can be restored.
+//
+// PERMANENT DELETE removes the row and RELEASES the Store Code. History
+// survives because each Broadcast Target, Receiver event and Device keeps a
+// snapshot of the code, not because a hidden row is propping it up. A new
+// Store that later takes the same code is a different Store with a different
+// id, and inherits no Device, credential or history. See
+// backend/store_permanent_delete.py.
 //
 // Restore is deliberately separate from Re-enable, and returns a Store to
 // DISABLED rather than ACTIVE: un-retiring a Store is not a small decision, and
@@ -439,9 +447,13 @@ function TombstoneStoreModal({ store, onClose, onDeleted }) {
                 Nothing currently refers to this Store.
               </p>
             )}
-            <p className="text-sm text-red-800">
-              The Store will be permanently removed from operational EchoCast.
-              Historical records will remain for audit purposes.
+            <p className="text-sm text-red-800" data-testid="tombstone-consequences">
+              This permanently removes the Store and cannot be undone. Its Receiver
+              Devices are retired and their credentials revoked, so nothing that
+              authenticated as this Store can connect again. Historical audit records
+              remain readable. The Store Code becomes available for a new Store — which
+              will be a different Store, with a different ID and none of this Store's
+              Devices or history.
             </p>
 
             <label htmlFor="tombstone-confirm-input" className="block text-xs font-bold uppercase tracking-widest text-slate-500">
@@ -458,7 +470,8 @@ function TombstoneStoreModal({ store, onClose, onDeleted }) {
             <label className="flex items-start gap-2 text-sm pt-1">
               <input type="checkbox" data-testid="tombstone-acknowledge-checkbox"
                      checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} />
-              <span>I understand this Store cannot be restored.</span>
+              <span>I understand this Store cannot be restored, and that its Store
+                    Code becomes available for a completely new Store.</span>
             </label>
           </>
         )}

@@ -159,8 +159,11 @@ def test_super_admin_can_permanently_delete_a_store_with_history(client):
 
     resp = _delete(client, owner, store["id"], confirm=store["store_code"])
     assert resp.status_code == 200, resp.text
-    assert resp.json()["dependency_counts"]["broadcast_targets"] == 1
-    assert resp.json()["dependency_counts"]["receiver_devices"] == 1
+    body = resp.json()
+    assert body["row_deleted"] is True
+    assert body["store_code_released"] is True
+    assert body["history_detached"]["broadcast_targets.store_id"] == 1
+    assert body["devices_detached"] == 1
 
 
 def test_admin_cannot_permanently_delete_a_store(client):
@@ -261,13 +264,16 @@ def test_direct_operations_against_a_deleted_store_are_refused(client):
     store = _target_store(client, owner)
     _delete(client, owner, store["id"], confirm=store["store_code"])
 
+    # 404 everywhere, not 409. There is no row left to refuse a transition on,
+    # which is the honest answer once deletion is real - a 409 would imply the
+    # Store still exists in some state.
     assert client.put(f"/api/stores/{store['id']}", headers=owner,
                       json={"store_name": "Should Not Work"}).status_code == 404
     assert client.post(f"/api/stores/{store['id']}/regenerate-token",
                        headers=owner).status_code == 404
-    assert client.post(f"/api/stores/{store['id']}/archive", headers=owner).status_code == 409
-    assert client.post(f"/api/stores/{store['id']}/disable", headers=owner).status_code == 409
-    assert client.post(f"/api/stores/{store['id']}/enable", headers=owner).status_code == 409
+    for action in ("archive", "disable", "enable"):
+        assert client.post(f"/api/stores/{store['id']}/{action}",
+                           headers=owner).status_code == 404, action
 
 
 def test_a_deleted_store_can_never_be_restored(client):
@@ -276,7 +282,7 @@ def test_a_deleted_store_can_never_be_restored(client):
     _delete(client, owner, store["id"], confirm=store["store_code"])
 
     resp = client.post(f"/api/stores/{store['id']}/restore", headers=owner)
-    assert resp.status_code == 409
+    assert resp.status_code == 404
 
 
 def test_deleting_an_already_deleted_store_is_refused_not_reapplied(client):
@@ -286,7 +292,7 @@ def test_deleting_an_already_deleted_store_is_refused_not_reapplied(client):
     assert first.status_code == 200
 
     second = _delete(client, owner, store["id"], confirm=store["store_code"])
-    assert second.status_code == 409
+    assert second.status_code == 409  # refusal: that Store no longer exists
 
 
 # ===========================================================================
@@ -302,7 +308,11 @@ def test_broadcast_history_remains_readable_and_shows_the_deleted_store(client):
     detail = client.get(f"/api/broadcast/sessions/{history_info['session_id']}", headers=owner)
     assert detail.status_code == 200, detail.text
     body = detail.json()
-    assert body["targets"][0]["store_id"] == store["id"]
+    target = body["targets"][0]
+    # The pointer is gone; the identity is not. Reading history must not
+    # depend on a Store row that an operator deleted.
+    assert target["store_id"] is None
+    assert target["store_code"] == store["store_code"]
 
     history = client.get("/api/broadcast/history", headers=owner)
     assert history.status_code == 200
@@ -317,11 +327,20 @@ def test_broadcast_target_rows_remain_in_the_database(client):
 
     from sqlalchemy import text
     with client.server_module.engine.connect() as connection:
-        count = connection.execute(
+        # The ROW stays - that is the history. The POINTER is nulled, because
+        # stores has no AUTOINCREMENT and a dangling id would be reissued to
+        # the next Store created.
+        still_pointing = connection.execute(
             text("SELECT COUNT(*) FROM broadcast_targets WHERE store_id = :i"),
             {"i": store["id"]},
         ).scalar_one()
-    assert count == 1
+        kept = connection.execute(
+            text("SELECT COUNT(*) FROM broadcast_targets "
+                 "WHERE store_code_snapshot = :c"),
+            {"c": store["store_code"]},
+        ).scalar_one()
+    assert still_pointing == 0
+    assert kept == 1
 
 
 def test_receiver_events_remain_in_the_database(client):
@@ -332,11 +351,17 @@ def test_receiver_events_remain_in_the_database(client):
 
     from sqlalchemy import text
     with client.server_module.engine.connect() as connection:
-        count = connection.execute(
+        still_pointing = connection.execute(
             text("SELECT COUNT(*) FROM receiver_events WHERE store_id = :i"),
             {"i": store["id"]},
         ).scalar_one()
-    assert count == 1
+        kept = connection.execute(
+            text("SELECT COUNT(*) FROM receiver_events "
+                 "WHERE store_code_snapshot = :c"),
+            {"c": store["store_code"]},
+        ).scalar_one()
+    assert still_pointing == 0
+    assert kept == 1
 
 
 def test_device_history_remains_but_device_is_retired(client):
@@ -409,14 +434,17 @@ def test_pending_enrollment_codes_become_unusable(client):
     store = _target_store(client, owner)
     _give_store_full_history(client, store_id=store["id"], owner_headers=owner)
     resp = _delete(client, owner, store["id"], confirm=store["store_code"])
-    assert resp.json()["enrollment_codes_revoked"] == 1
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["history_detached"]["receiver_enrollment_codes.store_id"] == 1
 
     from sqlalchemy import text
     with client.server_module.engine.connect() as connection:
+        # The row survives as evidence of what was issued, detached from the
+        # Store, and backdated so it can never be redeemed.
         row = connection.execute(
-            text("SELECT expires_at_epoch FROM receiver_enrollment_codes WHERE store_id = :i"),
-            {"i": store["id"]},
+            text("SELECT expires_at_epoch, store_id FROM receiver_enrollment_codes"),
         ).first()
+    assert row.store_id is None
     assert row.expires_at_epoch <= datetime.now(timezone.utc).timestamp()
 
 
@@ -440,16 +468,25 @@ def test_foreign_key_check_and_integrity_check_are_clean_after_deletion(client):
 # ===========================================================================
 # 21. Store code cannot silently be reused
 # ===========================================================================
-def test_a_deleted_stores_code_cannot_silently_be_reused(client):
+def test_a_deleted_stores_code_becomes_available_again(client):
+    """The defect this feature exists to fix.
+
+    The old tombstone kept the row, so the UNIQUE index kept the Store Code,
+    and an operator who permanently deleted AYUSHK could never create AYUSHK
+    again. Deleting means the code is free - and the Store that takes it is a
+    DIFFERENT Store, with a different id.
+    """
     owner = sign_in(client)
     store = _target_store(client, owner)
     _delete(client, owner, store["id"], confirm=store["store_code"])
 
-    clash = client.post("/api/stores", headers=owner, json={
-        "store_code": store["store_code"], "store_name": "Reused Code Attempt",
+    created = client.post("/api/stores", headers=owner, json={
+        "store_code": store["store_code"], "store_name": "A Different Shop",
         "city": store["city"], "region": store["region"],
     })
-    assert clash.status_code == 409
+    assert created.status_code == 201, created.text
+    assert created.json()["id"] != store["id"], (
+        "the replacement Store reused the deleted Store's id")
 
 
 # ===========================================================================
