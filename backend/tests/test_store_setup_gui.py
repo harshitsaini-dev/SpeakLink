@@ -23,6 +23,18 @@ for candidate in (REPOSITORY_ROOT, REPOSITORY_ROOT / "backend"):
 from tools import store_setup_core as core  # noqa: E402
 from tools.receiver_credential_store import FakeCredentialProtector  # noqa: E402
 
+
+#: Proof that the Settings Password was entered. These tests exercise the
+#: MUTATION, not the gate - the gate has its own file - so they construct the
+#: authorization directly rather than typing a password each time.
+def _authorized():
+    from datetime import datetime, timezone
+
+    from tools.store_setup_core import SettingsAuthorization
+
+    return SettingsAuthorization(granted_at=datetime.now(timezone.utc))
+
+
 try:
     import tkinter as tk
 
@@ -257,6 +269,22 @@ def _all_button_texts(widget) -> "list[str]":
     return found
 
 
+
+def _unlock_settings(application):
+    """Stand in for the operator typing the Settings Password.
+
+    The GUI now asks before any mutating action. These tests exercise the
+    MUTATION, not the gate - the gate has its own file - so the screen's one
+    authorization helper is replaced with a granted proof. Replacing that ONE
+    method is only possible because every mutating handler goes through it;
+    if a handler ever compares a password itself, this stops working, which is
+    the point.
+    """
+    screen = application._current
+    screen._authorize = lambda action: _authorized()
+    return screen
+
+
 def test_replace_device_identity_leaves_the_computer_needing_a_fresh_code(tmp_path):
     """After a CONFIRMED replace, this computer must genuinely be un-enrolled -
     so the next enrolment demands a real code rather than reusing the old
@@ -271,6 +299,7 @@ def test_replace_device_identity_leaves_the_computer_needing_a_fresh_code(tmp_pa
 
     application, credential_path = _enrolled_app(tmp_path)
     try:
+        _unlock_settings(application)
         application._current.confirm_var.set(core_module.CONFIRMATION_WORD)
         application._current._replace_identity()
 
@@ -373,7 +402,7 @@ def test_replace_identity_with_the_exact_word_proceeds(tmp_path):
 
     application, credential_path = _enrolled_app(tmp_path)
     try:
-        screen = application._current
+        screen = _unlock_settings(application)
         screen.confirm_var.set(core_module.CONFIRMATION_WORD)
         screen._replace_identity()
         assert not credential_path.exists()
