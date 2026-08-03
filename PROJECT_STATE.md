@@ -5098,3 +5098,45 @@ their own broadcast.
 The load matrix (2/5/10 concurrent sessions across 5-40 Stores), the Store Kit
 Settings Password, and release packaging. Live RC18 remains untouched and no
 new build has been installed.
+
+### Concurrent broadcast load validation (2026-08-03)
+
+Measured on one Uvicorn worker - the deployment shape - against a throwaway
+pilot profile on a free loopback port. Live ports, catalog and credentials
+were never touched.
+
+| Scenario | CPU (of 1 core) | RSS peak | Max queue depth | Drops | Stop | Verdict |
+|---|---|---|---|---|---|---|
+| 5 Stores / 2 sessions | 1.5% | 84 MB | 1 | 0 | 39 ms | GREEN |
+| 10 Stores / 5 sessions | 1.8% | 87 MB | 1 | 0 | 87 ms | GREEN |
+| 20 Stores / 5 sessions | 3.0% | 90 MB | 1 | 0 | 110 ms | GREEN |
+| 40 Stores / 10 sessions | 5.1% | 99 MB | 1 | 0 | 188 ms | GREEN |
+| 40 Stores / 7 uneven (12/8/6/5/4/3/2) | 4.6% | 98 MB | 1 | 0 | 143 ms | GREEN |
+| **Soak: 40 Stores / 10 sessions / 10 min** | 3.8% | 100 MB | 1 | 0 | 166 ms | GREEN |
+
+Soak delivered **91,600 chunks with zero drops**. RSS plateaued rather than
+climbing: second-half mean 98.66 MB against a first-half mean of 99.31 MB.
+Enqueue latency across 22,900 samples: median 0.22 ms, p95 0.68 ms, max
+1.83 ms.
+
+**The bounded queue was proven by actually filling it.** At the live ~1 kB
+profile a stalled Store never exerts backpressure within a short run, so that
+scenario proves nothing; with 64 kB payloads the stalled Store's queue reached
+**exactly 24 = capacity and never exceeded it**, dropped 60 chunks, and **no
+healthy Store dropped anything**. One slow Store delayed neither its siblings
+nor any other session.
+
+Other results: 20 churn cycles (60 sessions) left zero leases and zero
+sessions; a contended Store under live streaming produced exactly one winner
+and one privacy-safe STORE_BUSY; Emergency Stop All cleared 6 sessions over 18
+Stores in 39 ms with leases settled in 14 ms and a safe second call; a real
+process restart marked 3 orphaned sessions `failed`, released all 6 leases,
+and the Stores were immediately reusable.
+
+**Limitation:** these runs measure routing, queueing and lifecycle with marked
+byte payloads, deliberately not audio decoding - identical Opus frames cannot
+prove where a chunk came from. Decode correctness remains the job of
+local_audio_pilot and the staging smoke. No acoustic claim is made anywhere.
+
+Result artifacts are JSON written to a scratch directory and are not
+committed.
