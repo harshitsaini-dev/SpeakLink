@@ -196,6 +196,9 @@ def change_settings_password(parent, app) -> bool:
 
 
 DEFAULT_HQ_URL = "http://192.168.4.134:8000"
+#: One button whose label reflects what is on disk, so an operator is
+#: never offered "Change" on a Store that has no password.
+SETTINGS_PASSWORD_BUTTON_LABEL = "Settings Password"
 WINDOW_TITLE = "EchoCast Store Setup"
 
 
@@ -920,6 +923,7 @@ class RerunScreen(ttk.Frame):
             ("Export Redacted Diagnostics", self._export_diagnostics),
             ("Open Log Folder", self._open_log_folder),
             ("Uninstall Application", self._uninstall),
+            (SETTINGS_PASSWORD_BUTTON_LABEL, self._settings_password),
         )):
             ttk.Button(button_row, text=label, command=handler, width=26).grid(
                 row=column // 2, column=column % 2, padx=4, pady=2, sticky="w")
@@ -1090,6 +1094,37 @@ class RerunScreen(ttk.Frame):
 
 
     # -- Settings Password ------------------------------------------------
+    def _settings_password(self) -> None:
+        """One button, three outcomes, decided by what is actually on disk.
+
+        No verifier   -> Set Settings Password.
+        Valid verifier-> Change Settings Password.
+        CORRUPT       -> a support message and NOTHING ELSE. Deliberately no
+                         reset path: offering "set a new one" over an
+                         unreadable file would make corrupting it the way past
+                         the password, which is the whole protection.
+        """
+        described = settings_password.read_verifier(self.app.settings_password_path)
+        if described["configured"] and not described["readable"]:
+            messagebox.showerror(
+                "Settings Password unreadable",
+                "The Settings Password file on this computer cannot be read. "
+                "Settings changes are blocked. The Receiver continues running "
+                "with its current configuration and keeps playing "
+                "announcements. Contact an authorized administrator or "
+                "support operator - there is no reset available here.",
+                parent=self)
+            self.status_var.set(
+                "Settings changes are blocked: the Settings Password file "
+                "cannot be read. The Receiver is unaffected.")
+            return
+        if described["configured"]:
+            if change_settings_password(self, self.app):
+                self.status_var.set("The Settings Password has been changed.")
+            return
+        if set_settings_password(self, self.app):
+            self.status_var.set("The Settings Password is now set.")
+
     def _authorize(self, action: str):
         """Ask for the Settings Password once, and return the proof.
 

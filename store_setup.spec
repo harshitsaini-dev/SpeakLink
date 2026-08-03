@@ -22,6 +22,12 @@ analysis = Analysis(
     hiddenimports=[
         "tools.store_setup_gui",
         "tools.store_setup_core",
+        # store_setup_core imports it at module level, so the analysis would
+        # find it anyway. Named explicitly because the whole Settings Password
+        # gate lives in it: if it ever failed to bundle, the frozen Store Kit
+        # would raise on import rather than quietly running unprotected - but
+        # this list is where a reader looks to confirm it travels.
+        "tools.store_kit_settings_password",
         "tools.receiver_agent",
         "tools.receiver_credential_store",
         "tools.audio_receiver_pilot",
