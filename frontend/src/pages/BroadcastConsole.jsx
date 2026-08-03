@@ -1,4 +1,5 @@
 import React from "react";
+import { Link } from "react-router-dom";
 import { Mic, MicOff, Play, Square, AlertOctagon, Search, RefreshCcw, Users, Wifi, WifiOff, Radio } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
@@ -287,55 +288,32 @@ export default function BroadcastConsole() {
         </div>
       )}
 
-      {/* ACTIVE BROADCASTS - only for accounts holding broadcast.view_ownership.
-          Without that permission the backend sends an EMPTY sessions list, not
-          redacted stubs, so there is deliberately nothing here to render: even
-          the NUMBER of other broadcasts is withheld. This panel is view-only -
-          there is no Stop beside somebody else's broadcast, because ordinary
-          Stop is own-session-only and the one cross-owner control is Emergency
-          Stop All. */}
-      {active?.may_view_ownership && (
-        <div data-testid="active-broadcasts-panel"
-             className="border border-slate-200 bg-white rounded-md shadow-sm p-4">
-          <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-700">
-            Active Broadcasts
+      {/* A COMPACT LINK, NOT A LIST.
+          This used to render every other operator's broadcast as table rows.
+          That was readable with one concurrent broadcast and unusable with
+          twenty: the Console is where somebody speaks into a microphone, and
+          it was growing without bound behind the controls they came for.
+          Supervision moved to its own page, and what stays here is one line
+          whose height does not depend on how many broadcasts are live -
+          fifty active sessions render exactly the same badge as one.
+          Shown only for accounts holding broadcast.active_view; without it
+          the backend sends active_count: null, so even the NUMBER is
+          withheld rather than hidden client-side. */}
+      {active?.may_manage_active && (
+        <div data-testid="active-broadcasts-badge"
+             className="border border-slate-200 bg-white rounded-md shadow-sm px-4 py-3 flex items-center justify-between gap-4">
+          <div className="text-sm text-slate-700">
+            <span className="font-bold uppercase tracking-[0.15em] text-xs text-slate-500 mr-2">
+              Active Broadcasts
+            </span>
+            <span data-testid="active-broadcasts-count" className="font-semibold text-slate-900">
+              {active.active_count ?? 0}
+            </span>
           </div>
-          {active.sessions.length === 0 ? (
-            <p data-testid="active-broadcasts-empty" className="mt-2 text-sm text-slate-500">
-              No other operator is broadcasting.
-            </p>
-          ) : (
-            <table className="mt-2 w-full text-sm">
-              <thead className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
-                <tr>
-                  <th className="px-2 py-1">Broadcast</th>
-                  <th className="px-2 py-1">Owner</th>
-                  <th className="px-2 py-1">Started</th>
-                  <th className="px-2 py-1">Stores</th>
-                </tr>
-              </thead>
-              <tbody>
-                {active.sessions.map((s) => (
-                  <tr key={s.session_id} data-testid={`active-session-${s.session_id}`}
-                      className="border-b border-slate-100">
-                    <td className="px-2 py-1 font-medium"
-                        data-testid={`active-campaign-${s.session_id}`}>{s.campaign_name}</td>
-                    <td className="px-2 py-1" data-testid={`active-owner-${s.session_id}`}>
-                      {s.owner_display_name || s.owner_username}
-                    </td>
-                    <td className="px-2 py-1 text-xs text-slate-600">{s.started_at || "—"}</td>
-                    {/* The count comes from the API and is already narrowed to
-                        this viewer's Store Scope. It is NOT recomputed here and
-                        never shows a total the viewer may not see. */}
-                    <td className="px-2 py-1 text-xs"
-                        data-testid={`active-target-count-${s.session_id}`}>
-                      {s.target_store_count}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+          <Link to="/active-broadcasts" data-testid="active-broadcasts-link"
+                className="text-sm font-medium text-blue-700 hover:text-blue-900 hover:underline">
+            View →
+          </Link>
         </div>
       )}
 

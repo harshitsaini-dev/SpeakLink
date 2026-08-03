@@ -548,11 +548,12 @@ function RightsEditor({ user, onCancel, onSaved }) {
    * Every other admin list on this product filters on the server, because
    * every other one is unbounded - Logs and History grow forever, and Stores,
    * Users and Devices grow with the business. The permission catalog does
-   * not. It is 29 fixed rows defined in backend/permission_catalog.py, all of
-   * them already fetched by the single request above, and a new one appears
-   * only when somebody writes code to add it. Sending a round trip per
-   * keystroke to narrow 29 rows already in memory would be slower and would
-   * add an endpoint whose only job is re-filtering a constant.
+   * not. It is a few dozen fixed rows defined in
+   * backend/permission_catalog.py, all of them already fetched by the single
+   * request above, and a new one appears only when somebody writes code to
+   * add it. Sending a round trip per keystroke to narrow rows already in
+   * memory would be slower and would add an endpoint whose only job is
+   * re-filtering a constant.
    *
    * The rule this exception is measured against: filter on the server when
    * the row count is driven by data, on the client when it is driven by
