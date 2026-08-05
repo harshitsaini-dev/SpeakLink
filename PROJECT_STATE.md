@@ -6042,3 +6042,59 @@ Backend **3314 passed**, 90 skipped. No forbidden content in the package.
 No live HQ deployment, no Store touched, no second Store. The one-Store
 uninstall/reinstall and physical acceptance are outstanding and must use this
 kit, not 1.4.1.
+
+---
+
+## Output-control state model, and master-volume load acceptance
+
+Commits `84cda53` (+ docs). Store Kit **1.5.1**.
+
+### Four states, not two
+
+"Not supported by this Receiver" covered two different situations and only one
+was this software's fault. The Receiver now reports which, because only it
+knows — `capabilities.output_control_status`:
+
+| status | HQ shows | remedy |
+|---|---|---|
+| `unknown` | Not supported by this Receiver | new Store Kit |
+| `needs_output_selection` | Re-select the Store audio output | 30 s in Store Setup |
+| `unavailable` | Store audio output unavailable | check the output device |
+| `ready` | working slider and mute | — |
+
+Defaults to `unknown`, so an older Receiver — which omits the capabilities
+block entirely — keeps reading as genuinely unsupported rather than inheriting
+a friendlier explanation it never earned. HQ never infers the reason itself.
+
+### Load: 5 / 10 / 20 / 40 Stores, mocked endpoints
+
+| Stores | Req | Sent | ACK | ACK p95 | Max queue | Dropped | CPU s | RSS MB | Latest wins | Prepared | Restored |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 5 | 25 | 26 | 26 | 764 ms | 1 / 24 | 0 | 0.28 | 84.3 | 5/5 | 5 | 5 |
+| 10 | 50 | 41 | 41 | 759 ms | 1 / 24 | 0 | 0.34 | 86.3 | 7/8 | 8 | 8 |
+| 20 | 100 | 91 | 91 | 755 ms | 1 / 24 | 0 | 0.58 | 89.6 | 17/18 | 18 | 18 |
+| 40 | 200 | 191 | 191 | 0.14 ms | 1 / 24 | 0 | 1.67 | 95.7 | 37/38 | 38 | 38 |
+
+`Sent < Req` is correct: the old-Receiver Store and the unselected-output Store
+are never sent a command. The p95 fall at 40 Stores is the slow Store becoming
+a smaller fraction of the sample — minimum ACK stayed at 0.07 ms while it took
+~760 ms, which **is** the isolation result.
+
+**Restoration held at every scale**: `endpoints_left_changed` empty, and every
+Store finished at its original volume *and* original mute.
+**`pcm_gain_left_at_unity` true at every scale** — no double attenuation.
+Replayed stale ACKs rejected everywhere. Concurrent broadcasts isolated, each
+operator refused 403 on the other's session.
+
+| | |
+|---|---|
+| ZIP | `artifacts/EchoCast-Store-Kit-1.5.1-84cda53-20260805-143704.zip` |
+| SHA-256 | `71791e54b4fca424b153e9b37fce5bf635800e50668144ac9640d2c5a7bbede7` |
+| Receiver **1.2.1** · Kit **1.5.1** | 1.2.0–1.5.0 retained |
+
+Backend **3313 passed** (1 pre-existing order-dependent flake, reproduced on an
+untouched base commit), frontend **211**, Playwright **300**, build OK.
+
+### Live HQ restart IS required
+
+Backend and frontend both changed. Not deployed here.
