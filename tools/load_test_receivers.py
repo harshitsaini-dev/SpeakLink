@@ -54,13 +54,37 @@ HEARTBEAT_SECONDS = 5.0
 class SyntheticReceiver:
     """One null-sink Receiver: correct protocol, no audio device, no FFmpeg."""
 
-    def __init__(self, store_id: int, store_code: str, token: str, url: str) -> None:
+    def __init__(self, store_id: int, store_code: str, token: str, url: str,
+                 *, supports_audio_control: bool = True,
+                 audio_control_result: str = "applied",
+                 audio_control_delay_seconds: float = 0.0) -> None:
         self.store_id = store_id
         self.store_code = store_code
         self._token = token  # never logged, never placed in a URL
         self._url = url
         self._factory = MessageFactory()
         self._socket = None
+
+        # ---- audio control behaviour, so one harness can model the whole
+        # ---- estate: modern Stores, an old Receiver, a broken output, and a
+        # ---- slow one that must not hold anybody else up.
+        self.supports_audio_control = supports_audio_control
+        self.audio_control_result = audio_control_result
+        self.audio_control_delay_seconds = audio_control_delay_seconds
+
+        #: When set, this Receiver replays an acknowledgement for an EARLIER
+        #: command after answering the newest one - the late-ACK race, made
+        #: deterministic. HQ must keep the newer applied value.
+        self.replay_stale_ack = False
+        self._replayed_stale_ack = False
+
+        self.audio_commands_received = 0
+        self.audio_acks_sent = 0
+        self.audio_stale_commands_ignored = 0
+        self.audio_latencies_ms: list[float] = []
+        self._last_audio_command_id = 0
+        self.volume_percent = 100
+        self.muted = False
 
         self.connect_ms: float | None = None
         self.ready_ms: float | None = None
@@ -91,6 +115,73 @@ class SyntheticReceiver:
 
     async def _send(self, message_type: str, **fields) -> None:
         await self._socket.send(json.dumps(self._factory.build(message_type, **fields)))
+
+    async def _on_audio_control(self, payload: dict, session_id: int | None) -> None:
+        """Apply an output-volume command and acknowledge honestly.
+
+        A Receiver that does not support the capability should never be sent
+        one of these at all, so receiving one is itself worth recording rather
+        than silently tolerating.
+        """
+        self.audio_commands_received += 1
+        arrived = time.perf_counter()
+        command_id = payload.get("command_id")
+
+        if payload.get("session_id") != session_id:
+            # A command for a broadcast this Store is not running.
+            self.audio_stale_commands_ignored += 1
+            return
+        if not isinstance(command_id, int) or command_id <= self._last_audio_command_id:
+            # Older than something already applied: the newest command already
+            # describes everything this Store should be doing.
+            self.audio_stale_commands_ignored += 1
+            return
+        self._last_audio_command_id = command_id
+
+        if self.audio_control_delay_seconds:
+            # The slow Store. Its own acknowledgement is late; nobody else's
+            # may be, which is the property this whole harness exists to test.
+            await asyncio.sleep(self.audio_control_delay_seconds)
+
+        if not self.supports_audio_control:
+            await self._send(
+                "audio_control", session_id=session_id, command_id=command_id,
+                requested_volume_percent=payload.get("volume_percent"),
+                requested_muted=payload.get("muted"),
+                result="unsupported", error_code="OUTPUT_CONTROL_UNSUPPORTED",
+                details="this Receiver has no controllable audio output",
+            )
+        elif self.audio_control_result == "failed":
+            await self._send(
+                "audio_control", session_id=session_id, command_id=command_id,
+                requested_volume_percent=payload.get("volume_percent"),
+                requested_muted=payload.get("muted"),
+                result="failed", error_code="OUTPUT_CONTROL_FAILED",
+                details="the output level could not be applied",
+            )
+        else:
+            self.volume_percent = payload.get("volume_percent", self.volume_percent)
+            self.muted = bool(payload.get("muted", self.muted))
+            await self._send(
+                "audio_control", session_id=session_id, command_id=command_id,
+                requested_volume_percent=payload.get("volume_percent"),
+                requested_muted=payload.get("muted"),
+                applied_volume_percent=self.volume_percent,
+                applied_muted=self.muted, result="applied",
+                output_device="index:0",
+            )
+        self.audio_acks_sent += 1
+        self.audio_latencies_ms.append((time.perf_counter() - arrived) * 1000)
+
+        if self.replay_stale_ack and not self._replayed_stale_ack and command_id > 1:
+            self._replayed_stale_ack = True
+            await self._send(
+                "audio_control", session_id=session_id,
+                command_id=command_id - 1,
+                requested_volume_percent=1, requested_muted=False,
+                applied_volume_percent=1, applied_muted=False,
+                result="applied", output_device="index:0",
+            )
 
     async def run(self, broadcast_started: asyncio.Event) -> None:
         """Serve until the socket closes. Text is a command, binary is audio."""
@@ -126,12 +217,22 @@ class SyntheticReceiver:
                     # The prepare command names it broadcast_session_id; the stop
                     # command names it session_id. Accept either.
                     session_id = payload.get("broadcast_session_id") or payload.get("session_id")
-                    await self._send("receiver_ready", session_id=session_id)
+                    # Capability reporting, exactly as the real Receiver does:
+                    # omitted entirely for a Store modelling an older build.
+                    if self.supports_audio_control:
+                        await self._send(
+                            "receiver_ready", session_id=session_id,
+                            capabilities={"output_volume": True, "output_mute": True},
+                        )
+                    else:
+                        await self._send("receiver_ready", session_id=session_id)
                     self.ready_ms = (time.perf_counter() - prepare_clock[0]) * 1000
                     self.states.append("READY")
                 elif kind == "stop":
                     await self._send("stopped", session_id=session_id)
                     self.states.append("STOPPED")
+                elif kind == "set_audio_control":
+                    await self._on_audio_control(payload, session_id)
                 elif kind == "ack_rejected":
                     self.errors.append(str(payload.get("code")))
         except asyncio.CancelledError:

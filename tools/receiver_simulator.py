@@ -38,10 +38,12 @@ SUPPORTED_MESSAGE_TYPES = frozenset(
         "playback_error",
         "device_error",
         "stopped",
+        "audio_control",
     }
 )
 SESSION_SCOPED_TYPES = frozenset(
-    {"audio_receiving", "playback_confirmed", "playback_error", "stopped"}
+    {"audio_receiving", "playback_confirmed", "playback_error", "stopped",
+     "audio_control"}
 )
 SCENARIOS = (
     "ready-only",
@@ -120,6 +122,14 @@ class MessageFactory:
         details: str | None = None,
         recoverable: bool = False,
         reason: str | None = None,
+        capabilities: dict[str, bool] | None = None,
+        command_id: int | None = None,
+        requested_volume_percent: int | None = None,
+        requested_muted: bool | None = None,
+        applied_volume_percent: int | None = None,
+        applied_muted: bool | None = None,
+        result: str | None = None,
+        output_device: str | None = None,
     ) -> dict[str, Any]:
         if message_type not in SUPPORTED_MESSAGE_TYPES:
             raise SimulatorConfigurationError("unsupported receiver message type")
@@ -145,6 +155,10 @@ class MessageFactory:
                     "output_device_checks_passed": True,
                 }
             )
+            # Omitted entirely when not asked for, which is exactly how an
+            # older Receiver behaves - and how HQ recognises one.
+            if capabilities is not None:
+                payload["capabilities"] = capabilities
         if message_type in {"playback_error", "device_error"}:
             payload.update(
                 {
@@ -155,6 +169,27 @@ class MessageFactory:
             )
         if message_type == "stopped" and reason is not None:
             payload["reason"] = reason
+        if message_type == "audio_control":
+            payload.update(
+                {
+                    "command_id": command_id,
+                    "requested_volume_percent": requested_volume_percent,
+                    "requested_muted": requested_muted,
+                    "result": result or "applied",
+                }
+            )
+            # Only an APPLIED result may carry applied values. An unsupported
+            # or failed Receiver changed nothing and must not report a level.
+            if applied_volume_percent is not None:
+                payload["applied_volume_percent"] = applied_volume_percent
+            if applied_muted is not None:
+                payload["applied_muted"] = applied_muted
+            if output_device is not None:
+                payload["output_device"] = output_device
+            if error_code is not None:
+                payload["error_code"] = error_code
+            if details is not None:
+                payload["details"] = details
 
         try:
             acknowledgement = parse_receiver_ack(payload)

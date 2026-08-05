@@ -283,18 +283,36 @@ def test_a_copy_of_the_pilot_database_migrates_cleanly(tmp_path):
     pilot = Path(os.environ.get("LOCALAPPDATA", "")) / "SpeakLink" / "local-pilot" / "data" / "speaklink_local_pilot.db"
     if not pilot.exists():
         pytest.skip("no isolated pilot database on this machine")
+    if PHASE_ONE_TABLES & _tables(pilot):
+        # Already migrated, so there is nothing for this tool to do and
+        # `applied` is correctly False. That is the normal state of any pilot
+        # database prepared by a current release - `prepare()` creates these
+        # tables itself - so this test can only exercise a real migration on a
+        # machine still carrying one from an older build. Skipped honestly
+        # rather than rewritten to assert the no-op, which would test nothing.
+        pytest.skip("the local pilot database is already migrated")
 
     copy = tmp_path / "pilot-copy.db"
     shutil.copy2(pilot, copy)
     before_stores = _rows(copy, "stores")
+    # What the original looks like BEFORE the copy is migrated. Recorded rather
+    # than assumed: this used to assert the pilot had no phase-one tables at
+    # all, which was never a statement about this tool. It only held while the
+    # machine happened to carry a pilot database created by a release that
+    # predated those tables - today `prepare()` itself creates them, so the
+    # assertion tested the age of a local artefact rather than any behaviour.
+    pilot_tables_before = _tables(pilot)
+    pilot_stores_before = _rows(pilot, "stores")
 
     result = apply_phase_one(copy, backup_dir=tmp_path / "backups")
 
     assert result["applied"] is True
     assert PHASE_ONE_TABLES <= _tables(copy)
     assert _rows(copy, "stores") == before_stores
-    # The original is untouched: only the copy was migrated.
-    assert not (PHASE_ONE_TABLES & _tables(pilot))
+    # The original is untouched: only the copy was migrated. Compared against
+    # its own earlier state, which is what "untouched" actually means.
+    assert _tables(pilot) == pilot_tables_before
+    assert _rows(pilot, "stores") == pilot_stores_before
 
 
 # ---------------------------------------------------------------------------
