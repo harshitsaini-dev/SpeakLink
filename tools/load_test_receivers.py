@@ -99,6 +99,26 @@ class SyntheticReceiver:
         #: Set for a Store that upgraded but never re-selected its output.
         self.endpoint_configured = True
 
+        # ---- what somebody at the till does, and what HQ learns about it ----
+        #: The session this Receiver is currently serving, needed by the
+        #: telemetry pump, which runs outside the receive loop.
+        self.session_id: int | None = None
+        #: ONE slot, never a queue. A person dragging the Windows slider emits
+        #: a notification per step; only where it stopped is true by the time
+        #: HQ draws it, and a queue would let one noisy Store grow without
+        #: bound on a socket that is also carrying audio.
+        self._pending_state: tuple[int, bool] | None = None
+        self._state_sequence = 0
+        #: Local changes made (generated) versus frames actually put on the
+        #: wire (transmitted). The gap between them IS the coalescing.
+        self.endpoint_states_generated = 0
+        self.endpoint_states_transmitted = 0
+        #: When set, this Store sends one telemetry frame with a state_sequence
+        #: that goes BACKWARDS, so the discard rule is proven against the real
+        #: backend and not only in a unit test.
+        self.replay_stale_state = False
+        self._replayed_stale_state = False
+
         self.connect_ms: float | None = None
         self.ready_ms: float | None = None
         self.first_chunk_ms: float | None = None
@@ -106,6 +126,53 @@ class SyntheticReceiver:
         self.bytes = 0
         self.errors: list[str] = []
         self.states: list[str] = []
+
+    def local_change(self, volume_percent: int, muted: bool | None = None) -> None:
+        """Somebody at the till moves the Windows slider.
+
+        This deliberately does NOT touch endpoint_original_*. The pre-broadcast
+        snapshot is the sole restoration authority, and a live change must
+        never be mistaken for it - that is the property the harness checks
+        after the stop.
+        """
+        if not self.endpoint_configured or not self.supports_audio_control:
+            # No endpoint to watch, so nothing to report. HQ learns why from
+            # the capability status, not from silence.
+            return
+        self.endpoint_volume = max(0, min(100, volume_percent))
+        if muted is not None:
+            self.endpoint_muted = bool(muted)
+        self.endpoint_states_generated += 1
+        self._pending_state = (self.endpoint_volume, self.endpoint_muted)
+
+    async def telemetry_pump(self, interval: float = 0.15) -> None:
+        """Send the LATEST reading each tick, dropping the intermediates."""
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                reading, self._pending_state = self._pending_state, None
+                if reading is None or self.session_id is None or self._socket is None:
+                    continue
+                volume_percent, muted = reading
+                self._state_sequence += 1
+                try:
+                    await self._send(
+                        "endpoint_state", session_id=self.session_id,
+                        state_sequence=self._state_sequence,
+                        volume_percent=volume_percent, muted=muted)
+                    self.endpoint_states_transmitted += 1
+                except Exception:
+                    return
+
+                if self.replay_stale_state and not self._replayed_stale_state                         and self._state_sequence > 1:
+                    self._replayed_stale_state = True
+                    await self._send(
+                        "endpoint_state", session_id=self.session_id,
+                        state_sequence=self._state_sequence - 1,
+                        volume_percent=1, muted=False)
+                    self.endpoint_states_transmitted += 1
+        except asyncio.CancelledError:
+            raise
 
     async def connect(self) -> None:
         started = time.perf_counter()
@@ -235,6 +302,7 @@ class SyntheticReceiver:
                     # The prepare command names it broadcast_session_id; the stop
                     # command names it session_id. Accept either.
                     session_id = payload.get("broadcast_session_id") or payload.get("session_id")
+                    self.session_id = session_id
                     # Capability reporting, exactly as the real Receiver does:
                     # omitted entirely for a Store modelling an older build.
                     if self.supports_audio_control and self.endpoint_configured:
@@ -261,6 +329,11 @@ class SyntheticReceiver:
                     self.ready_ms = (time.perf_counter() - prepare_clock[0]) * 1000
                     self.states.append("READY")
                 elif kind == "stop":
+                    # Reporting stops BEFORE restoration, so putting the
+                    # original state back is never itself announced to HQ as
+                    # though somebody had moved the slider.
+                    self.session_id = None
+                    self._pending_state = None
                     # Restoration: the Store's own volume and mute go back.
                     if self.endpoint_prepared:
                         self.endpoint_volume = self.endpoint_original_volume

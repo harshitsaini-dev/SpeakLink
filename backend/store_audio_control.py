@@ -108,6 +108,20 @@ class StoreAudioState:
     last_error_message: str | None = None
     output_device: str | None = None
 
+    # ---- what the Store's Windows output is ACTUALLY doing ----------------
+    #
+    # Kept apart from requested_* on purpose. HQ asking for 80% and the person
+    # at the till then moving the slider to 25% are both true, and collapsing
+    # them would make the Console display a number nobody could act on. The
+    # requested value is what this operator asked for; the actual value is
+    # what the shop is doing, and the actual value is what the Console shows.
+    actual_volume_percent: int | None = None
+    actual_muted: bool | None = None
+    #: Monotonic per Receiver session. Telemetry older than this is discarded,
+    #: so a delayed notification cannot drag the Console backwards.
+    actual_state_sequence: int = 0
+    actual_state_updated_at: str | None = None
+
     @property
     def pending(self) -> bool:
         """A command is in flight: sent, not yet answered."""
@@ -132,6 +146,10 @@ class StoreAudioState:
             "error_message": self.last_error_message,
             "output_device": self.output_device,
             "pending": self.pending,
+            "actual_volume_percent": self.actual_volume_percent,
+            "actual_muted": self.actual_muted,
+            "actual_state_sequence": self.actual_state_sequence,
+            "actual_state_updated_at": self.actual_state_updated_at,
         }
 
 
@@ -310,6 +328,50 @@ class StoreAudioControlRegistry:
                 last_error_code=error_code,
                 last_error_message=error_message,
                 output_device=output_device or state.output_device,
+            )
+            control.stores[int(store_id)] = updated
+            return updated
+
+
+    def observe_endpoint_state(self, *, session_id: int, store_id: int,
+                               state_sequence: int, volume_percent: int,
+                               muted: bool, observed_at: str | None = None):
+        """Record what a Store's Windows output is actually doing.
+
+        Telemetry, not a command result: it updates the ACTUAL fields and
+        never touches requested_* or any command id. A Store user turning the
+        volume down does not retract the operator's request, and must not look
+        like one.
+
+        Returns None when the update is stale or not ours, so the caller sends
+        no dashboard notification for it.
+        """
+        from datetime import datetime, timezone
+
+        with self._lock:
+            control = self._sessions.get(session_id)
+            if control is None:
+                # An old session reporting into a broadcast that has ended, or
+                # one that was never ours. Ignored rather than applied.
+                return None
+            state = control.stores.get(int(store_id))
+            if state is None:
+                return None
+            if state_sequence <= state.actual_state_sequence:
+                # Out of order. The newest reading already on file is the one
+                # that is true; an older one arriving late is not news.
+                return None
+            volume_percent = _validate_volume(volume_percent)
+            if not isinstance(muted, bool):
+                raise StoreAudioControlError("muted must be true or false")
+
+            updated = replace(
+                state,
+                actual_volume_percent=volume_percent,
+                actual_muted=muted,
+                actual_state_sequence=state_sequence,
+                actual_state_updated_at=observed_at
+                or datetime.now(timezone.utc).isoformat(),
             )
             control.stores[int(store_id)] = updated
             return updated

@@ -1312,9 +1312,18 @@ class DeviceReceiverSession(AudioReceiverPilot):
         self._write_status("CONNECTED", detail="the backend accepted this Device credential")
 
         heartbeat = asyncio.create_task(self._heartbeat_loop(connection))
+        # Reports what the Windows output is actually doing, so a change made
+        # at the till reaches HQ. Started alongside the heartbeat and torn down
+        # with it: it must not outlive the connection it writes to.
+        telemetry = asyncio.create_task(self._endpoint_state_loop(connection))
         try:
             await self._session_loop(connection)
         finally:
+            telemetry.cancel()
+            try:
+                await telemetry
+            except (asyncio.CancelledError, Exception):
+                pass
             heartbeat.cancel()
             try:
                 await heartbeat

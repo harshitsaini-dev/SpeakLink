@@ -223,6 +223,30 @@ class AudioControlAcknowledgement(SessionAcknowledgement):
         return _reject_control_characters(value) if value is not None else None
 
 
+class EndpointStateAcknowledgement(SessionAcknowledgement):
+    """What the Store's Windows output is doing RIGHT NOW.
+
+    Telemetry, not a reply. It is emitted whenever the endpoint's master
+    volume or mute changes, whoever caused it - SpeakLink, the taskbar, the
+    keyboard volume keys, another application. HQ could previously set a
+    Store's volume but never see it, so a person at the till moving the slider
+    from 80% to 25% left the Console confidently displaying 80%.
+
+    ``state_sequence`` is monotonic per Receiver session and is what keeps a
+    delayed notification from dragging the Console backwards: HQ discards
+    anything not newer than what it already holds.
+
+    Deliberately carries no credential, no endpoint id and no device secret.
+    The Store is already identified by the authenticated socket it arrives on,
+    and repeating identity in the payload only creates something to leak.
+    """
+
+    type: Literal["endpoint_state"]
+    state_sequence: int = Field(ge=1)
+    volume_percent: int = Field(ge=0, le=100)
+    muted: bool
+
+
 ReceiverAcknowledgement = Annotated[
     Union[
         ReceiverReadyAcknowledgement,
@@ -233,6 +257,7 @@ ReceiverAcknowledgement = Annotated[
         StoppedAcknowledgement,
         HeartbeatAcknowledgement,
         AudioControlAcknowledgement,
+        EndpointStateAcknowledgement,
     ],
     Field(discriminator="type"),
 ]
@@ -430,6 +455,11 @@ def apply_receiver_ack(
     elif isinstance(ack, StoppedAcknowledgement):
         _validate_active_session(result, ack.session_id)
         result = replace(result, playback=PlaybackState.STOPPED)
+    elif isinstance(ack, EndpointStateAcknowledgement):
+        # Changes NO status, exactly like audio_control. How loud a shop is has
+        # nothing to do with whether it is connected, ready or playing - and a
+        # Store user nudging the volume must not look like a fault.
+        _validate_active_session(result, ack.session_id)
     elif isinstance(ack, AudioControlAcknowledgement):
         # Deliberately changes NO status. How loud a Store is playing is
         # orthogonal to whether it is connected, ready, or playing: a muted

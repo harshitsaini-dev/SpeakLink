@@ -85,6 +85,28 @@ def _post_audio_control(base_url, token, session_id, store_id, **body):
     return response.status_code, (response.json() if response.content else {})
 
 
+def _read_audio_control(base_url, token, session_id) -> dict:
+    """Read the control state without issuing a command.
+
+    Reading with a POST would make the very thing under test - that HQ learns
+    the Store's actual level without asking - impossible to tell apart from HQ
+    hearing its own command back.
+    """
+    import requests
+
+    response = requests.get(
+        f"{base_url}/api/broadcast/sessions/{session_id}/audio-control",
+        headers={"Authorization": f"Bearer {token}"}, timeout=20)
+    return response.json() if response.status_code == 200 else {}
+
+
+def _actual_row(state: dict, store_id: int) -> dict:
+    for row in (state or {}).get("stores", []):
+        if row.get("store_id") == store_id:
+            return row
+    return {}
+
+
 def _latest_wins_summary(state: dict, receivers) -> dict:
     """Did the last value of the drag survive, on every Store that can apply it?
 
@@ -168,12 +190,24 @@ async def _drive_audio_control(paths, store_count: int, port: int,
     # say WHY rather than calling the Receiver unsupported.
     if len(receivers) > 5:
         receivers[5].endpoint_configured = False
+    # And one replays a telemetry frame whose state_sequence goes BACKWARDS.
+    if len(receivers) > 6:
+        receivers[6].replay_stale_state = True
+
+    # The noisy Store: somebody at the till drags the Windows slider hard while
+    # the broadcast runs. Store 0 by choice, because it is also the Store the
+    # driver reads state back from.
+    noisy = receivers[0]
 
     started = asyncio.Event()
     await asyncio.gather(*(r.connect() for r in receivers))
     tasks = [asyncio.create_task(r.run(started)) for r in receivers]
+    # Every Store reports its own endpoint. The pumps run alongside the receive
+    # loops, exactly as they do in the real Receiver.
+    tasks += [asyncio.create_task(r.telemetry_pump()) for r in receivers]
 
     state_after_drag = {}
+    state_before_stop = {}
     requested = 0
     accepted = 0
     refused = {}
@@ -272,6 +306,36 @@ async def _drive_audio_control(paths, store_count: int, port: int,
                         volume_percent=150)
                     refused[f"out_of_range_{status}"] = 1
 
+                # ---- Telemetry churn, while audio is flowing.
+                if index == 4:
+                    # A hard drag: forty local changes inside one chunk
+                    # interval. HQ must end up with where it STOPPED, and the
+                    # count on the wire must be far smaller than forty.
+                    for level in range(30, 70):
+                        noisy.local_change(level)
+                if index == 7:
+                    # The till mutes, then unmutes, at the Windows mixer.
+                    noisy.local_change(55, muted=True)
+                    await asyncio.sleep(0.4)
+                    noisy.local_change(55, muted=False)
+                if index == 8:
+                    # A Store whose endpoint cannot be controlled, and one that
+                    # never re-selected an output, both have a go. Neither may
+                    # put anything on the wire.
+                    for receiver in receivers[1:6]:
+                        receiver.local_change(42)
+                    # The slow Store reports too; its lateness must not delay
+                    # anybody else's telemetry.
+                    if len(receivers) > 3:
+                        receivers[3].local_change(37)
+                # The stale-telemetry Store needs TWO readings before it can
+                # replay an older one, so it changes twice with a pump tick in
+                # between. HQ must keep the second and discard the replay.
+                if index == 12 and len(receivers) > 6:
+                    receivers[6].local_change(64)
+                if index == 14 and len(receivers) > 6:
+                    receivers[6].local_change(58)
+
                 if index == len(chunks) // 2:
                     queue_metrics = _read_audio_metrics(base_url, token)
 
@@ -295,6 +359,11 @@ async def _drive_audio_control(paths, store_count: int, port: int,
             # command as a stale value, which is a bug in the harness rather
             # than in the product.
             await asyncio.sleep(3.0)
+            # A final local change with NOTHING in flight from HQ, so what is
+            # read back below can only have come from telemetry.
+            noisy.local_change(23, muted=False)
+            await asyncio.sleep(1.5)
+            state_before_stop = _read_audio_control(base_url, token, session_id)
             _, state_after_drag = _post_audio_control(
                 base_url, token, session_id, receivers[0].store_id, muted=False)
 
@@ -376,6 +445,45 @@ async def _drive_audio_control(paths, store_count: int, port: int,
             # have followed the HQ slider anywhere.
             "pcm_gain_left_at_unity": all(
                 r.volume_percent == 100 and r.muted is False for r in receivers),
+            # ---- two-way synchronisation -----------------------------------
+            # Generated is what happened at the tills; transmitted is what
+            # reached HQ. Transmitted being much smaller is the coalescing
+            # working, not telemetry being lost.
+            "endpoint_states_generated": sum(
+                r.endpoint_states_generated for r in receivers),
+            "endpoint_states_transmitted": sum(
+                r.endpoint_states_transmitted for r in receivers),
+            "noisy_store_code": noisy.store_code,
+            "noisy_store_generated": noisy.endpoint_states_generated,
+            "noisy_store_transmitted": noisy.endpoint_states_transmitted,
+            # What HQ believed the noisy Store was doing, read from the server.
+            "hq_actual_volume_percent": _actual_row(
+                state_before_stop, noisy.store_id).get("actual_volume_percent"),
+            "hq_actual_muted": _actual_row(
+                state_before_stop, noisy.store_id).get("actual_muted"),
+            "hq_matches_store": (
+                _actual_row(state_before_stop, noisy.store_id).get(
+                    "actual_volume_percent") == 23),
+            # Stores with no controllable endpoint must report nothing at all.
+            # The replayed OLDER reading claimed 1%. HQ must still be showing
+            # the newer 58, read back from the server.
+            "stale_telemetry_store_code": (
+                receivers[6].store_code if len(receivers) > 6 else None),
+            "stale_telemetry_transmitted": (
+                receivers[6].endpoint_states_transmitted if len(receivers) > 6
+                else None),
+            "hq_ignored_stale_telemetry": (
+                _actual_row(state_before_stop, receivers[6].store_id).get(
+                    "actual_volume_percent") == 58 if len(receivers) > 6 else None),
+            "silent_stores_transmitted": sum(
+                r.endpoint_states_transmitted for r in receivers
+                if not r.endpoint_configured or not r.supports_audio_control),
+            # THE restoration property: a live change at the till must not have
+            # become the thing that gets put back.
+            "restored_to_original_not_live": all(
+                r.endpoint_volume == r.endpoint_original_volume
+                and r.endpoint_muted == r.endpoint_original_muted
+                for r in receivers if r.endpoint_prepared),
             "slow_store_code": receivers[3].store_code if len(receivers) > 3 else None,
             "unsupported_store_code": (
                 receivers[1].store_code if len(receivers) > 1
@@ -482,6 +590,7 @@ async def _drive_concurrent_isolation(paths, store_count: int, port: int,
     started = asyncio.Event()
     await asyncio.gather(*(r.connect() for r in receivers))
     tasks = [asyncio.create_task(r.run(started)) for r in receivers]
+    tasks += [asyncio.create_task(r.telemetry_pump()) for r in receivers]
     started.set()
 
     refusals = 0
@@ -511,6 +620,17 @@ async def _drive_concurrent_isolation(paths, store_count: int, port: int,
         _post_audio_control(base_url, operators["bob"], sessions["bob"],
                             bob_store, muted=True)
         await asyncio.sleep(1.5)
+
+        # Each estate's tills move their own Windows sliders. One operator's
+        # telemetry must never appear in the other's Console, and it must not
+        # look like a command either operator issued.
+        by_store = {r.store_id: r for r in receivers}
+        by_store[alice_store].local_change(18, muted=False)
+        by_store[bob_store].local_change(64, muted=False)
+        await asyncio.sleep(1.0)
+        alice_live = _read_audio_control(base_url, operators["alice"],
+                                         sessions["alice"])
+        bob_live = _read_audio_control(base_url, operators["bob"], sessions["bob"])
 
         alice_status, alice_state = _post_audio_control(
             base_url, operators["alice"], sessions["alice"], alice_store,
@@ -551,6 +671,21 @@ async def _drive_concurrent_isolation(paths, store_count: int, port: int,
             "cross_owner_refused": refusals,
             "cross_owner_accepted": accepted,
             "cross_status_codes": [cross_status, reverse_status],
+            "alice_actual_volume_percent": _actual_row(
+                alice_live, alice_store).get("actual_volume_percent"),
+            "bob_actual_volume_percent": _actual_row(
+                bob_live, bob_store).get("actual_volume_percent"),
+            # Nobody else in either session may have acquired a reading.
+            "alice_others_have_no_actual_state": all(
+                row.get("actual_volume_percent") is None
+                for store_id, row in
+                {r["store_id"]: r for r in alice_live.get("stores", [])}.items()
+                if store_id != alice_store),
+            "bob_others_have_no_actual_state": all(
+                row.get("actual_volume_percent") is None
+                for store_id, row in
+                {r["store_id"]: r for r in bob_live.get("stores", [])}.items()
+                if store_id != bob_store),
             "alice_read_status": alice_status,
             "bob_read_status": bob_status,
         }

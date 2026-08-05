@@ -311,3 +311,68 @@ test("polling stops when the operator lacks the capability", async () => {
   await act(async () => { jest.advanceTimersByTime(9100); });
   expect(api.get).not.toHaveBeenCalled();
 });
+
+// ===========================================================================
+// No feedback loop
+// ===========================================================================
+test("incoming actual-state telemetry never issues a command", async () => {
+  // The loop this guards against: HQ sends 80 -> Windows becomes 80 ->
+  // Receiver reports 80 -> the client sees 80 and POSTs 80 again -> for ever.
+  // Telemetry updates DISPLAYED state only; only an operator gesture sends.
+  await mount();
+  api.post.mockClear();
+
+  api.get.mockResolvedValue({
+    data: { session_id: 5, stores: [row(1, {
+      supported: true, online: true, control_status: "ready",
+      requested_volume_percent: 80, applied_volume_percent: 80,
+      actual_volume_percent: 25, actual_muted: false,
+      actual_state_sequence: 3, last_command_id: 2,
+      last_acknowledged_command_id: 2, result: "applied", pending: false })] },
+  });
+  await act(async () => { jest.advanceTimersByTime(3100); });
+
+  expect(hook.states[1].actual_volume_percent).toBe(25);
+  expect(api.post).not.toHaveBeenCalled();
+});
+
+test("repeated telemetry polls still issue no commands", async () => {
+  await mount();
+  api.post.mockClear();
+  api.get.mockResolvedValue({
+    data: { session_id: 5, stores: [row(1, {
+      supported: true, actual_volume_percent: 25, actual_muted: false,
+      actual_state_sequence: 4, pending: false })] },
+  });
+  await act(async () => { jest.advanceTimersByTime(12100); });
+  expect(api.post).not.toHaveBeenCalled();
+});
+
+test("an operator gesture still sends exactly one command", async () => {
+  // The other half: telemetry being silent must not make the control inert.
+  await mount();
+  api.post.mockClear();
+  await act(async () => { hook.setVolume(1, 45); });
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(api.post.mock.calls[0][1]).toEqual({ store_id: 1, volume_percent: 45 });
+});
+
+test("older telemetry cannot move the displayed state backwards", async () => {
+  await mount();
+  api.get.mockResolvedValue({
+    data: { session_id: 5, stores: [row(1, {
+      supported: true, actual_volume_percent: 25, actual_state_sequence: 9,
+      last_command_id: 5, pending: false })] },
+  });
+  await act(async () => { jest.advanceTimersByTime(3100); });
+  expect(hook.states[1].actual_volume_percent).toBe(25);
+
+  // A slow response describing an OLDER command arrives afterwards.
+  api.get.mockResolvedValue({
+    data: { session_id: 5, stores: [row(1, {
+      supported: true, actual_volume_percent: 80, actual_state_sequence: 4,
+      last_command_id: 2, pending: false })] },
+  });
+  await act(async () => { jest.advanceTimersByTime(3100); });
+  expect(hook.states[1].actual_volume_percent).toBe(25);
+});

@@ -39,11 +39,12 @@ SUPPORTED_MESSAGE_TYPES = frozenset(
         "device_error",
         "stopped",
         "audio_control",
+        "endpoint_state",
     }
 )
 SESSION_SCOPED_TYPES = frozenset(
     {"audio_receiving", "playback_confirmed", "playback_error", "stopped",
-     "audio_control"}
+     "audio_control", "endpoint_state"}
 )
 SCENARIOS = (
     "ready-only",
@@ -130,6 +131,9 @@ class MessageFactory:
         applied_muted: bool | None = None,
         result: str | None = None,
         output_device: str | None = None,
+        state_sequence: int | None = None,
+        volume_percent: int | None = None,
+        muted: bool | None = None,
     ) -> dict[str, Any]:
         if message_type not in SUPPORTED_MESSAGE_TYPES:
             raise SimulatorConfigurationError("unsupported receiver message type")
@@ -190,6 +194,17 @@ class MessageFactory:
                 payload["error_code"] = error_code
             if details is not None:
                 payload["details"] = details
+        if message_type == "endpoint_state":
+            # What the Store's Windows output is ACTUALLY doing right now. This
+            # is a report, not a request: it carries no command id, because
+            # nobody at HQ asked for it.
+            payload.update(
+                {
+                    "state_sequence": state_sequence,
+                    "volume_percent": volume_percent,
+                    "muted": muted,
+                }
+            )
 
         try:
             acknowledgement = parse_receiver_ack(payload)

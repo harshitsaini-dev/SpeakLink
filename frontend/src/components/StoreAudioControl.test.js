@@ -134,3 +134,114 @@ test("nothing in any state claims the speaker was heard", () => {
     expect(label.textContent.toLowerCase()).not.toMatch(/verified|audible|heard/);
   }
 });
+
+// ===========================================================================
+// Two-way sync: the Console follows what the Store is ACTUALLY doing
+// ===========================================================================
+test("the slider shows the actual Store volume, not the last request", () => {
+  // The reported gap: HQ asked for 80, the person at the till moved it to 25,
+  // and the Console went on saying 80.
+  render(
+    <StoreAudioControl
+      store={STORE}
+      state={baseState({ control_status: "ready", result: "applied",
+                         requested_volume_percent: 80,
+                         applied_volume_percent: 80, applied_muted: false,
+                         actual_volume_percent: 25, actual_muted: false,
+                         pending: false })}
+      online supported disabled={false}
+      onVolumeChange={() => {}} onMuteToggle={() => {}} />,
+  );
+  expect(screen.getByTestId("store-volume-BP").value).toBe("25");
+  expect(screen.getByTestId("store-volume-value-BP").textContent).toBe("25%");
+});
+
+test("a stale 'Applied 80%' is not presented as the current truth", () => {
+  render(
+    <StoreAudioControl
+      store={STORE}
+      state={baseState({ control_status: "ready", result: "applied",
+                         applied_volume_percent: 80, applied_muted: false,
+                         actual_volume_percent: 25, actual_muted: false })}
+      online supported disabled={false}
+      onVolumeChange={() => {}} onMuteToggle={() => {}} />,
+  );
+  const label = screen.getByTestId("store-audio-status-BP").textContent;
+  expect(label).toBe("Currently 25%");
+  expect(label).not.toMatch(/Applied 80/);
+});
+
+test("a Store muted at the till reads as muted at HQ", () => {
+  render(
+    <StoreAudioControl
+      store={STORE}
+      state={baseState({ control_status: "ready", result: "applied",
+                         requested_muted: false, applied_muted: false,
+                         applied_volume_percent: 80,
+                         actual_volume_percent: 80, actual_muted: true })}
+      online supported disabled={false}
+      onVolumeChange={() => {}} onMuteToggle={() => {}} />,
+  );
+  expect(screen.getByTestId("store-mute-BP").getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByTestId("store-audio-status-BP").textContent).toBe("Currently muted");
+});
+
+test("unmuting at the till reads as unmuted at HQ", () => {
+  render(
+    <StoreAudioControl
+      store={STORE}
+      state={baseState({ control_status: "ready", result: "applied",
+                         requested_muted: true, applied_muted: true,
+                         applied_volume_percent: 65,
+                         actual_volume_percent: 65, actual_muted: false })}
+      online supported disabled={false}
+      onVolumeChange={() => {}} onMuteToggle={() => {}} />,
+  );
+  expect(screen.getByTestId("store-mute-BP").getAttribute("aria-pressed")).toBe("false");
+});
+
+test("a command in flight keeps the operator's value under their finger", () => {
+  // Telemetry arriving mid-drag must not yank the slider back to the old
+  // value between the drag and the acknowledgement.
+  render(
+    <StoreAudioControl
+      store={STORE}
+      state={baseState({ control_status: "ready", pending: true,
+                         requested_volume_percent: 90,
+                         actual_volume_percent: 25 })}
+      online supported disabled={false}
+      onVolumeChange={() => {}} onMuteToggle={() => {}} />,
+  );
+  expect(screen.getByTestId("store-volume-BP").value).toBe("90");
+  expect(screen.getByTestId("store-audio-status-BP").textContent).toBe("Sending…");
+});
+
+test("with no reading yet the requested value is shown", () => {
+  render(
+    <StoreAudioControl
+      store={STORE}
+      state={baseState({ control_status: "ready", requested_volume_percent: 70,
+                         actual_volume_percent: null })}
+      online supported disabled={false}
+      onVolumeChange={() => {}} onMuteToggle={() => {}} />,
+  );
+  expect(screen.getByTestId("store-volume-BP").value).toBe("70");
+});
+
+test("rendering actual state never calls a change handler", () => {
+  // The feedback-loop guard at the component level: displaying what the Store
+  // reports must not look like an operator moving the control.
+  const onVolumeChange = jest.fn();
+  const onMuteToggle = jest.fn();
+  render(
+    <StoreAudioControl
+      store={STORE}
+      state={baseState({ control_status: "ready", result: "applied",
+                         applied_volume_percent: 80,
+                         actual_volume_percent: 25, actual_muted: true })}
+      online supported disabled={false}
+      onVolumeChange={onVolumeChange} onMuteToggle={onMuteToggle} />,
+  );
+  expect(onVolumeChange).not.toHaveBeenCalled();
+  expect(onMuteToggle).not.toHaveBeenCalled();
+});
