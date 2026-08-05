@@ -66,6 +66,17 @@ analysis = Analysis(
         "tools.audio_receiver_pilot",
         "tools.receiver_credential_store",
         "tools.windows_audio_devices",
+        # Windows master volume/mute. Imported lazily inside functions so the
+        # analyser cannot see them, and pycaw reaches Core Audio through
+        # comtypes' generated COM wrappers - which PyInstaller also cannot
+        # infer, hence naming the transport explicitly alongside it.
+        "tools.windows_endpoint_volume",
+        "tools.windows_endpoint_restore",
+        "pycaw",
+        "pycaw.pycaw",
+        "comtypes",
+        "comtypes.client",
+        "comtypes.stream",
         # Backend modules imported after a sys.path insert that does not exist
         # in a bundle. See the note above.
         "audio_protocol",
