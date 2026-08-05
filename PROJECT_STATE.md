@@ -6098,3 +6098,102 @@ untouched base commit), frontend **211**, Playwright **300**, build OK.
 ### Live HQ restart IS required
 
 Backend and frontend both changed. Not deployed here.
+
+---
+
+## Two-way Windows endpoint volume/mute synchronisation
+
+Store-local changes now reach HQ. Store Kit **1.5.2**.
+
+### The two values, and the line between them
+
+HQ could set a Store's master volume but never see it. Somebody moving the
+Windows slider at the till changed the shop and the Console went on displaying
+its own last command — confidently wrong about the one number the operator was
+reading.
+
+There are now two distinct facts, and conflating them was the whole risk:
+
+| | source | used for |
+|---|---|---|
+| **ORIGINAL** pre-broadcast state | captured once by PREPARE | **restoration — sole authority** |
+| **CURRENT** endpoint state | live telemetry | what HQ displays |
+
+**Option A restoration semantics are unchanged.** Live telemetry never writes
+the snapshot. Original 10% muted, HQ sets 80, the till moves it to 30 and
+unmutes — stop still puts back **10% muted**. That is asserted in
+`test_live_telemetry_never_mutates_the_restoration_snapshot`, and again at
+every load scale as `restored_to_original_not_live`.
+
+### How a change gets from the till to HQ
+
+`tools/windows_endpoint_observer.py` registers an `IAudioEndpointVolumeCallback`
+against the endpoint **after** the snapshot is taken, and is detached **first**
+on restore — a callback left attached would report a restoration into the next
+broadcast as though a person had moved the slider.
+
+It keeps **one slot, never a queue**. A drag emits a notification per step;
+only where it stopped is true by the time HQ draws it, and a queue would let
+one noisy Store grow without bound on a socket that is also carrying audio.
+Feasibility was proven live before any of this was written: registered against
+the real default endpoint, changed to 33% then 55%, the callback fired twice,
+and the machine was put back to its original 47%.
+
+`endpoint_state` is a new acknowledgement type: `state_sequence`,
+`volume_percent`, `muted`. It carries **no command id** — nobody at HQ asked
+for it — and **no credential, endpoint id or device secret**. It changes
+**no** playback or readiness status: a quiet shop is not a broken shop.
+Nothing is written to SQLite; `actual_*` is runtime-only, beside `requested_*`
+and `applied_*`.
+
+### No feedback loop
+
+Incoming telemetry updates **displayed state only**. It must never issue a
+command, or HQ would hear its own volume back and answer it for ever. Four
+frontend regression tests hold that line, including
+`incoming actual-state telemetry never issues a command` and its counterpart
+proving an operator gesture still sends exactly one.
+
+### Load: telemetry churn at 5 / 10 / 20 / 40 Stores
+
+| | 5 | 10 | 20 | 40 |
+|---|---|---|---|---|
+| Local changes generated | 48 | 49 | 49 | 49 |
+| Frames transmitted | 8 | 10 | 10 | 10 |
+| Noisy Store: generated → sent | 43 → 4 | 43 → 4 | 43 → 4 | 43 → 4 |
+| HQ actual matched the Store | yes | yes | yes | yes |
+| Silent Stores' frames | 0 | 0 | 0 | 0 |
+| Max queue / capacity | 1 / 24 | 1 / 24 | 1 / 24 | 1 / 24 |
+| Audio chunks dropped | 0 | 0 | 0 | 0 |
+| Restored to original, not live | yes | yes | yes | yes |
+
+**43 local changes became 4 frames** and HQ still ended up on exactly the value
+the drag stopped at (23%). Stores with no controllable endpoint — the old
+build, the unselected output, the failing device — transmitted **nothing**;
+HQ learns why from the capability status, not from silence. The stale-telemetry
+Store replayed a reading claiming 1% with a `state_sequence` that went
+backwards; HQ kept the newer 58 (`hq_ignored_stale_telemetry`). Concurrent
+broadcasts stayed isolated with telemetry flowing: Alice's Store read 18, Bob's
+64, no other Store in either session acquired a reading at all.
+
+Telemetry volume does **not** scale with estate size here — the churn is
+confined to fixed Store roles by design, so these figures are a coalescing and
+isolation result, not a per-Store telemetry-rate result.
+
+### Regression
+
+Backend **3330 passed**, frontend **222**, Playwright **300**, production build
+OK, `compileall` clean, `pip check` clean, secret scan clean.
+
+`test_concurrent_redemption_enrols_exactly_one_device` is a **pre-existing
+flake**, not caused by this work: it fails intermittently when run entirely
+alone (1 of 3 consecutive runs), a SQLite lock under its own 6-thread
+contention. A full suite run with only the new test file removed passed 3314.
+
+### Not done
+
+No live HQ deployment. No Store touched, BP included. No second Store. No
+physical acceptance — **no software state equals SPEAKER_VERIFIED**.
+
+Any future HQ restart must again check LIVE/PENDING == 0 **and** unreleased
+leases == 0 in the same controlled operation immediately before the stop.

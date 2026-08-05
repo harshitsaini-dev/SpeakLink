@@ -54,7 +54,19 @@ function statusLabel(state, error, online, supported) {
     return { text: "Not supported by this Receiver", tone: "muted" };
   }
   if (state.result === "applied") {
-    // The APPLIED value, reported by the Store - not the requested one.
+    // If the Store has since reported a DIFFERENT value - somebody moved the
+    // Windows slider at the till - then "Applied 80%" is history, not the
+    // current state, and saying it would be the stale display this whole
+    // feature exists to remove.
+    const actual = state.actual_volume_percent;
+    const hasActual = actual !== null && actual !== undefined;
+    const drifted = hasActual
+      && (actual !== state.applied_volume_percent
+          || (state.actual_muted ?? false) !== (state.applied_muted ?? false));
+    if (drifted) {
+      return { text: state.actual_muted ? "Currently muted" : `Currently ${actual}%`,
+               tone: "ok" };
+    }
     const applied = state.applied_muted ? "Muted" : `Applied ${state.applied_volume_percent}%`;
     return { text: applied, tone: "ok" };
   }
@@ -74,8 +86,24 @@ export default function StoreAudioControl({
   store, state, error, online, supported, disabled,
   onVolumeChange, onMuteToggle,
 }) {
-  const requested = state?.requested_volume_percent ?? 100;
-  const muted = state?.requested_muted ?? false;
+  // The slider follows what the Store is ACTUALLY doing, falling back to the
+  // requested value only until the first reading arrives. HQ asking for 80%
+  // and the person at the till moving it to 25% are both true, and only the
+  // second describes the shop - so 25 is what an operator must see, without
+  // touching anything first.
+  //
+  // While a command is in flight the requested value is shown instead: the
+  // slider must not jump back under the operator's finger between the drag
+  // and the acknowledgement.
+  const actualVolume = state?.actual_volume_percent;
+  const actualMuted = state?.actual_muted;
+  const hasActual = actualVolume !== null && actualVolume !== undefined;
+  const requested = (state?.pending || !hasActual)
+    ? (state?.requested_volume_percent ?? 100)
+    : actualVolume;
+  const muted = (state?.pending || actualMuted === null || actualMuted === undefined)
+    ? (state?.requested_muted ?? false)
+    : actualMuted;
   const status = statusLabel(state, error, online, supported);
   const unavailable = disabled || !online || !supported;
   const sliderId = `store-volume-${store.store_code}`;

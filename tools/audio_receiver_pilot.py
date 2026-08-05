@@ -644,6 +644,13 @@ class AudioReceiverPilot:
         self._endpoint_backend = None
         #: The level HQ last asked for, so unmute can return to it.
         self._endpoint_volume_percent = 100
+        #: Watches the endpoint and reports what it is ACTUALLY doing, so HQ
+        #: sees a change made at the till and not only its own commands.
+        self._endpoint_observer = None
+        self._endpoint_state_sequence = 0
+        #: Test seam for the observer, kept separate from the control backend
+        #: so a test can fake one without the other.
+        self._observer_backend = None
         self._audio_backend = audio_backend
 
         self.session_id: int | None = None
@@ -957,6 +964,25 @@ class AudioReceiverPilot:
             "applied_volume_percent": applied.volume_percent,
             "applied_muted": applied.muted,
         }
+
+        # Start watching AFTER the original state has been captured and
+        # persisted. Doing it earlier would risk the observer's own reading
+        # being mistaken for the pre-broadcast state, and the restoration
+        # snapshot is the one thing here that must never come from telemetry.
+        try:
+            from tools import windows_endpoint_observer
+
+            self._endpoint_observer = windows_endpoint_observer.EndpointObserver(
+                self.windows_endpoint_id, backend=self._observer_backend)
+            self._endpoint_observer.start()
+            self.report["endpoint_observer"] = "watching"
+        except Exception as failure:
+            # A Receiver that cannot watch can still CONTROL the endpoint. HQ
+            # simply will not learn about changes made at the till, which is a
+            # degradation worth recording rather than a reason to refuse to
+            # broadcast.
+            self._endpoint_observer = None
+            self.report["endpoint_observer"] = f"unavailable: {str(failure)[:120]}"
         return True
 
     def restore_windows_endpoint(self) -> dict:
@@ -966,6 +992,13 @@ class AudioReceiverPilot:
         idempotent and never raises: an exception here would turn a clean stop
         into a crash and leave the shop at the announcement level.
         """
+        # Detach the observer FIRST. A COM callback left attached would keep a
+        # finished session's object alive and could report a restoration into
+        # the next broadcast as though somebody had moved the slider.
+        if self._endpoint_observer is not None:
+            self._endpoint_observer.stop()
+            self._endpoint_observer = None
+
         original = self._endpoint_original
         if original is None or not self.windows_endpoint_id:
             return {"restored": False, "reason": "nothing was changed"}
@@ -991,6 +1024,47 @@ class AudioReceiverPilot:
             "volume_percent": applied.volume_percent, "muted": applied.muted}
         return {"restored": True, "volume_percent": applied.volume_percent,
                 "muted": applied.muted}
+
+    async def _endpoint_state_loop(self, connection) -> None:
+        """Report what the endpoint is actually doing, coalesced.
+
+        A Windows slider drag emits a notification per step, so this takes only
+        the LATEST reading each time round and drops the intermediates. Nobody
+        needs to know the slider passed through 43 on its way to 55, and one
+        noisy Store must not be able to fill a socket that is also carrying
+        audio. The observer keeps a single slot rather than a queue, so this
+        cannot grow without bound however fast the changes arrive.
+        """
+        from tools import windows_endpoint_observer
+
+        while True:
+            observer = self._endpoint_observer
+            if observer is None or not observer.started:
+                return
+            # Waking on the event rather than polling: the wait returns
+            # immediately when something changed and otherwise costs nothing.
+            await asyncio.to_thread(
+                observer.wait_for_change,
+                windows_endpoint_observer.COALESCE_SECONDS)
+            reading = observer.take()
+            if reading is None:
+                continue
+            if self.session_id is None:
+                continue
+            self._endpoint_state_sequence += 1
+            try:
+                await self._send(connection, {
+                    **self._envelope("endpoint_state"),
+                    "session_id": self.session_id,
+                    "state_sequence": self._endpoint_state_sequence,
+                    "volume_percent": reading.volume_percent,
+                    "muted": reading.muted,
+                })
+            except Exception:
+                # The socket has gone. The outer session loop owns reconnection.
+                return
+            self.report["last_endpoint_state"] = {
+                "volume_percent": reading.volume_percent, "muted": reading.muted}
 
     async def _on_set_audio_control(self, connection, payload: dict) -> None:
         """Apply an HQ output-volume command and report what really happened.

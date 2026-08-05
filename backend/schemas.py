@@ -381,6 +381,14 @@ class StoreAudioStateOut(BaseModel):
     #: Collapsing both into "not supported" sent people to rebuild software
     #: that was already correct.
     control_status: str = "unknown"
+    # ---- what the Store's Windows output is actually doing ----------------
+    # The Console displays THESE, not the requested values: HQ asking for 80%
+    # and the till showing 25% are both true, and only one of them describes
+    # the shop.
+    actual_volume_percent: Optional[int] = None
+    actual_muted: Optional[bool] = None
+    actual_state_sequence: int = 0
+    actual_state_updated_at: Optional[str] = None
 
 
 class StoreAudioControlOut(BaseModel):

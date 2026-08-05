@@ -224,6 +224,7 @@ from receiver_runtime_auth import (
 )
 from receiver_contract import (
     AudioControlAcknowledgement,
+    EndpointStateAcknowledgement,
     HEARTBEAT_INTERVAL_SECONDS,
     AudioReceivingAcknowledgement,
     ConnectionState,
@@ -4505,6 +4506,29 @@ async def ws_receiver(websocket: WebSocket):
             # misattribution the in-memory routing above exists to prevent - and
             # the persisted rows are what an operator reads afterwards.
             if is_standby_ack:
+                continue
+
+            # What the Store's Windows output is actually doing. Telemetry,
+            # so it updates the ACTUAL fields only and never a command id: a
+            # person at the till moving the slider does not retract the
+            # operator's request and must not look like a reply to it.
+            if isinstance(acknowledgement, EndpointStateAcknowledgement):
+                observed = store_audio_registry.observe_endpoint_state(
+                    session_id=acknowledgement.session_id,
+                    store_id=store_id,
+                    state_sequence=acknowledgement.state_sequence,
+                    volume_percent=acknowledgement.volume_percent,
+                    muted=acknowledgement.muted,
+                )
+                # None means stale or not ours; dashboards hear nothing, so a
+                # delayed reading cannot drag a Console backwards.
+                if observed is not None:
+                    await connection_manager.notify_dashboards({
+                        "type": "store_audio_state",
+                        "session_id": acknowledgement.session_id,
+                        "store_id": store_id,
+                        **observed.as_dict(),
+                    })
                 continue
 
             # Output-volume acknowledgements are live control state, not
