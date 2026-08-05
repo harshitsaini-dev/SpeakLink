@@ -114,6 +114,22 @@ class ReceiverCapabilities(BaseModel):
 
     output_volume: bool = False
     output_mute: bool = False
+    #: WHY output_volume is false, when it is.
+    #:
+    #: "Not supported by this Receiver" was true for two completely different
+    #: situations and only one of them was the Receiver's fault: a build that
+    #: predates master control, and a current build whose Store has simply not
+    #: re-selected its audio output since upgrading. The first needs a new
+    #: Store Kit; the second needs thirty seconds in Store Setup. Telling an
+    #: operator the wrong one sends them to rebuild software that was already
+    #: correct.
+    #:
+    #: Defaults to "unknown" so an older Receiver - which omits the whole
+    #: capabilities block - keeps reading as genuinely unsupported rather than
+    #: inheriting a friendlier explanation it never earned.
+    output_control_status: Literal[
+        "ready", "needs_output_selection", "unavailable", "unknown"
+    ] = "unknown"
 
 
 class ReceiverReadyAcknowledgement(AcknowledgementBase):
