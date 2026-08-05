@@ -379,6 +379,83 @@ class WSManager:
             self.receiver_connection_inventory.remove(exact_connection_id)
         return False
 
+    def find_device_connection(self, device_id: int):
+        """The live socket for one Device, primary or standby, or None.
+
+        Looked up by DEVICE, never by Store: a Store can be carrying a
+        different Device's connection, and closing that one because this
+        Device was revoked would silence a shop for a reason nobody asked for.
+        """
+        if device_id is None:
+            return None
+        standby = self.standby_receivers.get(device_id)
+        if standby is not None:
+            return ("standby", self.standby_store_ids.get(device_id), standby,
+                    self.standby_connection_ids.get(device_id))
+        for store_id, connection_id in list(self.receiver_connection_ids.items()):
+            record = self.receiver_connection_inventory.get(connection_id)
+            if record is not None and getattr(record, "device_id", None) == device_id:
+                return ("primary", store_id, self.receivers.get(store_id),
+                        connection_id)
+        return None
+
+    async def disconnect_device(self, device_id: int, *, code: int = 4403,
+                                reason: str = "Receiver Device access withdrawn") -> bool:
+        """Close a Device's live socket and drop its runtime registration.
+
+        WHY THIS EXISTS
+
+        Disabling, revoking, archiving or permanently deleting a Receiver
+        Device changed the database and nothing else. The Device's WebSocket
+        had already authenticated, so it stayed open, stayed registered, and
+        kept receiving broadcast audio - a Store whose Device an operator had
+        just deleted went READY, AUDIO_RECEIVING and PLAYBACK_CONFIRMED fifty
+        seconds later, with the Devices page correctly showing nothing.
+        Authentication happened once at connect and was never revisited.
+
+        Closing the socket is the whole fix: the Receiver is removed from the
+        fanout, the Store's health stops being refreshed by it, and the next
+        connect attempt has to authenticate again - which the revoked
+        credential can no longer do.
+
+        Returns False when the Device has no live socket, which is the
+        ordinary case and not an error.
+        """
+        found = self.find_device_connection(device_id)
+        if found is None:
+            return False
+        role, store_id, socket, connection_id = found
+        if socket is None:
+            return False
+
+        # Deregister BEFORE closing. A close can await, and a socket that is
+        # still registered while closing can be handed audio in between.
+        if role == "standby":
+            self.standby_receivers.pop(device_id, None)
+            self.standby_connection_ids.pop(device_id, None)
+            self.standby_store_ids.pop(device_id, None)
+            self.standby_snapshots.pop(device_id, None)
+        else:
+            if self.receivers.get(store_id) is socket:
+                self.receivers.pop(store_id, None)
+                self.receiver_connection_ids.pop(store_id, None)
+            snapshot = self.receiver_snapshots.get(store_id)
+            if snapshot is not None and snapshot.connection is not ConnectionState.OFFLINE:
+                # The Store stops being green immediately rather than waiting
+                # for the freshness sweep to notice a socket that is gone.
+                self.receiver_snapshots[store_id] = mark_disconnected(
+                    snapshot, datetime.now(timezone.utc))
+        if connection_id is not None:
+            self.receiver_connection_inventory.remove(connection_id)
+
+        try:
+            await socket.close(code=code, reason=reason)
+        except Exception:
+            # Already gone. The registration is removed either way, which is
+            # what stops audio reaching it.
+            pass
+        return True
+
     def get_receiver_connection_id(self, store_id: int) -> str | None:
         return self.receiver_connection_ids.get(store_id)
 
