@@ -5719,3 +5719,103 @@ ordering; they prove nothing about amplifier loudness, Bluetooth routing or
 audibility. The Store Kit has **not** been rebuilt, the live HQ was not
 restarted, and no Store was deployed to. `SPEAKER_VERIFIED` remains reserved
 for acoustic evidence and is not set by any of this.
+
+---
+
+## Audio control: load acceptance and Store Kit 1.3.0
+
+Branch `feature/audio-volume-controls`, commit `6ff3fb2`.
+
+### Harness
+
+Reuses the existing synthetic-Receiver infrastructure rather than adding a
+second framework: `tools/load_test_receivers.py`'s `SyntheticReceiver`
+(extended to answer `set_audio_control`), the pilot's own loopback backend
+bootstrap and `_pilot_environment`, and the existing CPU/RAM and per-Store
+audio-queue sampling. New driver: `tools/audio_control_load.py`. Report:
+`test_reports/audio-control-load-20260805.json`.
+
+The estate is deliberately mixed — from 10 Stores upward it contains one older
+Receiver reporting no capability, one whose output device refuses, and one that
+answers 750 ms late.
+
+### Results
+
+| Stores | Requested | Transmitted | ACKs | ACK p95 | Max queue | Dropped | CPU s | RSS MB | Latest wins |
+|---|---|---|---|---|---|---|---|---|---|
+| 5  | 25  | 26  | 26  | 766 ms | 1 / 24 | 0 | 0.11 | 84.0 | 5/5 |
+| 10 | 50  | 46  | 46  | 758 ms | 1 / 24 | 0 | 0.19 | 86.0 | 8/8 |
+| 20 | 100 | 96  | 96  | 0.18 ms | 1 / 24 | 0 | 0.28 | 89.2 | 18/18 |
+| 40 | 200 | 196 | 196 | 0.16 ms | 1 / 24 | 0 | 0.89 | 95.2 | 38/38 |
+
+`transmitted < requested` is correct: the Store modelling an older Receiver is
+never sent a command at all. ACK p95 at 5 and 10 Stores is dominated by the one
+deliberately slow Store — at 20 and 40 it is a small fraction of the sample, so
+p95 falls to the ~0.1 ms every other Store answers in. **That gap is the
+slow-Store isolation result**: minimum ACK latency stayed at 0.07–0.08 ms while
+one Store took ~760 ms.
+
+Every queue stayed within capacity, `enqueued == delivered` at all four scales,
+and all 21 audio chunks reached every Store — audio streaming was unharmed by
+control traffic moving underneath it.
+
+### Ordering
+
+`replayed_stale_ack_accepted = 0` at every scale. One Store replays an
+acknowledgement for an earlier command carrying 1%; the backend discards it and
+the newer applied value stands. `stores_left_at_a_stale_value = 0` throughout.
+
+### Failure cases (mid-broadcast)
+
+Store outside the session **404**; unknown/finished session **409**; volume
+outside the contract **422**; command after the broadcast ended **409**. No
+crash, no cross-Store corruption, no broadcast stopped by a failed command.
+
+### Concurrent isolation
+
+Alice and Bob on disjoint halves. Alice's Store reached 70 and Bob's stayed
+muted; every other Store in both sessions remained at the default. Each was
+refused **403** when naming the other's session id exactly.
+
+### Store Kit
+
+| | |
+|---|---|
+| ZIP | `artifacts/SpeakLink-Store-Kit-1.3.0-6ff3fb2-20260805-073937.zip` |
+| Size | 128,900,012 bytes (122.9 MB), 1061 entries |
+| SHA-256 | `d0f811941f817dbdc511de870e7a317f021ef30b8c775b2231a403f47b4430f2` |
+| Receiver | 1.1.0 (was 1.0.0) · Kit 1.3.0 (was 1.2.0) |
+| Source commit | `6ff3fb2`, tree clean |
+| Rollback kit | `SpeakLink-Store-Kit-1.2.0-1f4727c-20260803-085407.zip` **retained, untouched** |
+
+Builder audit passed: no credential/key/database/log/developer path, SpeakLink
+icon on every executable, background Receiver windowless, all three executables
+present. Independent scan found no `.env`, `.db`, `.sqlite`, `device-credential`,
+`settings-password.json`, `node_modules`, `.venv`, `.git`, `.log`, `.pem` or
+`.key` entry.
+
+**Capability verified by extracting the PyInstaller PYZ**, not by grepping the
+EXE: a raw string search finds nothing because the archive is compressed —
+including long-standing strings like `receiver_ready`, which is how that was
+established as a measurement artefact rather than missing code. The bundled
+`tools.audio_receiver_pilot` bytecode contains `set_audio_control`,
+`_on_set_audio_control`, `_scaled`, `effective_percent`, `output_volume`,
+`output_mute` and `capabilities`; `audio_protocol` contains both the builder
+and the parser.
+
+### Test totals
+
+Backend **3233 passed, 90 skipped**. Frontend not re-run — no frontend source
+was touched by this checkpoint.
+
+One skip is new and deliberate: `test_a_copy_of_the_pilot_database_migrates_cleanly`
+now skips when the local pilot database is already migrated. It had asserted the
+pilot database carried no phase-one tables, which was never a claim about the
+migration tool — it held only while the machine carried a database from a
+release predating those tables, and `prepare()` now creates them itself.
+
+### Not done, deliberately
+
+Live HQ not restarted or deployed. No Store Receiver installed, no Store
+re-enrolled, no credential changed. No physical amplifier test. Nothing here is
+acoustic evidence and `SPEAKER_VERIFIED` remains unset.
