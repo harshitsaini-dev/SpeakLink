@@ -5615,3 +5615,107 @@ clean.
 
 Development and acceptance only. The live HQ was not restarted and no database
 migration was required — this change adds no column and no table.
+
+---
+
+## EchoCast audio volume and mute
+
+Branch `feature/audio-volume-controls`. Two independent controls: HQ microphone
+gain in the broadcaster's browser, and per-Store EchoCast output on each Store
+PC.
+
+### The audio path as found
+
+    getUserMedia (mono, EC/NS/AGC)
+      -> MediaRecorder(stream)  [webm/opus, 32 kbps, 250 ms chunks]
+      -> broadcaster WebSocket
+      -> backend AudioFanout, one bounded queue + pump task per Store
+      -> Receiver WebSocket
+      -> FFmpeg (-f webm -i pipe:0 -f s16le pipe:1)
+      -> WindowsPcmSink -> sounddevice RawOutputStream -> selected endpoint
+
+An `AudioContext` already existed but only fed a meter tapped off the raw
+microphone. **FFmpeg never opens an audio device** — it decodes to raw PCM on
+stdout and the sink owns the endpoint.
+
+### A — HQ microphone
+
+Gain node inserted between the source and a `MediaStreamDestination`, whose
+stream MediaRecorder now records. Transport unchanged. Range 0–100 → 0.0–1.0,
+default 100, **no boost above unity** (a gain node above 1.0 clips; make-up
+gain needs compression and limiting).
+
+Mute is a separate flag, so unmute restores the chosen level. It does not stop
+the recorder, microphone track, socket, session or leases. Two meters — input
+(pre-gain) and sent (post-gain) — with a `MUTED — STORES HEAR NOTHING` badge,
+because the old single pre-gain meter kept moving while muted.
+
+Per browser session, no server call, no stored value: concurrent broadcasters
+cannot affect each other's microphone.
+
+### B — Per-Store output: mechanism chosen
+
+**Software gain on the decoded PCM inside `WindowsPcmSink`**, chosen over the
+Windows endpoint volume and over FFmpeg filters because:
+
+| | software gain (chosen) | Windows endpoint | FFmpeg filter |
+|---|---|---|---|
+| Affects other apps (EchoGuard, till) | **no** | yes | no |
+| State to restore after a crash | **none** | yes | none |
+| Restart to change | **no** | no | yes |
+
+Because the system mixer is never read or written, **there is nothing to save
+and nothing to restore** — a crashed Receiver leaves the machine as it found
+it. A test asserts no `pycaw`/`IAudioEndpointVolume`/`waveOutSetVolume` symbol
+appears in the Receiver source. It scales EchoCast's own audio only, which is
+exactly the claim being made.
+
+100% passes the buffer through untouched; 0% emits silence of the same length
+(an empty buffer would underrun and sound like a fault); samples are clamped
+after scaling because rounding can produce 32768 and wrap to a click.
+
+### Protocol
+
+Downstream `set_audio_control {session_id, command_id, volume_percent, muted}`
+— whole state, not a delta, which is what makes dropping a stale command safe.
+Back: `audio_control` carrying **requested and applied separately** plus
+`result` ∈ `applied | unsupported | failed`, `output_device`, `error_code`.
+Applied values are read back from the sink, not echoed.
+
+`audio_control` changes no readiness or playback status: a muted Store is still
+`AUDIO_RECEIVING`. Capabilities ride on `receiver_ready`; **absence means an
+older Receiver**, HQ then sends no command and shows the Store as unsupported.
+Old Receivers keep working and are not re-enrolled.
+
+### Permission
+
+`store_audio.control` ("Control Store Output Volume"), BROADCASTER by default.
+Session **ownership** is enforced on top, so it grants nothing over another
+operator's broadcast; `broadcast.stop_any` and `broadcast.active_view` do
+**not** reach it. Store Scope enforced server-side. Active Broadcast Management
+stays read-only for now — editing remains in the owning Console.
+
+Nothing in this protocol carries the Store Settings Password, a verifier or a
+Device credential; a Playwright test asserts it on the wire.
+
+### Persistence
+
+Zero database writes per slider movement, asserted by a full-table row census
+across 60 commands. No migration; no new table. A persistent per-Store
+announcement default is documented as a follow-up.
+
+### Tests
+
+Backend **3234 passed**, 89 skipped. Frontend units **183 passed**. Playwright
+**295 passed**. Production build, `compileall`, `pip check` all clean.
+
+New: 28 registry, 15 API, 25 Receiver/protocol, 17 HQ mic, 12 store-control
+hook, 11 Playwright.
+
+### Not proven, and not deployed
+
+No physical Store pilot has been run. Mock tests prove logic, protocol and
+ordering; they prove nothing about amplifier loudness, Bluetooth routing or
+audibility. The Store Kit has **not** been rebuilt, the live HQ was not
+restarted, and no Store was deployed to. `SPEAKER_VERIFIED` remains reserved
+for acoustic evidence and is not set by any of this.
