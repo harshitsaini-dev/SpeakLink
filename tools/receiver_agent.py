@@ -688,10 +688,36 @@ def diagnose_report(*, config_path, credential_path, devices=None, backend=None)
             f"  plain HTTP     : {'allowed (pilot only)' if config.allow_insecure_private_lan else 'no'}",
             f"  audio sink     : {config.audio_sink or 'null (audio is DISCARDED)'}",
             f"  audio device   : {config.audio_output_device or '<not set>'}",
+            f"  master endpoint: {config.windows_endpoint_id or '<not set - re-select the output>'}",
             f"  log directory  : {config.log_directory or default_log_directory()}",
             f"  installed ver  : {config.installed_version or '<not recorded>'}",
             f"  source commit  : {config.source_commit or '<not recorded>'}",
         ]
+
+    # Windows master-volume control, read-only. Nothing here changes a level;
+    # it exists so a technician can see whether EchoCast can drive this
+    # computer's output at all, and so the packaged build proves it can reach
+    # Core Audio - comtypes generates its COM wrappers at runtime and can fail
+    # when frozen, which no amount of "the module is bundled" would catch.
+    lines += ["", "windows master control:"]
+    try:
+        from tools import windows_endpoint_volume
+
+        endpoints = windows_endpoint_volume.list_endpoints()
+        lines.append(f"  core audio     : reachable ({len(endpoints)} active endpoint(s))")
+        configured = config.windows_endpoint_id if config else None
+        if configured:
+            try:
+                state = windows_endpoint_volume.read_state(configured)
+                lines.append(f"  master volume  : {state.volume_percent}%")
+                lines.append(f"  master mute    : {'ON' if state.muted else 'off'}")
+            except Exception as failure:
+                lines.append(f"  master volume  : UNAVAILABLE - {failure}")
+        else:
+            lines.append("  master volume  : not configured; re-select the audio "
+                         "output in Store Setup")
+    except Exception as failure:
+        lines.append(f"  core audio     : UNAVAILABLE - {failure}")
 
     # Presence only. The contents are sealed and are never read here.
     lines += [
