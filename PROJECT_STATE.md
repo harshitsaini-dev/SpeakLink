@@ -5968,3 +5968,77 @@ unreleased leases. UI 200, `/console` 200, `/api/` 200. Rollback not required.
 
 Store Kit 1.3.0 **not** installed. Dynamic live target work **not** started.
 Legacy Store-token authentication **unchanged**.
+
+---
+
+## HQ Store volume now controls the Windows endpoint master
+
+Branch `feature/windows-master-volume-control`, commits `357dc22` and `f363b1f`.
+
+### The semantic change
+
+**HQ per-Store Volume = the Store's Windows endpoint MASTER volume.**
+**HQ per-Store Mute = the Store's Windows endpoint MASTER mute.**
+HQ Microphone volume is unchanged: still a browser-local Web Audio `GainNode`.
+
+This deliberately reverses the earlier design. Scaling SpeakLink's own PCM meant
+nothing else on the machine moved and a crash left nothing behind — but a Store
+user who muted Windows silenced every announcement while HQ reported
+"Applied 100%".
+
+### Accepted consequences
+
+* **Other applications on the same endpoint are affected.** Chrome, LinkGuard,
+  till audio — anything sharing that output gets louder, quieter or muted with
+  SpeakLink. No per-app isolation in this release.
+* The change is **persistent Windows state**, so it is captured before the first
+  mutation, restored on every path that ends a broadcast, and recoverable after
+  a crash.
+* It is **not the amplifier**. Nothing here touches a physical knob, and no
+  software result is acoustic evidence. `SPEAKER_VERIFIED` remains unset.
+
+### Identity — the dangerous part
+
+A PortAudio `index:N` is **not** an endpoint identity: the same output appears
+under several host APIs, and indices renumber when hardware changes. Mutation
+therefore requires the stable MMDevice endpoint id, resolved **once** while the
+technician is selecting the output. An ambiguous name match is **refused**, not
+resolved — a wrong answer there is permanent, silent, and points at real
+hardware. Existing Stores have no id and report the control unsupported until
+the output is re-selected.
+
+### No double attenuation
+
+The PCM path stays at unity. Applying the same percentage in both places would
+make HQ 50% produce 25% of the signal. The scaling code is kept — it is the only
+way to silence SpeakLink without touching a shared endpoint — but nothing moves
+it today, and a test pins that.
+
+### A replaced test, not a deleted one
+
+`test_the_windows_endpoint_volume_is_never_touched` encoded the old property.
+After this change it still **passed**, because the Core Audio calls simply moved
+one module across — it would have gone on reassuring us about something no
+longer true. Replaced by two narrower, accurate tests.
+
+### Packaging
+
+`pycaw==20240210` and `comtypes==1.4.6`, pinned and bundled. Bundling is not
+proof: comtypes generates COM wrappers at runtime and often fails when frozen,
+so `diagnose` probes Core Audio read-only. The **frozen executable reports
+`core audio: reachable (3 active endpoint(s))`** — that is the packaging proof.
+
+| | |
+|---|---|
+| ZIP | `artifacts/SpeakLink-Store-Kit-1.5.0-f363b1f-20260805-135058.zip` |
+| SHA-256 | `68994ee2c651893f6649149b20fa64ef3bb207cd6d973a31e6e0b84a97c36814` |
+| Size | 129,995,436 bytes, 1065 entries |
+| Receiver **1.2.0** · Kit **1.5.0** | 1.2.0/1.3.0/1.4.0/1.4.1 all retained |
+
+Backend **3314 passed**, 90 skipped. No forbidden content in the package.
+
+### Not done
+
+No live HQ deployment, no Store touched, no second Store. The one-Store
+uninstall/reinstall and physical acceptance are outstanding and must use this
+kit, not 1.4.1.
