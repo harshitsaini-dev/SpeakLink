@@ -51,6 +51,10 @@ jest.mock("@/lib/audio/HQBroadcaster", () => ({
     static supportedMime() { return true; }
     start(...args) { return mockStart(...args); }
     stop(...args) { return mockStop(...args); }
+    // The provider applies the operator's current mic level to every new
+    // broadcaster, so a double without these is not a double of this class.
+    setVolumePercent(percent) { this.volumePercent = percent; }
+    setMuted(muted) { this.muted = muted; }
   },
 }));
 
