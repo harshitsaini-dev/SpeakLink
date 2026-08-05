@@ -2803,10 +2803,17 @@ def _audio_control_state_rows(sid: int) -> List[StoreAudioStateOut]:
         store_id = entry["store_id"]
         snapshot = manager.get_receiver_snapshot(store_id)
         capabilities = getattr(snapshot, "capabilities", None) if snapshot else None
+        # The Receiver's own answer, never inferred here. A Store that has not
+        # reported capabilities at all - an older build, or one that has not
+        # yet sent receiver_ready this session - stays "unknown", which the
+        # Console renders as genuinely unsupported rather than guessing at a
+        # friendlier reason.
+        status = getattr(capabilities, "output_control_status", "unknown")             if capabilities else "unknown"
         rows.append(StoreAudioStateOut(
             **entry,
             online=manager.is_receiver_online(store_id),
             supported=bool(capabilities and capabilities.output_volume),
+            control_status=status,
         ))
     return rows
 

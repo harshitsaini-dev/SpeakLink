@@ -22,9 +22,22 @@ function statusLabel(state, error, online, supported) {
   if (error) return { text: error, tone: "error" };
   if (!online) return { text: "Receiver offline", tone: "muted" };
   if (!supported) {
-    // A genuinely different problem from offline, with a different remedy:
-    // this Store needs a newer Receiver, not a power cycle.
-    return { text: "Not supported by this Receiver", tone: "muted" };
+    // Four states, not two. "Not supported by this Receiver" used to cover a
+    // build that predates master control AND a current build whose Store has
+    // simply not re-selected its audio output since upgrading. Those need
+    // completely different things - a new Store Kit, or half a minute in
+    // Store Setup - and telling an operator the wrong one sends them to
+    // rebuild software that was already correct.
+    switch (state?.control_status) {
+      case "needs_output_selection":
+        return { text: "Re-select the Store audio output", tone: "warn" };
+      case "unavailable":
+        return { text: "Store audio output unavailable", tone: "error" };
+      default:
+        // "unknown" - the Receiver never reported capabilities at all, which
+        // is what an older build does. Genuinely unsupported.
+        return { text: "Not supported by this Receiver", tone: "muted" };
+    }
   }
   if (!state) return { text: "", tone: "muted" };
   if (state.pending) return { text: "Sending…", tone: "pending" };
@@ -32,6 +45,12 @@ function statusLabel(state, error, online, supported) {
     return { text: state.error_message || "Could not apply", tone: "error" };
   }
   if (state.result === "unsupported") {
+    // The Receiver answered a command with "unsupported". Same four-state
+    // reasoning as above: say WHICH kind, so the operator knows whether to
+    // touch the Store PC or the Store Kit.
+    if (state.control_status === "needs_output_selection") {
+      return { text: "Re-select the Store audio output", tone: "warn" };
+    }
     return { text: "Not supported by this Receiver", tone: "muted" };
   }
   if (state.result === "applied") {
@@ -44,6 +63,8 @@ function statusLabel(state, error, online, supported) {
 
 const TONE_CLASS = {
   ok: "text-emerald-700",
+  // Amber, not red: needing an output re-selected is a task, not a fault.
+  warn: "text-amber-700",
   pending: "text-slate-500",
   error: "text-red-700",
   muted: "text-slate-400",

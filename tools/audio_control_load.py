@@ -163,6 +163,11 @@ async def _drive_audio_control(paths, store_count: int, port: int,
     # against the real backend rather than only in a unit test.
     if len(receivers) > 4:
         receivers[4].replay_stale_ack = True
+    # And one models the upgrade case: current software, output never
+    # re-selected, so master control is legitimately unavailable and HQ must
+    # say WHY rather than calling the Receiver unsupported.
+    if len(receivers) > 5:
+        receivers[5].endpoint_configured = False
 
     started = asyncio.Event()
     await asyncio.gather(*(r.connect() for r in receivers))
@@ -355,6 +360,22 @@ async def _drive_audio_control(paths, store_count: int, port: int,
             "stop_status": stop_status,
             "after_stop_status": after_stop_status,
             "receiver_errors": {r.store_code: r.errors for r in receivers if r.errors},
+            # ---- Windows endpoint outcomes ---------------------------------
+            "endpoints_prepared": sum(1 for r in receivers if r.endpoint_prepared),
+            "endpoints_restored": sum(1 for r in receivers if r.endpoint_restored),
+            "endpoints_left_changed": [
+                r.store_code for r in receivers
+                if r.endpoint_prepared and not r.endpoint_restored],
+            "endpoints_at_original_state": sum(
+                1 for r in receivers
+                if r.endpoint_volume == r.endpoint_original_volume
+                and r.endpoint_muted == r.endpoint_original_muted),
+            "needs_output_selection": [
+                r.store_code for r in receivers if not r.endpoint_configured],
+            # The proof there is no double attenuation: the PCM gain must not
+            # have followed the HQ slider anywhere.
+            "pcm_gain_left_at_unity": all(
+                r.volume_percent == 100 and r.muted is False for r in receivers),
             "slow_store_code": receivers[3].store_code if len(receivers) > 3 else None,
             "unsupported_store_code": (
                 receivers[1].store_code if len(receivers) > 1

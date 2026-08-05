@@ -864,7 +864,17 @@ class AudioReceiverPilot:
         # endpoint id captured when the output was selected; an installation
         # that has not re-selected since this feature shipped has none, and
         # says so instead of claiming a control that would act on a guess.
+        # Four states, because "unsupported" was true for two very different
+        # situations and only one of them was this software's fault.
         controllable = self.windows_endpoint_id is not None
+        if not controllable:
+            # A current build whose Store has not re-selected its output since
+            # upgrading. Thirty seconds in Store Setup, not a new Store Kit.
+            status = "needs_output_selection"
+        elif endpoint_ready is False:
+            status = "unavailable"
+        else:
+            status = "ready"
         await self._send(connection, {
             **self._envelope("receiver_ready"),
             "software_checks_passed": True,
@@ -872,6 +882,7 @@ class AudioReceiverPilot:
             "capabilities": {
                 "output_volume": controllable,
                 "output_mute": controllable,
+                "output_control_status": status,
             },
         })
         self.report["ready"] = True

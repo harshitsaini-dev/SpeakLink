@@ -373,6 +373,14 @@ class StoreAudioStateOut(BaseModel):
     #: "Receiver offline" are different problems with different remedies.
     supported: bool = True
     online: bool = True
+    #: ready | needs_output_selection | unavailable | unknown
+    #:
+    #: Carried separately from `supported` because the operator's next action
+    #: depends on it entirely: "unknown" means fetch a newer Store Kit,
+    #: "needs_output_selection" means re-pick the audio output on that PC.
+    #: Collapsing both into "not supported" sent people to rebuild software
+    #: that was already correct.
+    control_status: str = "unknown"
 
 
 class StoreAudioControlOut(BaseModel):

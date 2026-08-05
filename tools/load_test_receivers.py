@@ -85,6 +85,19 @@ class SyntheticReceiver:
         self._last_audio_command_id = 0
         self.volume_percent = 100
         self.muted = False
+        #: A mocked Windows endpoint. The load test must never touch a real
+        #: mixer, and the state below is what "restored correctly" is checked
+        #: against afterwards.
+        self.endpoint_original_volume = 10
+        self.endpoint_original_muted = True
+        self.endpoint_volume = self.endpoint_original_volume
+        self.endpoint_muted = self.endpoint_original_muted
+        self.endpoint_prepared = False
+        self.endpoint_restored = False
+        #: Set for the Store modelling a broken output device.
+        self.endpoint_fails = False
+        #: Set for a Store that upgraded but never re-selected its output.
+        self.endpoint_configured = True
 
         self.connect_ms: float | None = None
         self.ready_ms: float | None = None
@@ -143,15 +156,15 @@ class SyntheticReceiver:
             # may be, which is the property this whole harness exists to test.
             await asyncio.sleep(self.audio_control_delay_seconds)
 
-        if not self.supports_audio_control:
+        if not self.supports_audio_control or not self.endpoint_configured:
             await self._send(
                 "audio_control", session_id=session_id, command_id=command_id,
                 requested_volume_percent=payload.get("volume_percent"),
                 requested_muted=payload.get("muted"),
-                result="unsupported", error_code="OUTPUT_CONTROL_UNSUPPORTED",
-                details="this Receiver has no controllable audio output",
+                result="unsupported", error_code="OUTPUT_ENDPOINT_NOT_CONFIGURED",
+                details="this Receiver has no Windows audio output selected",
             )
-        elif self.audio_control_result == "failed":
+        elif self.audio_control_result == "failed" or self.endpoint_fails:
             await self._send(
                 "audio_control", session_id=session_id, command_id=command_id,
                 requested_volume_percent=payload.get("volume_percent"),
@@ -160,14 +173,19 @@ class SyntheticReceiver:
                 details="the output level could not be applied",
             )
         else:
-            self.volume_percent = payload.get("volume_percent", self.volume_percent)
-            self.muted = bool(payload.get("muted", self.muted))
+            # The WINDOWS MASTER moves, and the PCM gain deliberately does not.
+            # Applying the same percentage in both places would attenuate
+            # twice, so `self.volume_percent` is left at unity on purpose and
+            # asserted afterwards.
+            if payload.get("volume_percent") is not None:
+                self.endpoint_volume = payload["volume_percent"]
+            self.endpoint_muted = bool(payload.get("muted", self.endpoint_muted))
             await self._send(
                 "audio_control", session_id=session_id, command_id=command_id,
                 requested_volume_percent=payload.get("volume_percent"),
                 requested_muted=payload.get("muted"),
-                applied_volume_percent=self.volume_percent,
-                applied_muted=self.muted, result="applied",
+                applied_volume_percent=self.endpoint_volume,
+                applied_muted=self.endpoint_muted, result="applied",
                 output_device="index:0",
             )
         self.audio_acks_sent += 1
@@ -219,16 +237,35 @@ class SyntheticReceiver:
                     session_id = payload.get("broadcast_session_id") or payload.get("session_id")
                     # Capability reporting, exactly as the real Receiver does:
                     # omitted entirely for a Store modelling an older build.
-                    if self.supports_audio_control:
+                    if self.supports_audio_control and self.endpoint_configured:
+                        # PREPARE captures the Store's own state, then unmutes
+                        # and opens the endpoint - before READY, because READY
+                        # is what tells HQ this Store is fit to broadcast to.
+                        self.endpoint_prepared = True
+                        self.endpoint_volume = 100
+                        self.endpoint_muted = False
                         await self._send(
                             "receiver_ready", session_id=session_id,
-                            capabilities={"output_volume": True, "output_mute": True},
+                            capabilities={"output_volume": True, "output_mute": True,
+                                          "output_control_status": "ready"},
+                        )
+                    elif self.supports_audio_control:
+                        # Upgraded, but the output was never re-selected.
+                        await self._send(
+                            "receiver_ready", session_id=session_id,
+                            capabilities={"output_volume": False, "output_mute": False,
+                                          "output_control_status": "needs_output_selection"},
                         )
                     else:
                         await self._send("receiver_ready", session_id=session_id)
                     self.ready_ms = (time.perf_counter() - prepare_clock[0]) * 1000
                     self.states.append("READY")
                 elif kind == "stop":
+                    # Restoration: the Store's own volume and mute go back.
+                    if self.endpoint_prepared:
+                        self.endpoint_volume = self.endpoint_original_volume
+                        self.endpoint_muted = self.endpoint_original_muted
+                        self.endpoint_restored = True
                     await self._send("stopped", session_id=session_id)
                     self.states.append("STOPPED")
                 elif kind == "set_audio_control":
