@@ -56,20 +56,78 @@ $running = @(Get-CimInstance Win32_Process -Filter "Name = 'SpeakLinkReceiverBac
 if ($running.Count -eq 0) {
     Write-Output '  no Receiver running from the install root'
 } else {
-    foreach ($process in $running) {
+    # Background FIRST, then the console Receiver.
+    #
+    # The scheduled task is already unregistered above, so Windows will not
+    # relaunch anything - but both executables are stopped here and the order
+    # they are stopped in is not arbitrary. SpeakLinkReceiverBackground is the
+    # one the task starts and the one that owns the run; stopping the console
+    # Receiver while the background one is still alive risks the very restart
+    # race this ordering removes. Sorting is cheap insurance against a
+    # non-deterministic Get-CimInstance order.
+    $ordered = @($running | Sort-Object -Property @{
+        Expression = { if ($_.Name -eq 'SpeakLinkReceiverBackground.exe') { 0 } else { 1 } }
+    })
+    foreach ($process in $ordered) {
         Write-Output "  stopping PID $($process.ProcessId)  $($process.ExecutablePath)"
         if ($PSCmdlet.ShouldProcess("PID $($process.ProcessId)", 'Stop the Receiver')) {
             Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
         }
     }
-    Start-Sleep -Seconds 2
+
+    # WAIT for the processes to actually be gone, bounded.
+    #
+    # This was a flat 'Start-Sleep -Seconds 2', which is a guess in both
+    # directions: it wastes two seconds when the process died instantly, and it
+    # is not enough when Windows takes longer - and then Remove-Item below hits
+    # a still-locked SpeakLinkReceiver.exe and the whole uninstall fails on a
+    # race rather than on anything real.
+    $deadline = (Get-Date).AddSeconds(20)
+    while ((Get-Date) -lt $deadline) {
+        $stillRunning = @(Get-CimInstance Win32_Process -Filter "Name = 'SpeakLinkReceiverBackground.exe' OR Name = 'SpeakLinkReceiver.exe'" |
+                          Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallRoot, 'OrdinalIgnoreCase') })
+        if ($stillRunning.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    $stillRunning = @(Get-CimInstance Win32_Process -Filter "Name = 'SpeakLinkReceiverBackground.exe' OR Name = 'SpeakLinkReceiver.exe'" |
+                      Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallRoot, 'OrdinalIgnoreCase') })
+    if ($stillRunning.Count -gt 0) {
+        $names = ($stillRunning | ForEach-Object { "PID $($_.ProcessId)" }) -join ', '
+        throw ("The Receiver is still running after 20 seconds ($names). " +
+               'Nothing has been deleted. Close it and run Uninstall again, or ' +
+               'restart this computer and try once more.')
+    }
+    Write-Output '  all Receiver processes have exited'
 }
 
 # ---- the installed program --------------------------------------------------
 if (Test-Path $InstallRoot) {
     if ($PSCmdlet.ShouldProcess($InstallRoot, 'Remove the installed program')) {
-        Remove-Item $InstallRoot -Recurse -Force
-        Write-Output "  removed $InstallRoot"
+        # Retried briefly rather than attempted once. A file handle can outlive
+        # the process that held it by a moment, and antivirus routinely holds
+        # an executable open just after it exits - both produce a failure that
+        # is gone a second later, and neither is worth failing an uninstall on.
+        # The message on the last attempt names the actual obstacle instead of
+        # surfacing a raw PowerShell error.
+        $removed = $false
+        foreach ($attempt in 1..5) {
+            try {
+                Remove-Item $InstallRoot -Recurse -Force -ErrorAction Stop
+                $removed = $true
+                break
+            } catch {
+                if ($attempt -eq 5) {
+                    throw ("Could not remove $InstallRoot because a file there is " +
+                           "still in use: $($_.Exception.Message) " +
+                           'The scheduled task and the Receiver processes have ' +
+                           'already been stopped, so nothing is running. Close ' +
+                           'any window open in that folder, or restart this ' +
+                           'computer, then run Uninstall again.')
+                }
+                Start-Sleep -Milliseconds 500
+            }
+        }
+        if ($removed) { Write-Output "  removed $InstallRoot" }
     }
 } else {
     Write-Output '  nothing installed at the install root'

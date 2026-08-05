@@ -220,3 +220,109 @@ def test_uninstall_requires_the_settings_password_authorization():
 
     source = inspect.getsource(store_setup_core.uninstall_receiver)
     assert "_require_authorization" in source
+
+
+# ===========================================================================
+# Why HQ says "Not supported by this Receiver"
+# ===========================================================================
+def _snapshot(**overrides):
+    from tools.store_setup_core import StatusSnapshot
+    base = dict(is_installed=True, device_public_id="d", store_id=31,
+                audio_sink=None, audio_output_device=None)
+    base.update(overrides)
+    return StatusSnapshot(**base)
+
+
+def test_a_windows_sink_with_a_device_supports_output_control():
+    snapshot = _snapshot(audio_sink="windows", audio_output_device="index:3")
+    assert snapshot.output_control_supported is True
+    assert "index:3" in snapshot.output_control_detail
+
+
+def test_no_audio_configured_is_reported_as_the_null_sink():
+    """The live symptom: HQ says unsupported and the shop hears nothing.
+
+    A Receiver with no audio output still decodes, so HQ sees
+    PLAYBACK_CONFIRMED - which is exactly why this needs saying out loud on
+    the Store PC rather than being inferred from the HQ console.
+    """
+    snapshot = _snapshot()
+    assert snapshot.output_control_supported is False
+    detail = snapshot.output_control_detail
+    assert "null sink" in detail
+    assert "Not supported by this Receiver" in detail
+    assert "Change Audio Output Device" in detail
+
+
+def test_a_windows_sink_with_no_device_is_still_unsupported():
+    snapshot = _snapshot(audio_sink="windows", audio_output_device="")
+    assert snapshot.output_control_supported is False
+    assert "no output device is selected" in snapshot.output_control_detail
+
+
+def test_a_non_windows_sink_is_named_in_the_explanation():
+    snapshot = _snapshot(audio_sink="null", audio_output_device="index:3")
+    assert snapshot.output_control_supported is False
+    assert "'null'" in snapshot.output_control_detail
+
+
+def test_the_explanation_never_contains_a_credential():
+    for snapshot in (_snapshot(), _snapshot(audio_sink="windows",
+                                            audio_output_device="index:3")):
+        detail = snapshot.output_control_detail.lower()
+        for leak in ("credential", "token", "password", "bearer"):
+            assert leak not in detail
+
+
+# ===========================================================================
+# The uninstall script's own ordering and bounds
+# ===========================================================================
+def _uninstall_script() -> str:
+    return (REPOSITORY_ROOT / "scripts" / "Uninstall-SpeakLinkStoreReceiver.ps1"
+            ).read_text(encoding="utf-8")
+
+
+def test_the_scheduled_task_is_removed_before_processes_are_stopped():
+    """Auto-start off first, or Windows relaunches what was just stopped."""
+    source = _uninstall_script()
+    assert source.index("Unregister-ScheduledTask") < source.index("Stop-Process")
+
+
+def test_the_background_receiver_is_stopped_before_the_console_one():
+    source = _uninstall_script()
+    assert "SpeakLinkReceiverBackground.exe' ) { 0 }" in source.replace("'", "' ")
+
+
+def test_the_wait_for_exit_is_bounded_and_not_a_flat_sleep():
+    source = _uninstall_script()
+    assert "AddSeconds(20)" in source, "the wait must have a deadline"
+    assert "still running after 20 seconds" in source
+    # The old flat two-second guess must be gone: too long when the process
+    # died instantly, too short when Windows took longer.
+    assert "Start-Sleep -Seconds 2\n" not in source
+
+
+def test_a_still_running_receiver_deletes_nothing():
+    source = _uninstall_script()
+    assert "Nothing has been deleted" in source
+
+
+def test_file_removal_is_retried_and_then_explained():
+    source = _uninstall_script()
+    assert "foreach ($attempt in 1..5)" in source
+    assert "still in use" in source
+    assert "restart this computer" in source
+
+
+def test_an_absent_task_and_an_absent_install_are_both_accepted():
+    """Idempotency: a second uninstall must not fail."""
+    source = _uninstall_script()
+    assert "no scheduled task named" in source
+    assert "nothing installed at the install root" in source
+    assert "no Receiver running from the install root" in source
+
+
+def test_the_credential_survives_unless_explicitly_removed():
+    source = _uninstall_script()
+    assert "Device credential KEPT - this Store stays enrolled" in source
+    assert "The Device is NOT revoked at HQ" in source
