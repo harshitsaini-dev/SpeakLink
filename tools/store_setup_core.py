@@ -744,6 +744,9 @@ class StatusSnapshot:
     receiver_state: "str | None" = None
     receiver_detail: str = ""
     hq_reachable: "bool | None" = None
+    #: Why, when it is False. "HQ reachable: False" with no reason sent a
+    #: technician looking for a network fault that did not exist.
+    hq_detail: str = ""
 
     @property
     def output_control_supported(self) -> bool:
@@ -763,9 +766,17 @@ class StatusSnapshot:
     def output_control_detail(self) -> str:
         """Why, in words a technician can act on.
 
-        This exists because "Not supported by this Receiver" on the HQ console
-        is true but unhelpful: it does not say whether the Receiver is too old
-        or simply has no audio output configured, and those need completely
+        This describes LOCAL ELIGIBILITY only - what this computer is
+        configured to be able to do. It is deliberately not a statement about
+        what HQ has been told: this process cannot see the Receiver's live
+        WebSocket, so it cannot know which capabilities were actually
+        advertised on it, and presenting a locally-derived "yes" as proof of
+        that is exactly how an operator ends up trusting a screen over the
+        console in front of them.
+
+        It exists because "Not supported by this Receiver" on the HQ console is
+        true but unhelpful: it does not say whether the Receiver is too old or
+        simply has no audio output configured, and those need completely
         different remedies.
         """
         if self.output_control_supported:
@@ -797,11 +808,26 @@ def get_status_snapshot(*, credential_path, protector, config_path=None,
     task = query_task_state(task_name=task_name)
 
     hq_reachable = None
+    hq_detail = ""
     backend_url = (config.backend_url if config else None) or status.get("backend_origin")
     if backend_url:
-        connection = test_hq_connection(backend_url, opener=connection_opener)
+        # The SAME policy the Receiver connects under, read from the same
+        # config. Without these two arguments a plain-HTTP private-LAN HQ -
+        # which is what every pilot Store uses - is refused by
+        # normalise_backend_url before any request is made, and Status reported
+        # "HQ reachable: False" for an HQ the Receiver had an authenticated
+        # WebSocket to. The check was answering a different question from the
+        # one the operator was reading.
+        connection = test_hq_connection(
+            backend_url,
+            expected_hq_host=config.expected_hq_host if config else None,
+            allow_insecure_private_lan=(
+                config.allow_insecure_private_lan if config else False),
+            opener=connection_opener,
+        )
         hq_reachable = connection.state in (ConnectionState.CONNECTED_TO_HQ,
                                             ConnectionState.PRIVATE_LAN_WARNING)
+        hq_detail = connection.detail or connection.state.value
 
     return StatusSnapshot(
         is_installed=True,
@@ -815,6 +841,7 @@ def get_status_snapshot(*, credential_path, protector, config_path=None,
         receiver_state=receiver_status.get("state"),
         receiver_detail=receiver_status.get("detail", ""),
         hq_reachable=hq_reachable,
+        hq_detail=hq_detail,
     )
 
 

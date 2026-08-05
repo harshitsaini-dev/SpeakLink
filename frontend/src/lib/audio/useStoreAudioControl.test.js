@@ -259,3 +259,55 @@ test("a hundred Stores adjusted at once produce one request each", async () => {
   // distinct commands, and none of them waits behind another.
   expect(api.post).toHaveBeenCalledTimes(100);
 });
+
+// ===========================================================================
+// Capability arrives AFTER the broadcast starts
+// ===========================================================================
+test("a Store that reports support late stops being shown as unsupported", async () => {
+  // The live defect. A Receiver advertises output_volume/output_mute on
+  // `receiver_ready`, which it sends in response to HQ's `prepare` - so at the
+  // moment a broadcast starts, nothing has advertised anything and every Store
+  // legitimately reads supported:false. Fetching once froze that first answer,
+  // and because the control is disabled while unsupported there was no POST to
+  // correct it: the Console said "Not supported by this Receiver" for a Store
+  // whose Receiver had reported full support a second later.
+  api.get.mockResolvedValue({
+    data: { session_id: 5, stores: [row(1, { supported: false, online: true,
+                                             last_command_id: 0, pending: false })] },
+  });
+  await mount();
+  expect(hook.states[1].supported).toBe(false);
+
+  // The Receiver reports READY a moment later and the backend records it.
+  api.get.mockResolvedValue({
+    data: { session_id: 5, stores: [row(1, { supported: true, online: true,
+                                             last_command_id: 0, pending: false })] },
+  });
+  await act(async () => { jest.advanceTimersByTime(3100); });
+
+  expect(hook.states[1].supported).toBe(true);
+});
+
+test("a genuinely unsupported Receiver keeps reading unsupported", async () => {
+  // Polling must not turn into optimism: an old Receiver never advertises the
+  // capability, and the Console has to keep saying so.
+  api.get.mockResolvedValue({
+    data: { session_id: 5, stores: [row(1, { supported: false, online: true,
+                                             last_command_id: 0, pending: false })] },
+  });
+  await mount();
+  await act(async () => { jest.advanceTimersByTime(9100); });
+  expect(hook.states[1].supported).toBe(false);
+});
+
+test("polling stops when there is no live session", async () => {
+  await mount({ sessionId: null });
+  await act(async () => { jest.advanceTimersByTime(9100); });
+  expect(api.get).not.toHaveBeenCalled();
+});
+
+test("polling stops when the operator lacks the capability", async () => {
+  await mount({ canControl: false });
+  await act(async () => { jest.advanceTimersByTime(9100); });
+  expect(api.get).not.toHaveBeenCalled();
+});

@@ -326,3 +326,194 @@ def test_the_credential_survives_unless_explicitly_removed():
     source = _uninstall_script()
     assert "Device credential KEPT - this Store stays enrolled" in source
     assert "The Device is NOT revoked at HQ" in source
+
+
+# ===========================================================================
+# Every protected action must BIND its authorization before using it
+# ===========================================================================
+def _gui_tree():
+    import ast
+    return ast.parse((REPOSITORY_ROOT / "tools" / "store_setup_gui.py")
+                     .read_text(encoding="utf-8"))
+
+
+def _bound_names(node):
+    import ast
+    out = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Assign):
+            for target in child.targets:
+                for sub in ast.walk(target):
+                    if isinstance(sub, ast.Name):
+                        out.add(sub.id)
+        elif isinstance(child, (ast.AnnAssign, ast.AugAssign)) and isinstance(child.target, ast.Name):
+            out.add(child.target.id)
+        elif isinstance(child, ast.arg):
+            out.add(child.arg)
+        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.add(child.name)
+    return out
+
+
+def test_no_protected_action_uses_an_unbound_authorization():
+    """The operator-reported NameError, as a rule rather than one patch.
+
+    `_uninstall` built a closure over `authorization` and never assigned it, so
+    the worker raised NameError the moment it ran. Every other protected action
+    on that screen already called `_authorize` first. This walks the file so a
+    future action cannot reintroduce it - the failure only appears when a
+    technician presses the button, which is the worst place to find it.
+    """
+    import ast
+
+    tree = _gui_tree()
+    broken = []
+    for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
+        for fn in [n for n in cls.body
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            uses = any(isinstance(n, ast.Name) and n.id == "authorization"
+                       and isinstance(n.ctx, ast.Load) for n in ast.walk(fn))
+            if uses and "authorization" not in _bound_names(fn):
+                broken.append(f"{cls.name}.{fn.name}")
+    assert broken == [], f"these use authorization without binding it: {broken}"
+
+
+def test_uninstall_asks_for_the_settings_password():
+    import ast
+
+    tree = _gui_tree()
+    fn = next(n for cls in tree.body if isinstance(cls, ast.ClassDef)
+              for n in cls.body
+              if isinstance(n, ast.FunctionDef) and n.name == "_uninstall")
+    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute) and n.func.attr == "_authorize"]
+    assert calls, "uninstall must ask for the Settings Password"
+    assert "authorization" in _bound_names(fn)
+
+
+def test_a_cancelled_password_prompt_runs_nothing():
+    """`_authorize` returns None on cancel; the action must stop there."""
+    import ast
+
+    tree = _gui_tree()
+    for name in ("_uninstall", "_repair", "_stop", "_replace_identity"):
+        fn = next((n for cls in tree.body if isinstance(cls, ast.ClassDef)
+                   for n in cls.body
+                   if isinstance(n, ast.FunctionDef) and n.name == name), None)
+        if fn is None:
+            continue
+        source = ast.unparse(fn)
+        assert "is None" in source and "return" in source, (
+            f"{name} must stop when authorization is None")
+
+
+def test_status_does_not_present_local_config_as_hq_truth():
+    """The Store showed 'HQ output volume/mute control: yes' while the Console
+    showed 'Not supported by this Receiver'. This process reads a config file;
+    it cannot see the Receiver's live socket, and must not imply it can."""
+    source = (REPOSITORY_ROOT / "tools" / "store_setup_gui.py").read_text(encoding="utf-8")
+    assert "Local output-control eligibility" in source
+    assert "Receiver-advertised capability" in source
+    # The old wording claimed to speak for HQ. Checked against the rendered
+    # f-string, not the whole file: the phrase survives in the comment that
+    # explains why it was wrong, and that comment is worth keeping.
+    assert 'f"HQ output volume/mute control:' not in source
+
+
+# ===========================================================================
+# "HQ reachable: False" while the Receiver is connected
+# ===========================================================================
+def test_the_status_check_uses_the_stores_own_url_policy():
+    """The contradiction the operator photographed.
+
+    Status said "HQ reachable: False" while the line under it said the backend
+    had accepted this Device's credential. get_status_snapshot called
+    test_hq_connection without expected_hq_host or allow_insecure_private_lan,
+    so a plain-HTTP private-LAN HQ - which is what every pilot Store uses - was
+    refused by normalise_backend_url before a single request was made. The
+    Receiver connects under the policy stored in config; the diagnostic did not
+    read it, and answered a different question from the one on screen.
+    """
+    import inspect
+
+    from tools import store_setup_core
+
+    source = inspect.getsource(store_setup_core.get_status_snapshot)
+    assert "expected_hq_host=config.expected_hq_host" in source
+    assert "allow_insecure_private_lan" in source
+
+
+def test_a_private_lan_http_url_is_refused_without_the_policy():
+    """The mechanism, pinned so the fix cannot be quietly undone."""
+    from tools.store_setup_core import ConnectionState, test_hq_connection
+
+    refused = test_hq_connection("http://192.168.4.134:8000")
+    assert refused.state is ConnectionState.INSECURE_PUBLIC_URL_REFUSED
+    # And note it never reached the network: no opener was called.
+
+
+def test_a_private_lan_http_url_is_allowed_with_the_stored_policy():
+    from tools.store_setup_core import ConnectionState, test_hq_connection
+
+    class Response:
+        status = 200
+        def read(self): return b'{"status": "ok"}'
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    result = test_hq_connection(
+        "http://192.168.4.134:8000",
+        expected_hq_host="192.168.4.134",
+        allow_insecure_private_lan=True,
+        opener=lambda url, timeout=None: Response(),
+    )
+    assert result.state in (ConnectionState.CONNECTED_TO_HQ,
+                            ConnectionState.PRIVATE_LAN_WARNING)
+
+
+def test_a_refused_connection_is_reported_as_failed():
+    from tools.store_setup_core import ConnectionState, test_hq_connection
+
+    def refuse(url, timeout=None):
+        raise ConnectionRefusedError(61, "Connection refused")
+
+    result = test_hq_connection(
+        "http://192.168.4.134:8000", expected_hq_host="192.168.4.134",
+        allow_insecure_private_lan=True, opener=refuse)
+    assert result.state is ConnectionState.CONNECTION_FAILED
+
+
+def test_a_timeout_is_reported_as_failed_not_reachable():
+    from tools.store_setup_core import ConnectionState, test_hq_connection
+
+    def slow(url, timeout=None):
+        raise TimeoutError("timed out")
+
+    result = test_hq_connection(
+        "http://192.168.4.134:8000", expected_hq_host="192.168.4.134",
+        allow_insecure_private_lan=True, opener=slow)
+    assert result.state is ConnectionState.CONNECTION_FAILED
+
+
+def test_something_that_is_not_echocast_is_not_reachable():
+    from tools.store_setup_core import ConnectionState, test_hq_connection
+
+    class NotEchoCast:
+        status = 200
+        def read(self): return b'{"hello": "world"}'
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    result = test_hq_connection(
+        "http://192.168.4.134:8000", expected_hq_host="192.168.4.134",
+        allow_insecure_private_lan=True,
+        opener=lambda url, timeout=None: NotEchoCast())
+    assert result.state is ConnectionState.CONNECTION_FAILED
+
+
+def test_status_reports_the_http_diagnostic_separately_from_the_socket():
+    """Two different facts, never one line."""
+    source = (REPOSITORY_ROOT / "tools" / "store_setup_gui.py").read_text(encoding="utf-8")
+    assert "HQ HTTP diagnostic" in source
+    assert "Receiver status:" in source
+    assert 'f"HQ reachable: {snapshot.hq_reachable}"' not in source

@@ -74,7 +74,25 @@ export function useStoreAudioControl({ sessionId, canControl }) {
     }
   }, [sessionId, canControl, applyResponse]);
 
-  React.useEffect(() => { refresh(); }, [refresh]);
+  // Refreshed on an interval, not once.
+  //
+  // A Receiver only reports its capabilities on `receiver_ready`, which it
+  // sends after HQ's `prepare` - so at the instant a broadcast starts and this
+  // hook first runs, no Receiver has advertised anything yet and every Store
+  // legitimately reads `supported: false`. Fetching once cached that first
+  // answer for the life of the broadcast, and because the control is disabled
+  // while unsupported there was no POST to correct it either: the Console said
+  // "Not supported by this Receiver" for a Store whose Receiver had reported
+  // full support a second later, and nothing could ever change its mind.
+  //
+  // The Console already polls its target list on the same cadence, so this
+  // adds one small request alongside an existing one rather than a new rhythm.
+  React.useEffect(() => {
+    if (!sessionId || !canControl) return undefined;
+    refresh();
+    const id = setInterval(refresh, 3000);
+    return () => clearInterval(id);
+  }, [refresh, sessionId, canControl]);
 
   const send = React.useCallback(async (storeId, body) => {
     try {
