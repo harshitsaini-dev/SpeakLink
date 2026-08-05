@@ -716,6 +716,18 @@ def diagnose_report(*, config_path, credential_path, devices=None, backend=None)
         else:
             lines.append("  master volume  : not configured; re-select the audio "
                          "output in Store Setup")
+        # Whether this Store can report a change made at the till back to HQ.
+        # Asked HERE, from the frozen executable, because COM callbacks are
+        # exactly the thing that can work in a source checkout and fail once
+        # packaged - and a Store that cannot report is not broken, it simply
+        # leaves HQ showing its own last command.
+        try:
+            from tools import windows_endpoint_observer
+
+            supported, detail = windows_endpoint_observer.notifications_supported()
+            lines.append(f"  change reports : {'yes' if supported else 'NO'} - {detail}")
+        except Exception as failure:
+            lines.append(f"  change reports : UNAVAILABLE - {failure}")
     except Exception as failure:
         lines.append(f"  core audio     : UNAVAILABLE - {failure}")
 
