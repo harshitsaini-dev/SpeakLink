@@ -1013,7 +1013,13 @@ class RerunScreen(ttk.Frame):
             lines = [
                 f"Device: {snapshot.device_public_id}  Store: {snapshot.store_id}",
                 f"Backend: {snapshot.backend_origin}",
-                f"Audio: {snapshot.audio_sink} / {snapshot.audio_output_device}",
+                f"Audio: {snapshot.audio_sink or '<none configured>'} / "
+                f"{snapshot.audio_output_device or '<none selected>'}",
+                # Spelled out rather than left to be inferred from the line
+                # above. HQ says "Not supported by this Receiver" both when the
+                # Receiver is too old and when it simply has no audio output
+                # configured, and only this computer can tell those apart.
+                f"HQ output volume/mute control: {snapshot.output_control_detail}",
                 f"Task: {'registered, ours' if task and task.is_ours else task.detail if task else 'unknown'}"
                 + (f" ({task.state}, {task.process_count} process(es))" if task and task.is_ours else ""),
                 f"Receiver status: {snapshot.receiver_state or '<none yet>'} - {snapshot.receiver_detail}",

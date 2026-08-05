@@ -745,6 +745,43 @@ class StatusSnapshot:
     receiver_detail: str = ""
     hq_reachable: "bool | None" = None
 
+    @property
+    def output_control_supported(self) -> bool:
+        """Will HQ be able to set this Store's output volume?
+
+        The Receiver advertises ``output_volume``/``output_mute`` only when it
+        has a Windows PCM sink, and it only has one when BOTH a windows sink
+        mode and a selected output device are saved. Anything else runs the
+        null sink: FFmpeg still decodes, so HQ still sees PLAYBACK_CONFIRMED,
+        but no device is open - no volume to control and, more to the point,
+        no sound in the shop.
+        """
+        return (self.audio_sink or "").strip().lower() == "windows" and bool(
+            (self.audio_output_device or "").strip())
+
+    @property
+    def output_control_detail(self) -> str:
+        """Why, in words a technician can act on.
+
+        This exists because "Not supported by this Receiver" on the HQ console
+        is true but unhelpful: it does not say whether the Receiver is too old
+        or simply has no audio output configured, and those need completely
+        different remedies.
+        """
+        if self.output_control_supported:
+            return f"yes - Windows output device {self.audio_output_device}"
+        if not (self.audio_sink or "").strip():
+            return ("NO - no audio output has been configured on this computer, "
+                    "so the Receiver is running its null sink. Nothing is "
+                    "played to a speaker and HQ will say 'Not supported by "
+                    "this Receiver'. Use Change Audio Output Device, complete "
+                    "Test Sound, and confirm you heard it.")
+        if (self.audio_sink or "").strip().lower() != "windows":
+            return (f"NO - the audio sink is '{self.audio_sink}', not a Windows "
+                    "output device. Use Change Audio Output Device.")
+        return ("NO - a Windows sink is configured but no output device is "
+                "selected. Use Change Audio Output Device.")
+
 
 def get_status_snapshot(*, credential_path, protector, config_path=None,
                         status_path=None, task_name: str = DEFAULT_TASK_NAME,
