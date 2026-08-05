@@ -142,3 +142,10 @@ websockets==16.0
 yarl==1.24.2
 zipp==4.1.0
 httpx==0.28.1
+
+# Windows Core Audio, for the Store Receiver's endpoint master volume/mute.
+# Pinned: HQ's per-Store slider now moves a real Windows setting on a till, and
+# an unpinned COM binding is not something to discover a change in during a
+# rollout. comtypes is pycaw's transport and is pinned with it.
+pycaw==20240210
+comtypes==1.4.6

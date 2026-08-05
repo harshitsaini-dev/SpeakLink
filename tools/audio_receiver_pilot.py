@@ -287,26 +287,19 @@ class WindowsPcmSink:
         self._frames_written = 0
         self._failed = False
         self._lock = threading.Lock()
-        # EchoCast's OWN output level, applied to the decoded samples on their
-        # way to the device.
+        # EchoCast's own PCM level. DELIBERATELY LEFT AT UNITY.
         #
-        # WHY HERE AND NOT AT THE WINDOWS ENDPOINT
+        # This used to follow the HQ per-Store slider. It no longer does: that
+        # slider now sets the WINDOWS ENDPOINT MASTER volume, and applying the
+        # same percentage in both places would attenuate twice - HQ at 50%
+        # would produce 25% of the signal, and nobody could explain why the
+        # shop was quiet.
         #
-        # FFmpeg in this design never opens an audio device: it decodes to raw
-        # PCM on stdout and this sink owns the endpoint. That leaves a place to
-        # scale the samples themselves, which is worth a great deal:
-        #
-        #   * nothing else on the machine changes. Turning a Store down does
-        #     not turn down EchoGuard, the till software, or whatever else
-        #     shares that endpoint - which setting the Windows endpoint volume
-        #     would have done, invisibly.
-        #   * there is nothing to restore. The system volume is never written,
-        #     so a crashed Receiver cannot leave a shop's PC muted.
-        #   * it is instant and needs no restart. FFmpeg keeps running and the
-        #     stream keeps flowing; mute is a multiply by zero, not a teardown.
-        #
-        # The cost is that it scales EchoCast's audio only. That is exactly the
-        # product claim being made, and no more.
+        # The scaling code is kept rather than deleted because it is the only
+        # mechanism that can silence EchoCast WITHOUT touching the shared
+        # endpoint, and a future per-Store DSP control is the obvious use for
+        # it. Today nothing moves it off 100/unmuted, and a test asserts that
+        # the master-volume path does not.
         self._volume_percent = 100
         self._muted = False
 
@@ -637,6 +630,20 @@ class AudioReceiverPilot:
         # Newest output-volume command applied. Monotonic within a
         # session; a command that is not strictly newer is dropped.
         self._last_audio_command_id = 0
+
+        # ---- Windows endpoint master control ------------------------------
+        #: The STABLE Core Audio endpoint id this Receiver may control, or
+        #: None for an installation that has not re-selected its output since
+        #: master control existed. None means "unsupported", never "guess".
+        self.windows_endpoint_id = None
+        #: Captured once, before the first mutation of this broadcast.
+        self._endpoint_original = None
+        #: Where the crash-recovery record lives for this run.
+        self._endpoint_record_path = None
+        #: Test seam. None means real Core Audio.
+        self._endpoint_backend = None
+        #: The level HQ last asked for, so unmute can return to it.
+        self._endpoint_volume_percent = 100
         self._audio_backend = audio_backend
 
         self.session_id: int | None = None
@@ -841,14 +848,23 @@ class AudioReceiverPilot:
         self.decoder = FfmpegDecoder(sink_mode=self.sink.sink_mode, pcm_sink=pcm_sink)
         self.decoder.start()
 
+        # ---- Windows endpoint master control ------------------------------
+        #
+        # Done BEFORE receiver_ready is sent, because READY is what tells HQ
+        # this Store is fit to broadcast to - and a Store whose output is muted
+        # at the Windows level is not. If the endpoint cannot be prepared, the
+        # capability is not claimed and the failure is reported rather than
+        # being discovered later as silence.
+        endpoint_ready = await self._prepare_windows_endpoint(connection)
+        if endpoint_ready is False:
+            return
+
         # Capabilities are reported HONESTLY, from what this run can actually
-        # do rather than from the build version. Output control is applied to
-        # the decoded PCM inside WindowsPcmSink, so it exists only when there
-        # is a hardware sink; in null mode there is no device to be loud on and
-        # claiming the capability would make HQ show a control that changes
-        # nothing. An older Receiver omits this block entirely, and HQ reads
-        # that absence as "not controllable".
-        controllable = self.pcm_sink is not None
+        # do rather than from the build version. Master control needs a stable
+        # endpoint id captured when the output was selected; an installation
+        # that has not re-selected since this feature shipped has none, and
+        # says so instead of claiming a control that would act on a guess.
+        controllable = self.windows_endpoint_id is not None
         await self._send(connection, {
             **self._envelope("receiver_ready"),
             "software_checks_passed": True,
@@ -860,6 +876,110 @@ class AudioReceiverPilot:
         })
         self.report["ready"] = True
         self._record_state("READY")
+
+    # -- Windows endpoint master control ----------------------------------
+    def _endpoint_module(self):
+        from tools import windows_endpoint_volume
+
+        return windows_endpoint_volume
+
+    async def _prepare_windows_endpoint(self, connection) -> "bool | None":
+        """Capture, persist, unmute and open this broadcast's output.
+
+        Returns False only when the run must stop; None when there is nothing
+        to control, which is a normal state for an installation that has not
+        re-selected its output yet.
+        """
+        if not self.windows_endpoint_id:
+            return None
+
+        volume = self._endpoint_module()
+        try:
+            original = volume.read_state(self.windows_endpoint_id,
+                                         backend=self._endpoint_backend)
+        except Exception as failure:
+            await self._send(connection, {
+                **self._envelope("device_error"),
+                "error_code": "OUTPUT_ENDPOINT_UNAVAILABLE",
+                "details": "the selected Windows audio output could not be read",
+                "recoverable": True,
+            })
+            self._record_state("DEVICE_ERROR")
+            self.report["windows_endpoint_error"] = str(failure)[:200]
+            return False
+
+        # Persisted BEFORE the first mutation. If the machine loses power one
+        # instruction later, the next start finds this and puts it back.
+        self._endpoint_original = original
+        if self._endpoint_record_path is not None:
+            from tools import windows_endpoint_restore
+
+            windows_endpoint_restore.write_record(
+                self._endpoint_record_path,
+                session_id=self.session_id or 0,
+                endpoint_id=self.windows_endpoint_id,
+                original_volume_percent=original.volume_percent,
+                original_muted=original.muted,
+            )
+
+        try:
+            applied = volume.apply_state(
+                self.windows_endpoint_id,
+                volume_percent=self._endpoint_volume_percent,
+                muted=False,
+                backend=self._endpoint_backend,
+            )
+        except Exception as failure:
+            await self._send(connection, {
+                **self._envelope("device_error"),
+                "error_code": "OUTPUT_ENDPOINT_CONTROL_FAILED",
+                "details": "the selected Windows audio output could not be prepared",
+                "recoverable": True,
+            })
+            self._record_state("DEVICE_ERROR")
+            self.report["windows_endpoint_error"] = str(failure)[:200]
+            return False
+
+        self.report["windows_endpoint_prepared"] = {
+            "original_volume_percent": original.volume_percent,
+            "original_muted": original.muted,
+            "applied_volume_percent": applied.volume_percent,
+            "applied_muted": applied.muted,
+        }
+        return True
+
+    def restore_windows_endpoint(self) -> dict:
+        """Put the Store's own volume and mute back. Safe to call twice.
+
+        Called from every path that ends a broadcast, which is why it is
+        idempotent and never raises: an exception here would turn a clean stop
+        into a crash and leave the shop at the announcement level.
+        """
+        original = self._endpoint_original
+        if original is None or not self.windows_endpoint_id:
+            return {"restored": False, "reason": "nothing was changed"}
+        volume = self._endpoint_module()
+        try:
+            applied = volume.apply_state(
+                self.windows_endpoint_id,
+                volume_percent=original.volume_percent,
+                muted=original.muted,
+                backend=self._endpoint_backend,
+            )
+        except Exception as failure:
+            # The record is deliberately NOT cleared, so the next start tries
+            # again rather than forgetting a shop left loud.
+            return {"restored": False, "reason": str(failure)[:200]}
+
+        self._endpoint_original = None
+        if self._endpoint_record_path is not None:
+            from tools import windows_endpoint_restore
+
+            windows_endpoint_restore.clear_record(self._endpoint_record_path)
+        self.report["windows_endpoint_restored"] = {
+            "volume_percent": applied.volume_percent, "muted": applied.muted}
+        return {"restored": True, "volume_percent": applied.volume_percent,
+                "muted": applied.muted}
 
     async def _on_set_audio_control(self, connection, payload: dict) -> None:
         """Apply an HQ output-volume command and report what really happened.
@@ -906,47 +1026,58 @@ class AudioReceiverPilot:
         }
         device = self.sink.device.selector if self.sink.device else None
 
-        if self.pcm_sink is None:
-            # Null-sink runs and any future playback path without a software
-            # gain. Honest rather than optimistic: nothing was changed.
+        # The HQ slider is the WINDOWS ENDPOINT MASTER now, not a PCM gain.
+        # An installation with no stable endpoint id cannot be controlled
+        # safely - acting on a PortAudio index could move the wrong output -
+        # so it reports unsupported and changes nothing.
+        if not self.windows_endpoint_id:
             await self._send(connection, {
                 **base,
                 "result": "unsupported",
                 "output_device": device,
-                "error_code": "OUTPUT_CONTROL_UNSUPPORTED",
-                "details": "this Receiver has no controllable audio output",
+                "error_code": "OUTPUT_ENDPOINT_NOT_CONFIGURED",
+                "details": ("this Receiver has no Windows audio output selected "
+                            "for master control; re-select it in Store Setup"),
             })
             return
 
+        volume = self._endpoint_module()
+        # Mute is the endpoint's own mute, and the chosen level survives it so
+        # unmuting returns to what HQ last asked for rather than to full.
+        if command["volume_percent"] is not None:
+            self._endpoint_volume_percent = command["volume_percent"]
         try:
-            self.pcm_sink.set_audio_control(
-                volume_percent=command["volume_percent"],
+            applied = volume.apply_state(
+                self.windows_endpoint_id,
+                volume_percent=self._endpoint_volume_percent,
                 muted=command["muted"],
+                backend=self._endpoint_backend,
             )
-        except SinkConfigurationError:
+        except Exception as failure:
             await self._send(connection, {
                 **base,
                 "result": "failed",
                 "output_device": device,
                 "error_code": "OUTPUT_CONTROL_FAILED",
-                "details": "the output level could not be applied",
+                "details": "the Windows output master volume could not be applied",
             })
+            self.report["windows_endpoint_error"] = str(failure)[:200]
             return
 
-        # Read BACK from the sink rather than echoing the request. If the two
-        # ever diverge the operator should be told the sink's answer, not their
-        # own question repeated to them.
+        # The value READ BACK from Windows, never the one that was asked for.
+        # Windows can clamp and policy can override; "applied" has to mean the
+        # endpoint reported it afterwards.
         await self._send(connection, {
             **base,
             "result": "applied",
-            "applied_volume_percent": self.pcm_sink.volume_percent,
-            "applied_muted": self.pcm_sink.muted,
+            "applied_volume_percent": applied.volume_percent,
+            "applied_muted": applied.muted,
             "output_device": device,
         })
         self.report["audio_control_applied"] = {
-            "volume_percent": self.pcm_sink.volume_percent,
-            "muted": self.pcm_sink.muted,
-            "effective_percent": self.pcm_sink.effective_percent,
+            "volume_percent": applied.volume_percent,
+            "muted": applied.muted,
+            "windows_endpoint": True,
         }
 
     async def _on_audio(self, connection, chunk: bytes) -> None:
@@ -1010,6 +1141,11 @@ class AudioReceiverPilot:
 
     async def _on_stop(self, connection, payload: dict) -> None:
         session_id = payload.get("session_id") or self.session_id
+        # The Store's own volume and mute go back FIRST, before anything that
+        # could fail. Normal Stop, HQ Stop and Emergency Stop all arrive here,
+        # so this one call covers all three - and a shop left at announcement
+        # volume is the failure this whole feature has to avoid.
+        self.restore_windows_endpoint()
         if self.decoder is not None:
             returncode = await asyncio.to_thread(self.decoder.close)
             self.report["ffmpeg_returncode"] = returncode
@@ -1030,6 +1166,10 @@ class AudioReceiverPilot:
             self._record_state("STOPPED")
 
     async def _shutdown(self, connection) -> None:
+        # Every other way a run can end: the broadcaster disconnecting, the
+        # stream dying, a controlled Agent shutdown, an exception that reaches
+        # cleanup. Idempotent, so a stop that already restored costs nothing.
+        self.restore_windows_endpoint()
         if self.decoder is not None and self.decoder.running:
             self.report["ffmpeg_returncode"] = await asyncio.to_thread(self.decoder.close)
         if self.pcm_sink is not None:
