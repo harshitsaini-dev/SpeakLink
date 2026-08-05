@@ -78,6 +78,7 @@ from tools.windows_audio_devices import (  # noqa: E402
     list_output_devices,
     resolve_output_device,
 )
+from tools import windows_endpoint_restore  # noqa: E402
 from tools.receiver_credential_store import (  # noqa: E402
     CredentialStoreError,
     DeviceCredentialProtector,
@@ -458,6 +459,7 @@ _CONFIG_FIELDS = (
     "allow_insecure_private_lan",
     "audio_sink",
     "audio_output_device",
+    "windows_endpoint_id",
     "log_directory",
     "installed_version",
     "source_commit",
@@ -481,6 +483,13 @@ class ReceiverConfig:
     allow_insecure_private_lan: bool = False
     audio_sink: str | None = None
     audio_output_device: str | None = None
+    #: The STABLE Windows Core Audio endpoint id for the device above, captured
+    #: when the technician selected it. Master volume/mute is only ever applied
+    #: to this id - never to a PortAudio index, which renumbers when hardware
+    #: changes and would point SpeakLink at the wrong output. None means an
+    #: installation that predates master control: playback still works, and HQ
+    #: reports the control as unavailable until the output is re-selected.
+    windows_endpoint_id: str | None = None
     log_directory: str | None = None
     installed_version: str | None = None
     source_commit: str | None = None
@@ -1232,10 +1241,17 @@ class DeviceReceiverSession(AudioReceiverPilot):
     and untouched, which is what preserves the amplifier evidence path.
     """
 
-    def __init__(self, *, credential: str, connect=None, status_path=None, **kwargs) -> None:
+    def __init__(self, *, credential: str, connect=None, status_path=None,
+                 windows_endpoint_id=None, endpoint_record_path=None, **kwargs) -> None:
         super().__init__(**kwargs)
         self._credential = credential
         self._connect = connect
+        # The stable Core Audio endpoint this Store may drive, and where the
+        # crash-recovery record lives. Both come from the saved config, never
+        # from a lookup at broadcast time: resolving a device by name while an
+        # announcement is starting is how the wrong output gets muted.
+        self.windows_endpoint_id = windows_endpoint_id
+        self._endpoint_record_path = endpoint_record_path
         # Optional: where to write "what is true right now". A Store technician
         # waiting for the Device to come online cannot see this process's stdout
         # (it is backgrounded, on purpose), so the evidence has to be on disk.
@@ -1633,6 +1649,30 @@ def _run_locked(arguments, *, ws_url: str, path: Path, log: logging.Logger,
 
     report_path = Path(arguments.report) if arguments.report else None
 
+    # Read once, here, rather than at broadcast time. The endpoint this Store
+    # may drive is a decision the technician made when they selected the
+    # output; re-deriving it later - especially from a device name - is how
+    # SpeakLink would end up controlling whatever happened to match today.
+    try:
+        config = load_config(default_config_path())
+    except AgentError:
+        config = None
+
+    # A Receiver that died mid-announcement left the shop at the announcement
+    # volume. Put it back before doing anything else, and say so.
+    recovery = windows_endpoint_restore.recover_on_startup(
+        windows_endpoint_restore.default_record_path(),
+        apply_state=lambda endpoint_id, **kw: __import__(
+            "tools.windows_endpoint_volume", fromlist=["x"]
+        ).apply_state(endpoint_id, **kw),
+        logger=log,
+    )
+    if recovery.get("recovered"):
+        log.warning("Restored a Windows audio output left changed by a previous run")
+    elif recovery.get("endpoint_id"):
+        log.warning("Could not restore a previous run's Windows audio output: %s",
+                    recovery.get("reason"))
+
     async def attempt() -> dict:
         session = DeviceReceiverSession(
             ws_url=ws_url,
@@ -1644,6 +1684,11 @@ def _run_locked(arguments, *, ws_url: str, path: Path, log: logging.Logger,
             # installer has to know to pass. This is the only evidence a
             # backgrounded process can offer of what it is doing right now.
             status_path=receiver_status_path(),
+            # From the saved config. None on an installation that has not
+            # re-selected its output since master control shipped, and that is
+            # reported to HQ as unsupported rather than guessed at.
+            windows_endpoint_id=(config.windows_endpoint_id if config else None),
+            endpoint_record_path=windows_endpoint_restore.default_record_path(),
         )
         started = time.monotonic()
         try:

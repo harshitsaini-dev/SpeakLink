@@ -228,14 +228,56 @@ def test_change_audio_output_saves_before_restarting(tmp_path, monkeypatch):
 
     device = OutputDevice(index=2, name="Realtek(R) Audio", host_api="MME",
                           max_output_channels=2, default_samplerate=48000, is_default=False)
-    core.change_audio_output(authorization=_authorized(), 
+    # Selecting an output now also resolves and stores the STABLE Core Audio
+    # endpoint id, because HQ's per-Store volume drives the Windows master and
+    # a PortAudio index is not a safe thing to drive it from. A fake backend
+    # stands in for Core Audio so this test never touches the real mixer.
+    endpoint_id = "{0.0.0.00000000}.{aaaaaaaa-1111-2222-3333-444444444444}"
+
+    class FakeEndpointBackend:
+        def list_endpoints(self):
+            return [{"endpoint_id": endpoint_id, "name": "Realtek(R) Audio"}]
+
+        def controller(self, requested):
+            raise AssertionError("selecting an output must not mutate an endpoint")
+
+    core.change_audio_output(authorization=_authorized(),
         device=device, config_path=config_path,
         run=lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout="STARTED\n"),
         timeout_seconds=1,
+        endpoint_backend=FakeEndpointBackend(),
     )
     saved = core.load_config(config_path)
     assert saved.audio_output_device == device.verified_selector
     assert saved.audio_sink == "windows"
+    assert saved.windows_endpoint_id == endpoint_id
+
+
+def test_change_audio_output_refuses_an_endpoint_it_cannot_identify(tmp_path):
+    """Better to refuse than to store a guess.
+
+    A wrong endpoint id is permanent and silent: every later broadcast would
+    move the master volume of hardware nobody selected. The technician is
+    still standing there, so the error is useful now and impossible later.
+    """
+    from tools import windows_endpoint_volume
+
+    config_path = tmp_path / "config.json"
+    device = OutputDevice(index=2, name="Realtek(R) Audio", host_api="MME",
+                          max_output_channels=2, default_samplerate=48000,
+                          is_default=False)
+
+    class TwoOfThem:
+        def list_endpoints(self):
+            return [{"endpoint_id": "{0.0.0.0}.{a}", "name": "Realtek(R) Audio"},
+                    {"endpoint_id": "{0.0.0.0}.{b}", "name": "Realtek(R) Audio"}]
+
+    with pytest.raises(windows_endpoint_volume.EndpointAmbiguous):
+        core.change_audio_output(authorization=_authorized(),
+            device=device, config_path=config_path,
+            run=lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout="STARTED\n"),
+            timeout_seconds=1, endpoint_backend=TwoOfThem())
+    assert not config_path.exists(), "a refusal must not leave a half-written config"
 
 
 # ===========================================================================

@@ -139,18 +139,55 @@ def test_a_boolean_is_not_a_level():
         sink.set_audio_control(volume_percent=True, muted=False)
 
 
-def test_the_windows_endpoint_volume_is_never_touched():
-    """The mechanism's whole safety argument, asserted rather than assumed.
+def test_the_endpoint_is_driven_only_through_the_dedicated_module():
+    """The safety property this REPLACES, and why.
 
-    Nothing in the sink may reach for the system mixer: doing so would change
-    the level of every other application sharing that endpoint - LinkGuard
-    included - and would leave state behind to restore after a crash.
+    This test used to assert that the Receiver never reached for the system
+    mixer at all - no pycaw, no IAudioEndpointVolume, no SetMute. That was the
+    whole argument for scaling PCM instead: nothing else on the machine
+    changed, and a crash could leave nothing behind.
+
+    That decision has been deliberately reversed, because a Store user who
+    muted Windows silenced every announcement while HQ reported "Applied
+    100%". HQ's per-Store volume is now the Windows endpoint master.
+
+    Keeping the old assertion would have been worse than deleting it: the
+    Core Audio calls simply moved to windows_endpoint_volume.py, so the test
+    kept passing while the thing it claimed to prevent was happening one
+    import away. What is worth pinning now is narrower and true - the pilot
+    itself holds no COM code, so there is exactly ONE place where an endpoint
+    can be mutated, and that place refuses anything but a stable endpoint id.
     """
     source = Path(REPOSITORY_ROOT / "tools" / "audio_receiver_pilot.py").read_text(
         encoding="utf-8")
-    for forbidden in ("SetMasterVolume", "IAudioEndpointVolume", "pycaw",
-                      "SetMute", "waveOutSetVolume"):
-        assert forbidden not in source, forbidden
+    for forbidden in ("IAudioEndpointVolume", "pycaw", "SetMasterVolumeLevelScalar",
+                      "waveOutSetVolume"):
+        assert forbidden not in source, (
+            f"{forbidden} belongs in windows_endpoint_volume.py, which is the "
+            "only module allowed to mutate an endpoint")
+    # And it does go through that module.
+    assert "windows_endpoint_volume" in source
+
+
+def test_the_endpoint_module_refuses_to_act_without_a_stable_id():
+    """The replacement safety property, stated as a rule.
+
+    Master volume may only ever be applied to a Core Audio endpoint id. A
+    PortAudio index renumbers when hardware changes, so acting on one could
+    move the master volume of an output nobody selected.
+    """
+    from tools import windows_endpoint_volume
+
+    class Empty:
+        def controller(self, endpoint_id):
+            raise windows_endpoint_volume.EndpointNotFound(endpoint_id)
+
+        def list_endpoints(self):
+            return []
+
+    with pytest.raises(windows_endpoint_volume.EndpointNotFound):
+        windows_endpoint_volume.apply_state("index:3", volume_percent=80,
+                                            backend=Empty())
 
 
 # ===========================================================================

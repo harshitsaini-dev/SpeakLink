@@ -938,7 +938,7 @@ def stop_receiver(*, task_name: str = DEFAULT_TASK_NAME, run=None,
 
 def change_audio_output(*, device, config_path=None, task_name: str = DEFAULT_TASK_NAME,
                         run=None, timeout_seconds: float = 30.0,
-                        authorization=None) -> TaskActionResult:
+                        authorization=None, endpoint_backend=None) -> TaskActionResult:
     """Save the newly confirmed selector, then restart so it takes effect.
     Never saves before Test Sound + the heard confirmation - that gate lives
     in the GUI, which only calls this after both have happened."""
@@ -947,12 +947,25 @@ def change_audio_output(*, device, config_path=None, task_name: str = DEFAULT_TA
     _require_authorization(authorization, "Changing the audio output device")
     path = Path(config_path) if config_path is not None else default_config_path()
     existing = load_config(path) or ReceiverConfig()
+
+    # Resolve the STABLE Core Audio endpoint id now, while the technician is
+    # here and can see the result. HQ's per-Store volume drives the Windows
+    # master, and doing that from a PortAudio index would let a renumbered
+    # device redirect it to the wrong output. An ambiguous match is refused
+    # outright rather than guessed - a wrong answer here is permanent, silent,
+    # and would move the master volume of hardware nobody chose.
+    from tools import windows_endpoint_volume
+
+    endpoint_id = windows_endpoint_volume.resolve_endpoint_for_playback_device(
+        device.name, backend=endpoint_backend)
+
     updated = ReceiverConfig(
         backend_url=existing.backend_url,
         expected_hq_host=existing.expected_hq_host,
         allow_insecure_private_lan=existing.allow_insecure_private_lan,
         audio_sink="windows",
         audio_output_device=device.verified_selector,
+        windows_endpoint_id=endpoint_id,
         log_directory=existing.log_directory,
         installed_version=existing.installed_version,
         source_commit=existing.source_commit,
