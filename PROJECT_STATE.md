@@ -5901,3 +5901,70 @@ history was deleted. No Store Kit installed.
 
 Stability: API 200 and worker alive across six samples over 2.5 minutes, no new
 errors. Rollback not required.
+
+---
+
+## Live deployment — Receiver Device runtime disconnect (2026-08-05)
+
+Deployed `fix/receiver-delete-runtime-disconnect` @ `6861b27` to the live
+repo-native HQ. Clean stop (pid 14284, port released), start pid 12896 with one
+worker, `SpeakLink startup complete`, Receiver key *"reused unchanged"*.
+
+| | |
+|---|---|
+| Rollback backup | `_live-hq-deployment-backups/speaklink-before-runtime-disconnect-20260805-154400.db` |
+| SHA-256 | `34f40716066cf4785bee6532515cbba85874bc681738f47d5dbb117489dacd05` |
+| Verified | `integrity_check ok`, `foreign_key_check` 0 rows, 11 sessions / 10 devices / 11 credentials |
+| Receiver key | 470 bytes, sha256 `748a99f2…`, unchanged and not rotated |
+
+### A live broadcast was interrupted — operator impact
+
+The P1 safety check ran at 15:43:30 and correctly reported zero live
+broadcasts. Session 12 was created at **15:43:54**, twenty-four seconds later,
+and reached `playback_confirmed` on BP. The stop was issued moments after, so
+**an announcement that was audibly playing was cut off.**
+
+The gate was point-in-time with no re-check immediately before the stop. Any
+future restart must re-assert the live-broadcast check within seconds of
+issuing the stop, or hold a guard that refuses the stop outright. Restart
+reconciliation behaved correctly: session 12 was closed as `failed` with the
+honest note *"Interrupted: HQ restarted while this broadcast was live"*, and
+its Store lease was released.
+
+### The fix is proven live, on real hardware
+
+The operator exercised it on BP immediately after deployment:
+
+    15:47:37  BP connects (Device 11)
+    15:47:44  operator permanently deletes Device 11
+    15:47:44  "Receiver Device cf20de99-… disconnected from runtime
+               after permanent delete"
+    15:47:44+ 192.168.4.171 "WebSocket /api/ws/receiver" 403
+
+The socket was closed by the new code at the moment of deletion, and the
+Receiver's reconnect with the revoked credential was **rejected 403**. Against
+the defect this replaces — Device 6 deleted at 14:17:36, still reporting
+`playback_confirmed` at 14:18:26 — the behaviour is now correct.
+
+### Receiver continuity across the restart: NOT demonstrated
+
+BP did not reconnect during the 25 seconds between startup and the operator
+permanently deleting Device 10 at 15:44:29, so restart continuity on the
+pre-existing credential was never observed. It cannot now be tested on that
+Device: Devices 10 and 11 were both deleted by the operator and BP currently
+has **no active Device** and one unredeemed enrolment code. Those deletions and
+re-enrolments were operator actions (`actor_user_id=2`), recorded in
+`device_deletion_events`; this checkpoint changed no credential and re-enrolled
+nothing.
+
+### Result
+
+Full backend **3246 passed**, 90 skipped — the known order-dependent flake
+`test_concurrent_redemption_enrols_exactly_one_device` did not recur. Targeted
+Receiver/device/credential/broadcast selection: 2019 passed.
+
+`integrity_check ok`, `foreign_key_check` 0 rows, no live sessions, no
+unreleased leases. UI 200, `/console` 200, `/api/` 200. Rollback not required.
+
+Store Kit 1.3.0 **not** installed. Dynamic live target work **not** started.
+Legacy Store-token authentication **unchanged**.
