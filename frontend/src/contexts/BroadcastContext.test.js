@@ -398,3 +398,92 @@ test("the broadcaster socket URL still carries session_id", async () => {
   expect(constructedUrl).toContain("session_id=77");
   expect(window.__broadcast.hasActiveBroadcaster()).toBe(true);
 });
+
+// ===========================================================================
+// Navigating away and back must not start anything a second time
+// ===========================================================================
+//
+// The route is mounted and unmounted INSIDE the provider, which is exactly
+// how the real application behaves: BroadcastProvider sits above the router,
+// so navigating to another page unmounts the Console and leaves the provider -
+// and its microphone, recorder and socket - untouched.
+function Routed({ show }) {
+  return show ? <Probe /> : <span data-testid="elsewhere">another page</span>;
+}
+
+test("remounting a consumer route creates no second broadcaster", async () => {
+  // The operator's bug was an empty form on return. The fix rehydrates it, and
+  // the risk of any "restore" is that it quietly re-broadcasts rather than
+  // re-rendering, so the negative half is asserted here.
+  //
+  // ready_receivers is what startBroadcast waits for before opening the
+  // microphone; without it the provider polls until its 20 s deadline.
+  respond({ current: { live: false, ready_receivers: [101, 102] },
+            active: ACTIVE_EMPTY });
+  const view = render(
+    <BroadcastProvider><Routed show /></BroadcastProvider>);
+  await act(async () => {});
+
+  await act(async () => {
+    await window.__broadcast.startBroadcast({
+      campaign: "Morning Offer", targetMode: "selected", ids: [101, 102],
+    });
+  });
+  expect(mockConstructed.length).toBe(1);
+  expect(mockStart).toHaveBeenCalledTimes(1);
+  expect(window.__broadcast.hasActiveBroadcaster()).toBe(true);
+  const socketUrl = mockConstructed[0].wsUrl;
+
+  // Navigate away and back, three times.
+  for (let visit = 0; visit < 3; visit += 1) {
+    await act(async () => {
+      view.rerender(<BroadcastProvider><Routed show={false} /></BroadcastProvider>);
+    });
+    await act(async () => {
+      view.rerender(<BroadcastProvider><Routed show /></BroadcastProvider>);
+    });
+  }
+
+  // One HQBroadcaster, so one getUserMedia, one MediaRecorder and one
+  // broadcaster WebSocket - all three are acquired inside its start().
+  expect(mockConstructed.length).toBe(1);
+  expect(mockStart).toHaveBeenCalledTimes(1);
+  expect(mockStop).not.toHaveBeenCalled();
+  expect(window.__broadcast.hasActiveBroadcaster()).toBe(true);
+  // The same socket, bound to the same session - not a second uplink.
+  expect(mockConstructed[0].wsUrl).toBe(socketUrl);
+  // And exactly one session was ever created.
+  expect(api.post.mock.calls.filter(([path]) => path === "/broadcast/sessions"))
+    .toHaveLength(1);
+});
+
+test("the microphone level survives navigating away and back", async () => {
+  respond({ current: { live: false, ready_receivers: [101] },
+            active: ACTIVE_EMPTY });
+  const view = render(
+    <BroadcastProvider><Routed show /></BroadcastProvider>);
+  await act(async () => {});
+
+  await act(async () => {
+    await window.__broadcast.startBroadcast({
+      campaign: "Morning Offer", targetMode: "selected", ids: [101],
+    });
+  });
+  await act(async () => {
+    window.__broadcast.setMicVolume(40);
+    window.__broadcast.setMicMute(true);
+  });
+
+  await act(async () => {
+    view.rerender(<BroadcastProvider><Routed show={false} /></BroadcastProvider>);
+  });
+  await act(async () => {
+    view.rerender(<BroadcastProvider><Routed show /></BroadcastProvider>);
+  });
+
+  // Mic gain and mute live in the provider, so a route remount must not reset
+  // them - an operator who muted before walking to another page must not come
+  // back to an unmuted microphone.
+  expect(window.__broadcast.micVolumePercent).toBe(40);
+  expect(window.__broadcast.micMuted).toBe(true);
+});
