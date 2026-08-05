@@ -31,6 +31,7 @@ command argument. No raw audio is ever logged or written into the repository.
 from __future__ import annotations
 
 import argparse
+import array
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -50,8 +51,10 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from audio_protocol import (  # noqa: E402
+    AudioProtocolError,
     InvalidAudioChunkError,
     parse_prepare_message,
+    parse_set_audio_control_message,
     validate_audio_chunk,
 )
 from audio_streaming import StoreAudioQueue, StoreQueueClosedError  # noqa: E402
@@ -284,6 +287,28 @@ class WindowsPcmSink:
         self._frames_written = 0
         self._failed = False
         self._lock = threading.Lock()
+        # EchoCast's OWN output level, applied to the decoded samples on their
+        # way to the device.
+        #
+        # WHY HERE AND NOT AT THE WINDOWS ENDPOINT
+        #
+        # FFmpeg in this design never opens an audio device: it decodes to raw
+        # PCM on stdout and this sink owns the endpoint. That leaves a place to
+        # scale the samples themselves, which is worth a great deal:
+        #
+        #   * nothing else on the machine changes. Turning a Store down does
+        #     not turn down EchoGuard, the till software, or whatever else
+        #     shares that endpoint - which setting the Windows endpoint volume
+        #     would have done, invisibly.
+        #   * there is nothing to restore. The system volume is never written,
+        #     so a crashed Receiver cannot leave a shop's PC muted.
+        #   * it is instant and needs no restart. FFmpeg keeps running and the
+        #     stream keeps flowing; mute is a multiply by zero, not a teardown.
+        #
+        # The cost is that it scales EchoCast's audio only. That is exactly the
+        # product claim being made, and no more.
+        self._volume_percent = 100
+        self._muted = False
 
     @property
     def configuration(self) -> SinkConfiguration:
@@ -331,11 +356,75 @@ class WindowsPcmSink:
                 f"({device.name}) could not be opened"
             ) from error
 
+    @property
+    def volume_percent(self) -> int:
+        with self._lock:
+            return self._volume_percent
+
+    @property
+    def muted(self) -> bool:
+        with self._lock:
+            return self._muted
+
+    @property
+    def effective_percent(self) -> int:
+        with self._lock:
+            return 0 if self._muted else self._volume_percent
+
+    def set_audio_control(self, *, volume_percent: int, muted: bool) -> None:
+        """Change the output level. Takes effect on the next buffer written.
+
+        Never restarts the stream and never touches the device: the next
+        ``write`` simply scales differently. Mute is kept separate from volume
+        so unmuting restores the operator's level rather than a remembered
+        copy of it.
+        """
+        if isinstance(volume_percent, bool) or not isinstance(volume_percent, int):
+            raise SinkConfigurationError("volume_percent must be a whole number")
+        if not 0 <= volume_percent <= 100:
+            raise SinkConfigurationError("volume_percent must be between 0 and 100")
+        if not isinstance(muted, bool):
+            raise SinkConfigurationError("muted must be true or false")
+        with self._lock:
+            self._volume_percent = volume_percent
+            self._muted = muted
+
+    def _scaled(self, pcm: bytes) -> bytes:
+        """Apply the current level to one buffer of signed 16-bit samples.
+
+        Two shortcuts that matter: at 100% unmuted the buffer is passed through
+        untouched, so the ordinary case costs nothing at all; and at zero the
+        result is a silent buffer of the same length, which keeps the device
+        fed at a steady rate. Writing nothing instead would starve the stream
+        and produce underruns that sound like faults rather than like silence.
+        """
+        with self._lock:
+            percent = 0 if self._muted else self._volume_percent
+        if percent == 100:
+            return pcm
+        if percent == 0:
+            return b"\x00" * len(pcm)
+        # int16 little-endian, the format this sink opened the device with.
+        samples = array.array("h")
+        samples.frombytes(pcm[: len(pcm) - (len(pcm) % samples.itemsize)])
+        if sys.byteorder != "little":  # pragma: no cover - Windows is LE
+            samples.byteswap()
+        scale = percent / 100.0
+        for index, value in enumerate(samples):
+            # Rounded, then clamped. Rounding alone can produce 32768, which is
+            # one past int16 and would wrap to a loud negative click.
+            scaled = int(value * scale)
+            samples[index] = -32768 if scaled < -32768 else (32767 if scaled > 32767 else scaled)
+        if sys.byteorder != "little":  # pragma: no cover
+            samples.byteswap()
+        return samples.tobytes()
+
     def write(self, pcm: bytes) -> bool:
         stream = self._stream
         if stream is None or self._failed:
             return False
         try:
+            pcm = self._scaled(pcm)
             stream.write(pcm)
         except Exception:
             # Never log the audio payload; record the failure for PLAYBACK_ERROR.
@@ -544,6 +633,10 @@ class AudioReceiverPilot:
         self.playback_timeout = playback_timeout
         self.report_path = report_path
         self.sink = sink or SinkConfiguration(sink_mode=SINK_MODE_NULL, device=None)
+        self.pcm_sink = None
+        # Newest output-volume command applied. Monotonic within a
+        # session; a command that is not strictly newer is dropped.
+        self._last_audio_command_id = 0
         self._audio_backend = audio_backend
 
         self.session_id: int | None = None
@@ -689,6 +782,8 @@ class AudioReceiverPilot:
             elif kind == "stop":
                 await self._on_stop(connection, payload)
                 return
+            elif kind == "set_audio_control":
+                await self._on_set_audio_control(connection, payload)
             # Unknown control messages are ignored rather than acted upon.
 
     async def _on_prepare(self, connection, payload: dict) -> None:
@@ -746,13 +841,113 @@ class AudioReceiverPilot:
         self.decoder = FfmpegDecoder(sink_mode=self.sink.sink_mode, pcm_sink=pcm_sink)
         self.decoder.start()
 
+        # Capabilities are reported HONESTLY, from what this run can actually
+        # do rather than from the build version. Output control is applied to
+        # the decoded PCM inside WindowsPcmSink, so it exists only when there
+        # is a hardware sink; in null mode there is no device to be loud on and
+        # claiming the capability would make HQ show a control that changes
+        # nothing. An older Receiver omits this block entirely, and HQ reads
+        # that absence as "not controllable".
+        controllable = self.pcm_sink is not None
         await self._send(connection, {
             **self._envelope("receiver_ready"),
             "software_checks_passed": True,
             "output_device_checks_passed": True,
+            "capabilities": {
+                "output_volume": controllable,
+                "output_mute": controllable,
+            },
         })
         self.report["ready"] = True
         self._record_state("READY")
+
+    async def _on_set_audio_control(self, connection, payload: dict) -> None:
+        """Apply an HQ output-volume command and report what really happened.
+
+        Every path here ends in exactly one acknowledgement carrying the
+        command_id it answers, because HQ resolves ordering by that id: a
+        silent failure would leave a Store pending for ever, and an
+        acknowledgement without the id could be mistaken for an answer to a
+        newer command.
+
+        The command is whole state rather than a delta, so an older one that
+        arrives late can simply be dropped - the newest already says everything
+        the Store should be doing.
+        """
+        try:
+            command = parse_set_audio_control_message(payload)
+        except AudioProtocolError:
+            # Malformed and therefore unanswerable: there is no trustworthy
+            # command_id to acknowledge against, and inventing one would let a
+            # corrupt message overwrite a good command's state.
+            return
+
+        session_id = command["session_id"]
+        command_id = command["command_id"]
+
+        # A command for a session this Receiver is not running. Ignored rather
+        # than applied: a stale command from a finished broadcast must never
+        # change the level of one that is on air now.
+        if self.session_id is None or session_id != self.session_id:
+            return
+
+        # Older than something already applied - a late arrival that a newer
+        # command has superseded.
+        if command_id <= self._last_audio_command_id:
+            return
+        self._last_audio_command_id = command_id
+
+        base = {
+            **self._envelope("audio_control"),
+            "session_id": session_id,
+            "command_id": command_id,
+            "requested_volume_percent": command["volume_percent"],
+            "requested_muted": command["muted"],
+        }
+        device = self.sink.device.selector if self.sink.device else None
+
+        if self.pcm_sink is None:
+            # Null-sink runs and any future playback path without a software
+            # gain. Honest rather than optimistic: nothing was changed.
+            await self._send(connection, {
+                **base,
+                "result": "unsupported",
+                "output_device": device,
+                "error_code": "OUTPUT_CONTROL_UNSUPPORTED",
+                "details": "this Receiver has no controllable audio output",
+            })
+            return
+
+        try:
+            self.pcm_sink.set_audio_control(
+                volume_percent=command["volume_percent"],
+                muted=command["muted"],
+            )
+        except SinkConfigurationError:
+            await self._send(connection, {
+                **base,
+                "result": "failed",
+                "output_device": device,
+                "error_code": "OUTPUT_CONTROL_FAILED",
+                "details": "the output level could not be applied",
+            })
+            return
+
+        # Read BACK from the sink rather than echoing the request. If the two
+        # ever diverge the operator should be told the sink's answer, not their
+        # own question repeated to them.
+        await self._send(connection, {
+            **base,
+            "result": "applied",
+            "applied_volume_percent": self.pcm_sink.volume_percent,
+            "applied_muted": self.pcm_sink.muted,
+            "output_device": device,
+        })
+        self.report["audio_control_applied"] = {
+            "volume_percent": self.pcm_sink.volume_percent,
+            "muted": self.pcm_sink.muted,
+            "effective_percent": self.pcm_sink.effective_percent,
+        }
 
     async def _on_audio(self, connection, chunk: bytes) -> None:
         if self.session_id is None or self.decoder is None or self.queue is None:
