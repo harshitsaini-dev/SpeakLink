@@ -113,6 +113,72 @@ export default function BroadcastConsole() {
     return () => clearInterval(id);
   }, [load]);
 
+  // ---- rehydrate the form from the LIVE broadcast -------------------------
+  //
+  // campaign, targetMode and selectedIds are component-local state, so they die
+  // when this route unmounts. The broadcast itself does not: BroadcastProvider
+  // sits above the router and keeps the microphone, the socket and the session.
+  // Navigating away and back therefore left an operator looking at an empty
+  // form while forty Stores were being broadcast to - the Console said "no
+  // Stores chosen" about a broadcast that was very much choosing them.
+  //
+  // The live session is the authority here, not this component and not
+  // localStorage: a stored draft outlives Stop, Emergency Stop, another tab and
+  // a server restart, and would confidently redraw a broadcast that had ended.
+  // `current` comes from GET /api/broadcast/current, which already returns only
+  // the caller's OWN session, already carries campaign_name and target_mode,
+  // and already applies Store Scope to the target list server-side.
+  //
+  // Keyed by session id so it runs once per broadcast rather than on every
+  // poll. Re-applying on each poll would be invisible today - every input is
+  // disabled while live - and would silently start fighting the operator the
+  // day any of them becomes editable.
+  const rehydratedSessionRef = React.useRef(null);
+  React.useEffect(() => {
+    const liveSession = current?.live ? current.session : null;
+
+    if (!liveSession) {
+      // The broadcast ended - Stop, Emergency Stop, or somebody else's stop.
+      // Clear only what was restored FROM it, so the next draft starts empty
+      // rather than inheriting a finished campaign and its Stores.
+      if (rehydratedSessionRef.current !== null) {
+        rehydratedSessionRef.current = null;
+        setCampaign("");
+        setTargetMode("selected");
+        setSelectedIds(new Set());
+        setRegion("");
+        setCity("");
+      }
+      return;
+    }
+
+    if (rehydratedSessionRef.current === liveSession.id) return;
+    rehydratedSessionRef.current = liveSession.id;
+
+    setCampaign(liveSession.campaign_name || "");
+    if (liveSession.target_mode) setTargetMode(liveSession.target_mode);
+    // Matched on stable Store id, never on Store Code text: a code can be
+    // released and reissued to a different shop after a permanent deletion.
+    setSelectedIds(new Set(
+      (current.targets || [])
+        .map((target) => target.store_id)
+        .filter((storeId) => storeId !== null && storeId !== undefined),
+    ));
+  }, [current]);
+
+  // Region and City are not columns on a session, so they cannot be read back
+  // directly - they are derived from the Stores actually being targeted. Kept
+  // separate from the effect above because it needs the Store catalog, which
+  // arrives on its own schedule.
+  React.useEffect(() => {
+    if (!current?.live || !stores.length) return;
+    const targeted = new Set((current.targets || []).map((t) => t.store_id));
+    const first = stores.find((s) => targeted.has(s.id));
+    if (!first) return;
+    if (current.session?.target_mode === "region") setRegion(first.region || "");
+    if (current.session?.target_mode === "city") setCity(first.city || "");
+  }, [current, stores]);
+
   const filteredStores = React.useMemo(() => {
     const ql = q.toLowerCase();
     return stores.filter((s) =>
@@ -128,7 +194,18 @@ export default function BroadcastConsole() {
     if (targetMode === "online_only") return stores.filter((s) => s.is_online_store).map((s) => s.id);
     return [];
   };
-  const targetIds = resolveTargetStoreIds();
+  // While a broadcast is LIVE the session's own target list is the truth, not
+  // whatever the draft inputs would compute. That matters most for the Region
+  // and City modes: those recompute from a dropdown value that is not stored on
+  // the session at all, so after a remount they would resolve to an empty set
+  // and the Console would show a live broadcast reaching nothing. It is also
+  // simply more honest - these are the Stores the backend is streaming to.
+  const liveTargetIds = current?.live
+    ? (current.targets || [])
+        .map((target) => target.store_id)
+        .filter((storeId) => storeId !== null && storeId !== undefined)
+    : null;
+  const targetIds = liveTargetIds ?? resolveTargetStoreIds();
   const targetStores = stores.filter((s) => targetIds.includes(s.id));
   const onlineCount = targetStores.filter((s) => s.status === "online" || s.status === "playing").length;
   const offlineCount = targetStores.length - onlineCount;

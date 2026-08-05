@@ -78,7 +78,7 @@ const OPERATOR = { id: 1, username: 'pilot-operator', role: 'admin' };
 const ALL_PERMISSION_CODES = [
   'menu.broadcast.view', 'broadcast.start', 'broadcast.stop', 'broadcast.emergency_stop',
   'broadcast.view_ownership', 'broadcast.active_view', 'broadcast.view_targets',
-  'broadcast.stop_any',
+  'broadcast.stop_any', 'store_audio.control',
   'menu.stores.view', 'stores.create', 'stores.update', 'stores.archive',
   'stores.delete_permanently',
   'menu.receivers.view', 'devices.enrollment.create', 'devices.primary.assign',
@@ -104,9 +104,12 @@ const DEFAULT_ROLE_PERMISSIONS = {
   // stops every other operator's broadcast, one reveals whose broadcast holds
   // a Store, and the others open, expose and interrupt other operators' work.
   // Mirrors permission_catalog.DEFAULT_ROLE_PERMISSIONS.
+  // store_audio.control IS here, unlike the supervision codes above: setting
+  // the output level of the Stores you are broadcasting to is part of running
+  // an ordinary broadcast, and ownership of the session gates every command.
   BROADCASTER: ['menu.broadcast.view', 'broadcast.start', 'broadcast.stop',
                 'menu.history.view', 'menu.receivers.view',
-                'menu.stores.view'],
+                'menu.stores.view', 'store_audio.control'],
   VIEWER: ['menu.broadcast.view', 'menu.stores.view', 'menu.receivers.view',
            'menu.history.view', 'menu.logs.view'],
 };
@@ -172,6 +175,12 @@ async function mockBackend(page, options = {}) {
     stores: options.stores || STORES,
     loginStatus: options.loginStatus || 200,
     current: options.current || { live: false, session: null, targets: [], ready_receivers: [] },
+    // Whether the SPEC is modelling Receiver readiness itself. When it is, the
+    // start handler below must not invent ready_receivers: the READY gate
+    // tests configure an empty list precisely so that no microphone opens, and
+    // filling it in would quietly disable the most important assertion in the
+    // suite.
+    readyReceiversConfigured: options.current !== undefined,
     sessionId: 8,
     startCalls: [],
     stopCalls: [],
@@ -1208,6 +1217,32 @@ async function mockBackend(page, options = {}) {
     }
 
     if (method === 'POST' && /^\/broadcast\/sessions\/\d+\/start$/.test(path)) {
+      // Go LIVE, as the real backend does. The mock used to answer ok and
+      // leave `current` reporting live:false, which meant no spec could
+      // exercise anything that depends on there being a running broadcast -
+      // including navigating away from one and coming back to it.
+      const payload = state.startCalls[state.startCalls.length - 1] || {};
+      const targetIds = payload.store_ids
+        || state.stores.map((store) => store.id);
+      if (state.readyReceiversConfigured) {
+        // The spec owns readiness. Leave `current` exactly as configured so
+        // the READY gate behaves as that spec intends.
+        return route.fulfill(json({ ok: true }));
+      }
+      state.current = {
+        live: true,
+        session: {
+          id: state.sessionId,
+          campaign_name: payload.campaign_name || null,
+          status: 'live',
+          target_mode: payload.target_mode || 'selected',
+          started_at: new Date(0).toISOString(),
+        },
+        targets: targetIds.map((storeId, index) => ({
+          id: index + 1, store_id: storeId, play_status: 'audio_receiving',
+        })),
+        ready_receivers: targetIds,
+      };
       return route.fulfill(json({ ok: true }));
     }
 
