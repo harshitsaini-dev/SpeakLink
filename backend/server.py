@@ -1446,25 +1446,83 @@ def read_receiver_device(
         raise HTTPException(status_code=503, detail=str(unavailable))
 
 
+
+def _device_internal_id(public_id: str) -> int | None:
+    """Resolve a Device's internal row id from its public id.
+
+    Done here rather than by widening the Device response shape: `public_id` is
+    what the product exposes, and adding the internal key to every Device
+    payload just to reach the runtime would publish it to every caller for
+    ever.
+    """
+    try:
+        with engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT id FROM receiver_devices WHERE public_id = :p"),
+                {"p": public_id},
+            ).first()
+        return int(row[0]) if row else None
+    except Exception:
+        # A runtime disconnect must never turn a successful lifecycle change
+        # into a 500. The database change has already happened and is what
+        # blocks the next reconnect.
+        return None
+
+
+async def _disconnect_device_runtime(public_id: str, device_id: int | None,
+                                     *, action: str) -> bool:
+    """Close a Device's live socket after its access has been withdrawn.
+
+    Called AFTER the database change, never instead of it. The database is the
+    authority on whether the Device may connect; this is what stops the socket
+    that already did.
+
+    Without it, disabling, revoking, archiving or permanently deleting a Device
+    changed rows and nothing else: the socket had authenticated once at connect
+    and was never re-checked, so it stayed registered and kept receiving
+    broadcast audio. A Store whose only Device an operator had just deleted
+    went READY, AUDIO_RECEIVING and PLAYBACK_CONFIRMED fifty seconds
+    afterwards, while the Receiver Devices page correctly showed nothing.
+
+    Deliberately keyed on the DEVICE id. Closing "the Store's connection"
+    would silence a shop that had already failed over to a different, entirely
+    valid Device.
+    """
+    resolved = device_id if device_id is not None else _device_internal_id(public_id)
+    if resolved is None:
+        return False
+    closed = await manager.disconnect_device(resolved)
+    if closed:
+        logger.info(
+            "Receiver Device %s disconnected from runtime after %s", public_id, action)
+    return closed
+
+
 @api.post("/receiver-devices/{public_id}/disable", response_model=ReceiverDeviceOut)
-def disable_receiver_device(
+async def disable_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
     user: HQUser = Depends(require("devices.disable")),
 ):
-    """Stop this one computer. Its Store and every other Device keep working."""
+    """Stop this one computer. Its Store and every other Device keep working.
+
+    "Stop" now means stop: the Device's live socket is closed as well as its
+    row updated, so a disabled computer stops playing immediately rather than
+    at whatever future moment it happens to reconnect.
+    """
     try:
         device = disable_device(engine, public_id=public_id)
     except DeviceNotFound:
         raise HTTPException(status_code=404, detail="Receiver Device not found")
     except EnrollmentUnavailable as unavailable:
         raise HTTPException(status_code=503, detail=str(unavailable))
+    await _disconnect_device_runtime(public_id, None, action="disable")
     _write_log(db, "warn", f"receiver_device_disabled device={public_id} by={user.username}")
     return ReceiverDeviceOut(**device)
 
 
 @api.post("/receiver-devices/{public_id}/archive", response_model=ReceiverDeviceOut)
-def archive_receiver_device(
+async def archive_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
     user: HQUser = Depends(require("devices.archive")),
@@ -1477,6 +1535,10 @@ def archive_receiver_device(
         raise HTTPException(status_code=404, detail="Receiver Device not found")
     except EnrollmentUnavailable as unavailable:
         raise HTTPException(status_code=503, detail=str(unavailable))
+    # Archiving retires the Device from the active list, and _set_status also
+    # clears its primary assignment - so leaving its socket open would keep a
+    # retired computer in the fanout.
+    await _disconnect_device_runtime(public_id, None, action="archive")
     _write_log(db, "warn", f"receiver_device_archived device={public_id} by={user.username}")
     return ReceiverDeviceOut(**device)
 
@@ -1523,7 +1585,7 @@ class DeviceTombstoneRequest(BaseModel):
 
 
 @api.post("/receiver-devices/{public_id}/delete-permanently")
-def tombstone_receiver_device(public_id: str, payload: DeviceTombstoneRequest,
+async def tombstone_receiver_device(public_id: str, payload: DeviceTombstoneRequest,
                               db: Session = Depends(get_db),
                               user: HQUser = Depends(require("devices.delete_permanently"))):
     """Permanently remove a Receiver Device from operational EchoCast even
@@ -1547,6 +1609,11 @@ def tombstone_receiver_device(public_id: str, payload: DeviceTombstoneRequest,
         )
     except DeviceDeletionRefused as refusal:
         raise HTTPException(status_code=409, detail=str(refusal))
+    # The row is a tombstone and its credentials are revoked, but a socket that
+    # authenticated before either happened is still open until it is closed.
+    await _disconnect_device_runtime(
+        result.public_id, getattr(result, "device_id", None),
+        action="permanent delete")
     _write_log(
         db, "warn",
         f"DEVICE_PERMANENTLY_DELETED device={result.public_id} "
@@ -1843,18 +1910,19 @@ def rotate_receiver_device(
 
 
 @api.post("/receiver-devices/{public_id}/revoke", response_model=ReceiverDeviceOut)
-def revoke_receiver_device(
+async def revoke_receiver_device(
     public_id: str,
     db: Session = Depends(get_db),
     user: HQUser = Depends(require("devices.revoke")),
 ):
-    """Retire this one computer permanently."""
+    """Retire this one computer permanently, including any live connection."""
     try:
         device = revoke_device(engine, public_id=public_id)
     except DeviceNotFound:
         raise HTTPException(status_code=404, detail="Receiver Device not found")
     except EnrollmentUnavailable as unavailable:
         raise HTTPException(status_code=503, detail=str(unavailable))
+    await _disconnect_device_runtime(public_id, None, action="revoke")
     _write_log(db, "warn", f"receiver_device_revoked device={public_id} by={user.username}")
     return ReceiverDeviceOut(**device)
 

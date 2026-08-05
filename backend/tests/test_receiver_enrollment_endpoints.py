@@ -298,13 +298,17 @@ def test_a_missing_key_container_answers_503_not_400(fresh, monkeypatch):
 # Device administration
 # ---------------------------------------------------------------------------
 def test_a_device_can_be_disabled_and_revoked_independently(fresh):
+    """disable and revoke are async now: withdrawing a Device's access also
+    closes its live socket, and closing one is awaited."""
+    import asyncio
+
     first, _ = _enroll(fresh, _create_code(fresh).code, name="primary")
     second, _ = _enroll(fresh, _create_code(fresh).code, name="standby")
 
     with fresh.db.SessionLocal() as db:
-        disabled = fresh.server.disable_receiver_device(
+        disabled = asyncio.run(fresh.server.disable_receiver_device(
             first.device_public_id, db=db, user=fresh.operator
-        )
+        ))
         other = fresh.server.read_receiver_device(
             second.device_public_id, db=db, user=fresh.operator
         )
@@ -312,9 +316,9 @@ def test_a_device_can_be_disabled_and_revoked_independently(fresh):
     assert other.status == "active"
 
     with fresh.db.SessionLocal() as db:
-        revoked = fresh.server.revoke_receiver_device(
+        revoked = asyncio.run(fresh.server.revoke_receiver_device(
             second.device_public_id, db=db, user=fresh.operator
-        )
+        ))
         store = db.query(fresh.models.Store).filter(
             fresh.models.Store.id == fresh.store_id
         ).one()
