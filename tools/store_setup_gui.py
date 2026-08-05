@@ -327,6 +327,45 @@ class StoreSetupApp(tk.Tk):
         self._show(ConnectionScreen(self._container, self))
 
 
+def _failure_message(failure: BaseException) -> str:
+    """A sentence a Store technician can act on, never a traceback.
+
+    The three cases below are the ones this wizard actually meets on a till:
+    an operation that outran its timeout, an operation refused for want of
+    administrator rights, and everything else. Each says what happened and what
+    to do next; none of them prints the Settings Password, a credential or a
+    path that only means something to a developer.
+    """
+    import subprocess
+
+    if isinstance(failure, subprocess.TimeoutExpired):
+        return ("This step did not finish in time and was stopped, so nothing "
+                "is still running in the background. The Receiver may still be "
+                "installed. Press Status to see what is on this computer now, "
+                "then try again.")
+    if isinstance(failure, PermissionError):
+        return ("Windows refused this step because SpeakLink Store Setup is not "
+                "running as an administrator. Close it, right-click "
+                "SpeakLinkStoreSetup and choose 'Run as administrator', then "
+                "try again.")
+    if isinstance(failure, FileNotFoundError):
+        return ("A file this step needs is missing from the installation. Press "
+                "Repair, or reinstall from the Store Kit.")
+    # The exception's own text, with anything that names secret material
+    # removed. The type name alone tells a technician nothing and a traceback
+    # tells them too much - but an arbitrary message is not automatically safe
+    # to read aloud to support either, so the few words that would indicate
+    # secret material are dropped rather than trusted not to appear.
+    detail = str(failure).strip() or failure.__class__.__name__
+    for secret_word in ("verifier", "password", "credential", "token", "bearer",
+                        "settings-password"):
+        if secret_word in detail.lower():
+            return ("This step could not be completed. The details mention "
+                    "protected settings, so they are not shown here - check "
+                    "the Receiver log on this computer.")
+    return f"This step could not be completed: {detail}"
+
+
 def _run_in_background(target, on_done) -> None:
     """Run ``target`` off the Tk thread; marshal the result back via ``after``.
 
@@ -936,7 +975,29 @@ class RerunScreen(ttk.Frame):
         self.status_var.set(message)
 
     def _run(self, work, done) -> None:
-        poll = _run_in_background(work, done)
+        """Run `work` off the Tk thread and hand its result to `done`.
+
+        A FAILURE is turned into a status message here, once, rather than in
+        every callback. `_run_in_background` deliberately hands an exception to
+        the callback instead of re-raising it - but nine of the eleven callbacks
+        on this screen were written expecting a result object and immediately
+        read `.detail` off it. An exception has no `.detail`, so the
+        AttributeError was raised inside a Tk `after` callback, which goes to
+        Tk's error handler, which writes to a stderr the packaged wizard does
+        not have (`disable_windowed_traceback=True`). The operator saw the
+        screen sit on "UNINSTALLING..." for ever with the reason nowhere at
+        all - exactly the symptom reported from the Store.
+
+        Doing it centrally also means the next callback somebody adds cannot
+        reintroduce it by forgetting the guard.
+        """
+        def guarded(result):
+            if isinstance(result, BaseException):
+                self.status_var.set(_failure_message(result))
+                return
+            done(result)
+
+        poll = _run_in_background(work, guarded)
         poll(self)
 
     # -- Status -----------------------------------------------------------
