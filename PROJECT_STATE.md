@@ -6182,13 +6182,44 @@ isolation result, not a per-Store telemetry-rate result.
 
 ### Regression
 
-Backend **3330 passed**, frontend **222**, Playwright **300**, production build
-OK, `compileall` clean, `pip check` clean, secret scan clean.
+Backend **3332 passed, 0 failed** on a second full run, frontend **222**,
+Playwright **300**, production build OK, `compileall` clean, `pip check` clean,
+secret scan clean.
 
+The first full run showed two failures and neither survived investigation.
 `test_concurrent_redemption_enrols_exactly_one_device` is a **pre-existing
-flake**, not caused by this work: it fails intermittently when run entirely
-alone (1 of 3 consecutive runs), a SQLite lock under its own 6-thread
-contention. A full suite run with only the new test file removed passed 3314.
+flake**: it fails intermittently when run entirely **alone** (1 of 3
+consecutive runs), a SQLite lock under its own 6-thread contention.
+`test_the_primary_button_is_the_replacement` passed in isolation, pairwise and
+on both later full runs. A run with only the new test file removed passed 3314,
+and the second unmodified full run passed 3332 — so the change is not the
+cause.
+
+### Store Kit 1.5.3
+
+| | |
+|---|---|
+| ZIP | `artifacts/EchoCast-Store-Kit-1.5.3-117d409-20260805-164449.zip` |
+| SHA-256 | `e0e9c42ac1507bf6691a234db2b9e256db7de40beaa9d724e077600d8c5fa362` |
+| Receiver **1.2.3** · Kit **1.5.3** | 1.2.0–1.5.2 retained, none overwritten |
+
+Verified **inside the shipped executable**, not on disk: the PYZ was extracted
+and matched by substring, giving `pycaw` (14 modules), `comtypes` (44),
+`tools.windows_endpoint_observer`, `windows_endpoint_volume`,
+`windows_endpoint_restore`, and the `_endpoint_state_loop` and `endpoint_state`
+symbols inside `tools.audio_receiver_pilot`.
+
+The frozen Receiver was then asked directly, and answered:
+
+```
+windows master control:
+  core audio     : reachable (3 active endpoint(s))
+  change reports : yes - endpoint change notifications supported
+```
+
+That second line is new, and is the point: packaging `pycaw` proves nothing
+about whether `comtypes` can still build a COM callback once frozen. The probe
+registers and immediately unregisters, changing no volume on the machine.
 
 ### Not done
 
