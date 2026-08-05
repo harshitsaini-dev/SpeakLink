@@ -5819,3 +5819,85 @@ release predating those tables, and `prepare()` now creates them itself.
 Live HQ not restarted or deployed. No Store Receiver installed, no Store
 re-enrolled, no credential changed. No physical amplifier test. Nothing here is
 acoustic evidence and `SPEAKER_VERIFIED` remains unset.
+
+---
+
+## Live HQ deployment — audio volume controls (2026-08-05)
+
+Source deployed: `feature/audio-volume-controls` @ `8c874d8`, tree clean and
+equal to origin.
+
+### What this deployment actually was
+
+The live HQ runs **repo-native from this working tree**, and the operator had
+already restarted it at 13:55 from the accepted commit — so the running build
+already served `/api/broadcast/target-stores` and
+`/api/broadcast/sessions/{id}/audio-control` before this checkpoint began. The
+frontend was rebuilt from HEAD and produced the **identical content-hashed
+bundle** `main.e5da7b46.js`, which is proof the served UI already corresponded
+to `8c874d8` rather than an inference from timestamps.
+
+The controlled stop/start was performed anyway, to prove the startup migrations
+run cleanly against the live database and that Receiver credentials survive a
+restart.
+
+### A measurement error worth recording
+
+The first baseline was read over a `mode=ro` SQLite connection, which could not
+attach the `-shm` and therefore **silently omitted 4 MB of committed WAL**. It
+under-reported broadcast_sessions/targets/leases as 6 (actually 9), system_logs
+as 23 (actually 34) and receiver_events as 879 (actually 898) — and the backup
+taken through that connection was incomplete for the same reason. A second,
+WAL-complete backup was taken and verified before any further step. The
+incomplete file is retained but superseded.
+
+| | |
+|---|---|
+| Rollback backup | `_live-hq-deployment-backups/echocast-audio-deploy-COMPLETE-20260805-140500.db` |
+| SHA-256 | `8449688598bb0918bd38824284bc2242b54e787163c3031c7d714c83b95eee33` |
+| Verified | `integrity_check ok`, `foreign_key_check` 0 rows, 9 sessions, 898 events |
+| Superseded (WAL-incomplete) | `echocast-before-audio-deploy-20260805-140000.db` |
+| Receiver key rollback | `receiver-hmac-keys-before-audio-deploy-20260805.bin`, 470 bytes, sha256 `748a99f2…` |
+
+### Result
+
+Stop was clean (pid 7468, port released, both PIDs gone). Start produced pid
+19616 with a single worker (`--workers 1`), `EchoCast Live startup complete`,
+and the log line *"Receiver key container present … reused unchanged"*.
+
+**Every one of 16 tracked tables is byte-identical before and after** — no
+migration had anything to do, because the User and Store tombstone migrations
+had already run on 2026-08-03 and the live catalog already contained
+`store_audio.control`. `integrity_check ok`, `foreign_key_check` 0 rows.
+
+`store_audio.control` present with roles OWNER / ADMIN / BROADCASTER, matching
+`DEFAULT_ROLE_PERMISSIONS` in the accepted source. Permission catalog unchanged
+at 34 / 74.
+
+UI `/` 200, `/console` 200 (direct React route), `/api/` 200, unknown `/api`
+path 404 with a JSON body. No port 3000 dependency.
+
+### Receiver continuity
+
+One Store Receiver (`192.168.4.171`) reconnected after the restart and held an
+open WebSocket for the whole observation. The server closes an idle Receiver
+socket with code 4408 after 30 seconds, so a socket open for 6+ minutes is
+positive evidence the Receiver is authenticated and heartbeating. **No
+re-enrolment was performed or required.**
+
+It did **not** register as the Store's primary: no `connected` event was
+persisted and no Store transitioned to online, so READY is *not* claimed.
+`stores.status='online'` for BP is stale pre-restart data from 08:32, not
+evidence. Which connection path it took could not be determined without
+authenticated API access, and no account was altered to obtain it.
+
+### Not performed, deliberately
+
+No on-air test broadcast: no Store is confirmed READY and no operator
+authorisation for an audible announcement was given, so P15/P16/P17 live checks
+are outstanding. No test account was created or modified for the RBAC checks —
+the estate has exactly two real accounts and neither is disposable. No live
+history was deleted. No Store Kit installed.
+
+Stability: API 200 and worker alive across six samples over 2.5 minutes, no new
+errors. Rollback not required.
