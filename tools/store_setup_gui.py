@@ -1013,17 +1013,28 @@ class RerunScreen(ttk.Frame):
             lines = [
                 f"Device: {snapshot.device_public_id}  Store: {snapshot.store_id}",
                 f"Backend: {snapshot.backend_origin}",
-                f"Audio: {snapshot.audio_sink or '<none configured>'} / "
+                f"Windows audio output: {snapshot.audio_sink or '<none configured>'} / "
                 f"{snapshot.audio_output_device or '<none selected>'}",
-                # Spelled out rather than left to be inferred from the line
-                # above. HQ says "Not supported by this Receiver" both when the
-                # Receiver is too old and when it simply has no audio output
-                # configured, and only this computer can tell those apart.
-                f"HQ output volume/mute control: {snapshot.output_control_detail}",
+                # LOCAL eligibility, labelled as such. The previous wording -
+                # "HQ output volume/mute control: yes" - was read as proof that
+                # HQ had received the capability, which this process cannot
+                # know: it sees the config file, not the Receiver's live
+                # socket. A Store showed "yes" here while the Console showed
+                # "Not supported by this Receiver", and the screen was the one
+                # overstating its case.
+                f"Local output-control eligibility: {snapshot.output_control_detail}",
+                "Receiver-advertised capability: unknown from this computer - "
+                "check the Broadcast Console; only the live WebSocket carries it",
                 f"Task: {'registered, ours' if task and task.is_ours else task.detail if task else 'unknown'}"
                 + (f" ({task.state}, {task.process_count} process(es))" if task and task.is_ours else ""),
                 f"Receiver status: {snapshot.receiver_state or '<none yet>'} - {snapshot.receiver_detail}",
-                f"HQ reachable: {snapshot.hq_reachable}",
+                # HTTP diagnostic and Receiver socket are separate facts and
+                # are labelled as such: the Store showed "HQ reachable: False"
+                # while its Receiver held an authenticated WebSocket to that
+                # very HQ, and the two lines sat next to each other
+                # contradicting one another.
+                f"HQ HTTP diagnostic: {'reachable' if snapshot.hq_reachable else 'FAILED'}"
+                + (f" - {snapshot.hq_detail}" if not snapshot.hq_reachable and snapshot.hq_detail else ""),
             ]
             self.status_var.set("\n".join(lines))
 
@@ -1148,6 +1159,24 @@ class RerunScreen(ttk.Frame):
                 f"press Uninstall Application again."
             )
             return
+
+        # The Settings Password, asked for BEFORE anything is cleared or
+        # started. `work()` below closes over this name; without the
+        # assignment the closure referenced a variable that never existed and
+        # raised NameError the moment the worker ran. Every other protected
+        # action on this screen already did this - uninstall was the one that
+        # did not, which is why it was also the one that never completed.
+        #
+        # Ordered after the typed confirmation on purpose: an operator who has
+        # not typed UNINSTALL should be told so without first being made to
+        # find the password.
+        authorization = self._authorize("Uninstalling the Receiver")
+        if authorization is None:
+            # Cancelled or wrong password. Nothing is cleared, nothing runs,
+            # and the typed confirmation is deliberately left in place so the
+            # operator does not have to type it again.
+            return
+
         self.confirm_var.set("")
         self._busy("UNINSTALLING...")
 
