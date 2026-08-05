@@ -23,6 +23,14 @@ const BroadcastCtx = createContext(null);
 export function BroadcastProvider({ children }) {
   const [current, setCurrent] = useState(null);
   const [meter, setMeter] = useState(0);
+  // Input level is measured before the gain node, sent level after it. Both
+  // are kept so the Console can show a live microphone that is nevertheless
+  // sending silence - the case an operator most needs to be told about.
+  const [micLevels, setMicLevels] = useState({ input: 0, sent: 0 });
+  // Mirrors the broadcaster's own gain state into React. The instance is the
+  // source of truth; this exists so the slider re-renders.
+  const [micVolumePercent, setMicVolumePercent] = useState(100);
+  const [micMuted, setMicMuted] = useState(false);
   const [broadcasterStatus, setBroadcasterStatus] = useState("idle");
   const [error, setError] = useState("");
   const broadcasterRef = useRef(null);
@@ -200,7 +208,10 @@ export function BroadcastProvider({ children }) {
       // socket knows which of several concurrent broadcasts it feeds.
       wsUrl: `${wsUrl("/ws/broadcaster")}?ticket=${encodeURIComponent(uplink.ticket)}`
              + `&session_id=${encodeURIComponent(session.id)}`,
-      onMeter: (l) => setMeter(l),
+      onMeter: (level, detail) => {
+        setMeter(level);
+        if (detail) setMicLevels({ input: detail.input, sent: detail.sent });
+      },
       onStatus: (s) => setBroadcasterStatus(s),
       onError: (m) => setError(m),
     });
@@ -211,6 +222,8 @@ export function BroadcastProvider({ children }) {
     if (broadcasterRef.current) {
       await broadcasterRef.current.stop();
     }
+    bc.setVolumePercent(micVolumePercent);
+    bc.setMuted(micMuted);
     try {
       await bc.start();
     } catch (failure) {
@@ -220,12 +233,13 @@ export function BroadcastProvider({ children }) {
       // listening - the operator would reasonably believe they were on air.
       try { await bc.stop(); } catch { /* already torn down */ }
       setMeter(0);
+      setMicLevels({ input: 0, sent: 0 });
       setBroadcasterStatus("idle");
       throw failure;
     }
     broadcasterRef.current = bc;
     await load();
-  }, [load, loadActive, waitForReceiverReady]);
+  }, [load, loadActive, waitForReceiverReady, micVolumePercent, micMuted]);
 
   const stopBroadcast = useCallback(async () => {
     setError("");
@@ -241,9 +255,26 @@ export function BroadcastProvider({ children }) {
       broadcasterRef.current = null;
     }
     setMeter(0);
+    setMicLevels({ input: 0, sent: 0 });
     setBroadcasterStatus("idle");
     await load();
   }, [active, current, load]);
+
+  // Mic controls act on THIS browser session's broadcaster instance only.
+  // There is deliberately no server call and no stored setting: Alice at 40%
+  // and Bob at 100% are two people holding two microphones, and a shared
+  // server-side value would make one of them change the other's.
+  const setMicVolume = useCallback((percent) => {
+    const value = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+    setMicVolumePercent(value);
+    if (broadcasterRef.current) broadcasterRef.current.setVolumePercent(value);
+  }, []);
+
+  const setMicMute = useCallback((muted) => {
+    const value = Boolean(muted);
+    setMicMuted(value);
+    if (broadcasterRef.current) broadcasterRef.current.setMuted(value);
+  }, []);
 
   const emergencyStop = useCallback(async () => {
     setError("");
@@ -295,7 +326,10 @@ export function BroadcastProvider({ children }) {
       (active.busy_store_ids || []).includes(storeId)
       && !(active.mine?.target_store_ids || []).includes(storeId)
     ),
-    meter, broadcasterStatus, error, setError,
+    meter, micLevels, broadcasterStatus, error, setError,
+    micVolumePercent, micMuted, setMicVolume, setMicMute,
+    // True when the microphone is live but nothing is reaching the Stores.
+    micEffectivelySilent: micMuted || micVolumePercent === 0,
     startBroadcast, stopBroadcast, emergencyStop,
     hasActiveBroadcaster: () => Boolean(broadcasterRef.current),
   };
