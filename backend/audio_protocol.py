@@ -192,6 +192,79 @@ def build_stop_message(*, session_id: int, reason: str = "operator_stop") -> dic
     return {"type": "stop", "session_id": validated_session, "reason": reason}
 
 
+#: Output volume is a whole percent of the decoded signal, 0-100.
+#:
+#: The ceiling is 100 on purpose and is enforced here rather than only in the
+#: UI: above unity a software gain clips, and clipping on a shop's PA is worse
+#: than being quiet. Amplification belongs in a later audio-processing feature
+#: with the headroom and limiting to do it properly.
+MIN_OUTPUT_VOLUME_PERCENT = 0
+MAX_OUTPUT_VOLUME_PERCENT = 100
+
+
+def build_set_audio_control_message(
+    *,
+    session_id: int,
+    command_id: int,
+    volume_percent: int,
+    muted: bool,
+) -> dict[str, Any]:
+    """Build the ``set_audio_control`` control message for one Store.
+
+    Named to match the existing downstream vocabulary (``prepare``, ``stop``):
+    a verb the Receiver is being asked to perform, carrying the session it
+    belongs to. It is deliberately NOT a delta - it carries the whole desired
+    state - so a command that is lost or arrives out of order can never leave a
+    Store at a level nobody asked for. The Receiver applies the newest
+    command_id it has seen and ignores anything older.
+
+    Volume and mute travel together, and mute is a separate flag rather than
+    "volume 0". The operator's chosen level has to survive being muted, and
+    collapsing the two would lose it: unmuting would have nothing to restore.
+    """
+    validated_session = _positive_int(session_id, "session_id")
+    validated_command = _positive_int(command_id, "command_id")
+    if isinstance(volume_percent, bool) or not isinstance(volume_percent, int):
+        raise AudioProtocolError("volume_percent must be a whole number")
+    if not MIN_OUTPUT_VOLUME_PERCENT <= volume_percent <= MAX_OUTPUT_VOLUME_PERCENT:
+        raise AudioProtocolError(
+            f"volume_percent must be between {MIN_OUTPUT_VOLUME_PERCENT} and "
+            f"{MAX_OUTPUT_VOLUME_PERCENT}"
+        )
+    if not isinstance(muted, bool):
+        raise AudioProtocolError("muted must be true or false")
+    return {
+        "type": "set_audio_control",
+        "session_id": validated_session,
+        "command_id": validated_command,
+        "volume_percent": volume_percent,
+        "muted": muted,
+    }
+
+
+def parse_set_audio_control_message(payload: Any) -> dict[str, Any]:
+    """Receiver-side counterpart. Rejects anything it does not recognise.
+
+    A Receiver must never widen its own contract by tolerating extra keys: a
+    field it silently ignores today is a field HQ believes is being honoured.
+    """
+    if not isinstance(payload, dict):
+        raise AudioProtocolError("set_audio_control must be an object")
+    if payload.get("type") != "set_audio_control":
+        raise AudioProtocolError("not a set_audio_control message")
+    unexpected = set(payload) - {
+        "type", "session_id", "command_id", "volume_percent", "muted",
+    }
+    if unexpected:
+        raise AudioProtocolError(f"unexpected fields: {sorted(unexpected)}")
+    return build_set_audio_control_message(
+        session_id=payload.get("session_id"),
+        command_id=payload.get("command_id"),
+        volume_percent=payload.get("volume_percent"),
+        muted=payload.get("muted"),
+    )
+
+
 def validate_audio_chunk(chunk: Any, *, max_bytes: int = MAX_AUDIO_CHUNK_BYTES) -> bool:
     """Validate one binary audio frame. Never logs or returns the payload."""
     if not isinstance(chunk, (bytes, bytearray, memoryview)):

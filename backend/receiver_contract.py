@@ -99,10 +99,31 @@ class AcknowledgementBase(BaseModel):
         return value
 
 
+class ReceiverCapabilities(BaseModel):
+    """What this Receiver build can actually do beyond the 1.0 baseline.
+
+    Optional, and absent from every Receiver built before audio control
+    existed. That absence is the compatibility signal: no capabilities block
+    means a Receiver that will play audio perfectly well and ignore a
+    ``set_audio_control`` it does not understand, so HQ must not send it one
+    and must not present its Stores as controllable. Defaulting these to True
+    would invert that and make every old Store look controllable.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    output_volume: bool = False
+    output_mute: bool = False
+
+
 class ReceiverReadyAcknowledgement(AcknowledgementBase):
     type: Literal["receiver_ready"]
     software_checks_passed: Literal[True]
     output_device_checks_passed: Literal[True]
+    #: None means "an older Receiver that never mentioned capabilities" - a
+    #: different fact from "a Receiver that reported it cannot do this", and
+    #: the UI is allowed to say so.
+    capabilities: ReceiverCapabilities | None = None
 
 
 class SessionAcknowledgement(AcknowledgementBase):
@@ -148,6 +169,44 @@ class HeartbeatAcknowledgement(AcknowledgementBase):
     type: Literal["heartbeat"]
 
 
+class AudioControlAcknowledgement(SessionAcknowledgement):
+    """What the Store ACTUALLY did with a ``set_audio_control`` command.
+
+    The requested and applied values are both carried, and they are allowed to
+    differ. "HQ sent 50" and "the Store is at 50" are separate facts, and the
+    entire point of this message is that the operator sees the second one
+    rather than inferring it from a successful WebSocket send.
+
+    ``result`` distinguishes three genuinely different outcomes:
+
+        applied      - the output level really changed
+        unsupported  - this Receiver has no mechanism for it
+        failed       - it tried and the device refused
+
+    ``output_device`` is the selected device's stable selector, never a
+    credential and never an identity: it is here so an operator can tell which
+    endpoint a failure refers to when a Store has more than one.
+    """
+
+    type: Literal["audio_control"]
+    command_id: int = Field(gt=0)
+    requested_volume_percent: int = Field(ge=0, le=100)
+    requested_muted: bool
+    applied_volume_percent: int | None = Field(default=None, ge=0, le=100)
+    applied_muted: bool | None = None
+    result: Literal["applied", "unsupported", "failed"]
+    output_device: str | None = Field(default=None, max_length=200)
+    error_code: str | None = Field(
+        default=None, min_length=1, max_length=64, pattern=r"^[A-Z0-9][A-Z0-9_.-]*$"
+    )
+    details: str | None = Field(default=None, min_length=1, max_length=512)
+
+    @field_validator("details", "output_device")
+    @classmethod
+    def validate_text(cls, value: str | None) -> str | None:
+        return _reject_control_characters(value) if value is not None else None
+
+
 ReceiverAcknowledgement = Annotated[
     Union[
         ReceiverReadyAcknowledgement,
@@ -157,6 +216,7 @@ ReceiverAcknowledgement = Annotated[
         DeviceErrorAcknowledgement,
         StoppedAcknowledgement,
         HeartbeatAcknowledgement,
+        AudioControlAcknowledgement,
     ],
     Field(discriminator="type"),
 ]
@@ -194,6 +254,11 @@ class ReceiverSnapshot:
     seen_message_ids: tuple[UUID, ...] = ()
     seen_verifier_message_ids: tuple[UUID, ...] = ()
     requires_ready: bool = True
+    #: Last reported capabilities, or None for a Receiver that has never
+    #: mentioned them. Kept on the snapshot rather than looked up per request
+    #: so HQ can answer "is this Store controllable" from the same state it
+    #: already uses for online/ready, and cannot drift from it.
+    capabilities: ReceiverCapabilities | None = None
 
 
 def _reset_health(snapshot: ReceiverSnapshot) -> ReceiverSnapshot:
@@ -203,6 +268,7 @@ def _reset_health(snapshot: ReceiverSnapshot) -> ReceiverSnapshot:
         playback=PlaybackState.STOPPED,
         acoustic=AcousticState.UNVERIFIED,
         requires_ready=True,
+        capabilities=None,
     )
 
 
@@ -310,7 +376,12 @@ def apply_receiver_ack(
     elif isinstance(ack, ReceiverReadyAcknowledgement):
         if result.readiness not in {ReadinessState.UNKNOWN, ReadinessState.DEVICE_ERROR}:
             raise InvalidTransitionError("receiver_ready requires UNKNOWN or DEVICE_ERROR readiness")
-        result = replace(result, readiness=ReadinessState.READY, requires_ready=False)
+        # Capabilities ride on receiver_ready because that is the message a
+        # Receiver sends after it has finished checking what it can actually
+        # do - including opening its output device. Anything reported earlier
+        # would be a claim rather than a check.
+        result = replace(result, readiness=ReadinessState.READY,
+                         requires_ready=False, capabilities=ack.capabilities)
     elif isinstance(ack, DeviceErrorAcknowledgement):
         if result.readiness not in {ReadinessState.UNKNOWN, ReadinessState.READY}:
             raise InvalidTransitionError("device_error requires UNKNOWN or READY readiness")
@@ -343,6 +414,17 @@ def apply_receiver_ack(
     elif isinstance(ack, StoppedAcknowledgement):
         _validate_active_session(result, ack.session_id)
         result = replace(result, playback=PlaybackState.STOPPED)
+    elif isinstance(ack, AudioControlAcknowledgement):
+        # Deliberately changes NO status. How loud a Store is playing is
+        # orthogonal to whether it is connected, ready, or playing: a muted
+        # Store is still AUDIO_RECEIVING and still PLAYBACK_CONFIRMED, because
+        # it is still receiving and still processing the stream. Folding volume
+        # into the status model would make "quiet" indistinguishable from
+        # "broken" on the very screen an operator uses to tell them apart.
+        #
+        # The session check stays, so a command answered against a finished
+        # broadcast is rejected here as it is everywhere else.
+        _validate_active_session(result, ack.session_id)
     else:  # pragma: no cover - protected by the discriminated union
         raise InvalidTransitionError("unsupported receiver acknowledgement")
 
