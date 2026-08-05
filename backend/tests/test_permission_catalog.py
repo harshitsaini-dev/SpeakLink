@@ -144,9 +144,14 @@ def test_broadcaster_default_permissions_are_exactly_broadcast_and_read_only():
     # absent: one stops every other operator's broadcast, the other reveals
     # whose broadcast is using a Store. Both are ADMIN/OWNER by default and
     # reachable per user through an override.
+    # store_audio.control is included, unlike the supervision codes: setting
+    # the output level of the Stores you are broadcasting to is part of running
+    # an ordinary broadcast. Ownership of the session gates every individual
+    # command, so holding it grants nothing over anybody else's broadcast.
     assert broadcaster == {
         "menu.broadcast.view", "broadcast.start", "broadcast.stop",
         "menu.history.view", "menu.receivers.view", "menu.stores.view",
+        "store_audio.control",
     }
     # No Store modification, no Device security changes, no User management.
     assert not any(code.startswith("stores.") for code in broadcaster)

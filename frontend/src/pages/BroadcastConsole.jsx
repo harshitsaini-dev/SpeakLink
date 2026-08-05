@@ -6,6 +6,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useBroadcast } from "@/contexts/BroadcastContext";
 import { elapsedSeconds } from "@/lib/time";
 import StatusBadge from "@/components/StatusBadge";
+import StoreAudioControl from "@/components/StoreAudioControl";
+import { useStoreAudioControl } from "@/lib/audio/useStoreAudioControl";
 
 const TARGET_MODES = [
   { value: "selected", label: "Selected Stores" },
@@ -48,7 +50,8 @@ function fmtDur(sec) {
 export default function BroadcastConsole() {
   const { can } = useAuth();
   const {
-    current, load: loadBroadcast, isLive, meter, broadcasterStatus,
+    current, load: loadBroadcast, isLive, meter, micLevels, broadcasterStatus,
+    micVolumePercent, micMuted, setMicVolume, setMicMute, micEffectivelySilent,
     error, setError, startBroadcast: startBroadcastAudio,
     stopBroadcast: stopBroadcastAudio, emergencyStop: emergencyStopAudio,
     active, isStoreBusyForOthers,
@@ -69,6 +72,15 @@ export default function BroadcastConsole() {
   // dialog somebody clicks through routinely is how that becomes a reflex.
   const [emergencyConfirmOpen, setEmergencyConfirmOpen] = React.useState(false);
   const [emergencyResult, setEmergencyResult] = React.useState(null);
+  // Output control belongs to THIS broadcast. No session, no controls: there
+  // is nothing to be loud on and nothing the backend would accept.
+  const liveSessionId = active?.mine?.session_id ?? current?.session?.id ?? null;
+  const mayControlAudio = can("store_audio.control");
+  const storeAudio = useStoreAudioControl({
+    sessionId: isLive ? liveSessionId : null,
+    canControl: mayControlAudio,
+  });
+
   const [micTest, setMicTest] = React.useState({ on: false, level: 0 });
   const testAudioRef = React.useRef(null);
 
@@ -244,13 +256,66 @@ export default function BroadcastConsole() {
             </div>
           </div>
 
-          {/* VU meter when live */}
+          {/* Mic level and gain, only while live */}
           {isLive && (
-            <div className="mt-4">
-              <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Mic Input</div>
-              <div className="h-3 bg-slate-100 rounded overflow-hidden">
-                <div className="h-full bg-gradient-to-r from-emerald-500 via-yellow-400 to-red-500 transition-all"
-                     style={{ width: `${Math.min(100, Math.round(meter * 100))}%` }} />
+            <div className="mt-4 space-y-3">
+              {/* TWO meters. The upper one is the raw microphone; the lower
+                  one is what is actually leaving for the Stores. They differ
+                  whenever the gain is below 100 and they differ completely
+                  when muted - which is the whole point, because a single
+                  pre-gain meter let an operator watch their voice move a bar
+                  while the shops heard nothing. */}
+              <div>
+                <div className="flex items-center justify-between text-[10px] uppercase tracking-widest text-slate-500 mb-1">
+                  <span>Mic Input</span>
+                  <span className="text-slate-400 normal-case tracking-normal">before volume</span>
+                </div>
+                <div className="h-2 bg-slate-100 rounded overflow-hidden">
+                  <div data-testid="mic-input-meter"
+                       className="h-full bg-slate-400 transition-all"
+                       style={{ width: `${Math.min(100, Math.round((micLevels?.input ?? 0) * 100))}%` }} />
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between text-[10px] uppercase tracking-widest text-slate-500 mb-1">
+                  <span>Sent to Stores</span>
+                  {micEffectivelySilent && (
+                    <span data-testid="mic-muted-badge"
+                          className="rounded border border-red-400 bg-red-100 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-red-800">
+                      MUTED — STORES HEAR NOTHING
+                    </span>
+                  )}
+                </div>
+                <div className="h-3 bg-slate-100 rounded overflow-hidden">
+                  <div data-testid="mic-sent-meter"
+                       className={`h-full transition-all ${micEffectivelySilent ? "bg-red-300"
+                         : "bg-gradient-to-r from-emerald-500 via-yellow-400 to-red-500"}`}
+                       style={{ width: `${micEffectivelySilent ? 0 : Math.min(100, Math.round(meter * 100))}%` }} />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button type="button" data-testid="mic-mute-toggle"
+                        aria-pressed={micMuted}
+                        onClick={() => setMicMute(!micMuted)}
+                        className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs font-semibold ${
+                          micMuted ? "border-red-400 bg-red-100 text-red-800"
+                                   : "border-slate-300 text-slate-700"}`}>
+                  {micMuted ? <MicOff size={13} /> : <Mic size={13} />}
+                  {micMuted ? "Unmute" : "Mute"}
+                </button>
+                <label htmlFor="mic-volume" className="sr-only">HQ microphone volume</label>
+                <input id="mic-volume" data-testid="mic-volume-slider"
+                       type="range" min="0" max="100" step="1"
+                       value={micVolumePercent}
+                       aria-valuetext={`${micVolumePercent} percent`}
+                       onChange={(e) => setMicVolume(e.target.value)}
+                       className="flex-1 accent-blue-600" />
+                <span data-testid="mic-volume-value"
+                      className="w-10 text-right text-xs font-mono text-slate-700">
+                  {micVolumePercent}%
+                </span>
               </div>
             </div>
           )}
@@ -492,6 +557,11 @@ export default function BroadcastConsole() {
                 <th className="px-3 py-2">City / Zone</th>
                 <th className="px-3 py-2">Status</th>
                 <th className="px-3 py-2">Play Status</th>
+                {isLive && mayControlAudio && (
+                  <th className="px-3 py-2" title="Controls the SpeakLink audio output on the Store PC. The amplifier's physical volume control is separate.">
+                    Store Output
+                  </th>
+                )}
               </tr>
             </thead>
             <tbody>
@@ -538,11 +608,33 @@ export default function BroadcastConsole() {
                       {playStatus === "—" ? <span className="text-slate-400 text-xs">—</span> :
                         <StatusBadge status={playStatus} testid={`play-status-${s.store_code}`} />}
                     </td>
+                    {isLive && mayControlAudio && (
+                      <td className="px-3 py-2">
+                        {/* Only a Store this broadcast is actually targeting.
+                            Offering a volume control for a Store that is not
+                            receiving the announcement would be a control that
+                            does nothing, on a row that looks identical. */}
+                        {isTarget ? (
+                          <StoreAudioControl
+                            store={s}
+                            state={storeAudio.states[s.id]}
+                            error={storeAudio.errors[s.id]}
+                            online={storeAudio.states[s.id]?.online ?? true}
+                            supported={storeAudio.states[s.id]?.supported ?? false}
+                            disabled={busy}
+                            onVolumeChange={(value) => storeAudio.setVolume(s.id, value)}
+                            onMuteToggle={(value) => storeAudio.setMuted(s.id, value)}
+                          />
+                        ) : (
+                          <span className="text-slate-400 text-xs">—</span>
+                        )}
+                      </td>
+                    )}
                   </tr>
                 );
               })}
               {filteredStores.length === 0 && (
-                <tr><td colSpan="6" className="px-3 py-6 text-center text-slate-500">No stores found.</td></tr>
+                <tr><td colSpan={isLive && mayControlAudio ? 7 : 6} className="px-3 py-6 text-center text-slate-500">No stores found.</td></tr>
               )}
             </tbody>
           </table>

@@ -199,6 +199,15 @@ async function mockBackend(page, options = {}) {
     // through - e.g. a hand-crafted fetch bypassing a hidden button. 200
     // means "let the mock's normal logic decide", matching every other
     // *Status option in this file.
+    // Live per-Store output state, keyed by store id. Seeded by the spec.
+    audioControl: options.audioControl || {},
+    audioCommandId: 0,
+    // 'applied' (default), 'failed', 'unsupported', or 'none' for a Receiver
+    // that never answers - the ACK-timeout case.
+    audioControlAckResult: options.audioControlAckResult,
+    audioControlSupported: options.audioControlSupported,
+    audioControlOnline: options.audioControlOnline,
+    audioControlSessionEnded: options.audioControlSessionEnded || false,
     storeUpdateStatus: options.storeUpdateStatus || 200,
     storesListStatus: options.storesListStatus || 200,
     // Per-user Store scope for the broadcast target catalog. null means
@@ -926,6 +935,72 @@ async function mockBackend(page, options = {}) {
         regions: [...new Set(stores.map((s) => s.region).filter(Boolean))].sort(),
         cities: [...new Set(stores.map((s) => s.city).filter(Boolean))].sort(),
       }));
+    }
+
+    // ---- per-Store output volume ------------------------------------------
+    //
+    // Models the parts a browser test can actually observe: the requested
+    // value comes back immediately (pending), and the APPLIED value only
+    // appears once a Receiver acknowledgement is simulated. A mock that
+    // reported "applied" straight away would let a UI claiming an unproven
+    // result pass.
+    const audioControl = path.match(/^\/broadcast\/sessions\/(\d+)\/audio-control$/);
+    if (audioControl) {
+      const sessionId = Number(audioControl[1]);
+      if (!state.permissions.includes('store_audio.control')) {
+        return route.fulfill(json(
+          { detail: 'You do not have permission to perform this action.' }, 403));
+      }
+      if (state.audioControlSessionEnded) {
+        return route.fulfill(json({ detail: 'That broadcast is no longer active.' }, 409));
+      }
+      if (method === 'POST') {
+        const body = request.postDataJSON() || {};
+        const existing = state.audioControl[body.store_id] || {
+          requested_volume_percent: 100, requested_muted: false,
+          applied_volume_percent: null, applied_muted: null,
+          last_command_id: 0, last_acknowledged_command_id: 0, result: null,
+        };
+        state.audioCommandId += 1;
+        state.audioControl[body.store_id] = {
+          ...existing,
+          requested_volume_percent: 'volume_percent' in body
+            ? body.volume_percent : existing.requested_volume_percent,
+          requested_muted: 'muted' in body ? body.muted : existing.requested_muted,
+          last_command_id: state.audioCommandId,
+        };
+        // The simulated Receiver answers unless a test asks it not to.
+        if (state.audioControlAckResult !== 'none') {
+          const row = state.audioControl[body.store_id];
+          const result = state.audioControlAckResult || 'applied';
+          state.audioControl[body.store_id] = {
+            ...row,
+            last_acknowledged_command_id: row.last_command_id,
+            result,
+            applied_volume_percent: result === 'applied'
+              ? row.requested_volume_percent : null,
+            applied_muted: result === 'applied' ? row.requested_muted : null,
+            error_message: result === 'failed' ? 'Could not apply output volume' : null,
+          };
+        }
+      }
+      const stores = Object.entries(state.audioControl).map(([storeId, row]) => ({
+        store_id: Number(storeId),
+        requested_volume_percent: row.requested_volume_percent,
+        requested_muted: row.requested_muted,
+        applied_volume_percent: row.applied_volume_percent ?? null,
+        applied_muted: row.applied_muted ?? null,
+        last_command_id: row.last_command_id,
+        last_acknowledged_command_id: row.last_acknowledged_command_id,
+        result: row.result ?? null,
+        error_code: null,
+        error_message: row.error_message ?? null,
+        output_device: 'index:1',
+        pending: row.last_command_id > row.last_acknowledged_command_id,
+        supported: state.audioControlSupported !== false,
+        online: state.audioControlOnline !== false,
+      }));
+      return route.fulfill(json({ session_id: sessionId, stores }));
     }
 
     if (method === 'GET' && path === '/broadcast/current') {

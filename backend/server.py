@@ -35,6 +35,7 @@ from schemas import (
     StoreCreate, StoreUpdate, StoreOut, StoresMetaOut,
     BroadcastTargetStoreOut, BroadcastTargetsOut,
     SessionCreate, SessionOut, SessionDetailOut, TargetOut,
+    StoreAudioControlUpdate, StoreAudioStateOut, StoreAudioControlOut,
     SystemLogOut,
     EnrollmentCodeRequest, EnrollmentCodeResponse, EnrollmentCodeStatusOut,
     DeviceEnrollmentRequest, DeviceEnrollmentResponse,
@@ -62,6 +63,13 @@ from rbac import (
     migrate_legacy_roles,
     parse_role,
     require_permission,
+)
+import store_audio_control
+from store_audio_control import (
+    StoreAudioControlError,
+    StoreNotInSessionError,
+    UnknownSessionError,
+    registry as store_audio_registry,
 )
 from permission_catalog import (
     OwnerOverrideRefused,
@@ -200,7 +208,10 @@ from receiver_enrollment_codes import (
     describe_state,
     ensure_enrollment_device_link_schema,
 )
-from audio_protocol import build_prepare_message
+from audio_protocol import (
+    build_prepare_message,
+    build_set_audio_control_message,
+)
 from auth import verify_password, hash_password, create_access_token, get_current_user
 from seed import seed_admin, seed_stores
 from audio_streaming import DEFAULT_STORE_QUEUE_CAPACITY
@@ -212,6 +223,7 @@ from receiver_runtime_auth import (
     MigrationAwareReceiverRuntimeAuthenticator,
 )
 from receiver_contract import (
+    AudioControlAcknowledgement,
     HEARTBEAT_INTERVAL_SECONDS,
     AudioReceivingAcknowledgement,
     ConnectionState,
@@ -2649,6 +2661,13 @@ async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = 
 
     await manager.start_live_session(session.id, target_store_ids,
                                      owner_user_id=session.started_by)
+    # Live output-volume state for this session's Stores, at the product
+    # defaults (100%, unmuted). In memory only - see store_audio_control.
+    store_audio_registry.start_session(
+        session_id=session.id,
+        owner_user_id=session.started_by,
+        store_ids=target_store_ids,
+    )
     # Send PREPARE then PLAY to online targets. PREPARE carries the negotiated
     # audio format so the Receiver can run its real FFmpeg/codec checks before
     # reporting READY. Audio is only meaningful after that acknowledgement.
@@ -2689,12 +2708,144 @@ async def _end_session(db: Session, session: BroadcastSession, final_status: str
     # broadcaster socket - every other live session keeps its operator and its
     # audio.
     await manager.stop_live_session(session.id)
+    # Forget this session's output-volume state. The Receiver restores the
+    # Store's pre-broadcast output itself on `stop`, so this is only HQ's
+    # bookkeeping - but leaving it behind would let a later request name a
+    # finished session and be answered.
+    store_audio_registry.end_session(session.id)
     # Release ONLY this session's Stores. Scoped by session id rather than by
     # store id: releasing by Store could free one another session is
     # legitimately broadcasting to, and the symptom would be a second campaign
     # arriving on speakers that were already busy.
     release_session_leases(engine, session_id=session.id)
     await manager.notify_dashboards({"type": "session_ended", "session_id": session.id, "status": final_status})
+
+
+def _audio_control_state_rows(sid: int) -> List[StoreAudioStateOut]:
+    """Control state joined with what HQ knows about each Receiver.
+
+    ``supported`` and ``online`` are computed here rather than stored, because
+    both are properties of the live connection: a Store that reconnects with an
+    older Receiver must stop being controllable immediately, and control state
+    that remembered "supported" from an earlier connection would keep offering
+    a control that silently does nothing.
+    """
+    rows: List[StoreAudioStateOut] = []
+    for entry in store_audio_registry.describe(sid):
+        store_id = entry["store_id"]
+        snapshot = manager.get_receiver_snapshot(store_id)
+        capabilities = getattr(snapshot, "capabilities", None) if snapshot else None
+        rows.append(StoreAudioStateOut(
+            **entry,
+            online=manager.is_receiver_online(store_id),
+            supported=bool(capabilities and capabilities.output_volume),
+        ))
+    return rows
+
+
+@api.get("/broadcast/sessions/{sid}/audio-control",
+         response_model=StoreAudioControlOut)
+def read_store_audio_control(
+    sid: int,
+    user: HQUser = Depends(require("store_audio.control")),
+):
+    """Current per-Store output state for a broadcast you own.
+
+    Reading needs no permission of its own beyond the one that allows
+    controlling output at all: this returns nothing about a session the caller
+    does not own, and ownership is the gate. A separate ``store_audio.view``
+    would be a second code that could only ever say yes wherever this one
+    already does.
+    """
+    _require_audio_control_owner(sid, user)
+    return StoreAudioControlOut(session_id=sid, stores=_audio_control_state_rows(sid))
+
+
+def _require_audio_control_owner(sid: int, user: HQUser) -> None:
+    """Only the operator running a broadcast may steer its output.
+
+    Deliberately NOT satisfied by broadcast.stop_any or broadcast.active_view.
+    A supervisor entitled to END somebody's broadcast is not thereby entitled
+    to sit inside it changing how loud individual shops are - that is an
+    invisible, continuous intervention rather than a single accountable act,
+    and the operator on the other end would have no way to tell it was
+    happening. Ending a broadcast is loud; quietly remixing one is not.
+    """
+    try:
+        owner_id = store_audio_registry.session_owner(sid)
+    except UnknownSessionError as refusal:
+        # 409 rather than 404: the session may well exist in history. What is
+        # gone is the LIVE state, and "no longer active" is the honest reason.
+        raise HTTPException(status_code=409, detail=str(refusal))
+    if owner_id != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only change output volume for your own broadcast.",
+        )
+
+
+@api.post("/broadcast/sessions/{sid}/audio-control",
+          response_model=StoreAudioControlOut)
+async def set_store_audio_control(
+    sid: int,
+    payload: StoreAudioControlUpdate,
+    user: HQUser = Depends(require("store_audio.control")),
+):
+    """Set one Store's SpeakLink output level for the rest of this broadcast.
+
+    This controls the SpeakLink audio OUTPUT on the Store PC. The amplifier's
+    physical volume control is separate, and nothing here can observe or change
+    it - a Store reporting "applied 60" means its software output is at 60% of
+    the decoded signal, not that the room is at 60% of anything.
+
+    Returns immediately after handing the command to the Receiver, with the
+    Store still marked pending. The applied value arrives later on the
+    Receiver's own acknowledgement; a 200 here means "sent", never "applied".
+    """
+    _require_audio_control_owner(sid, user)
+
+    # Store Scope, enforced server-side and before anything is sent. A scoped
+    # operator can be broadcasting to a Store through a target mode that
+    # selected it - scope governs which Stores they may act on individually,
+    # and turning the volume down in a shop is exactly such an act.
+    scope = resolve_store_scope(engine, user)
+    if scope is not None and payload.store_id not in scope:
+        raise HTTPException(
+            status_code=403,
+            detail="That Store is not in your Store Scope.",
+        )
+
+    try:
+        state = store_audio_registry.request(
+            session_id=sid,
+            store_id=payload.store_id,
+            volume_percent=payload.volume_percent,
+            muted=payload.muted,
+        )
+    except StoreNotInSessionError as refusal:
+        raise HTTPException(status_code=404, detail=str(refusal))
+    except UnknownSessionError as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    except StoreAudioControlError as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+
+    # Sent outside any lock, and only to a Receiver that said it understands
+    # this command. An older Receiver is left alone entirely rather than sent
+    # a message it would have to ignore.
+    snapshot = manager.get_receiver_snapshot(payload.store_id)
+    capabilities = getattr(snapshot, "capabilities", None) if snapshot else None
+    if capabilities and capabilities.output_volume:
+        await manager.send_to_receiver(
+            payload.store_id,
+            build_set_audio_control_message(
+                session_id=sid,
+                command_id=state.last_command_id,
+                volume_percent=state.requested_volume_percent,
+                muted=state.requested_muted,
+            ),
+        )
+
+    return StoreAudioControlOut(session_id=sid, stores=_audio_control_state_rows(sid))
 
 
 @api.post("/broadcast/sessions/{sid}/stop", response_model=SessionOut)
@@ -4279,6 +4430,35 @@ async def ws_receiver(websocket: WebSocket):
             # misattribution the in-memory routing above exists to prevent - and
             # the persisted rows are what an operator reads afterwards.
             if is_standby_ack:
+                continue
+
+            # Output-volume acknowledgements are live control state, not
+            # Store history: they say how loud a shop is for the next few
+            # minutes. Recording them in the registry and NOT in the database
+            # is what keeps a slider drag from writing rows.
+            if isinstance(acknowledgement, AudioControlAcknowledgement):
+                updated = store_audio_registry.acknowledge(
+                    session_id=acknowledgement.session_id,
+                    store_id=store_id,
+                    command_id=acknowledgement.command_id,
+                    result=acknowledgement.result,
+                    applied_volume_percent=acknowledgement.applied_volume_percent,
+                    applied_muted=acknowledgement.applied_muted,
+                    output_device=acknowledgement.output_device,
+                    error_code=acknowledgement.error_code,
+                    error_message=acknowledgement.details,
+                )
+                # None means the acknowledgement was stale or unknown - an
+                # answer to a question a newer command has already replaced.
+                # Dashboards are told nothing, so a late ACK cannot walk a
+                # slider backwards.
+                if updated is not None:
+                    await connection_manager.notify_dashboards({
+                        "type": "store_audio_control",
+                        "session_id": acknowledgement.session_id,
+                        "store_id": store_id,
+                        **updated.as_dict(),
+                    })
                 continue
 
             _persist_receiver_ack(store_id, acknowledgement, received_at)

@@ -71,6 +71,16 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
                         "Active Broadcasts - View Stores"),
     PermissionDefinition("broadcast.stop_any", "Broadcast",
                         "Active Broadcasts - Stop Other Broadcast"),
+    #: Change a Store's SpeakLink OUTPUT volume/mute during a live broadcast.
+    #:
+    #: A new code rather than a reuse. broadcast.start is about beginning a
+    #: broadcast, not about steering it afterwards; broadcast.active_view and
+    #: broadcast.stop_any are supervision codes, and neither should silently
+    #: become "may change how loud another operator's Store is". Ownership of
+    #: the session is enforced separately and always - this permission answers
+    #: "may this account operate output volume at all", never "whose".
+    PermissionDefinition("store_audio.control", "Broadcast",
+                        "Control Store Output Volume"),
 
     PermissionDefinition("menu.stores.view", "Stores", "View Store Management"),
     PermissionDefinition("stores.create", "Stores", "Create Store"),
@@ -152,8 +162,15 @@ _ALL_CODES = frozenset(PERMISSION_CODES)
 #: on a Store they administer without being told which campaign or which
 #: colleague it belonged to. Bundling them would make the finest-grained
 #: question ("who may see what") answerable only at the coarsest grain.
+#: store_audio.control IS here, unlike the supervision codes above. Setting the
+#: output level of the Stores you are broadcasting to is part of running an
+#: ordinary broadcast - an operator who may take the estate live but may not
+#: stop it deafening one shop has been given the dangerous half of the job.
+#: Ownership still gates every individual command, so holding this grants
+#: nothing over anybody else's session.
 _BROADCAST_CODES = frozenset({
     "menu.broadcast.view", "broadcast.start", "broadcast.stop",
+    "store_audio.control",
 })
 _VIEW_ONLY_CODES = frozenset({
     "menu.broadcast.view", "menu.stores.view", "menu.receivers.view",
