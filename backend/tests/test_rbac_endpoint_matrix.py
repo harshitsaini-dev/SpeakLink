@@ -162,6 +162,12 @@ EXPECTED: dict[str, object] = {
     # menu.stores.view: Store MANAGEMENT visibility must not decide whether an
     # operator can see the Stores they may broadcast to.
     "list_broadcast_target_stores": "menu.broadcast.view",
+    # Live per-Store output volume. store_audio.control rather than
+    # broadcast.start: starting a broadcast and steering one are different
+    # acts, and ownership of the session is enforced inside the route on top
+    # of this permission - neither stop_any nor active_view reaches it.
+    "read_store_audio_control": "store_audio.control",
+    "set_store_audio_control": "store_audio.control",
     "create_session": "broadcast.start",
     "start_session": "broadcast.start",
     "stop_session": "broadcast.stop",

@@ -339,6 +339,47 @@ class BroadcastTargetsOut(BaseModel):
     cities: List[str]
 
 
+class StoreAudioControlUpdate(BaseModel):
+    """One Store's requested output level.
+
+    Both fields optional, and that is the point: Mute sends only ``muted`` and
+    says nothing about volume, so the operator's chosen level survives being
+    muted and unmuting restores it without the client having to remember it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    store_id: int = Field(gt=0)
+    volume_percent: Optional[int] = Field(default=None, ge=0, le=100)
+    muted: Optional[bool] = None
+
+
+class StoreAudioStateOut(BaseModel):
+    """Requested vs applied, never merged into one number."""
+
+    store_id: int
+    requested_volume_percent: int
+    requested_muted: bool
+    applied_volume_percent: Optional[int] = None
+    applied_muted: Optional[bool] = None
+    last_command_id: int
+    last_acknowledged_command_id: int
+    result: Optional[str] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    output_device: Optional[str] = None
+    pending: bool
+    #: False for a Receiver built before audio control existed, and for one
+    #: that is offline. The UI says which - "unsupported by this Receiver" and
+    #: "Receiver offline" are different problems with different remedies.
+    supported: bool = True
+    online: bool = True
+
+
+class StoreAudioControlOut(BaseModel):
+    session_id: int
+    stores: List[StoreAudioStateOut]
+
+
 class SessionCreate(BaseModel):
     campaign_name: str = Field(..., min_length=1, max_length=255)
     target_mode: str  # all|selected|region|city|online_only
