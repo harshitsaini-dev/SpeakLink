@@ -264,6 +264,12 @@ def _pilot_environment(paths: PilotPaths, *, jwt_secret: str | None = None) -> d
     environment[ADMIN_USERNAME_ENV] = _pilot_username()
     environment[ADMIN_PASSWORD_ENV] = require_pilot_password()
     environment[CORS_ORIGINS_ENV] = "http://localhost:3000"
+    # Keep a pilot's DATA beside its database, not in the repository's own
+    # data directory. Without this a load run wrote its broadcast recordings
+    # into data/recordings/ - the same folder the live HQ uses - and left
+    # orphan .part files there with no metadata row pointing at them. The
+    # database was already scoped; the recordings were not.
+    environment["SPEAKLINK_DATA_DIR"] = str(paths.database_path.parent)
     environment[JWT_SECRET_ENV] = jwt_secret or environment.get(
         JWT_SECRET_ENV
     ) or secrets.token_urlsafe(48)

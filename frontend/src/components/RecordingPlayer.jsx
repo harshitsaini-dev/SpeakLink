@@ -1,5 +1,5 @@
 import React from "react";
-import { Play, AlertTriangle, FileX } from "lucide-react";
+import { Play, Download, AlertTriangle, FileX } from "lucide-react";
 import { api } from "@/lib/api";
 
 /**
@@ -34,6 +34,7 @@ function formatSize(bytes) {
 export default function RecordingPlayer({ sessionId, recording }) {
   const [source, setSource] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState(null);
 
   React.useEffect(() => () => {
@@ -95,6 +96,34 @@ export default function RecordingPlayer({ sessionId, recording }) {
     }
   };
 
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      // Through the API client for the same reason playback is: the token has
+      // to travel with the request, and the recordings folder is not public.
+      const response = await api.get(
+        `/broadcast/sessions/${sessionId}/recording/download`,
+        { responseType: "blob" });
+      const url = URL.createObjectURL(response.data);
+      const link = document.createElement("a");
+      link.href = url;
+      // Session id only. A campaign name could carry something private into
+      // somebody's downloads folder.
+      link.download = `broadcast-${String(sessionId).padStart(6, "0")}.webm`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (failure) {
+      setError(failure?.response?.status === 403
+        ? "You do not have access to this recording."
+        : "This recording could not be downloaded.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="space-y-1" data-testid={`recording-${sessionId}`}>
       <div className="flex items-center gap-2">
@@ -114,17 +143,29 @@ export default function RecordingPlayer({ sessionId, recording }) {
         </span>
       </div>
 
-      {!source && (
+      <div className="flex items-center gap-3">
+        {!source && (
+          <button
+            type="button"
+            onClick={load}
+            disabled={loading}
+            data-testid={`recording-play-${sessionId}`}
+            className="inline-flex items-center gap-1 text-xs text-blue-700 hover:text-blue-900 disabled:opacity-50"
+          >
+            <Play size={13} /> {loading ? "Loading…" : "Play Recording"}
+          </button>
+        )}
+
         <button
           type="button"
-          onClick={load}
-          disabled={loading}
-          data-testid={`recording-play-${sessionId}`}
+          onClick={save}
+          disabled={saving}
+          data-testid={`recording-download-${sessionId}`}
           className="inline-flex items-center gap-1 text-xs text-blue-700 hover:text-blue-900 disabled:opacity-50"
         >
-          <Play size={13} /> {loading ? "Loading…" : "Play Recording"}
+          <Download size={13} /> {saving ? "Preparing…" : "Download"}
         </button>
-      )}
+      </div>
 
       {source && (
         // Seeking works because the API answers byte-range requests; without

@@ -48,8 +48,7 @@ def client(tmp_path, monkeypatch):
                    if name in ("server", "db", "models", "seed", "auth", "rbac",
                                "user_lifecycle", "schemas", "permission_catalog",
                                "store_scope", "store_audio_control",
-                               "store_master_audio", "store_audio_pending",
-                               "master_volume_api", "broadcast_recording")]:
+                                                              "master_volume_api", "broadcast_recording")]:
         sys.modules.pop(module, None)
 
     from fastapi.testclient import TestClient
@@ -347,3 +346,166 @@ def test_deleting_history_removes_the_recording_and_its_file(client, owner):
     assert (directory / file_two).exists()
     assert broadcast_recording.get_recording(engine, session_id=2) is not None
     assert directory.exists()
+
+
+# ===========================================================================
+# Download
+# ===========================================================================
+def test_an_authorized_operator_can_download_a_recording(client, owner):
+    make_session(client, session_id=1)
+    make_recording(client, 1)
+    response = client.get("/api/broadcast/sessions/1/recording/download",
+                          headers=owner)
+    assert response.status_code == 200
+    assert response.content == AUDIO
+    assert response.headers["content-disposition"].startswith("attachment;")
+
+
+def test_playback_stays_inline_and_download_is_an_attachment(client, owner):
+    """The same bytes, and the only difference is how the browser treats them."""
+    make_session(client, session_id=1)
+    make_recording(client, 1)
+    play = client.get("/api/broadcast/sessions/1/recording/audio", headers=owner)
+    save = client.get("/api/broadcast/sessions/1/recording/download", headers=owner)
+    assert play.content == save.content
+    assert play.headers["content-disposition"].startswith("inline;")
+    assert save.headers["content-disposition"].startswith("attachment;")
+
+
+def test_an_unauthenticated_download_gets_no_audio(client):
+    make_session(client, session_id=1)
+    make_recording(client, 1)
+    response = client.get("/api/broadcast/sessions/1/recording/download")
+    assert response.status_code in (401, 403)
+    assert AUDIO not in response.content
+
+
+def test_an_account_without_history_permission_cannot_download(client, owner):
+    make_session(client, session_id=1)
+    make_recording(client, 1)
+    user_id = make_user(client, owner, "viewer", "VIEWER")
+    client.put(f"/api/users/{user_id}/permissions", headers=owner,
+               json={"changes": [{"code": "menu.history.view", "effect": "DENY"}]})
+    viewer = sign_in(client, "viewer")
+
+    response = client.get("/api/broadcast/sessions/1/recording/download",
+                          headers=viewer)
+    assert response.status_code == 403
+    assert AUDIO not in response.content
+
+
+def test_a_scoped_operator_cannot_download_another_regions_broadcast(client, owner):
+    """Downloading is not a way around Store Scope."""
+    ids = store_ids(client, owner, count=2)
+    make_session(client, session_id=1, store_ids=[ids[1]])
+    make_recording(client, 1)
+
+    caster_id = make_user(client, owner, "caster", "BROADCASTER")
+    client.put(f"/api/users/{caster_id}/store-scope", headers=owner,
+               json={"entries": [{"scope_type": "STORE", "store_id": ids[0]}]})
+    caster = sign_in(client, "caster")
+
+    response = client.get("/api/broadcast/sessions/1/recording/download",
+                          headers=caster)
+    assert response.status_code == 404
+    assert AUDIO not in response.content
+
+
+def test_the_download_name_carries_nothing_private(client, owner):
+    make_session(client, session_id=1)
+    make_recording(client, 1)
+    disposition = client.get("/api/broadcast/sessions/1/recording/download",
+                             headers=owner).headers["content-disposition"]
+    assert 'filename="broadcast-000001.webm"' in disposition
+    for leak in ("founder", "Morning announcement", "token", "password"):
+        assert leak not in disposition
+
+
+def test_a_failed_recording_cannot_be_downloaded(client, owner):
+    make_session(client, session_id=1)
+    make_recording(client, 1, status="failed", write_file=False)
+    assert client.get("/api/broadcast/sessions/1/recording/download",
+                      headers=owner).status_code == 404
+
+
+def test_a_partial_recording_can_be_downloaded(client, owner):
+    """Incomplete is still the best evidence of what went out."""
+    make_session(client, session_id=1)
+    make_recording(client, 1, status="partial")
+    assert client.get("/api/broadcast/sessions/1/recording/download",
+                      headers=owner).status_code == 200
+
+
+def test_no_recording_url_carries_a_token(client, owner):
+    """The credential travels in a header, never in something bookmarkable."""
+    make_session(client, session_id=1)
+    make_recording(client, 1)
+    for path in ("/api/broadcast/sessions/1/recording",
+                 "/api/broadcast/sessions/1/recording/audio",
+                 "/api/broadcast/sessions/1/recording/download"):
+        response = client.get(path, headers=owner)
+        assert response.status_code == 200
+        assert "?" not in str(response.url) or "token" not in str(response.url)
+
+
+# ===========================================================================
+# Deleting history deletes exactly one recording
+# ===========================================================================
+def test_deleting_one_broadcast_never_touches_another_recording(client, owner):
+    import broadcast_recording
+    from db import engine
+
+    for session_id in (1, 2, 3):
+        make_session(client, session_id=session_id)
+        make_recording(client, session_id)
+    directory = broadcast_recording.recordings_directory()
+
+    response = client.post("/api/broadcast/history/delete-permanently",
+                           headers=owner,
+                           json={"ids": [2], "confirm": "DELETE",
+                                 "acknowledged": True})
+    assert response.status_code == 200, response.text
+
+    assert not (directory / "broadcast-000002.webm").exists()
+    assert broadcast_recording.get_recording(engine, session_id=2) is None
+    for survivor in (1, 3):
+        assert (directory / f"broadcast-{survivor:06d}.webm").exists()
+        assert broadcast_recording.get_recording(engine, session_id=survivor)
+    assert directory.exists(), "the directory itself is never removed"
+
+
+def test_deleting_a_broadcast_whose_file_already_vanished_still_succeeds(client, owner):
+    """A missing file must not block an operator from clearing history."""
+    import broadcast_recording
+    from db import engine
+
+    make_session(client, session_id=1)
+    file_name = make_recording(client, 1)
+    (broadcast_recording.recordings_directory() / file_name).unlink()
+
+    response = client.post("/api/broadcast/history/delete-permanently",
+                           headers=owner,
+                           json={"ids": [1], "confirm": "DELETE",
+                                 "acknowledged": True})
+    assert response.status_code == 200, response.text
+    assert broadcast_recording.get_recording(engine, session_id=1) is None
+
+
+def test_an_unauthorized_account_cannot_delete_a_recording(client, owner):
+    import broadcast_recording
+    from db import engine
+
+    make_session(client, session_id=1)
+    make_recording(client, 1)
+    user_id = make_user(client, owner, "viewer", "VIEWER")
+    viewer = sign_in(client, "viewer")
+
+    response = client.post("/api/broadcast/history/delete-permanently",
+                           headers=viewer,
+                           json={"ids": [1], "confirm": "DELETE",
+                                 "acknowledged": True})
+    assert response.status_code == 403
+    # The audio and its metadata are both still there.
+    assert broadcast_recording.get_recording(engine, session_id=1) is not None
+    assert (broadcast_recording.recordings_directory()
+            / "broadcast-000001.webm").exists()

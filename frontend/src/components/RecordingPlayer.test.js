@@ -152,3 +152,49 @@ test("nothing here claims the announcement was heard", () => {
   expect(screen.getByTestId("recording-12").textContent.toLowerCase())
     .not.toMatch(/verified|audible|confirmed/);
 });
+
+// ===========================================================================
+// Download
+// ===========================================================================
+test("downloading fetches through the authenticated API", async () => {
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+  render(<RecordingPlayer sessionId={12} recording={recording()} />);
+
+  fireEvent.click(screen.getByTestId("recording-download-12"));
+  await waitFor(() => expect(api.get).toHaveBeenCalledWith(
+    "/broadcast/sessions/12/recording/download", { responseType: "blob" }));
+});
+
+test("the downloaded filename carries only the session id", async () => {
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+  const clicked = [];
+  const realCreate = document.createElement.bind(document);
+  jest.spyOn(document, "createElement").mockImplementation((tag) => {
+    const node = realCreate(tag);
+    if (tag === "a") {
+      node.click = () => clicked.push(node.download);
+    }
+    return node;
+  });
+
+  render(<RecordingPlayer sessionId={12} recording={recording()} />);
+  fireEvent.click(screen.getByTestId("recording-download-12"));
+  await waitFor(() => expect(clicked).toEqual(["broadcast-000012.webm"]));
+  document.createElement.mockRestore();
+});
+
+test("a refused download is reported rather than failing silently", async () => {
+  api.get.mockRejectedValue({ response: { status: 403 } });
+  render(<RecordingPlayer sessionId={12} recording={recording()} />);
+
+  fireEvent.click(screen.getByTestId("recording-download-12"));
+  expect((await screen.findByTestId("recording-error-12")).textContent)
+    .toBe("You do not have access to this recording.");
+});
+
+test("a failed recording offers neither Play nor Download", () => {
+  render(<RecordingPlayer sessionId={12}
+                          recording={recording({ status: "failed" })} />);
+  expect(screen.queryByTestId("recording-play-12")).toBeNull();
+  expect(screen.queryByTestId("recording-download-12")).toBeNull();
+});
