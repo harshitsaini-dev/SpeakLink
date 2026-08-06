@@ -222,6 +222,13 @@ from receiver_runtime_auth import (
     LegacyStoreTokenRuntimeAuthenticator,
     MigrationAwareReceiverRuntimeAuthenticator,
 )
+import store_master_audio
+from store_audio_pending import (
+    EmptyPendingCommandError,
+    InvalidPendingVolumeError,
+    ensure_pending_audio_schema,
+)
+import store_audio_pending
 from receiver_contract import (
     AudioControlAcknowledgement,
     EndpointStateAcknowledgement,
@@ -592,6 +599,10 @@ def startup_event():
     # window. A host without the phase-one schema simply has an empty one.
     try:
         ensure_primary_device_schema(engine)
+        # Additive, and safe on every boot. A pending mixer change must
+        # survive an HQ restart - outliving a disconnection is its whole
+        # purpose - so unlike live readings it has to live in the database.
+        ensure_pending_audio_schema(engine)
     except Exception:
         logger.warning("Receiver primary-device table could not be prepared", exc_info=False)
 
@@ -4410,6 +4421,18 @@ async def ws_receiver(websocket: WebSocket):
             finally:
                 db.close()
 
+            # The Master Volume panel now has a live Store again. The sequence
+            # counter is reset inside note_online because it is per-connection:
+            # a Receiver that restarted begins at 1, and keeping the old
+            # high-water mark would silently discard every reading it sends.
+            # Its last known reading is deliberately kept until a fresh one
+            # arrives, so the row shows a value rather than blanking.
+            store_master_audio.registry.note_online(store_id=store_id)
+            await connection_manager.notify_dashboards({
+                "type": "store_master_audio",
+                **store_master_audio.registry.state_for(store_id).as_dict(),
+            })
+
         # If a broadcast is reaching this Store, send PLAY immediately so a
         # Receiver that reconnected mid-announcement rejoins it.
         #
@@ -4512,7 +4535,41 @@ async def ws_receiver(websocket: WebSocket):
             # so it updates the ACTUAL fields only and never a command id: a
             # person at the till moving the slider does not retract the
             # operator's request and must not look like a reply to it.
+            # Whatever the Receiver says about its own output, remembered so
+            # the panel can still explain an OFFLINE Store. Only the Store
+            # knows whether it has an endpoint selected; inferring it here is
+            # what produced the "Not supported by this Receiver" message that
+            # sent technicians to rebuild software that was already correct.
+            ready_capabilities = getattr(acknowledgement, "capabilities", None)
+            if ready_capabilities is not None:
+                store_master_audio.registry.note_capability(
+                    store_id=store_id,
+                    endpoint_status=getattr(
+                        ready_capabilities, "output_control_status", "unknown"),
+                )
+
             if isinstance(acknowledgement, EndpointStateAcknowledgement):
+                # Always-on first, and unconditionally: this reading is true
+                # about the Store whether or not a broadcast exists, and the
+                # Master Volume panel is not a broadcast screen. Most readings
+                # now arrive with no session id at all.
+                master_state = store_master_audio.registry.observe(
+                    store_id=store_id,
+                    state_sequence=acknowledgement.state_sequence,
+                    volume_percent=acknowledgement.volume_percent,
+                    muted=acknowledgement.muted,
+                )
+                if master_state is not None:
+                    await connection_manager.notify_dashboards({
+                        "type": "store_master_audio",
+                        **master_state.as_dict(),
+                    })
+
+                # A reading taken during a broadcast additionally updates that
+                # broadcast's own view. No session id means idle, and there is
+                # nothing further to do.
+                if acknowledgement.session_id is None:
+                    continue
                 observed = store_audio_registry.observe_endpoint_state(
                     session_id=acknowledgement.session_id,
                     store_id=store_id,
@@ -4597,6 +4654,15 @@ async def ws_receiver(websocket: WebSocket):
                     db.commit()
             finally:
                 db.close()
+
+            # The last reading is KEPT but stops being current. Knowing a shop
+            # was left muted is useful; showing that number as though it were
+            # live is the lie this flag exists to prevent.
+            store_master_audio.registry.note_offline(store_id=store_id)
+            await connection_manager.notify_dashboards({
+                "type": "store_master_audio",
+                **store_master_audio.registry.state_for(store_id).as_dict(),
+            })
             await connection_manager.notify_dashboards({
                 "type": "receiver_status",
                 "store_id": store_id,
