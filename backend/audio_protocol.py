@@ -204,7 +204,7 @@ MAX_OUTPUT_VOLUME_PERCENT = 100
 
 def build_set_audio_control_message(
     *,
-    session_id: int | None,
+    session_id: int,
     command_id: int,
     volume_percent: int,
     muted: bool,
@@ -222,13 +222,7 @@ def build_set_audio_control_message(
     "volume 0". The operator's chosen level has to survive being muted, and
     collapsing the two would lose it: unmuting would have nothing to restore.
     """
-    # None means "no broadcast owns this Store" - the Master Volume panel
-    # controlling an idle shop. The Receiver applies it to the same endpoint
-    # through the same code path; what changes is only that there is no session
-    # for it to be checked against, because there is no session.
-    validated_session = (
-        None if session_id is None else _positive_int(session_id, "session_id")
-    )
+    validated_session = _positive_int(session_id, "session_id")
     validated_command = _positive_int(command_id, "command_id")
     if isinstance(volume_percent, bool) or not isinstance(volume_percent, int):
         raise AudioProtocolError("volume_percent must be a whole number")

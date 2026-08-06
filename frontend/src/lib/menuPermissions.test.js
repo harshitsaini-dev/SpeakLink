@@ -16,10 +16,6 @@ test("every top-level nav route names its menu permission", () => {
     // the page that lists every other operator's broadcast.
     "/active-broadcasts": "broadcast.active_view",
     "/stores": "menu.stores.view",
-    // Master Volume shares store_audio.control with in-broadcast volume
-    // control. Seeing how loud the estate is and being able to change it are
-    // one responsibility, and a second permission would let them drift apart.
-    "/master-volume": "store_audio.control",
     "/history": "menu.history.view",
     "/receivers": "menu.receivers.view",
     // The fleet-wide Devices view shows the same Receivers from another angle,

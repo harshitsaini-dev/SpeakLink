@@ -14,11 +14,6 @@ export const MENU_PERMISSION_BY_PATH = {
   // ordinary Broadcaster holds the second without the first.
   "/active-broadcasts": "broadcast.active_view",
   "/stores": "menu.stores.view",
-  // The same permission that governs changing a Store's volume during a
-  // broadcast. Seeing how loud the estate is and being able to change it
-  // are one responsibility; a second permission here would only let the
-  // two drift apart.
-  "/master-volume": "store_audio.control",
   "/history": "menu.history.view",
   "/receivers": "menu.receivers.view",
   // Same subject as /receivers, so the same menu permission gates it. A second
@@ -31,7 +26,7 @@ export const MENU_PERMISSION_BY_PATH = {
 
 /** The route a signed-in account should land on if its current one is denied. */
 export const FIRST_ALLOWED_ROUTE = [
-  "/console", "/active-broadcasts", "/stores", "/master-volume", "/history", "/receivers", "/logs", "/users",
+  "/console", "/active-broadcasts", "/stores", "/history", "/receivers", "/logs", "/users",
 ];
 
 export function firstAllowedRoute(can) {
