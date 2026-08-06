@@ -188,6 +188,20 @@ async def _drive(paths, store_count: int, port: int, backend_pid: int) -> dict:
         command(offline.store_id, volume_percent=30)
         command(offline.store_id, volume_percent=70)
 
+        # ---- Target enforcement under repeated Store-local interference ----
+        # The hazard this measures: a shop whose staff keep moving the mixer.
+        # The bounds must collapse that into a small, finite number of
+        # commands and then stop, rather than an argument at socket speed.
+        fighter = connecting[1] if len(connecting) > 1 else connecting[0]
+        commands_before = fighter.audio_commands_received
+        for _ in range(12):
+            fighter.local_change(15)          # dragged away from its Target
+            await asyncio.sleep(0.25)
+        # Long enough for the shortened debounce, the sweep and the cooldown to
+        # all have had their say.
+        await asyncio.sleep(12.0)
+        enforcement_commands = fighter.audio_commands_received - commands_before
+
         after = panel()
         cost_after = _process_cost(backend_pid)
 
@@ -226,6 +240,14 @@ async def _drive(paths, store_count: int, port: int, backend_pid: int) -> dict:
                 unconfigured.store_code if unconfigured else None),
             "unconfigured_transmitted": (
                 unconfigured.endpoint_states_transmitted if unconfigured else None),
+            # A dozen local changes must not become a dozen corrections. The
+            # debounce and cooldown are what keep this small; the attempt
+            # budget is what stops it entirely.
+            "interference_local_changes": 12,
+            "enforcement_commands_sent": enforcement_commands,
+            "enforcement_bounded": enforcement_commands <= 3,
+            "fighter_store_code": fighter.store_code,
+            "fighter_sync_state": after.get(fighter.store_id, {}).get("sync_state"),
             "commands_accepted": accepted,
             "commands_refused": refusals,
             "http_latency_ms": {
@@ -257,6 +279,13 @@ def run_master_volume_load(store_count: int, pilot_root: Path | None = None) -> 
 
     port = _free_loopback_port()
     environment = _pilot_environment(paths)
+    # Short bounds so a run lasting seconds exercises the real enforcement
+    # mechanism rather than only proving it declined to act yet. The bounds are
+    # shortened, never removed - what is under test is that a dozen local
+    # changes still produce a small, finite number of commands.
+    environment["ECHOCAST_TARGET_DEBOUNCE_SECONDS"] = "1"
+    environment["ECHOCAST_TARGET_COOLDOWN_SECONDS"] = "1"
+    environment["ECHOCAST_TARGET_POST_BROADCAST_SECONDS"] = "2"
     backend = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "server:app",
          "--host", "127.0.0.1", "--port", str(port),

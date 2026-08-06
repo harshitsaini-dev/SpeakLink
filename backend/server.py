@@ -3236,10 +3236,12 @@ async def _apply_target_master_volume(store_id: int, device_id: int | None) -> N
         return
 
     state = store_master_audio.registry.state_for(store_id)
-    snapshot = manager.get_receiver_snapshot(store_id)
-    capabilities = getattr(snapshot, "capabilities", None) if snapshot else None
-    if not (capabilities and capabilities.output_volume):
-        return
+    # The endpoint status is the gate, and capabilities are not consulted
+    # separately. Capabilities only ever arrive in receiver_ready, which
+    # happens at broadcast PREPARE - so requiring them here meant a Store that
+    # had simply never been broadcast to could never be brought to its target,
+    # however plainly it was reporting its own mixer. A READY status already
+    # means either the Receiver said so or it demonstrably read its endpoint.
     if state.endpoint_status != store_master_audio.ENDPOINT_READY:
         return
 
@@ -3296,13 +3298,6 @@ async def _enforce_targets_once() -> list[dict]:
             if not decision.should_enforce:
                 outcomes.append({"store_id": store_id,
                                  "enforced": False, "reason": decision.reason})
-                continue
-
-            snapshot = manager.get_receiver_snapshot(store_id)
-            capabilities = getattr(snapshot, "capabilities", None) if snapshot else None
-            if not (capabilities and capabilities.output_volume):
-                outcomes.append({"store_id": store_id, "enforced": False,
-                                 "reason": target_enforcement.SKIP_ENDPOINT})
                 continue
 
             await _send_target_to_store(store_id, target, state)

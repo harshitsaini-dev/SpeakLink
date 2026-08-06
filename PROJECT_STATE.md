@@ -6592,10 +6592,83 @@ Broadcast load with recording, 5 and 40 Stores: recording `available`, opus,
 21 chunks written / 0 dropped, **0 audio chunks dropped**, max queue 1/24,
 restoration held.
 
+### Target enforcement
+
+The panel is a permanent Store audio configuration console. The persisted value
+is the **TARGET**, and the operator sets it whenever they like.
+
+While a Store is online and no broadcast owns it, the Target is
+**authoritative**: if somebody at the till turns a shop down, EchoCast puts it
+back. The naive form of that is a fight with a person holding a mouse -
+endpoint notifications arrive in milliseconds, so the loop would run as fast as
+the socket allows. Four bounds prevent it:
+
+| bound | default | what it prevents |
+|---|---|---|
+| Debounce | 20 s | interrupting somebody mid-adjustment; collapses a drag into one command |
+| Cooldown | 15 s | a command and its own readback triggering the next one |
+| Attempt budget | 3 | an endless argument; ends in `ENFORCEMENT_SUSPENDED` |
+| Post-broadcast quiet | 30 s | STOP's restoration being dragged away in the same breath |
+
+The policy is a pure decision function with time passed in, so all four are
+tested by calling it rather than by waiting. Every refusal returns a *reason*,
+so a test asserts WHY nothing happened rather than only that nothing did.
+
+`ENFORCEMENT_SUSPENDED` is deliberate: a shop where somebody keeps disagreeing
+must end in a fact an operator can act on. Setting a new Target, or seeing the
+Store match, clears it.
+
+### A real bug this found
+
+Both enforcement paths gated on `capabilities.output_volume`, which only ever
+arrives in `receiver_ready` — and that happens at broadcast PREPARE. A Store
+that had simply never been broadcast to could therefore never be brought to its
+Target, however plainly it was reporting its own mixer. The endpoint status is
+now the single gate, which already means either the Receiver said so or it
+demonstrably read its endpoint.
+
+### Receiver reconnect: audited, already sufficient
+
+No change was needed, and the requirements are already covered by tests:
+
+* **starts with Windows** — `-AtLogOn` trigger for the installing user;
+* **recovers if it dies** — a separate periodic trigger with
+  `MultipleInstances IgnoreNew`, because `RestartCount` applies when a task
+  fails to *start*, not when the program it started exits;
+* **survives HQ restarts and LAN faults** — bounded, jittered exponential
+  backoff, 1 s to a 60 s cap with 25% jitter, reset after a stable connection;
+* **no manual Store interaction** — `StartWhenAvailable`,
+  `AllowStartIfOnBatteries`, `DontStopIfGoingOnBatteries`, no execution time
+  limit, and it runs as the interactive user with no stored password.
+
+The jitter matters at 44 Stores: when a shared link returns, the estate must
+not reconnect in the same millisecond and knock it over again.
+
+### Load with enforcement
+
+| | 5 | 10 | 20 | 40 |
+|---|---|---|---|---|
+| Local changes fighting the Target | 12 | 12 | 12 | 12 |
+| Enforcement commands sent | **1** | **1** | **1** | **1** |
+| Final sync state | SYNCED | SYNCED | SYNCED | SYNCED |
+| Offline Store accepted a Target | 200 | 200 | 200 | 200 |
+| Noisy Store 42 changes → frames | 3 | 3 | 3 | 3 |
+| CPU s · RSS MB | 0.09 · 83.2 | 0.06 · 84.5 | 0.12 · 86.8 | 0.31 · 91.7 |
+
+Twelve deliberate local changes produce **one** correction and the Store ends
+SYNCED. The load harness shortens the bounds through
+`ECHOCAST_TARGET_*_SECONDS` so a run lasting seconds exercises the real
+mechanism; an override can only ever *shorten* a wait, and there is no way to
+switch a bound off.
+
+Broadcast load with recording, 5 and 40 Stores: recording `available`, 0 chunks
+dropped, 0 audio chunks dropped, max queue 1/24, restoration held.
+
 ### No new Store Kit
 
-The Receiver is unchanged by this work - desired state, sync state and the
-refusal rules are all HQ-side. **Store Kit 1.6.0 remains current.**
+The Receiver is unchanged by this work - Target state, sync state, enforcement
+and the refusal rules are all HQ-side. **Store Kit 1.6.0 remains current**, and
+its SHA-256 is unchanged.
 
 ### Not done
 
