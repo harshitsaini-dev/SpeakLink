@@ -3582,6 +3582,27 @@ def _require_history_store_scope(db: Session, session, user: HQUser) -> None:
         raise HTTPException(status_code=404, detail="Session not found")
 
 
+@api.get("/broadcast/sessions/{sid}/recording/download")
+def download_broadcast_recording(
+    sid: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require(Permission.VIEW_HISTORY)),
+):
+    """The same bytes as playback, offered as a file.
+
+    Deliberately the same permission, the same Store Scope and the same route
+    body as playback - downloading is not a different entitlement from
+    listening, and a second implementation would be a second place for the
+    authorization to drift.
+
+    The only difference is Content-Disposition: attachment rather than inline,
+    with a name built from the session id alone. No campaign name, no username,
+    nothing that could carry something private into a downloads folder.
+    """
+    return _stream_recording(sid, request, db, user, disposition="attachment")
+
+
 @api.get("/broadcast/sessions/{sid}/recording/audio")
 def stream_broadcast_recording(
     sid: int,
@@ -3589,6 +3610,11 @@ def stream_broadcast_recording(
     db: Session = Depends(get_db),
     user: HQUser = Depends(require(Permission.VIEW_HISTORY)),
 ):
+    return _stream_recording(sid, request, db, user, disposition="inline")
+
+
+def _stream_recording(sid: int, request: Request, db: Session, user: HQUser,
+                      *, disposition: str):
     """The audio itself, authenticated, with byte-range support.
 
     NOT a static mount. The recordings directory is never served as a public
@@ -3665,7 +3691,7 @@ def stream_broadcast_recording(
         # name, no username, nothing that could carry something private into a
         # downloads folder.
         "Content-Disposition":
-            f'inline; filename="broadcast-{sid:06d}.webm"',
+            f'{disposition}; filename="broadcast-{sid:06d}.webm"',
     }
     if status_code == 206:
         headers["Content-Range"] = f"bytes {start}-{end}/{total}"
