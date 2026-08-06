@@ -1,5 +1,6 @@
 import React from "react";
-import RecordingPlayer from "@/components/RecordingPlayer";
+import RecordingActions from "@/components/RecordingActions";
+import RecordingPlayer, { PLAYER_BAR_HEIGHT } from "@/components/RecordingPlayer";
 import { api } from "@/lib/api";
 import StatusBadge from "@/components/StatusBadge";
 import { formatIst, parseUtcMs, elapsedSeconds } from "@/lib/time";
@@ -22,6 +23,10 @@ const dur = (a, b) => {
 
 export default function BroadcastHistory() {
   const { can } = useAuth();
+  // Which recording the single bottom player is currently on. Owning it here
+  // is what makes "one at a time" a property of the page rather than a rule
+  // that per-row players would have to negotiate between themselves.
+  const [playing, setPlaying] = React.useState(null);
   const list = useAdminList("/broadcast/history/search", {
     q: "", status: "", date_from: "", date_to: "", started_by: "",
     store_id: "", city: "", region: "",
@@ -69,7 +74,8 @@ export default function BroadcastHistory() {
   };
 
   return (
-    <div className="space-y-4" data-testid="history-page">
+    <div className="space-y-4" data-testid="history-page"
+         style={playing ? { paddingBottom: PLAYER_BAR_HEIGHT + 24 } : undefined}>
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight text-slate-900">Broadcast History</h1>
         <button data-testid="history-refresh-btn" onClick={list.reload}
@@ -199,7 +205,11 @@ export default function BroadcastHistory() {
                 <td className="px-3 py-2 font-mono text-xs">{dur(s.started_at, s.ended_at)}</td>
                 <td className="px-3 py-2"><StatusBadge status={s.status} /></td>
                 <td className="px-3 py-2">
-                  <RecordingPlayer sessionId={s.id} recording={s.recording} />
+                  <RecordingActions
+                    sessionId={s.id}
+                    recording={s.recording}
+                    isActive={playing?.id === s.id}
+                    onPlay={() => setPlaying(s)} />
                 </td>
               </tr>
             ))}
@@ -282,6 +292,13 @@ export default function BroadcastHistory() {
           </div>
         </div>
       )}
+
+      {/* ONE player for the page. A row's Play button only chooses which
+          recording is active; two cannot overlap because there is only ever
+          one audio element. */}
+      <RecordingPlayer
+        session={playing}
+        onClose={() => setPlaying(null)} />
     </div>
   );
 }
