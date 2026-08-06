@@ -300,6 +300,14 @@ build/pyi-work-*/
 /data/*
 !/data/.gitkeep
 
+# Broadcast recordings. Already covered by /data/* above; named explicitly
+# because these are recordings of real announcements in real shops, and
+# "it happens to be under an ignored directory" is a weaker guarantee than
+# saying so. Never commit one.
+/data/recordings/
+**/recordings/*.webm
+**/recordings/*.webm.part
+
 # Belt and braces for the individual kinds, in case a data directory is
 # relocated with ECHOCAST_DATA_DIR and ends up somewhere else in the tree.
 **/echocast.db
