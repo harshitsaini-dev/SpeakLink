@@ -151,12 +151,11 @@ class SyntheticReceiver:
             while True:
                 await asyncio.sleep(interval)
                 reading, self._pending_state = self._pending_state, None
-                if reading is None or self._socket is None:
+                if reading is None or self.session_id is None or self._socket is None:
                     continue
-                # Reported whether or not a broadcast exists, exactly as the
-                # real Receiver now does: a shop's mixer is changed at the till
-                # on a quiet afternoon, and that is the case the Master Volume
-                # panel exists for.
+                # Only meaningful inside a broadcast, exactly as the real
+                # Receiver behaves: observation runs between PREPARE and
+                # restoration and at no other time.
                 volume_percent, muted = reading
                 self._state_sequence += 1
                 try:

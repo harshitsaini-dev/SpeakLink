@@ -43,13 +43,9 @@ SUPPORTED_MESSAGE_TYPES = frozenset(
     }
 )
 SESSION_SCOPED_TYPES = frozenset(
-    {"audio_receiving", "playback_confirmed", "playback_error", "stopped"}
+    {"audio_receiving", "playback_confirmed", "playback_error", "stopped",
+     "audio_control", "endpoint_state"}
 )
-#: Carry a session id when there IS one and omit it otherwise. Endpoint
-#: observation and output control both now run while a Store is merely
-#: connected, so demanding a session would make a legitimate idle message
-#: unbuildable - and a session id that names no session would be a lie.
-SESSION_OPTIONAL_TYPES = frozenset({"audio_control", "endpoint_state"})
 SCENARIOS = (
     "ready-only",
     "successful-playback",
@@ -155,8 +151,6 @@ class MessageFactory:
             "sequence": sequence,
         }
         if message_type in SESSION_SCOPED_TYPES:
-            payload["session_id"] = session_id
-        elif message_type in SESSION_OPTIONAL_TYPES and session_id is not None:
             payload["session_id"] = session_id
         if message_type == "receiver_ready":
             payload.update(

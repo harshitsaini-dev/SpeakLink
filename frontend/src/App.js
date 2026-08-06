@@ -9,7 +9,6 @@ import Login from "@/pages/Login";
 import BroadcastConsole from "@/pages/BroadcastConsole";
 import ActiveBroadcasts from "@/pages/ActiveBroadcasts";
 import StoreManagement from "@/pages/StoreManagement";
-import MasterVolume from "@/pages/MasterVolume";
 import BroadcastHistory from "@/pages/BroadcastHistory";
 import ReceiverStatus from "@/pages/ReceiverStatus";
 import ReceiverDevices from "@/pages/ReceiverDevices";
@@ -47,7 +46,6 @@ export default function App() {
                 direct URL visit, not only on the sidebar link. */}
             <Route path="/active-broadcasts" element={<ActiveBroadcasts />} />
             <Route path="/stores" element={<StoreManagement />} />
-            <Route path="/master-volume" element={<MasterVolume />} />
             {/* The Store id is in the path, never a credential. Both secrets
                 this page can show - an enrolment code and a rotated credential -
                 live in component state only, so a reload loses them. */}

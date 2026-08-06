@@ -185,7 +185,7 @@ class HeartbeatAcknowledgement(AcknowledgementBase):
     type: Literal["heartbeat"]
 
 
-class AudioControlAcknowledgement(AcknowledgementBase):
+class AudioControlAcknowledgement(SessionAcknowledgement):
     """What the Store ACTUALLY did with a ``set_audio_control`` command.
 
     The requested and applied values are both carried, and they are allowed to
@@ -205,10 +205,6 @@ class AudioControlAcknowledgement(AcknowledgementBase):
     """
 
     type: Literal["audio_control"]
-    #: Absent when this answers an IDLE command from the Master Volume panel.
-    #: Control is no longer something only a broadcast can do, so requiring a
-    #: session here would make the reply to a legitimate command unparseable.
-    session_id: int | None = Field(default=None, gt=0)
     command_id: int = Field(gt=0)
     requested_volume_percent: int = Field(ge=0, le=100)
     requested_muted: bool
@@ -227,7 +223,7 @@ class AudioControlAcknowledgement(AcknowledgementBase):
         return _reject_control_characters(value) if value is not None else None
 
 
-class EndpointStateAcknowledgement(AcknowledgementBase):
+class EndpointStateAcknowledgement(SessionAcknowledgement):
     """What the Store's Windows output is doing RIGHT NOW.
 
     Telemetry, not a reply. It is emitted whenever the endpoint's master
@@ -246,13 +242,6 @@ class EndpointStateAcknowledgement(AcknowledgementBase):
     """
 
     type: Literal["endpoint_state"]
-    #: Absent when the Receiver is simply connected and idle. Endpoint
-    #: observation is no longer tied to a broadcast: a Store's mixer can be
-    #: changed at the till at four in the afternoon with nothing on air, and
-    #: HQ still needs to know. A session id is carried only when this reading
-    #: was taken while that broadcast was running, so a reading can still be
-    #: attributed when it matters.
-    session_id: int | None = Field(default=None, gt=0)
     state_sequence: int = Field(ge=1)
     volume_percent: int = Field(ge=0, le=100)
     muted: bool
@@ -471,13 +460,7 @@ def apply_receiver_ack(
         # nothing to do with whether it is connected, ready or playing - and a
         # Store user nudging the volume must not look like a fault.
         #
-        # An idle reading carries no session id and is validated against
-        # nothing: endpoint observation runs whenever the Receiver is
-        # connected, so most readings arrive with no broadcast in existence.
-        # A reading that DOES name a session is still checked against it, so a
-        # stale reading from a finished broadcast is refused as before.
-        if ack.session_id is not None:
-            _validate_active_session(result, ack.session_id)
+        _validate_active_session(result, ack.session_id)
     elif isinstance(ack, AudioControlAcknowledgement):
         # Deliberately changes NO status. How loud a Store is playing is
         # orthogonal to whether it is connected, ready, or playing: a muted
@@ -486,11 +469,9 @@ def apply_receiver_ack(
         # into the status model would make "quiet" indistinguishable from
         # "broken" on the very screen an operator uses to tell them apart.
         #
-        # An idle acknowledgement names no session and is checked against
-        # none. One that DOES name a session must name the running one, so a
-        # command answered against a finished broadcast is still rejected.
-        if ack.session_id is not None:
-            _validate_active_session(result, ack.session_id)
+        # The session check stays, so a command answered against a finished
+        # broadcast is rejected here as it is everywhere else.
+        _validate_active_session(result, ack.session_id)
     else:  # pragma: no cover - protected by the discriminated union
         raise InvalidTransitionError("unsupported receiver acknowledgement")
 

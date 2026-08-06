@@ -36,8 +36,7 @@ from schemas import (
     BroadcastTargetStoreOut, BroadcastTargetsOut,
     SessionCreate, SessionOut, SessionDetailOut, TargetOut,
     StoreAudioControlUpdate, StoreAudioStateOut, StoreAudioControlOut,
-    MasterVolumeOut, MasterVolumeStoreOut, RecordingOut,
-    MasterVolumeSummaryOut, MasterVolumeUpdate,
+    RecordingOut,
     SystemLogOut,
     EnrollmentCodeRequest, EnrollmentCodeResponse, EnrollmentCodeStatusOut,
     DeviceEnrollmentRequest, DeviceEnrollmentResponse,
@@ -224,16 +223,7 @@ from receiver_runtime_auth import (
     LegacyStoreTokenRuntimeAuthenticator,
     MigrationAwareReceiverRuntimeAuthenticator,
 )
-import store_master_audio
-import master_volume_api
 import broadcast_recording
-from store_audio_target import (
-    EmptyTargetStateError,
-    InvalidTargetVolumeError,
-    ensure_target_audio_schema,
-)
-import store_audio_target
-import target_enforcement
 from receiver_contract import (
     AudioControlAcknowledgement,
     EndpointStateAcknowledgement,
@@ -607,7 +597,6 @@ def startup_event():
         # Additive, and safe on every boot. A pending mixer change must
         # survive an HQ restart - outliving a disconnection is its whole
         # purpose - so unlike live readings it has to live in the database.
-        ensure_target_audio_schema(engine)
         broadcast_recording.ensure_recording_schema(engine)
         # Anything left mid-flight by a crash is resolved BEFORE the first
         # request can read it. An unfinished .part is never promoted to
@@ -820,18 +809,6 @@ def startup_event():
             f"{len(reconciliation.orphaned_session_ids)} interrupted "
             f"broadcast(s) and released {reconciliation.released_leases} "
             f"Store lease(s)")
-
-    # Puts Stores back to their configured target while they are online and
-    # nobody else owns them. All four bounds - debounce, cooldown, attempt
-    # budget and post-broadcast quiet period - live in target_enforcement, so
-    # this task only has to run the sweep.
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop is not None:
-        app.state.target_enforcement_task = loop.create_task(
-            _target_enforcement_loop())
 
     logger.info("SpeakLink startup complete")
 
@@ -2803,16 +2780,6 @@ async def _end_session(db: Session, session: BroadcastSession, final_status: str
     # a dropped microphone, server cleanup - which is exactly why finalization
     # lives here rather than in the stop route. Idempotent, and it never raises.
     await _finish_recording(session.id)
-
-    # STOP must be SEEN to restore each Store's original state. Target
-    # enforcement is held off for a cooldown so a shop put back to 25% muted is
-    # not dragged to 70% in the same breath, which would make the restoration
-    # look as though it never happened.
-    restored_at = time.monotonic()
-    for target_row in db.query(BroadcastTarget).filter(
-            BroadcastTarget.session_id == session.id).all():
-        target_enforcement.policy.note_broadcast_restored(
-            store_id=target_row.store_id, now=restored_at)
     now = datetime.now(timezone.utc)
     session.status = final_status
     session.ended_at = now
@@ -2988,528 +2955,6 @@ async def set_store_audio_control(
 # ---------------------------------------------------------------------------
 # Master Volume - the estate's mixers, independent of any broadcast
 # ---------------------------------------------------------------------------
-#: Command ids for IDLE control, one counter per Store. The Receiver applies
-#: the newest id it has seen and ignores anything older, exactly as it does for
-#: broadcast commands - so a rapid drag on an idle Store still resolves to the
-#: value the operator stopped on rather than to whichever command arrived last.
-#: One recording writer per LIVE broadcast. Runtime only - the metadata row is
-#: the durable record, and a writer is a file handle plus a queue.
-_RECORDING_WRITERS: dict[int, "broadcast_recording.RecordingWriter"] = {}
-
-
-def _start_recording(session_id: int) -> None:
-    """Begin recording one broadcast. Never raises into the broadcast path.
-
-    A recording that cannot start must not stop an announcement going out, so
-    every failure here is recorded against the row and swallowed.
-    """
-    try:
-        directory = broadcast_recording.recordings_directory()
-        writer = broadcast_recording.RecordingWriter(
-            session_id=session_id, directory=directory)
-        broadcast_recording.start_record(
-            engine, session_id=session_id, file_name=writer.file_name)
-        writer.start()
-        if writer.failed:
-            broadcast_recording.finish_record(
-                engine, session_id=session_id,
-                status=broadcast_recording.STATUS_FAILED, error=writer.error)
-            return
-        _RECORDING_WRITERS[session_id] = writer
-    except Exception as failure:
-        logger.warning("Recording could not start for session %s: %s",
-                       session_id, failure)
-
-
-async def _finish_recording(session_id: int) -> None:
-    """Finalize and publish. Called from EVERY path that ends a broadcast.
-
-    Normal stop, emergency stop, a dropped microphone and server cleanup all
-    arrive here, which is why it is idempotent and never raises.
-    """
-    writer = _RECORDING_WRITERS.pop(session_id, None)
-    if writer is None:
-        return
-    try:
-        status = await writer.close()
-        probed = {}
-        if status in (broadcast_recording.STATUS_AVAILABLE,
-                      broadcast_recording.STATUS_PARTIAL):
-            probed = broadcast_recording.probe_recording(writer.final_path)
-            # ffprobe present and refusing the file is real evidence it cannot
-            # be played. ffprobe ABSENT is evidence of nothing, so the file is
-            # kept rather than condemned by a missing tool.
-            if probed.get("error") or probed.get("has_audio") is False:
-                status = broadcast_recording.STATUS_FAILED
-        size = None
-        if writer.final_path.exists():
-            size = writer.final_path.stat().st_size
-        broadcast_recording.finish_record(
-            engine, session_id=session_id, status=status,
-            container=probed.get("container"), codec=probed.get("codec"),
-            byte_size=size, duration_seconds=probed.get("duration_seconds"),
-            chunks_written=writer.chunks_written,
-            chunks_dropped=writer.chunks_dropped,
-            error=writer.error or (
-                "some audio was dropped while writing to disk"
-                if writer.chunks_dropped else None))
-    except Exception as failure:
-        logger.warning("Recording could not be finalized for session %s: %s",
-                       session_id, failure)
-        broadcast_recording.finish_record(
-            engine, session_id=session_id,
-            status=broadcast_recording.STATUS_FAILED, error=str(failure))
-
-
-_IDLE_COMMAND_IDS: dict[int, int] = {}
-#: Store -> (command id, monotonic time it was sent). This is what makes
-#: APPLYING mean "a command is on the wire" rather than merely "these two
-#: numbers differ", which is the normal resting state of a Store whose staff
-#: moved the slider.
-_IN_FLIGHT_COMMANDS: dict[int, tuple[int, float]] = {}
-
-#: After this long with no answer, a command stops being described as APPLYING.
-#: Receivers acknowledge in milliseconds - the load runs put p95 under a second
-#: even with a deliberately slow Store - so silence for this long means it did
-#: not arrive, and saying APPLYING for ever would be a promise nobody is
-#: keeping.
-IN_FLIGHT_SECONDS = 10.0
-
-
-def _mark_in_flight(store_id: int, command_id: int) -> None:
-    import time as _time
-
-    _IN_FLIGHT_COMMANDS[store_id] = (command_id, _time.monotonic())
-
-
-def _is_in_flight(store_id: int) -> bool:
-    import time as _time
-
-    entry = _IN_FLIGHT_COMMANDS.get(store_id)
-    if entry is None:
-        return False
-    if _time.monotonic() - entry[1] > IN_FLIGHT_SECONDS:
-        _IN_FLIGHT_COMMANDS.pop(store_id, None)
-        return False
-    return True
-
-
-def _next_idle_command_id(store_id: int) -> int:
-    _IDLE_COMMAND_IDS[store_id] = _IDLE_COMMAND_IDS.get(store_id, 0) + 1
-    return _IDLE_COMMAND_IDS[store_id]
-
-
-def _log_master_volume(message: str) -> None:
-    """Audit a pending change through the existing System Log.
-
-    Deliberately records the Store, the actor and the intent and nothing else -
-    no credential, no token, no device secret. This line is read by anyone who
-    can see System Logs.
-    """
-    db = SessionLocal()
-    try:
-        _write_log(db, "info", message)
-    finally:
-        db.close()
-
-
-def _broadcast_owner_of_store(store_id: int) -> tuple[int, int] | None:
-    """(session_id, owner_user_id) if a LIVE broadcast is steering this Store.
-
-    This is what stops two writers racing one Windows endpoint. The Master
-    Volume panel never opens a competing channel: it either goes through the
-    broadcast that already owns the Store or it refuses.
-    """
-    for session_id in store_audio_registry.active_session_ids():
-        for row in store_audio_registry.describe(session_id):
-            if row["store_id"] == store_id:
-                return session_id, store_audio_registry.session_owner(session_id)
-    return None
-
-
-def _master_volume_rows(user: HQUser) -> tuple[list[MasterVolumeStoreOut], list[str]]:
-    scope = resolve_store_scope(engine, user)
-    stores = master_volume_api.installed_stores(engine, store_ids=scope)
-    target_by_store = store_audio_target.all_target(engine)
-    rows: list[MasterVolumeStoreOut] = []
-    for store in stores:
-        state = store_master_audio.registry.state_for(store.store_id)
-        owner = _broadcast_owner_of_store(store.store_id)
-        # The live capability answer wins while the Store is connected; the
-        # remembered one explains an offline Store rather than leaving it
-        # unexplained.
-        snapshot = manager.get_receiver_snapshot(store.store_id)
-        capabilities = getattr(snapshot, "capabilities", None) if snapshot else None
-        online = manager.is_receiver_online(store.store_id)
-        endpoint_status = (
-            getattr(capabilities, "output_control_status", state.endpoint_status)
-            if (online and capabilities) else state.endpoint_status
-        )
-        desired = target_by_store.get(store.store_id)
-        # APPLYING only while a command this Store has not answered is in
-        # flight. Otherwise a Store that a member of staff has turned down is
-        # OUT_OF_SYNC, which is a standing observation rather than a promise
-        # that something is about to happen.
-        applying = _is_in_flight(store.store_id)
-        rows.append(MasterVolumeStoreOut(
-            store_id=store.store_id,
-            store_code=store.store_code,
-            store_name=store.store_name,
-            zone=store.zone,
-            device_id=store.device_id,
-            control_status=master_volume_api.control_status_for(
-                online=online, endpoint_status=endpoint_status,
-                owned_by_broadcast=owner is not None),
-            online=online,
-            stale=not online,
-            volume_percent=state.volume_percent,
-            muted=state.muted,
-            level_class=master_volume_api.classify_volume(state.volume_percent),
-            endpoint_status=endpoint_status,
-            updated_at=state.updated_at.isoformat() if state.updated_at else None,
-            last_seen_at=state.last_seen_at.isoformat() if state.last_seen_at else None,
-            target_volume_percent=desired.volume_percent if desired else None,
-            target_muted=desired.muted if desired else None,
-            target_updated_at=desired.updated_at if desired else None,
-            sync_state=(
-                # An honest end to a disagreement beats an argument nobody can
-                # see. Only meaningful while the Store is reachable.
-                "ENFORCEMENT_SUSPENDED"
-                if (online and desired is not None
-                    and target_enforcement.policy.is_suspended(store.store_id))
-                else store_audio_target.sync_state(
-                    desired=desired,
-                    actual_volume_percent=state.volume_percent,
-                    actual_muted=state.muted,
-                    online=online,
-                    applying=applying)),
-            sync_error=desired.last_error if desired else None,
-        ))
-    zones = sorted({row.zone for row in rows if row.zone})
-    return rows, zones
-
-
-
-async def _apply_target_master_volume(store_id: int, device_id: int | None) -> None:
-    """Bring a reconnected Store to what HQ wants, if it is not there already.
-
-    ORDER MATTERS, and it is the order in the operator brief:
-
-    the Receiver has already authenticated, been confirmed as this Store's
-    active primary, and reported what its endpoint ACTUALLY is - all before
-    this runs. Only then is the target state compared with reality, and only
-    a genuine difference produces a command.
-
-    Deliberately conservative. It refuses rather than guesses whenever the
-    world has moved on since the operator expressed their intention:
-
-    * a broadcast now owns the Store - the single-writer rule outranks this,
-      and the target state simply keeps waiting;
-    * the Device that came back is not the one the intention was recorded
-      against - the machine was replaced, and applying one machine's settings
-      to another is exactly the blind inheritance this must not do;
-    * the Receiver reports no controllable output - nothing to apply it to.
-
-    The target state is NEVER cleared here. It is a standing intention rather
-    than a one-shot command: knowing a shop is meant to be at 70% is what makes
-    it possible to notice tomorrow that it is not.
-    """
-    try:
-        desired = store_audio_target.get_target(engine, store_id=store_id)
-    except Exception:
-        return
-    if desired is None:
-        return
-
-    if device_id is not None and desired.device_id != device_id:
-        # A different machine. The intention was recorded against a Device that
-        # is no longer this Store's Receiver, so it is not applied - and it is
-        # not silently retargeted either.
-        store_audio_target.mark_sync_failed(
-            engine, store_id=store_id,
-            error="the Receiver Device changed since this setting was chosen")
-        return
-
-    if _broadcast_owner_of_store(store_id) is not None:
-        # Left waiting on purpose. The broadcast will end, and the operator can
-        # decide then; forcing it now would fight the announcement.
-        return
-
-    state = store_master_audio.registry.state_for(store_id)
-    # The endpoint status is the gate, and capabilities are not consulted
-    # separately. Capabilities only ever arrive in receiver_ready, which
-    # happens at broadcast PREPARE - so requiring them here meant a Store that
-    # had simply never been broadcast to could never be brought to its target,
-    # however plainly it was reporting its own mixer. A READY status already
-    # means either the Receiver said so or it demonstrably read its endpoint.
-    if state.endpoint_status != store_master_audio.ENDPOINT_READY:
-        return
-
-    # Already where it should be. Sending a command anyway would put pointless
-    # traffic on the socket and briefly show APPLYING for a Store that is fine.
-    volume_matches = (desired.volume_percent is None
-                      or desired.volume_percent == state.volume_percent)
-    mute_matches = (desired.muted is None
-                    or bool(desired.muted) == bool(state.muted))
-    if volume_matches and mute_matches:
-        store_audio_target.clear_sync_error(engine, store_id=store_id)
-        return
-
-    await _send_target_to_store(store_id, desired, state)
-
-
-
-#: How often the enforcement sweep looks at the estate. Deliberately slow: the
-#: debounce and cooldown do the real work, and a fast sweep would only burn CPU
-#: discovering that it is not allowed to act yet.
-TARGET_SWEEP_SECONDS = 5.0
-
-
-async def _enforce_targets_once() -> list[dict]:
-    """One pass over every Store with a configured target.
-
-    Returns what it did, so this is testable by calling it rather than by
-    waiting for a timer. Never raises: it runs from a background task, and an
-    exception here would silently kill enforcement for the whole estate.
-    """
-    outcomes: list[dict] = []
-    try:
-        targets = store_audio_target.all_target(engine)
-    except Exception:
-        return outcomes
-    if not targets:
-        return outcomes
-
-    now = time.monotonic()
-    for store_id, target in targets.items():
-        try:
-            state = store_master_audio.registry.state_for(store_id)
-            decision = target_enforcement.policy.decide(
-                store_id=store_id,
-                target=target,
-                actual_volume_percent=state.volume_percent,
-                actual_muted=state.muted,
-                online=manager.is_receiver_online(store_id),
-                endpoint_ready=(state.endpoint_status
-                                == store_master_audio.ENDPOINT_READY),
-                owned_by_broadcast=_broadcast_owner_of_store(store_id) is not None,
-                now=now,
-            )
-            if not decision.should_enforce:
-                outcomes.append({"store_id": store_id,
-                                 "enforced": False, "reason": decision.reason})
-                continue
-
-            await _send_target_to_store(store_id, target, state)
-            target_enforcement.policy.note_enforced(store_id=store_id, now=now)
-            outcomes.append({"store_id": store_id, "enforced": True,
-                             "reason": target_enforcement.ENFORCE})
-        except Exception as failure:                  # pragma: no cover - guard
-            logger.warning("Target enforcement failed for store %s: %s",
-                           store_id, failure)
-    return outcomes
-
-
-async def _target_enforcement_loop() -> None:
-    while True:
-        await asyncio.sleep(TARGET_SWEEP_SECONDS)
-        try:
-            await _enforce_targets_once()
-        except Exception as failure:                  # pragma: no cover - guard
-            logger.warning("Target enforcement sweep failed: %s", failure)
-
-
-@api.get("/store-audio/master", response_model=MasterVolumeOut)
-def read_master_volume(user: HQUser = Depends(require("store_audio.control"))):
-    """Every installed Store's mixer, online or not.
-
-    Guarded by the SAME permission that governs changing a Store's volume
-    during a broadcast. Reading how loud the estate is and being able to change
-    it are the same operational responsibility, and inventing a second
-    permission here would let the two drift apart.
-    """
-    rows, zones = _master_volume_rows(user)
-    return MasterVolumeOut(stores=rows, zones=zones)
-
-
-@api.get("/store-audio/master/summary", response_model=MasterVolumeSummaryOut)
-def read_master_volume_summary(
-    user: HQUser = Depends(require("store_audio.control")),
-):
-    """The dashboard card. Live readings only, counted honestly."""
-    rows, _ = _master_volume_rows(user)
-    return MasterVolumeSummaryOut(
-        installed=len(rows),
-        online=sum(1 for r in rows if r.online),
-        offline=sum(1 for r in rows if not r.online),
-        # Only Stores we can currently see. A shop that was left muted before
-        # it was switched off is not evidence about now.
-        muted_online=sum(1 for r in rows if r.online and r.muted),
-        low_volume_online=sum(
-            1 for r in rows if r.online and r.level_class == "low"),
-        synced=sum(1 for r in rows if r.sync_state == "SYNCED"),
-        waiting_for_sync=sum(1 for r in rows if r.sync_state == "WAITING_FOR_SYNC"),
-        out_of_sync=sum(1 for r in rows if r.sync_state == "OUT_OF_SYNC"),
-        # From DESIRED, so these say what HQ intends rather than what any
-        # particular shop happens to be doing at this moment.
-        target_muted=sum(1 for r in rows if r.target_muted),
-        target_low_volume=sum(
-            1 for r in rows
-            if r.target_volume_percent is not None
-            and r.target_volume_percent <= 20),
-    )
-
-
-def _require_master_volume_store(store_id: int, user: HQUser):
-    """Scope and installation checks, in one place so no route can skip one."""
-    scope = resolve_store_scope(engine, user)
-    stores = master_volume_api.installed_stores(engine, store_ids=scope)
-    for store in stores:
-        if store.store_id == store_id:
-            return store
-    # Identical refusal whether the Store is out of scope, has no installed
-    # Receiver, or does not exist. Distinguishing them would turn this route
-    # into a way of enumerating the estate from outside your own scope.
-    raise HTTPException(
-        status_code=404,
-        detail="No installed Receiver for that Store in your Store Scope.")
-
-
-@api.post("/store-audio/master/{store_id}", response_model=MasterVolumeOut)
-async def set_master_volume(
-    store_id: int,
-    payload: MasterVolumeUpdate,
-    user: HQUser = Depends(require("store_audio.control")),
-):
-    """Set what HQ wants this Store's Windows mixer to be.
-
-    WHAT THIS ROUTE WILL NOT DO
-
-    It will not refuse because a Store is switched off. Choosing a shop's
-    volume and that shop being reachable this second are different questions,
-    and letting the second one gate the first produced a greyed-out slider
-    answering a question the operator never asked.
-
-    So the TARGET state is always recorded. What varies is only whether a
-    command goes out now, and nothing here ever claims a mixer moved.
-    """
-    store = _require_master_volume_store(store_id, user)
-    if payload.volume_percent is None and payload.muted is None:
-        raise HTTPException(
-            status_code=400, detail="Requesting nothing changes nothing.")
-
-    owner = _broadcast_owner_of_store(store_id)
-
-    # ---- a broadcast owns this Store -------------------------------------
-    # Checked BEFORE anything is recorded. A broadcast is the single writer
-    # while it runs, and quietly banking a target state that would be applied
-    # the moment it ends is a decision for the operator to make afterwards
-    # rather than a side effect of a refused click.
-    if owner is not None:
-        session_id, owner_user_id = owner
-        if owner_user_id != user.id:
-            raise HTTPException(
-                status_code=409,
-                detail="That Store is being controlled by an active broadcast.")
-        # Routed THROUGH the broadcast's own authority - same registry, same
-        # command ids, same acknowledgements. No second channel to race.
-        state = store_audio_registry.request(
-            session_id=session_id, store_id=store_id,
-            volume_percent=payload.volume_percent, muted=payload.muted)
-        snapshot = manager.get_receiver_snapshot(store_id)
-        capabilities = getattr(snapshot, "capabilities", None) if snapshot else None
-        if capabilities and capabilities.output_volume:
-            await manager.send_to_receiver(
-                store_id,
-                build_set_audio_control_message(
-                    session_id=session_id,
-                    command_id=state.last_command_id,
-                    volume_percent=state.requested_volume_percent,
-                    muted=state.requested_muted),
-            )
-        rows, zones = _master_volume_rows(user)
-        return MasterVolumeOut(stores=rows, zones=zones)
-
-    # ---- record the intention. Always. -----------------------------------
-    try:
-        desired = store_audio_target.set_target(
-            engine, store_id=store_id, device_id=store.device_id,
-            volume_percent=payload.volume_percent, muted=payload.muted,
-            created_by=user.id)
-    except EmptyTargetStateError as refusal:
-        raise HTTPException(status_code=400, detail=str(refusal))
-    except InvalidTargetVolumeError as refusal:
-        raise HTTPException(status_code=400, detail=str(refusal))
-
-    # A fresh instruction resets the attempt budget: the operator is asking for
-    # something new, and the previous disagreement is void.
-    target_enforcement.policy.note_target_changed(store_id=store_id)
-
-    _log_master_volume(
-        f"Master Volume target state for store {store_id} set to "
-        f"volume={desired.volume_percent} muted={desired.muted} "
-        f"by {user.username}")
-
-    # ---- send it now if, and only if, the Store can actually take it -----
-    online = manager.is_receiver_online(store_id)
-    state = store_master_audio.registry.state_for(store_id)
-    if online and state.endpoint_status == store_master_audio.ENDPOINT_READY:
-        await _send_target_to_store(store_id, desired, state)
-
-    # Deliberately does NOT set the actual volume anywhere. A command that has
-    # been sent is not a fact about a mixer, and "Current 70%" may only ever
-    # come from the Receiver reading Windows back.
-    rows, zones = _master_volume_rows(user)
-    return MasterVolumeOut(stores=rows, zones=zones)
-
-
-async def _send_target_to_store(store_id: int, desired, state) -> None:
-    """Put the target state on the wire. Never raises into a request.
-
-    The command carries WHOLE state rather than a delta, so one that is lost or
-    arrives late can never leave a Store at a level nobody asked for.
-    """
-    volume = (desired.volume_percent if desired.volume_percent is not None
-              else (state.volume_percent if state.volume_percent is not None else 100))
-    muted = desired.muted if desired.muted is not None else bool(state.muted)
-    command_id = _next_idle_command_id(store_id)
-    _mark_in_flight(store_id, command_id)
-    try:
-        await manager.send_to_receiver(
-            store_id,
-            # session_id is None on purpose: no broadcast owns this Store, and
-            # naming one would be a lie the Receiver would rightly reject.
-            build_set_audio_control_message(
-                session_id=None, command_id=command_id,
-                volume_percent=volume, muted=muted),
-        )
-    except Exception as failure:
-        _IN_FLIGHT_COMMANDS.pop(store_id, None)
-        store_audio_target.mark_sync_failed(
-            engine, store_id=store_id, error=str(failure)[:200])
-
-
-@api.delete("/store-audio/master/{store_id}/pending",
-            response_model=MasterVolumeOut)
-def clear_master_volume_target(
-    store_id: int,
-    user: HQUser = Depends(require("store_audio.control")),
-):
-    """Stop having an opinion about this Store's volume.
-
-    Not a cancel-the-command button - there is no queue to cancel. It removes
-    HQ's standing intention, so the Store stops being reported as out of sync
-    with something nobody wants any more. Whatever the shop is currently set to
-    is left exactly as it is; forgetting an intention must not change a mixer.
-    """
-    _require_master_volume_store(store_id, user)
-    store_audio_target.clear_target(engine, store_id=store_id)
-    _log_master_volume(
-        f"Master Volume target state cleared for store {store_id} "
-        f"by {user.username}")
-    rows, zones = _master_volume_rows(user)
-    return MasterVolumeOut(stores=rows, zones=zones)
-
 @api.post("/broadcast/sessions/{sid}/stop", response_model=SessionOut)
 async def stop_session(sid: int, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.STOP_BROADCAST))):
     """Stop YOUR OWN broadcast. Never anybody else's.
@@ -5185,25 +4630,6 @@ async def ws_receiver(websocket: WebSocket):
             finally:
                 db.close()
 
-            # The Master Volume panel now has a live Store again. The sequence
-            # counter is reset inside note_online because it is per-connection:
-            # a Receiver that restarted begins at 1, and keeping the old
-            # high-water mark would silently discard every reading it sends.
-            # Its last known reading is deliberately kept until a fresh one
-            # arrives, so the row shows a value rather than blanking.
-            store_master_audio.registry.note_online(store_id=store_id)
-            await connection_manager.notify_dashboards({
-                "type": "store_master_audio",
-                **store_master_audio.registry.state_for(store_id).as_dict(),
-            })
-
-            # A change an operator asked for while this Store was off. It is
-            # attempted only AFTER the Receiver has authenticated, been
-            # confirmed as this Store's active primary, and reported what its
-            # mixer actually is - never before, or it would be applied on top
-            # of an assumption about where the Store started.
-            await _apply_target_master_volume(store_id, identity.device_id)
-
         # If a broadcast is reaching this Store, send PLAY immediately so a
         # Receiver that reconnected mid-announcement rejoins it.
         #
@@ -5306,98 +4732,12 @@ async def ws_receiver(websocket: WebSocket):
             # so it updates the ACTUAL fields only and never a command id: a
             # person at the till moving the slider does not retract the
             # operator's request and must not look like a reply to it.
-            # Whatever the Receiver says about its own output, remembered so
-            # the panel can still explain an OFFLINE Store. Only the Store
-            # knows whether it has an endpoint selected; inferring it here is
-            # what produced the "Not supported by this Receiver" message that
-            # sent technicians to rebuild software that was already correct.
-            ready_capabilities = getattr(acknowledgement, "capabilities", None)
-            if ready_capabilities is not None:
-                store_master_audio.registry.note_capability(
-                    store_id=store_id,
-                    endpoint_status=getattr(
-                        ready_capabilities, "output_control_status", "unknown"),
-                )
-
             if isinstance(acknowledgement, EndpointStateAcknowledgement):
-                # Always-on first, and unconditionally: this reading is true
-                # about the Store whether or not a broadcast exists, and the
-                # Master Volume panel is not a broadcast screen. Most readings
-                # now arrive with no session id at all.
-                # A reading IS evidence that this Receiver can read its
-                # configured endpoint. Capabilities are otherwise only reported
-                # in receiver_ready, which happens at broadcast PREPARE - so a
-                # Store that has merely been connected all day would sit at
-                # "unknown" and its slider would be refused, despite the Store
-                # demonstrably reporting its mixer.
-                #
-                # Promoted from UNKNOWN only. An explicit needs_output_selection
-                # or unavailable came from the Receiver's own capability report
-                # and is never overridden by inference.
-                if (store_master_audio.registry.state_for(store_id).endpoint_status
-                        == store_master_audio.ENDPOINT_UNKNOWN):
-                    store_master_audio.registry.note_capability(
-                        store_id=store_id,
-                        endpoint_status=store_master_audio.ENDPOINT_READY)
-
-                # A reading that MATCHES the target state is proof the
-                # command arrived, whether or not its acknowledgement did.
-                # Without this a Store would sit at APPLYING while visibly
-                # already correct, which is the opposite of informative.
-                try:
-                    wanted = store_audio_target.get_target(
-                        engine, store_id=store_id)
-                except Exception:
-                    wanted = None
-                if wanted is not None and _IN_FLIGHT_COMMANDS.get(store_id):
-                    volume_ok = (wanted.volume_percent is None
-                                 or wanted.volume_percent
-                                 == acknowledgement.volume_percent)
-                    mute_ok = (wanted.muted is None
-                               or bool(wanted.muted) == bool(acknowledgement.muted))
-                    if volume_ok and mute_ok:
-                        _IN_FLIGHT_COMMANDS.pop(store_id, None)
-
-                # Tell the enforcement policy what this Store just reported.
-                # A reading that matches the target ends any argument; one that
-                # does not starts the debounce clock. Doing this BEFORE the
-                # registry update keeps the policy's view and the panel's view
-                # of "matches" identical.
-                try:
-                    configured = store_audio_target.get_target(
-                        engine, store_id=store_id)
-                except Exception:
-                    configured = None
-                if configured is not None:
-                    matches_target = (
-                        (configured.volume_percent is None
-                         or configured.volume_percent
-                         == acknowledgement.volume_percent)
-                        and (configured.muted is None
-                             or bool(configured.muted)
-                             == bool(acknowledgement.muted))
-                    )
-                    target_enforcement.policy.note_reading(
-                        store_id=store_id, matches_target=matches_target,
-                        now=time.monotonic())
-
-                master_state = store_master_audio.registry.observe(
-                    store_id=store_id,
-                    state_sequence=acknowledgement.state_sequence,
-                    volume_percent=acknowledgement.volume_percent,
-                    muted=acknowledgement.muted,
-                )
-                if master_state is not None:
-                    await connection_manager.notify_dashboards({
-                        "type": "store_master_audio",
-                        **master_state.as_dict(),
-                    })
-
-                # A reading taken during a broadcast additionally updates that
-                # broadcast's own view. No session id means idle, and there is
-                # nothing further to do.
-                if acknowledgement.session_id is None:
-                    continue
+                # What the Store's Windows output is actually doing, while a
+                # broadcast is running. Telemetry, so it updates the ACTUAL
+                # fields only and never a command id: a person at the till
+                # moving the slider does not retract the operator's request and
+                # must not look like a reply to it.
                 observed = store_audio_registry.observe_endpoint_state(
                     session_id=acknowledgement.session_id,
                     store_id=store_id,
@@ -5421,28 +4761,6 @@ async def ws_receiver(websocket: WebSocket):
             # minutes. Recording them in the registry and NOT in the database
             # is what keeps a slider drag from writing rows.
             if isinstance(acknowledgement, AudioControlAcknowledgement):
-                # An idle acknowledgement belongs to no broadcast. If it is the
-                # answer to a pending change, that change is now resolved -
-                # cleared on success, kept with its reason on failure.
-                if acknowledgement.session_id is None:
-                    entry = _IN_FLIGHT_COMMANDS.get(store_id)
-                    if entry is not None and entry[0] == acknowledgement.command_id:
-                        _IN_FLIGHT_COMMANDS.pop(store_id, None)
-                        if acknowledgement.result == "applied":
-                            # The target state SURVIVES a successful apply. It
-                            # is a standing intention, and keeping it is what
-                            # lets HQ notice later that a shop has drifted.
-                            # SYNCED comes from the Receiver's readback
-                            # matching it, never from this acknowledgement.
-                            store_audio_target.clear_sync_error(
-                                engine, store_id=store_id)
-                        else:
-                            store_audio_target.mark_sync_failed(
-                                engine, store_id=store_id,
-                                error=acknowledgement.details
-                                or acknowledgement.result)
-                    continue
-
                 updated = store_audio_registry.acknowledge(
                     session_id=acknowledgement.session_id,
                     store_id=store_id,
@@ -5504,15 +4822,6 @@ async def ws_receiver(websocket: WebSocket):
                     db.commit()
             finally:
                 db.close()
-
-            # The last reading is KEPT but stops being current. Knowing a shop
-            # was left muted is useful; showing that number as though it were
-            # live is the lie this flag exists to prevent.
-            store_master_audio.registry.note_offline(store_id=store_id)
-            await connection_manager.notify_dashboards({
-                "type": "store_master_audio",
-                **store_master_audio.registry.state_for(store_id).as_dict(),
-            })
             await connection_manager.notify_dashboards({
                 "type": "receiver_status",
                 "store_id": store_id,

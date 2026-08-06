@@ -965,27 +965,17 @@ class AudioReceiverPilot:
             "applied_muted": applied.muted,
         }
 
-        # Usually already watching: observation is tied to being connected with
-        # a configured endpoint, not to being on air. Idempotent, so PREPARE
-        # neither restarts it nor loses the readings either side of it.
-        self.ensure_endpoint_observer()
+        # Observation begins HERE and ends at restoration: SpeakLink has no
+        # business watching a shop's mixer when it is not broadcasting to it.
+        # Started AFTER the original state has been captured and persisted, so
+        # the observer's own reading can never be mistaken for the
+        # pre-broadcast snapshot - the one thing that must never come from
+        # telemetry.
+        self._start_endpoint_observer()
         return True
 
-    def ensure_endpoint_observer(self) -> bool:
-        """Watch the saved endpoint. Idempotent, and safe to call on reconnect.
-
-        WHY THIS IS NOT TIED TO A BROADCAST
-
-        A Store's mixer is changed at the till in the middle of a quiet
-        Tuesday, with nothing on air. Observation that only ran between PREPARE
-        and STOP could not see that, so HQ's Master Volume panel would show
-        whatever the shop happened to be doing the last time somebody
-        broadcast to it - a number that is often days old and always presented
-        as though it were current.
-
-        Observation therefore runs whenever this Receiver is connected and has
-        a stable endpoint configured, and nothing else.
-        """
+    def _start_endpoint_observer(self) -> bool:
+        """Watch the saved endpoint for the duration of this broadcast."""
         if not self.windows_endpoint_id:
             # Nothing safe to watch. Falling back to the Windows DEFAULT
             # endpoint would silently observe - and later control - whatever
@@ -1012,31 +1002,6 @@ class AudioReceiverPilot:
             self.report["endpoint_observer"] = "unavailable: " + str(failure)[:120]
             return False
 
-    def stop_endpoint_observer(self) -> None:
-        """Detach the COM callback.
-
-        Called when the CONNECTION ends, not when a broadcast does: a callback
-        outliving its socket would keep a dead session's object alive.
-        """
-        if self._endpoint_observer is not None:
-            self._endpoint_observer.stop()
-            self._endpoint_observer = None
-
-    def read_endpoint_state_now(self):
-        """The endpoint's ACTUAL current state, read directly.
-
-        Used on reconnect, before anything is applied. HQ must learn what a
-        Store really is before it is told what to become, or a pending change
-        would be applied on top of an assumption.
-        """
-        if not self.windows_endpoint_id:
-            return None
-        try:
-            return self._endpoint_module().read_state(
-                self.windows_endpoint_id, backend=self._endpoint_backend)
-        except Exception:
-            return None
-
     def restore_windows_endpoint(self) -> dict:
         """Put the Store's own volume and mute back. Safe to call twice.
 
@@ -1044,17 +1009,14 @@ class AudioReceiverPilot:
         idempotent and never raises: an exception here would turn a clean stop
         into a crash and leave the shop at the announcement level.
         """
-        # The observer deliberately KEEPS RUNNING. It used to be stopped here,
-        # back when observation existed only for the duration of a broadcast;
-        # now that the Master Volume panel is always on, the restoration itself
-        # is something HQ needs to see. Putting the shop back to 25% muted is a
-        # real change to the mixer, and the panel must show 25% muted
-        # afterwards rather than the announcement level.
-        #
-        # The session id is cleared first so that reading is reported as idle
-        # telemetry rather than being attributed to the broadcast that is in
-        # the act of ending.
-        self.session_id = None
+        # Detach the observer FIRST. Once this broadcast is over SpeakLink has
+        # no business watching the shop's mixer, and a COM callback left
+        # attached would keep a finished session's object alive and could
+        # report the restoration itself into the NEXT broadcast as though
+        # somebody had moved the slider.
+        if self._endpoint_observer is not None:
+            self._endpoint_observer.stop()
+            self._endpoint_observer = None
 
         original = self._endpoint_original
         if original is None or not self.windows_endpoint_id:
@@ -1082,34 +1044,6 @@ class AudioReceiverPilot:
         return {"restored": True, "volume_percent": applied.volume_percent,
                 "muted": applied.muted}
 
-    async def _report_endpoint_state_now(self, connection) -> dict | None:
-        """Read the endpoint directly and tell HQ what it actually is.
-
-        Used on reconnect. The observer only ever reports CHANGES, so a Store
-        that comes back at exactly the volume it left at would otherwise report
-        nothing at all and sit in the panel showing whatever HQ last remembered
-        - which is indistinguishable from a stale value.
-        """
-        state = self.read_endpoint_state_now()
-        if state is None:
-            return None
-        self._endpoint_state_sequence += 1
-        message = {
-            **self._envelope("endpoint_state"),
-            "state_sequence": self._endpoint_state_sequence,
-            "volume_percent": state.volume_percent,
-            "muted": state.muted,
-        }
-        if self.session_id is not None:
-            message["session_id"] = self.session_id
-        try:
-            await self._send(connection, message)
-        except Exception:
-            return None
-        self.report["reconnect_endpoint_state"] = {
-            "volume_percent": state.volume_percent, "muted": state.muted}
-        return self.report["reconnect_endpoint_state"]
-
     async def _endpoint_state_loop(self, connection) -> None:
         """Report what the endpoint is actually doing, coalesced.
 
@@ -1134,20 +1068,20 @@ class AudioReceiverPilot:
             reading = observer.take()
             if reading is None:
                 continue
-            # Reported whether or not a broadcast exists. The session id is
-            # carried only when one does, so an idle reading is attributed to
-            # nothing rather than to a session that is not running.
+            # Only meaningful inside a broadcast. Observation is started at
+            # PREPARE and stopped at restoration, so a reading with no session
+            # would be one nothing asked for and nothing could attribute.
+            if self.session_id is None:
+                continue
             self._endpoint_state_sequence += 1
-            message = {
-                **self._envelope("endpoint_state"),
-                "state_sequence": self._endpoint_state_sequence,
-                "volume_percent": reading.volume_percent,
-                "muted": reading.muted,
-            }
-            if self.session_id is not None:
-                message["session_id"] = self.session_id
             try:
-                await self._send(connection, message)
+                await self._send(connection, {
+                    **self._envelope("endpoint_state"),
+                    "session_id": self.session_id,
+                    "state_sequence": self._endpoint_state_sequence,
+                    "volume_percent": reading.volume_percent,
+                    "muted": reading.muted,
+                })
             except Exception:
                 # The socket has gone. The outer session loop owns reconnection.
                 return
@@ -1178,12 +1112,11 @@ class AudioReceiverPilot:
         session_id = command["session_id"]
         command_id = command["command_id"]
 
-        # A command carrying no session is the Master Volume panel controlling
-        # an idle Store, and is legitimate whether or not a broadcast exists.
-        # A command that DOES name a session must name the one this Receiver is
-        # running: a stale command from a finished broadcast must never change
-        # the level of one that is on air now.
-        if session_id is not None and session_id != self.session_id:
+        # A command for a session this Receiver is not running. Ignored rather
+        # than applied: Store output control exists only inside a broadcast, so
+        # a command naming no session - or a finished one - must never change
+        # the level of the announcement that is on air now.
+        if self.session_id is None or session_id != self.session_id:
             return
 
         # Older than something already applied - a late arrival that a newer
