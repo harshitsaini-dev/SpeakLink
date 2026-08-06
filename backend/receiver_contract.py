@@ -185,7 +185,7 @@ class HeartbeatAcknowledgement(AcknowledgementBase):
     type: Literal["heartbeat"]
 
 
-class AudioControlAcknowledgement(SessionAcknowledgement):
+class AudioControlAcknowledgement(AcknowledgementBase):
     """What the Store ACTUALLY did with a ``set_audio_control`` command.
 
     The requested and applied values are both carried, and they are allowed to
@@ -205,6 +205,10 @@ class AudioControlAcknowledgement(SessionAcknowledgement):
     """
 
     type: Literal["audio_control"]
+    #: Absent when this answers an IDLE command from the Master Volume panel.
+    #: Control is no longer something only a broadcast can do, so requiring a
+    #: session here would make the reply to a legitimate command unparseable.
+    session_id: int | None = Field(default=None, gt=0)
     command_id: int = Field(gt=0)
     requested_volume_percent: int = Field(ge=0, le=100)
     requested_muted: bool
@@ -482,9 +486,11 @@ def apply_receiver_ack(
         # into the status model would make "quiet" indistinguishable from
         # "broken" on the very screen an operator uses to tell them apart.
         #
-        # The session check stays, so a command answered against a finished
-        # broadcast is rejected here as it is everywhere else.
-        _validate_active_session(result, ack.session_id)
+        # An idle acknowledgement names no session and is checked against
+        # none. One that DOES name a session must name the running one, so a
+        # command answered against a finished broadcast is still rejected.
+        if ack.session_id is not None:
+            _validate_active_session(result, ack.session_id)
     else:  # pragma: no cover - protected by the discriminated union
         raise InvalidTransitionError("unsupported receiver acknowledgement")
 

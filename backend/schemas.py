@@ -353,6 +353,67 @@ class StoreAudioControlUpdate(BaseModel):
     muted: Optional[bool] = None
 
 
+class MasterVolumeStoreOut(BaseModel):
+    """One row of the Master Volume panel.
+
+    Deliberately carries BOTH the numbers and the honesty flags. A client that
+    receives only `volume_percent` cannot tell a live reading from a memory,
+    and every rendering of it would be a claim the backend never made.
+    """
+
+    store_id: int
+    store_code: str
+    store_name: str
+    zone: Optional[str] = None
+    device_id: int
+    #: ONLINE | OFFLINE | NEEDS_OUTPUT_SELECTION | OUTPUT_UNAVAILABLE
+    #: | CONTROLLED_BY_BROADCAST
+    control_status: str
+    online: bool
+    #: True when the values below are a memory of how the Store was left rather
+    #: than an observation of what it is doing. The UI must say "last known".
+    stale: bool
+    volume_percent: Optional[int] = None
+    muted: Optional[bool] = None
+    #: low | normal | high | unknown - a scanning aid, never a substitute for
+    #: the number, which is always rendered beside it.
+    level_class: str = "unknown"
+    endpoint_status: str = "unknown"
+    updated_at: Optional[str] = None
+    last_seen_at: Optional[str] = None
+    #: The desired state waiting for this Store to come back. Never presented
+    #: as applied and never as current.
+    pending_volume_percent: Optional[int] = None
+    pending_muted: Optional[bool] = None
+    pending_created_at: Optional[str] = None
+    pending_status: Optional[str] = None
+    pending_error: Optional[str] = None
+
+
+class MasterVolumeOut(BaseModel):
+    stores: List[MasterVolumeStoreOut]
+    zones: List[str] = []
+
+
+class MasterVolumeSummaryOut(BaseModel):
+    """The dashboard card. Counts only, and honest about what they mean."""
+
+    installed: int
+    online: int
+    offline: int
+    #: Counted from LIVE readings only. An offline Store that was left muted is
+    #: not evidence that it is muted now, and folding it in would produce a
+    #: number that quietly drifts from reality as machines go off.
+    muted_online: int
+    low_volume_online: int
+    pending_changes: int
+
+
+class MasterVolumeUpdate(BaseModel):
+    volume_percent: Optional[int] = Field(default=None, ge=0, le=100)
+    muted: Optional[bool] = None
+
+
 class StoreAudioStateOut(BaseModel):
     """Requested vs applied, never merged into one number."""
 

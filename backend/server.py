@@ -36,6 +36,8 @@ from schemas import (
     BroadcastTargetStoreOut, BroadcastTargetsOut,
     SessionCreate, SessionOut, SessionDetailOut, TargetOut,
     StoreAudioControlUpdate, StoreAudioStateOut, StoreAudioControlOut,
+    MasterVolumeOut, MasterVolumeStoreOut,
+    MasterVolumeSummaryOut, MasterVolumeUpdate,
     SystemLogOut,
     EnrollmentCodeRequest, EnrollmentCodeResponse, EnrollmentCodeStatusOut,
     DeviceEnrollmentRequest, DeviceEnrollmentResponse,
@@ -223,6 +225,7 @@ from receiver_runtime_auth import (
     MigrationAwareReceiverRuntimeAuthenticator,
 )
 import store_master_audio
+import master_volume_api
 from store_audio_pending import (
     EmptyPendingCommandError,
     InvalidPendingVolumeError,
@@ -2935,6 +2938,311 @@ async def set_store_audio_control(
     return StoreAudioControlOut(session_id=sid, stores=_audio_control_state_rows(sid))
 
 
+
+# ---------------------------------------------------------------------------
+# Master Volume - the estate's mixers, independent of any broadcast
+# ---------------------------------------------------------------------------
+#: Command ids for IDLE control, one counter per Store. The Receiver applies
+#: the newest id it has seen and ignores anything older, exactly as it does for
+#: broadcast commands - so a rapid drag on an idle Store still resolves to the
+#: value the operator stopped on rather than to whichever command arrived last.
+_IDLE_COMMAND_IDS: dict[int, int] = {}
+#: Which idle command id, per Store, was the attempt to apply a PENDING
+#: change. Only that exact command's acknowledgement may clear the row.
+_PENDING_COMMAND_IDS: dict[int, int] = {}
+
+
+def _next_idle_command_id(store_id: int) -> int:
+    _IDLE_COMMAND_IDS[store_id] = _IDLE_COMMAND_IDS.get(store_id, 0) + 1
+    return _IDLE_COMMAND_IDS[store_id]
+
+
+def _log_master_volume(message: str) -> None:
+    """Audit a pending change through the existing System Log.
+
+    Deliberately records the Store, the actor and the intent and nothing else -
+    no credential, no token, no device secret. This line is read by anyone who
+    can see System Logs.
+    """
+    db = SessionLocal()
+    try:
+        _write_log(db, "info", message)
+    finally:
+        db.close()
+
+
+def _broadcast_owner_of_store(store_id: int) -> tuple[int, int] | None:
+    """(session_id, owner_user_id) if a LIVE broadcast is steering this Store.
+
+    This is what stops two writers racing one Windows endpoint. The Master
+    Volume panel never opens a competing channel: it either goes through the
+    broadcast that already owns the Store or it refuses.
+    """
+    for session_id in store_audio_registry.active_session_ids():
+        for row in store_audio_registry.describe(session_id):
+            if row["store_id"] == store_id:
+                return session_id, store_audio_registry.session_owner(session_id)
+    return None
+
+
+def _master_volume_rows(user: HQUser) -> tuple[list[MasterVolumeStoreOut], list[str]]:
+    scope = resolve_store_scope(engine, user)
+    stores = master_volume_api.installed_stores(engine, store_ids=scope)
+    pending = store_audio_pending.all_pending(engine)
+    rows: list[MasterVolumeStoreOut] = []
+    for store in stores:
+        state = store_master_audio.registry.state_for(store.store_id)
+        owner = _broadcast_owner_of_store(store.store_id)
+        # The live capability answer wins while the Store is connected; the
+        # remembered one explains an offline Store rather than leaving it
+        # unexplained.
+        snapshot = manager.get_receiver_snapshot(store.store_id)
+        capabilities = getattr(snapshot, "capabilities", None) if snapshot else None
+        online = manager.is_receiver_online(store.store_id)
+        endpoint_status = (
+            getattr(capabilities, "output_control_status", state.endpoint_status)
+            if (online and capabilities) else state.endpoint_status
+        )
+        waiting = pending.get(store.store_id)
+        rows.append(MasterVolumeStoreOut(
+            store_id=store.store_id,
+            store_code=store.store_code,
+            store_name=store.store_name,
+            zone=store.zone,
+            device_id=store.device_id,
+            control_status=master_volume_api.control_status_for(
+                online=online, endpoint_status=endpoint_status,
+                owned_by_broadcast=owner is not None),
+            online=online,
+            stale=not online,
+            volume_percent=state.volume_percent,
+            muted=state.muted,
+            level_class=master_volume_api.classify_volume(state.volume_percent),
+            endpoint_status=endpoint_status,
+            updated_at=state.updated_at.isoformat() if state.updated_at else None,
+            last_seen_at=state.last_seen_at.isoformat() if state.last_seen_at else None,
+            pending_volume_percent=waiting.volume_percent if waiting else None,
+            pending_muted=waiting.muted if waiting else None,
+            pending_created_at=waiting.created_at if waiting else None,
+            pending_status=waiting.status if waiting else None,
+            pending_error=waiting.last_error if waiting else None,
+        ))
+    zones = sorted({row.zone for row in rows if row.zone})
+    return rows, zones
+
+
+
+async def _apply_pending_master_volume(store_id: int, device_id: int | None) -> None:
+    """Apply a change queued while a Store was offline. Best effort, honest.
+
+    Deliberately conservative. It refuses rather than guesses whenever the
+    world has moved on since the operator asked:
+
+    * a broadcast now owns the Store - two writers must never race one endpoint;
+    * the Device that came back is not the one the change was created for -
+      the machine was replaced, and the old instruction is not about this one;
+    * the Receiver reports no controllable output - nothing to apply it to.
+
+    The pending row is cleared ONLY after the Receiver confirms it applied the
+    change. Clearing on attempt would make a failure indistinguishable from a
+    success, which is the one outcome this whole feature exists to avoid.
+    """
+    try:
+        waiting = store_audio_pending.get_pending(engine, store_id=store_id)
+    except Exception:
+        return
+    if waiting is None:
+        return
+
+    if device_id is not None and waiting.device_id != device_id:
+        # A different machine. The instruction was authored against a Device
+        # that is no longer this Store's Receiver, so it is dropped rather
+        # than retargeted - retargeting would silently apply one machine's
+        # settings to another.
+        store_audio_pending.mark_failed(
+            engine, store_id=store_id,
+            error="the Receiver Device changed since this change was requested")
+        return
+
+    if _broadcast_owner_of_store(store_id) is not None:
+        # Left pending on purpose. The broadcast will end, and the change can
+        # be applied then; forcing it now would fight the announcement.
+        return
+
+    state = store_master_audio.registry.state_for(store_id)
+    snapshot = manager.get_receiver_snapshot(store_id)
+    capabilities = getattr(snapshot, "capabilities", None) if snapshot else None
+    if not (capabilities and capabilities.output_volume):
+        return
+    if state.endpoint_status != store_master_audio.ENDPOINT_READY:
+        return
+
+    volume = (waiting.volume_percent if waiting.volume_percent is not None
+              else (state.volume_percent if state.volume_percent is not None else 100))
+    muted = waiting.muted if waiting.muted is not None else bool(state.muted)
+    command_id = _next_idle_command_id(store_id)
+    _PENDING_COMMAND_IDS[store_id] = command_id
+    try:
+        await manager.send_to_receiver(
+            store_id,
+            build_set_audio_control_message(
+                session_id=None, command_id=command_id,
+                volume_percent=volume, muted=muted),
+        )
+    except Exception as failure:
+        store_audio_pending.mark_failed(
+            engine, store_id=store_id, error=str(failure)[:200])
+
+@api.get("/store-audio/master", response_model=MasterVolumeOut)
+def read_master_volume(user: HQUser = Depends(require("store_audio.control"))):
+    """Every installed Store's mixer, online or not.
+
+    Guarded by the SAME permission that governs changing a Store's volume
+    during a broadcast. Reading how loud the estate is and being able to change
+    it are the same operational responsibility, and inventing a second
+    permission here would let the two drift apart.
+    """
+    rows, zones = _master_volume_rows(user)
+    return MasterVolumeOut(stores=rows, zones=zones)
+
+
+@api.get("/store-audio/master/summary", response_model=MasterVolumeSummaryOut)
+def read_master_volume_summary(
+    user: HQUser = Depends(require("store_audio.control")),
+):
+    """The dashboard card. Live readings only, counted honestly."""
+    rows, _ = _master_volume_rows(user)
+    return MasterVolumeSummaryOut(
+        installed=len(rows),
+        online=sum(1 for r in rows if r.online),
+        offline=sum(1 for r in rows if not r.online),
+        # Only Stores we can currently see. A shop that was left muted before
+        # it was switched off is not evidence about now.
+        muted_online=sum(1 for r in rows if r.online and r.muted),
+        low_volume_online=sum(
+            1 for r in rows if r.online and r.level_class == "low"),
+        pending_changes=sum(1 for r in rows if r.pending_status is not None),
+    )
+
+
+def _require_master_volume_store(store_id: int, user: HQUser):
+    """Scope and installation checks, in one place so no route can skip one."""
+    scope = resolve_store_scope(engine, user)
+    stores = master_volume_api.installed_stores(engine, store_ids=scope)
+    for store in stores:
+        if store.store_id == store_id:
+            return store
+    # Identical refusal whether the Store is out of scope, has no installed
+    # Receiver, or does not exist. Distinguishing them would turn this route
+    # into a way of enumerating the estate from outside your own scope.
+    raise HTTPException(
+        status_code=404,
+        detail="No installed Receiver for that Store in your Store Scope.")
+
+
+@api.post("/store-audio/master/{store_id}", response_model=MasterVolumeOut)
+async def set_master_volume(
+    store_id: int,
+    payload: MasterVolumeUpdate,
+    user: HQUser = Depends(require("store_audio.control")),
+):
+    """Change one Store's Windows master volume, broadcast or not."""
+    store = _require_master_volume_store(store_id, user)
+    if payload.volume_percent is None and payload.muted is None:
+        raise HTTPException(
+            status_code=400, detail="Requesting nothing changes nothing.")
+
+    owner = _broadcast_owner_of_store(store_id)
+    online = manager.is_receiver_online(store_id)
+
+    # ---- a broadcast owns this Store -------------------------------------
+    if owner is not None:
+        session_id, owner_user_id = owner
+        if owner_user_id != user.id:
+            # Refused rather than queued. Quietly steering a shop somebody else
+            # is broadcasting to is an invisible, continuous intervention, and
+            # the operator on the other end has no way to tell it is happening.
+            raise HTTPException(
+                status_code=409,
+                detail="That Store is being controlled by an active broadcast.")
+        # Routed THROUGH the broadcast's own authority - the same registry,
+        # the same command ids, the same acknowledgements. There is deliberately
+        # no second command channel to race with the first.
+        state = store_audio_registry.request(
+            session_id=session_id, store_id=store_id,
+            volume_percent=payload.volume_percent, muted=payload.muted)
+        snapshot = manager.get_receiver_snapshot(store_id)
+        capabilities = getattr(snapshot, "capabilities", None) if snapshot else None
+        if capabilities and capabilities.output_volume:
+            await manager.send_to_receiver(
+                store_id,
+                build_set_audio_control_message(
+                    session_id=session_id,
+                    command_id=state.last_command_id,
+                    volume_percent=state.requested_volume_percent,
+                    muted=state.requested_muted),
+            )
+        rows, zones = _master_volume_rows(user)
+        return MasterVolumeOut(stores=rows, zones=zones)
+
+    # ---- offline: remember the wish, never claim it was granted -----------
+    if not online:
+        try:
+            store_audio_pending.set_pending(
+                engine, store_id=store_id, device_id=store.device_id,
+                volume_percent=payload.volume_percent, muted=payload.muted,
+                created_by=user.id)
+        except EmptyPendingCommandError as refusal:
+            raise HTTPException(status_code=400, detail=str(refusal))
+        except InvalidPendingVolumeError as refusal:
+            raise HTTPException(status_code=400, detail=str(refusal))
+        _log_master_volume(
+            f"Master Volume change pending on reconnect for store {store_id} "
+            f"requested by {user.username}")
+        rows, zones = _master_volume_rows(user)
+        return MasterVolumeOut(stores=rows, zones=zones)
+
+    # ---- online and idle: command it directly -----------------------------
+    state = store_master_audio.registry.state_for(store_id)
+    if state.endpoint_status != store_master_audio.ENDPOINT_READY:
+        raise HTTPException(
+            status_code=409,
+            detail="That Store has no controllable Windows audio output.")
+
+    command_id = _next_idle_command_id(store_id)
+    volume = (payload.volume_percent if payload.volume_percent is not None
+              else (state.volume_percent if state.volume_percent is not None else 100))
+    muted = payload.muted if payload.muted is not None else bool(state.muted)
+    await manager.send_to_receiver(
+        store_id,
+        # session_id is None on purpose: no broadcast owns this Store, and
+        # naming one would be a lie the Receiver would rightly reject.
+        build_set_audio_control_message(
+            session_id=None, command_id=command_id,
+            volume_percent=volume, muted=muted),
+    )
+    # Deliberately does NOT set volume_percent here. The panel shows what the
+    # Store reports, and a command that has been sent is not yet a fact about
+    # a mixer. "Currently 70%" may only come from the Receiver's readback.
+    rows, zones = _master_volume_rows(user)
+    return MasterVolumeOut(stores=rows, zones=zones)
+
+
+@api.delete("/store-audio/master/{store_id}/pending",
+            response_model=MasterVolumeOut)
+def cancel_master_volume_pending(
+    store_id: int,
+    user: HQUser = Depends(require("store_audio.control")),
+):
+    """Withdraw a change that was waiting for a Store to come back."""
+    _require_master_volume_store(store_id, user)
+    store_audio_pending.clear_pending(engine, store_id=store_id)
+    _log_master_volume(
+        f"Master Volume pending change cancelled for store {store_id} "
+        f"by {user.username}")
+    rows, zones = _master_volume_rows(user)
+    return MasterVolumeOut(stores=rows, zones=zones)
+
 @api.post("/broadcast/sessions/{sid}/stop", response_model=SessionOut)
 async def stop_session(sid: int, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.STOP_BROADCAST))):
     """Stop YOUR OWN broadcast. Never anybody else's.
@@ -4433,6 +4741,13 @@ async def ws_receiver(websocket: WebSocket):
                 **store_master_audio.registry.state_for(store_id).as_dict(),
             })
 
+            # A change an operator asked for while this Store was off. It is
+            # attempted only AFTER the Receiver has authenticated, been
+            # confirmed as this Store's active primary, and reported what its
+            # mixer actually is - never before, or it would be applied on top
+            # of an assumption about where the Store started.
+            await _apply_pending_master_volume(store_id, identity.device_id)
+
         # If a broadcast is reaching this Store, send PLAY immediately so a
         # Receiver that reconnected mid-announcement rejoins it.
         #
@@ -4593,6 +4908,23 @@ async def ws_receiver(websocket: WebSocket):
             # minutes. Recording them in the registry and NOT in the database
             # is what keeps a slider drag from writing rows.
             if isinstance(acknowledgement, AudioControlAcknowledgement):
+                # An idle acknowledgement belongs to no broadcast. If it is the
+                # answer to a pending change, that change is now resolved -
+                # cleared on success, kept with its reason on failure.
+                if acknowledgement.session_id is None:
+                    expected = _PENDING_COMMAND_IDS.get(store_id)
+                    if expected == acknowledgement.command_id:
+                        _PENDING_COMMAND_IDS.pop(store_id, None)
+                        if acknowledgement.result == "applied":
+                            store_audio_pending.clear_pending(
+                                engine, store_id=store_id)
+                        else:
+                            store_audio_pending.mark_failed(
+                                engine, store_id=store_id,
+                                error=acknowledgement.details
+                                or acknowledgement.result)
+                    continue
+
                 updated = store_audio_registry.acknowledge(
                     session_id=acknowledgement.session_id,
                     store_id=store_id,
