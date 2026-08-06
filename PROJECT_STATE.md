@@ -6495,3 +6495,109 @@ change reports : yes - endpoint change notifications supported
 No live HQ deployment. No Store touched, BP included. No second Store. Store
 Kit 1.6.0 **not installed anywhere**. No physical acceptance.
 **No software state equals SPEAKER_VERIFIED.**
+
+---
+
+## Master Volume: persistent desired state
+
+The controls are no longer disabled by a Store being offline.
+
+### The defect
+
+An offline Store showed a greyed-out slider, a greyed-out Mute and the words
+*"Immediate control unavailable"*. That answered a question the operator had
+not asked. They were not trying to move a mixer that second; they were trying
+to say what the shop should be set to. Letting the connection decide what the
+intention was allowed to be meant a manager could not set a Store's level until
+somebody switched a PC on.
+
+### Three facts, never merged
+
+| | where it lives | who writes it |
+|---|---|---|
+| **DESIRED** what HQ wants | persisted, `store_audio_desired_state` | an operator, only |
+| **ACTUAL** what Windows reports | runtime only | the Receiver's readback, only |
+| **CONNECTION** can it be applied now | runtime only | the socket |
+
+Every misleading thing this feature could say comes from collapsing two of
+those. *"Applied 70%"* is DESIRED wearing ACTUAL's clothes, so it is never
+said; a number is called **Current** only when a Receiver read it, and **Last
+reported** otherwise. A Store that has never reported says *"Current Windows
+state: Unknown"* and can still be given a setting.
+
+### Sync state, derived and never stored
+
+`SYNCED` · `APPLYING` · `OUT_OF_SYNC` · `WAITING_FOR_SYNC` · `SYNC_FAILED` ·
+`NO_DESIRED_STATE`
+
+Computed on every read from the three facts above. A stored status would be a
+fourth thing to keep in step and would go stale the moment a Store reported
+anything.
+
+A Store its own staff turned down reads **OUT_OF_SYNC**, not APPLYING: nothing
+is being applied, and HQ deliberately does not answer a local change with a
+corrective command. Store-local telemetry updates ACTUAL and never DESIRED, so
+there is no feedback fight with the people in the shop. The operator can
+re-assert the level if they want it enforced.
+
+**APPLYING now means a command is genuinely on the wire.** A readback matching
+the desired state clears it - that is proof of arrival whether or not the
+acknowledgement came - and an unanswered command stops claiming APPLYING after
+ten seconds rather than promising something nobody is keeping.
+
+### Persistence
+
+`store_id` is the PRIMARY KEY, so 20 → 40 → 50 → 70 leaves **one row saying
+70**. Latest-wins is a schema property; no queue can exist. A partial
+instruction merges: pressing Mute says nothing about the level chosen earlier.
+Rows carry Store, Device, levels, actor and timestamp - no credential, token or
+JWT. Legacy `store_audio_pending_commands` rows are carried over once at
+startup so intent recorded before the rework is not silently dropped.
+
+The desired state **survives a successful apply**. It is a standing intention,
+and keeping it is what makes it possible to notice tomorrow that a shop has
+drifted. Clearing it is an explicit operator action that changes no mixer.
+
+### Reconnect order
+
+authenticate → confirm active primary Device → confirm Store → confirm the
+stable MMDevice endpoint → **read ACTUAL first** → report it → compare with
+DESIRED → apply only a genuine difference → read back → report. A Store already
+where HQ wants it is sent nothing at all.
+
+Refused, honestly and without losing the intention, when the Device was
+replaced (`SYNC_FAILED`, "the Receiver Device changed"), when a broadcast owns
+the Store, or when there is no controllable output.
+
+### Broadcast ownership unchanged
+
+Single writer. A broadcast owning a Store refuses a non-owner with 409 and
+records **nothing** - no desired state is quietly banked to fire the moment the
+announcement ends. Restoration remains authoritative: original 25% muted,
+desired 70, broadcast at 80, STOP restores **25% muted**, and the panel then
+reads 25% ACTUAL / 70% DESIRED / OUT_OF_SYNC. The desired state is never
+applied in the restoration path.
+
+### Results
+
+Backend **3435 passed** (50 in the Master Volume suite), frontend **265**,
+Playwright **300**, production build OK.
+
+Idle load, no broadcast, 5 → 40 Stores: offline Store listed, stale, accepted a
+desired state (**200**, `WAITING_FOR_SYNC`, latest of 70/30/70 = 70), noisy
+Store 42 local changes → 3 frames, HQ matched the Store, **no command refused
+for being unreachable**, CPU 0.16 s and RSS 91.4 MB at 40.
+
+Broadcast load with recording, 5 and 40 Stores: recording `available`, opus,
+21 chunks written / 0 dropped, **0 audio chunks dropped**, max queue 1/24,
+restoration held.
+
+### No new Store Kit
+
+The Receiver is unchanged by this work - desired state, sync state and the
+refusal rules are all HQ-side. **Store Kit 1.6.0 remains current.**
+
+### Not done
+
+No live HQ deployment. No Store touched, BP included. No second Store.
+**No software state equals SPEAKER_VERIFIED.**
