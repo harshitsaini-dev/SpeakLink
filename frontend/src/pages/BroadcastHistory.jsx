@@ -1,4 +1,5 @@
 import React from "react";
+import RecordingPlayer from "@/components/RecordingPlayer";
 import { api } from "@/lib/api";
 import StatusBadge from "@/components/StatusBadge";
 import { formatIst, parseUtcMs, elapsedSeconds } from "@/lib/time";
@@ -163,11 +164,12 @@ export default function BroadcastHistory() {
               <th className="px-3 py-2">Started</th>
               <th className="px-3 py-2">Duration</th>
               <th className="px-3 py-2">Status</th>
+              <th className="px-3 py-2">Recording</th>
             </tr>
           </thead>
           <tbody>
             <ListState loading={list.loading} error={list.error}
-                       empty={!list.items.length} colSpan={8} onRetry={list.reload}
+                       empty={!list.items.length} colSpan={9} onRetry={list.reload}
                        emptyText="No broadcast sessions match these filters." />
             {!list.loading && !list.error && list.items.map((s) => (
               <tr key={s.id} data-testid={`history-row-${s.id}`}
@@ -196,6 +198,9 @@ export default function BroadcastHistory() {
                 <td className="px-3 py-2 text-xs">{fmt(s.started_at)}</td>
                 <td className="px-3 py-2 font-mono text-xs">{dur(s.started_at, s.ended_at)}</td>
                 <td className="px-3 py-2"><StatusBadge status={s.status} /></td>
+                <td className="px-3 py-2">
+                  <RecordingPlayer sessionId={s.id} recording={s.recording} />
+                </td>
               </tr>
             ))}
           </tbody>
