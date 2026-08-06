@@ -6674,3 +6674,127 @@ its SHA-256 is unchanged.
 
 No live HQ deployment. No Store touched, BP included. No second Store.
 **No software state equals SPEAKER_VERIFIED.**
+
+---
+
+## Scope correction: Broadcast-only Store volume
+
+Branch `refactor/broadcast-only-store-volume`.
+
+### What was removed, and why
+
+The dedicated always-on Master Volume console is gone: the page, its navigation
+entry, its route, the dashboard summary card, the persistent Target state, the
+offline pending commands and the background enforcement sweep.
+
+**Store Windows master-volume control now exists only while that Store is part
+of an active broadcast.** With nothing on air SpeakLink does not observe or
+touch a shop's mixer at all, and Store staff use Windows normally.
+
+Endpoint observation is broadcast-scoped again: it starts at PREPARE, after the
+original state has been captured, and is detached at restoration. A callback
+left attached could report a restoration into the *next* broadcast as though
+somebody had moved the slider. After STOP, SpeakLink leaves the mixer alone.
+
+`endpoint_state` and `audio_control` require a session id again, and a control
+command must name the broadcast the Receiver is running - so a sessionless
+command is refused by construction rather than by a check.
+
+### A finding worth recording
+
+The live HQ is **repo-native**, so a restart picks up whatever branch is
+checked out. It was restarted while the Master Volume branch was checked out,
+and a real operator used the feature: `store_audio_pending_commands` and
+`store_audio_target_state` both hold a genuine row against BP, and a real
+3-minute broadcast (session 1, 10:57-11:00 UTC) was recorded to
+`data/recordings/broadcast-000001.webm`, 634 KB.
+
+Those two tables are therefore **already deployed with real data**. They are
+left **dormant and documented** rather than dropped: nothing creates, reads or
+writes them any more, and `test_broadcast_only_volume.py` asserts the
+application no longer names them. Dropping live tables to tidy up a reverted
+feature is not worth the risk.
+
+Also found and fixed: the pilot environment scoped the database but not the
+data directory, so load runs wrote recordings into `data/recordings/` - the
+folder the live HQ uses - leaving orphan `.part` files for sessions 2-4 with no
+metadata row. The harness is now scoped; **the orphan files are still there and
+should be cleared by hand**, since deleting anything from live data is not this
+task's to do.
+
+### A real defect this refactor caused, and how it surfaced
+
+Removing the always-on block also removed `_start_recording`,
+`_finish_recording` and the writer registry, which sat in the same span of
+`server.py`. Their call sites survived, so every broadcast start raised
+`NameError` - **46 failures and 60 errors**. Restored verbatim from the previous
+commit, with the removed feature's symbols asserted absent from what came back.
+
+### Broadcast-scoped volume, unchanged
+
+PREPARE captures the original volume and mute and persists the crash-recovery
+record before any mutation. HQ steers the real Windows endpoint during the
+broadcast; Store-local changes flow back and the Console follows them, with no
+corrective command generated. STOP restores the exact pre-broadcast state -
+never the announcement level and never a level somebody set mid-broadcast.
+
+PCM gain stays at unity, so a 50% slider is 50% at the Windows master and not
+50% x 50%.
+
+### Recording, completed
+
+Play **and** Download, both authenticated, both applying Broadcast History's
+permission and Store Scope. Download shares playback's route body so the
+authorization cannot drift, differing only in `Content-Disposition`. The
+filename is the session id alone. Permanent deletion removes the audio first,
+then the rows, so a failure can at worst leave a row reported as MISSING rather
+than an orphan file nothing points at; deleting one broadcast leaves the others
+untouched and the directory is never removed.
+
+### Results
+
+Backend **3407 passed, 0 failed**. Frontend **237**. Playwright **300**.
+Production build OK, `compileall`, `pip check`, `git diff --check` and the
+secret scan all clean.
+
+Load with recording enabled:
+
+| | 5 | 10 | 20 | 40 |
+|---|---|---|---|---|
+| Ready Receivers | 5 | 10 | 20 | 40 |
+| Audio chunks dropped | 0 | 0 | 0 | 0 |
+| Max audio queue / capacity | 1/24 | 1/24 | 1/24 | 1/24 |
+| Recording | available | available | available | available |
+| Recording chunks written / dropped | 21/0 | 21/0 | 21/0 | 21/0 |
+| Endpoints restored | 5 | 8 | 18 | 38 |
+| PCM gain left at unity | yes | yes | yes | yes |
+| CPU s · RSS MB | 0.47 · 84.6 | 0.44 · 86.6 | 0.69 · 89.7 | 1.28 · 96.6 |
+
+A stale load-harness expectation was corrected rather than papered over: the
+synthetic Receiver now answers commands with a readback, so the
+stale-telemetry Store no longer ends on the value that assertion named. What it
+was always proving - that HQ never adopted the replayed 1% - is what it asserts
+now, and it reports the value HQ actually holds (70).
+
+### Store Kit 1.7.0
+
+Rebuilt **because the Receiver source changed** - observation is
+broadcast-scoped again and the protocol requires a session id.
+
+| | |
+|---|---|
+| ZIP | `artifacts/SpeakLink-Store-Kit-1.7.0-0f2491c-20260806-115716.zip` |
+| SHA-256 | `98e80348192f07feee357e430115317d7914def269bdc10d722f156489645f75` |
+| Receiver **1.4.0** · Kit **1.7.0** | 1.2.0-1.6.0 retained |
+
+Verified inside the shipped executable: `_start_endpoint_observer` present,
+`ensure_endpoint_observer`, `read_endpoint_state_now` and
+`_report_endpoint_state_now` all absent, pycaw present. Package audit found no
+database, credential, key, `.env`, log, `.git`, `.venv`, `node_modules` or
+recording. The frozen Receiver answers `core audio: reachable` and
+`change reports: yes`.
+
+### Not done
+
+No live HQ deployment. No Store touched, BP included. No second Store.
+**No software state equals SPEAKER_VERIFIED.**
