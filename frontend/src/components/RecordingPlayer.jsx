@@ -56,7 +56,9 @@ export default function RecordingPlayer({ session, onClose,
                                           pauseToken = 0 }) {
   const sessionId = session?.id ?? null;
 
-  const [source, setSource] = React.useState(null);
+  // A source is never just a URL. It carries the recording it belongs to, so
+  // a play request for B can never be executed against A's audio.
+  const [loaded, setLoaded] = React.useState(null);   // { sessionId, url }
   const [loading, setLoading] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState(null);
@@ -71,93 +73,128 @@ export default function RecordingPlayer({ session, onClose,
   const [muted, setMuted] = React.useState(false);
 
   const audioRef = React.useRef(null);
-  const sourceRef = React.useRef(null);
-  //: Which play request this element has already acted on, so one click
-  //: produces one start and a repeat request can still resume.
-  const startedForToken = React.useRef(0);
+  const loadedRef = React.useRef(null);
+  //: Bumped on every selection. A fetch that resolves after a newer one has
+  //: started belongs to a recording the operator has already moved on from,
+  //: and must not replace what is attached now.
+  const generation = React.useRef(0);
+  //: "<sessionId>:<playToken>" of the request this element has already acted
+  //: on. Keyed by SESSION as well as token, so a token alone can never start
+  //: whatever source happens to still be attached.
+  const startedFor = React.useRef(null);
+  //: The selected recording, readable synchronously. Media events can fire
+  //: while React is still committing, so the handlers below compare identity
+  //: against refs rather than against a render closure that may be one
+  //: render behind - which is how a genuine `play` event ended up ignored.
+  const selectedRef = React.useRef(null);
+  selectedRef.current = sessionId;
 
-  const release = React.useCallback(() => {
-    if (sourceRef.current) {
-      // A blob URL pins the whole recording in memory until it is revoked.
-      URL.revokeObjectURL(sourceRef.current);
-      sourceRef.current = null;
+  /** Is the element's current source the recording the operator selected? */
+  const isCurrent = React.useCallback(() => (
+    loadedRef.current !== null
+    && loadedRef.current.sessionId === selectedRef.current
+  ), []);
+
+  /**
+   * Take the current recording off the element, then let its memory go.
+   *
+   * The order matters. Revoking a blob URL the browser is still reading from
+   * leaves the element holding a source it can no longer fetch - which is how
+   * a switch ended up with the footer naming B while nothing was audible. So
+   * the element is paused, the src attribute is removed, and load() is called
+   * to make the detach take effect BEFORE the URL is revoked.
+   */
+  const detachAndRelease = React.useCallback(() => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    if (loadedRef.current) {
+      URL.revokeObjectURL(loadedRef.current.url);
+      loadedRef.current = null;
     }
   }, []);
 
-  // Selecting a different recording, or leaving the page, tears the previous
-  // one down completely: paused, revoked, and forgotten.
+  // Selecting a different recording tears the previous one down completely
+  // before anything of the new one is attached.
   React.useEffect(() => {
-    let cancelled = false;
+    const mine = generation.current + 1;
+    generation.current = mine;
+
     setPlaying(false);
     setEnded(false);
     setPosition(0);
     setDuration(null);
     setError(null);
-    setSource(null);
-    if (audioRef.current) audioRef.current.pause();
-    release();
+    setLoaded(null);
+    detachAndRelease();
 
     if (sessionId === null) return undefined;
 
-    startedForToken.current = 0;      // a new recording plays from the start
     setLoading(true);
     fetchRecording(sessionId, "audio")
       .then((blob) => {
-        if (cancelled) return;
         const url = URL.createObjectURL(blob);
-        sourceRef.current = url;
-        setSource(url);
+        if (mine !== generation.current) {
+          // A slower request for a recording the operator has already left.
+          // Its URL is revoked immediately rather than leaked, and it never
+          // touches the element.
+          URL.revokeObjectURL(url);
+          return;
+        }
+        loadedRef.current = { sessionId, url };
+        setLoaded({ sessionId, url });
       })
       .catch((failure) => {
-        if (cancelled) return;
+        if (mine !== generation.current) return;
         setError(failure?.response?.status === 403
           ? "You do not have access to this recording."
           : "This recording could not be loaded.");
       })
-      .finally(() => { if (!cancelled) setLoading(false); });
+      .finally(() => { if (mine === generation.current) setLoading(false); });
 
-    return () => { cancelled = true; };
-  }, [sessionId, release]);
+    return undefined;
+  }, [sessionId, detachAndRelease]);
 
-  React.useEffect(() => () => {
-    if (audioRef.current) audioRef.current.pause();
-    release();
-  }, [release]);
+  React.useEffect(() => () => { detachAndRelease(); }, [detachAndRelease]);
 
-  // ONE click on History's Play has to mean play.
+  // ONE click on History's Play has to mean play, and exactly one place
+  // decides that.
   //
-  // The click selects the recording; the audio arrives a moment later over an
-  // authenticated request. This starts it as soon as there is something to
-  // start, so the operator never has to press a second Play in the footer.
-  // Nothing here claims to be playing - that state still comes from the
-  // element's own `play` event.
+  // There used to be two effects that could each call play() for the same
+  // request. Between them, a play intent for B could run while A's source was
+  // still attached - which is how a switch produced a footer saying B with
+  // nothing audible. This fires only when the attached source IS the selected
+  // recording, and the request is keyed by session as well as token so a
+  // token can never start the wrong audio.
   React.useEffect(() => {
-    if (!source || !playToken || startedForToken.current === playToken) return;
+    if (!playToken || !loaded || loaded.sessionId !== sessionId) return;
+    const key = `${sessionId}:${playToken}`;
+    if (startedFor.current === key) return;
     const audio = audioRef.current;
     if (!audio) return;
-    startedForToken.current = playToken;
+
+    startedFor.current = key;
     const started = audio.play();
     if (started && typeof started.catch === "function") {
-      started.catch(() => {
-        // Chromium can refuse if the user gesture has expired by the time the
-        // fetch finished. Said plainly, with the transport still available,
-        // rather than silently doing nothing.
-        setError("Playback could not start automatically. Press play.");
-      });
+      started
+        // Read the element rather than assume. The `play` event is the primary
+        // signal, but asking the element what it is doing once its own promise
+        // has settled is strictly MORE truthful than trusting an event to be
+        // delivered - and it is what keeps the label honest if one is missed.
+        .then(() => { if (isCurrent()) setPlaying(!audio.paused); })
+        .catch(() => {
+          // Chromium can refuse if the user gesture has expired by the time
+          // the fetch finished. Said plainly, with the transport still
+          // available, rather than silently doing nothing.
+          setError("Playback could not start automatically. Press play.");
+        });
+    } else if (isCurrent()) {
+      setPlaying(!audio.paused);
     }
-  }, [source, playToken]);
-
-  // A second request for the recording ALREADY loaded - resume rather than
-  // restart, so an operator who paused does not lose their place.
-  React.useEffect(() => {
-    if (!playToken || !source) return;
-    const audio = audioRef.current;
-    if (audio && audio.paused && startedForToken.current !== playToken) {
-      startedForToken.current = playToken;
-      const resumed = audio.play();
-      if (resumed && typeof resumed.catch === "function") resumed.catch(() => {});
-    }
-  }, [playToken, source]);
+  }, [loaded, sessionId, playToken, isCurrent]);
 
   // A live broadcast starting: pause, but keep the selection so the operator
   // can carry on afterwards. A recording playing out of the HQ speakers can be
@@ -182,6 +219,8 @@ export default function RecordingPlayer({ session, onClose,
     try {
       if (audio.paused) await audio.play();
       else audio.pause();
+      // Same reason: the element is the authority on whether it is playing.
+      setPlaying(!audio.paused);
     } catch {
       setError("Playback failed.");
       setPlaying(false);
@@ -237,12 +276,14 @@ export default function RecordingPlayer({ session, onClose,
     }
   };
 
+  // Only a source that belongs to the SELECTED recording counts as attached.
+  const attached = loaded && loaded.sessionId === sessionId ? loaded : null;
   const seekable = Number.isFinite(duration) && duration > 0;
   const state = error ? "Playback failed"
     : loading ? "Preparing…"
     : ended ? "Finished"
     : playing ? "Playing"
-    : source ? "Paused"
+    : attached ? "Paused"
     : "Ready";
 
   return (
@@ -259,13 +300,19 @@ export default function RecordingPlayer({ session, onClose,
           and every control here drives this directly. */}
       <audio
         ref={audioRef}
-        src={source || undefined}
+        src={attached ? attached.url : undefined}
+        // Which recording is REALLY attached, so a test can prove the element
+        // is playing what the footer claims rather than trusting the label.
+        data-active-session-id={attached ? String(attached.sessionId) : ""}
         data-testid="recording-audio"
         className="hidden"
-        onPlay={() => { setPlaying(true); setEnded(false); }}
-        onPause={() => setPlaying(false)}
-        onEnded={() => { setPlaying(false); setEnded(true); }}
-        onError={() => setError("Playback failed.")}
+        // Every event is ignored unless the attached source is still the
+        // selected recording: a late `play` from the previous one must never
+        // mark the new one as playing.
+        onPlay={() => { if (isCurrent()) { setPlaying(true); setEnded(false); } }}
+        onPause={() => { if (isCurrent()) setPlaying(false); }}
+        onEnded={() => { if (isCurrent()) { setPlaying(false); setEnded(true); } }}
+        onError={() => { if (isCurrent()) setError("Playback failed."); }}
         onTimeUpdate={(event) => setPosition(event.target.currentTime)}
         onLoadedMetadata={(event) => {
           const value = event.target.duration;
@@ -306,7 +353,7 @@ export default function RecordingPlayer({ session, onClose,
               <RotateCcw size={14} />
             </button>
             <button type="button" onClick={togglePlay}
-                    disabled={!source}
+                    disabled={!attached}
                     aria-label={playing ? "Pause" : "Play"}
                     data-testid="recording-toggle"
                     className="rounded-full bg-red-600 hover:bg-red-500 p-2 disabled:opacity-50">

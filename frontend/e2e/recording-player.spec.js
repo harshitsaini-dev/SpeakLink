@@ -40,13 +40,13 @@ const SESSIONS = [
                  error: 'no space left on device' } },
 ];
 
-const fs = require('fs');
-const path = require('path');
+const { ensureRecordingFixture } = require('./support/fixture-audio');
 
 // A REAL 13-second Opus/WebM, remuxed exactly as the backend now finalizes a
 // recording - so Chromium sees a finite duration and can seek immediately. A
 // stub header would prove nothing about seeking, which is the whole point.
-const FIXTURE = fs.readFileSync(path.join(__dirname, 'fixtures/recording-13s.webm'));
+// Generated rather than committed: the repository tracks no audio at all.
+const FIXTURE = ensureRecordingFixture();
 
 async function serveRecordingAudio(page) {
   for (const kind of ['audio', 'download']) {
