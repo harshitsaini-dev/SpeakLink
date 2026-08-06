@@ -2,6 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import { api, getToken, wsUrl } from "@/lib/api";
 import { HQBroadcaster } from "@/lib/audio/HQBroadcaster";
 import { createBeforeUnloadGuard } from "@/lib/beforeUnloadGuard";
+import { useOptionalRecordingPlayback } from "@/contexts/RecordingPlaybackContext";
 
 const BroadcastCtx = createContext(null);
 
@@ -21,6 +22,9 @@ const BroadcastCtx = createContext(null);
  * an owner.
  */
 export function BroadcastProvider({ children }) {
+  // Optional on purpose: broadcasting does not depend on a player being
+  // mounted, and requiring one would make this provider untestable alone.
+  const { pauseForBroadcast } = useOptionalRecordingPlayback();
   const [current, setCurrent] = useState(null);
   const [meter, setMeter] = useState(0);
   // Input level is measured before the gain node, sent level after it. Both
@@ -146,6 +150,11 @@ export function BroadcastProvider({ children }) {
   }, []);
 
   const startBroadcast = useCallback(async ({ campaign, targetMode, ids, region, city }) => {
+    // A History recording playing out of the HQ speakers can be picked up by
+    // the HQ microphone and go out over the announcement. Paused rather than
+    // closed, so the operator can carry on with it afterwards. Only GOING LIVE
+    // does this - visiting the Console does not.
+    pauseForBroadcast();
     setError("");
     if (!campaign.trim()) throw new Error("Please enter a campaign name");
     if (ids.length === 0) throw new Error("No stores selected for broadcast");

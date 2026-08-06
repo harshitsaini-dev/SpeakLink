@@ -5,6 +5,7 @@ import { AuthProvider } from "@/contexts/AuthContext";
 import { BroadcastProvider } from "@/contexts/BroadcastContext";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import Layout from "@/components/Layout";
+import { RecordingPlaybackProvider } from "@/contexts/RecordingPlaybackContext";
 import Login from "@/pages/Login";
 import BroadcastConsole from "@/pages/BroadcastConsole";
 import ActiveBroadcasts from "@/pages/ActiveBroadcasts";
@@ -33,9 +34,17 @@ export default function App() {
           <Route
             element={
               <ProtectedRoute>
-                <BroadcastProvider>
-                  <Layout />
-                </BroadcastProvider>
+                {/* Above the routes on purpose: a recording keeps playing
+                    while the operator moves around EchoCast. Inside
+                    ProtectedRoute, so signing out tears it down with
+                    everything else authenticated.
+                    OUTSIDE BroadcastProvider, so going live can pause History
+                    playback before the microphone opens. */}
+                <RecordingPlaybackProvider>
+                  <BroadcastProvider>
+                    <Layout />
+                  </BroadcastProvider>
+                </RecordingPlaybackProvider>
               </ProtectedRoute>
             }
           >

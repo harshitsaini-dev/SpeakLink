@@ -267,6 +267,77 @@ def _ffprobe_binary() -> str | None:
     return shutil.which("ffprobe")
 
 
+def _ffmpeg_binary() -> str | None:
+    return shutil.which("ffmpeg")
+
+
+REMUX_SUFFIX = ".remux"
+
+
+def finalize_container(part_path: Path, output_path: Path) -> dict:
+    """Turn the recorded chunk stream into a normally seekable WebM.
+
+    WHY THIS IS NEEDED AT ALL
+
+    MediaRecorder writes a STREAMING WebM: a header with no duration and no
+    cues, because when it starts it does not know how long the broadcast will
+    be. Appending its chunks produces a file every player can decode and none
+    can seek - Chromium will not let an operator drag the scrubber until it has
+    buffered that far, so a thirteen-second announcement could not be skipped
+    through until it had almost finished playing.
+
+    A stream COPY through FFmpeg rewrites the container with a real duration
+    and an index. The Opus stream is not touched: same codec, same sample
+    rate, same channels, same bytes of audio. Re-encoding would cost quality
+    and time for nothing.
+
+    SAFETY
+
+    The recording of a real announcement is not something to gamble with, so
+    the input is never destroyed here. FFmpeg writes a THIRD file; only after
+    that file is probed and found to carry a finite duration does the caller
+    publish it. If anything fails the ``.part`` is still on disk exactly as it
+    was, and the caller falls back to publishing it unchanged - a file that
+    plays but seeks poorly is worth far more than no file at all.
+    """
+    binary = _ffmpeg_binary()
+    if binary is None:
+        return {"remuxed": False, "reason": "ffmpeg is not installed"}
+
+    remux_path = Path(str(output_path) + REMUX_SUFFIX)
+    try:
+        completed = subprocess.run(
+            [binary, "-v", "error", "-y", "-i", str(part_path),
+             # Stream copy. The audio is not re-encoded.
+             "-c", "copy",
+             # The container is named explicitly. The output carries a
+             # .remux suffix so it cannot be mistaken for the finished
+             # recording, and FFmpeg cannot infer a format from that.
+             "-f", "webm", str(remux_path)],
+            capture_output=True, text=True, timeout=120, check=False)
+    except Exception as failure:                       # pragma: no cover - guard
+        return {"remuxed": False, "reason": str(failure)[:200]}
+
+    if completed.returncode != 0 or not remux_path.exists():
+        with contextlib.suppress(FileNotFoundError):
+            remux_path.unlink()
+        return {"remuxed": False,
+                "reason": (completed.stderr or "ffmpeg refused the file")[:200]}
+
+    probed = probe_recording(remux_path)
+    duration = probed.get("duration_seconds")
+    if (probed.get("error") or not probed.get("has_audio")
+            or duration is None or duration <= 0):
+        # A remux that produced something unseekable or unreadable is worse
+        # than the original, so it is discarded rather than published.
+        with contextlib.suppress(FileNotFoundError):
+            remux_path.unlink()
+        return {"remuxed": False,
+                "reason": probed.get("error") or "no finite duration"}
+
+    return {"remuxed": True, "path": remux_path, **probed}
+
+
 def probe_recording(path: Path) -> dict:
     """Ask ffprobe whether this file is actually playable.
 
@@ -341,6 +412,11 @@ class RecordingWriter:
         self.bytes_written = 0
         self.failed = False
         self.error: str | None = None
+        #: Whether the container was rewritten into a seekable one, and what
+        #: the finished file's real duration turned out to be.
+        self.remuxed = False
+        self.remux_error: str | None = None
+        self.duration_seconds: float | None = None
         self._closed = False
 
     @property
@@ -434,15 +510,35 @@ class RecordingWriter:
             self.error = "no audio was recorded"
             return STATUS_FAILED
 
+        # Rewrite the container so the finished file is normally seekable.
+        # The recorded chunks are a STREAMING WebM with no duration and no
+        # index; a stream copy adds both without touching the Opus audio.
+        published = self.part_path
+        outcome = finalize_container(self.part_path, self.final_path)
+        self.remuxed = bool(outcome.get("remuxed"))
+        self.duration_seconds = outcome.get("duration_seconds")
+        if self.remuxed:
+            published = outcome["path"]
+        else:
+            # Publishing the original anyway. A file that plays but seeks
+            # poorly is worth far more than no recording at all, and the
+            # reason is recorded rather than swallowed.
+            self.remux_error = outcome.get("reason")
+
         try:
             # Atomic on the same filesystem: the finished name appears whole or
             # not at all. Nothing ever sees a partially written recording under
             # the real name.
-            os.replace(self.part_path, self.final_path)
+            os.replace(published, self.final_path)
         except Exception as failure:
             self.failed = True
             self.error = f"the recording could not be finalized: {failure}"
             return STATUS_FAILED
+
+        if self.remuxed:
+            # Only now that the finished file exists is the input removed.
+            with contextlib.suppress(FileNotFoundError):
+                self.part_path.unlink()
 
         return self._status()
 

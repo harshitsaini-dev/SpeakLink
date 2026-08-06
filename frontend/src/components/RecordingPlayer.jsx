@@ -51,7 +51,9 @@ function formatClock(seconds) {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 }
 
-export default function RecordingPlayer({ session, onClose }) {
+export default function RecordingPlayer({ session, onClose,
+                                          playToken = 0,
+                                          pauseToken = 0 }) {
   const sessionId = session?.id ?? null;
 
   const [source, setSource] = React.useState(null);
@@ -70,6 +72,9 @@ export default function RecordingPlayer({ session, onClose }) {
 
   const audioRef = React.useRef(null);
   const sourceRef = React.useRef(null);
+  //: Which play request this element has already acted on, so one click
+  //: produces one start and a repeat request can still resume.
+  const startedForToken = React.useRef(0);
 
   const release = React.useCallback(() => {
     if (sourceRef.current) {
@@ -94,6 +99,7 @@ export default function RecordingPlayer({ session, onClose }) {
 
     if (sessionId === null) return undefined;
 
+    startedForToken.current = 0;      // a new recording plays from the start
     setLoading(true);
     fetchRecording(sessionId, "audio")
       .then((blob) => {
@@ -117,6 +123,49 @@ export default function RecordingPlayer({ session, onClose }) {
     if (audioRef.current) audioRef.current.pause();
     release();
   }, [release]);
+
+  // ONE click on History's Play has to mean play.
+  //
+  // The click selects the recording; the audio arrives a moment later over an
+  // authenticated request. This starts it as soon as there is something to
+  // start, so the operator never has to press a second Play in the footer.
+  // Nothing here claims to be playing - that state still comes from the
+  // element's own `play` event.
+  React.useEffect(() => {
+    if (!source || !playToken || startedForToken.current === playToken) return;
+    const audio = audioRef.current;
+    if (!audio) return;
+    startedForToken.current = playToken;
+    const started = audio.play();
+    if (started && typeof started.catch === "function") {
+      started.catch(() => {
+        // Chromium can refuse if the user gesture has expired by the time the
+        // fetch finished. Said plainly, with the transport still available,
+        // rather than silently doing nothing.
+        setError("Playback could not start automatically. Press play.");
+      });
+    }
+  }, [source, playToken]);
+
+  // A second request for the recording ALREADY loaded - resume rather than
+  // restart, so an operator who paused does not lose their place.
+  React.useEffect(() => {
+    if (!playToken || !source) return;
+    const audio = audioRef.current;
+    if (audio && audio.paused && startedForToken.current !== playToken) {
+      startedForToken.current = playToken;
+      const resumed = audio.play();
+      if (resumed && typeof resumed.catch === "function") resumed.catch(() => {});
+    }
+  }, [playToken, source]);
+
+  // A live broadcast starting: pause, but keep the selection so the operator
+  // can carry on afterwards. A recording playing out of the HQ speakers can be
+  // picked up by the HQ microphone and go out over the announcement.
+  React.useEffect(() => {
+    if (!pauseToken) return;
+    if (audioRef.current) audioRef.current.pause();
+  }, [pauseToken]);
 
   React.useEffect(() => {
     if (sessionId === null) return undefined;

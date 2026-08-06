@@ -1,6 +1,6 @@
 import React from "react";
 import RecordingActions from "@/components/RecordingActions";
-import RecordingPlayer, { PLAYER_BAR_HEIGHT } from "@/components/RecordingPlayer";
+import { useRecordingPlayback } from "@/contexts/RecordingPlaybackContext";
 import { api } from "@/lib/api";
 import StatusBadge from "@/components/StatusBadge";
 import { formatIst, parseUtcMs, elapsedSeconds } from "@/lib/time";
@@ -23,10 +23,9 @@ const dur = (a, b) => {
 
 export default function BroadcastHistory() {
   const { can } = useAuth();
-  // Which recording the single bottom player is currently on. Owning it here
-  // is what makes "one at a time" a property of the page rather than a rule
-  // that per-row players would have to negotiate between themselves.
-  const [playing, setPlaying] = React.useState(null);
+  // The player itself lives in Layout so it survives navigation. History only
+  // says WHICH recording to play, and asks for it to start.
+  const { active, playRecording, forgetRecording } = useRecordingPlayback();
   const list = useAdminList("/broadcast/history/search", {
     q: "", status: "", date_from: "", date_to: "", started_by: "",
     store_id: "", city: "", region: "",
@@ -74,8 +73,7 @@ export default function BroadcastHistory() {
   };
 
   return (
-    <div className="space-y-4" data-testid="history-page"
-         style={playing ? { paddingBottom: PLAYER_BAR_HEIGHT + 24 } : undefined}>
+    <div className="space-y-4" data-testid="history-page">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight text-slate-900">Broadcast History</h1>
         <button data-testid="history-refresh-btn" onClick={list.reload}
@@ -208,8 +206,8 @@ export default function BroadcastHistory() {
                   <RecordingActions
                     sessionId={s.id}
                     recording={s.recording}
-                    isActive={playing?.id === s.id}
-                    onPlay={() => setPlaying(s)} />
+                    isActive={active?.id === s.id}
+                    onPlay={() => playRecording(s)} />
                 </td>
               </tr>
             ))}
@@ -228,8 +226,15 @@ export default function BroadcastHistory() {
           warning="These sessions and their per-Store target rows are removed for good. The record of this deletion is kept in a separate administrative audit that this action cannot touch."
           busy={busy} error={actionError}
           onCancel={() => { setConfirming(false); setActionError(""); }}
-          onConfirm={({ typed, acknowledged }) =>
-            runBulk("/broadcast/history/delete-permanently", { confirm: typed, acknowledged })}
+          onConfirm={({ typed, acknowledged }) => {
+            // If the recording being played is among these, stop it before the
+            // rows go: audio must not keep coming out of a deleted broadcast.
+            // isSelected covers both an explicit id list and Select All
+            // Filtered, where the ids are never enumerated client-side.
+            if (active && selection.isSelected(active.id)) forgetRecording(active.id);
+            return runBulk("/broadcast/history/delete-permanently",
+                           { confirm: typed, acknowledged });
+          }}
         />
       )}
 
@@ -293,12 +298,6 @@ export default function BroadcastHistory() {
         </div>
       )}
 
-      {/* ONE player for the page. A row's Play button only chooses which
-          recording is active; two cannot overlap because there is only ever
-          one audio element. */}
-      <RecordingPlayer
-        session={playing}
-        onClose={() => setPlaying(null)} />
     </div>
   );
 }
