@@ -1323,6 +1323,18 @@ class DeviceReceiverSession(AudioReceiverPilot):
         self._record_state("CONNECTED")
         self._write_status("CONNECTED", detail="the backend accepted this Device credential")
 
+        # Observation begins on CONNECT, not on PREPARE. A shop's mixer is
+        # changed at the till on a quiet afternoon with nothing on air, and a
+        # Master Volume panel that only learned about changes during broadcasts
+        # would show a number that is often days old.
+        self.ensure_endpoint_observer()
+
+        # ACTUAL STATE FIRST, before any pending change is applied. HQ must
+        # learn what this Store really is before it is told what to become -
+        # otherwise a change queued while the machine was off would be applied
+        # on top of an assumption about where it started.
+        await self._report_endpoint_state_now(connection)
+
         heartbeat = asyncio.create_task(self._heartbeat_loop(connection))
         # Reports what the Windows output is actually doing, so a change made
         # at the till reaches HQ. Started alongside the heartbeat and torn down
@@ -1341,6 +1353,10 @@ class DeviceReceiverSession(AudioReceiverPilot):
                 await heartbeat
             except asyncio.CancelledError:
                 pass
+            # The COM callback goes with the connection it reports to. Left
+            # attached it would keep writing into a socket that no longer
+            # exists, and hold the endpoint object open across a reconnect.
+            self.stop_endpoint_observer()
             await self._shutdown(connection)
         # report["stopped"] means a BROADCAST session ended by an operator's
         # stop command - it says nothing about whether THIS RECEIVER keeps

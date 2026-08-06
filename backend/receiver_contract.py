@@ -223,7 +223,7 @@ class AudioControlAcknowledgement(SessionAcknowledgement):
         return _reject_control_characters(value) if value is not None else None
 
 
-class EndpointStateAcknowledgement(SessionAcknowledgement):
+class EndpointStateAcknowledgement(AcknowledgementBase):
     """What the Store's Windows output is doing RIGHT NOW.
 
     Telemetry, not a reply. It is emitted whenever the endpoint's master
@@ -242,6 +242,13 @@ class EndpointStateAcknowledgement(SessionAcknowledgement):
     """
 
     type: Literal["endpoint_state"]
+    #: Absent when the Receiver is simply connected and idle. Endpoint
+    #: observation is no longer tied to a broadcast: a Store's mixer can be
+    #: changed at the till at four in the afternoon with nothing on air, and
+    #: HQ still needs to know. A session id is carried only when this reading
+    #: was taken while that broadcast was running, so a reading can still be
+    #: attributed when it matters.
+    session_id: int | None = Field(default=None, gt=0)
     state_sequence: int = Field(ge=1)
     volume_percent: int = Field(ge=0, le=100)
     muted: bool
@@ -459,7 +466,14 @@ def apply_receiver_ack(
         # Changes NO status, exactly like audio_control. How loud a shop is has
         # nothing to do with whether it is connected, ready or playing - and a
         # Store user nudging the volume must not look like a fault.
-        _validate_active_session(result, ack.session_id)
+        #
+        # An idle reading carries no session id and is validated against
+        # nothing: endpoint observation runs whenever the Receiver is
+        # connected, so most readings arrive with no broadcast in existence.
+        # A reading that DOES name a session is still checked against it, so a
+        # stale reading from a finished broadcast is refused as before.
+        if ack.session_id is not None:
+            _validate_active_session(result, ack.session_id)
     elif isinstance(ack, AudioControlAcknowledgement):
         # Deliberately changes NO status. How loud a Store is playing is
         # orthogonal to whether it is connected, ready, or playing: a muted
