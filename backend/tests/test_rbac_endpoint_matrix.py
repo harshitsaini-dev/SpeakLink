@@ -175,7 +175,7 @@ EXPECTED: dict[str, object] = {
     "read_master_volume": "store_audio.control",
     "read_master_volume_summary": "store_audio.control",
     "set_master_volume": "store_audio.control",
-    "clear_master_volume_desired": "store_audio.control",
+    "clear_master_volume_target": "store_audio.control",
     "create_session": "broadcast.start",
     "start_session": "broadcast.start",
     "stop_session": "broadcast.stop",

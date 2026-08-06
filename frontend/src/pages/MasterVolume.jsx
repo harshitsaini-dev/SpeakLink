@@ -18,11 +18,11 @@ import { api } from "@/lib/api";
  *
  * THE THREE FACTS, WHICH ARE NEVER MERGED
  *
- *   DESIRED     what HQ wants        - the slider position, always settable
+ *   TARGET     what HQ wants        - the slider position, always settable
  *   ACTUAL      what Windows reports - only ever from the Receiver's readback
  *   CONNECTION  can it be applied now - ONLINE or OFFLINE
  *
- * "Applied 70%" would be DESIRED wearing ACTUAL's clothes, so it is never
+ * "Applied 70%" would be TARGET wearing ACTUAL's clothes, so it is never
  * said. A number is only ever called Current when a Receiver read it back.
  */
 
@@ -42,7 +42,11 @@ const SYNC_TEXT = {
   OUT_OF_SYNC: { label: "Changed at the Store", tone: "warn" },
   WAITING_FOR_SYNC: { label: "Waiting for Receiver sync", tone: "off" },
   SYNC_FAILED: { label: "Last sync attempt failed", tone: "bad" },
-  NO_DESIRED_STATE: { label: "No HQ setting", tone: "off" },
+  // EchoCast tried, repeatedly, and something keeps moving the mixer
+  // back. Saying so beats arguing with a shop for ever in silence.
+  ENFORCEMENT_SUSPENDED: {
+    label: "Not holding — changed at the Store repeatedly", tone: "bad" },
+  NO_TARGET_STATE: { label: "No Target set", tone: "off" },
 };
 
 const TONE_CLASS = {
@@ -240,7 +244,8 @@ export default function MasterVolume() {
             <option value="OUT_OF_SYNC">Changed at the Store</option>
             <option value="APPLYING">Applying</option>
             <option value="SYNC_FAILED">Sync failed</option>
-            <option value="NO_DESIRED_STATE">No HQ setting</option>
+            <option value="NO_TARGET_STATE">No Target set</option>
+            <option value="ENFORCEMENT_SUSPENDED">Not holding</option>
           </select>
         </label>
 
@@ -280,15 +285,15 @@ export default function MasterVolume() {
           const syncState = SYNC_TEXT[row.sync_state]
             || { label: row.sync_state, tone: "off" };
           const working = Boolean(busy[row.store_id]);
-          const hasDesired = row.desired_volume_percent !== null
-            && row.desired_volume_percent !== undefined;
-          const desiredMuted = Boolean(row.desired_muted);
+          const hasTarget = row.target_volume_percent !== null
+            && row.target_volume_percent !== undefined;
+          const targetMuted = Boolean(row.target_muted);
 
           // The slider shows what HQ WANTS. Falling back to the last reported
           // reading only when nobody has expressed an intention yet, and to a
           // neutral position when even that is unknown.
-          const sliderValue = hasDesired
-            ? row.desired_volume_percent
+          const sliderValue = hasTarget
+            ? row.target_volume_percent
             : (row.volume_percent ?? 50);
 
           // Nothing about the CONNECTION disables these controls. A Store an
@@ -342,15 +347,15 @@ export default function MasterVolume() {
               {/* ---- DESIRED: what HQ wants, always settable ---- */}
               <div className="flex items-baseline gap-2 flex-wrap">
                 <span
-                  data-testid={`master-volume-desired-${row.store_code}`}
+                  data-testid={`master-volume-target-${row.store_code}`}
                   className="text-2xl font-semibold text-slate-900"
                 >
-                  {hasDesired ? `Desired: ${row.desired_volume_percent}%`
-                              : "Desired: not set"}
+                  {hasTarget ? `Target Volume: ${row.target_volume_percent}%`
+                              : "Target Volume: not set"}
                 </span>
-                {desiredMuted && (
+                {targetMuted && (
                   <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-white">
-                    Desired muted
+                    Target Mute: ON
                   </span>
                 )}
               </div>
@@ -386,12 +391,12 @@ export default function MasterVolume() {
                   type="button"
                   disabled={working}
                   data-testid={`master-volume-mute-${row.store_code}`}
-                  aria-pressed={desiredMuted}
-                  onClick={() => send(row, { muted: !desiredMuted })}
+                  aria-pressed={targetMuted}
+                  onClick={() => send(row, { muted: !targetMuted })}
                   className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border border-slate-300 text-sm disabled:opacity-50"
                 >
-                  {desiredMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
-                  {desiredMuted ? "Unmute" : "Mute"}
+                  {targetMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                  {targetMuted ? "Unmute" : "Mute"}
                 </button>
                 <span className="text-xs text-slate-400">
                   {row.online
@@ -405,19 +410,19 @@ export default function MasterVolume() {
                 // away. The setting is real and it will be applied.
                 <p className="text-xs text-slate-500"
                    data-testid={`master-volume-offline-note-${row.store_code}`}>
-                  Receiver offline — this desired setting will sync when it
+                  Receiver offline — automatically syncs when the Receiver
                   reconnects.
                 </p>
               )}
 
-              {hasDesired && (
+              {hasTarget && (
                 <button
                   type="button"
                   onClick={() => clearDesired(row)}
                   data-testid={`master-volume-clear-${row.store_code}`}
                   className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-800"
                 >
-                  <X size={13} /> Clear HQ setting
+                  <X size={13} /> Clear Target
                 </button>
               )}
             </article>
