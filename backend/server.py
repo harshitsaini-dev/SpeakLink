@@ -2955,6 +2955,75 @@ async def set_store_audio_control(
 # ---------------------------------------------------------------------------
 # Master Volume - the estate's mixers, independent of any broadcast
 # ---------------------------------------------------------------------------
+#: One recording writer per LIVE broadcast. Runtime only - the metadata row is
+#: the durable record, and a writer is a file handle plus a queue.
+_RECORDING_WRITERS: dict[int, "broadcast_recording.RecordingWriter"] = {}
+
+
+def _start_recording(session_id: int) -> None:
+    """Begin recording one broadcast. Never raises into the broadcast path.
+
+    A recording that cannot start must not stop an announcement going out, so
+    every failure here is recorded against the row and swallowed.
+    """
+    try:
+        directory = broadcast_recording.recordings_directory()
+        writer = broadcast_recording.RecordingWriter(
+            session_id=session_id, directory=directory)
+        broadcast_recording.start_record(
+            engine, session_id=session_id, file_name=writer.file_name)
+        writer.start()
+        if writer.failed:
+            broadcast_recording.finish_record(
+                engine, session_id=session_id,
+                status=broadcast_recording.STATUS_FAILED, error=writer.error)
+            return
+        _RECORDING_WRITERS[session_id] = writer
+    except Exception as failure:
+        logger.warning("Recording could not start for session %s: %s",
+                       session_id, failure)
+
+
+async def _finish_recording(session_id: int) -> None:
+    """Finalize and publish. Called from EVERY path that ends a broadcast.
+
+    Normal stop, emergency stop, a dropped microphone and server cleanup all
+    arrive here, which is why it is idempotent and never raises.
+    """
+    writer = _RECORDING_WRITERS.pop(session_id, None)
+    if writer is None:
+        return
+    try:
+        status = await writer.close()
+        probed = {}
+        if status in (broadcast_recording.STATUS_AVAILABLE,
+                      broadcast_recording.STATUS_PARTIAL):
+            probed = broadcast_recording.probe_recording(writer.final_path)
+            # ffprobe present and refusing the file is real evidence it cannot
+            # be played. ffprobe ABSENT is evidence of nothing, so the file is
+            # kept rather than condemned by a missing tool.
+            if probed.get("error") or probed.get("has_audio") is False:
+                status = broadcast_recording.STATUS_FAILED
+        size = None
+        if writer.final_path.exists():
+            size = writer.final_path.stat().st_size
+        broadcast_recording.finish_record(
+            engine, session_id=session_id, status=status,
+            container=probed.get("container"), codec=probed.get("codec"),
+            byte_size=size, duration_seconds=probed.get("duration_seconds"),
+            chunks_written=writer.chunks_written,
+            chunks_dropped=writer.chunks_dropped,
+            error=writer.error or (
+                "some audio was dropped while writing to disk"
+                if writer.chunks_dropped else None))
+    except Exception as failure:
+        logger.warning("Recording could not be finalized for session %s: %s",
+                       session_id, failure)
+        broadcast_recording.finish_record(
+            engine, session_id=session_id,
+            status=broadcast_recording.STATUS_FAILED, error=str(failure))
+
+
 @api.post("/broadcast/sessions/{sid}/stop", response_model=SessionOut)
 async def stop_session(sid: int, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.STOP_BROADCAST))):
     """Stop YOUR OWN broadcast. Never anybody else's.

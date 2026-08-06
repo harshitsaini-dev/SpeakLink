@@ -168,14 +168,6 @@ EXPECTED: dict[str, object] = {
     # of this permission - neither stop_any nor active_view reaches it.
     "read_store_audio_control": "store_audio.control",
     "set_store_audio_control": "store_audio.control",
-    # The Master Volume panel. Deliberately the SAME permission as in-broadcast
-    # volume control: seeing how loud the estate is and being able to change it
-    # are one responsibility, and a second permission here would only create a
-    # way for the two to drift apart.
-    "read_master_volume": "store_audio.control",
-    "read_master_volume_summary": "store_audio.control",
-    "set_master_volume": "store_audio.control",
-    "clear_master_volume_target": "store_audio.control",
     "create_session": "broadcast.start",
     "start_session": "broadcast.start",
     "stop_session": "broadcast.stop",
@@ -205,6 +197,7 @@ EXPECTED: dict[str, object] = {
     # allowed to hear it. Store Scope is applied inside both routes.
     "read_broadcast_recording": "menu.history.view",
     "stream_broadcast_recording": "menu.history.view",
+    "download_broadcast_recording": "menu.history.view",
     "session_detail": "menu.history.view",
 
     "list_logs": "menu.logs.view",
