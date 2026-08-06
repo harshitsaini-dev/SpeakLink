@@ -4525,8 +4525,29 @@ def search_broadcast_history(
 
     total = query.count()
     rows = apply_paging(query.order_by(BroadcastSession.id.desc()), page, page_size).all()
+    # The SAME recording attachment the unpaginated /broadcast/history applies.
+    #
+    # This is the bug this route had: History in the browser reads THIS
+    # endpoint, not that one, so every row arrived with recording=null and the
+    # page said "No recording" for seven broadcasts whose audio was on disk and
+    # whose metadata said AVAILABLE. Two endpoints returning the same shape had
+    # drifted, and only one of them was ever looked at.
+    #
+    # Attached through the shared helper rather than repeated here, so the two
+    # cannot drift again.
+    # The SAME recording attachment the unpaginated /broadcast/history applies.
+    #
+    # This is the bug this route had: History in the browser reads THIS
+    # endpoint, not that one, so every row arrived with recording=null and the
+    # page said "No recording" for seven broadcasts whose audio was on disk and
+    # whose metadata said AVAILABLE. Two endpoints returning the same shape had
+    # drifted, and only one of them was ever looked at.
+    #
+    # Attached through the shared helper rather than repeated here, so the two
+    # cannot drift again.
+    attached = {row.id: row for row in _with_recordings(rows)}
     return Page(items=rows, total=total, page=page, page_size=page_size).as_dict(
-        lambda row: SessionOut.model_validate(row).model_dump(mode="json"))
+        lambda row: attached[row.id].model_dump(mode="json"))
 
 
 # ================ WEBSOCKETS ================
