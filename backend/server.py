@@ -227,12 +227,12 @@ from receiver_runtime_auth import (
 import store_master_audio
 import master_volume_api
 import broadcast_recording
-from store_audio_pending import (
-    EmptyPendingCommandError,
-    InvalidPendingVolumeError,
-    ensure_pending_audio_schema,
+from store_audio_desired import (
+    EmptyDesiredStateError,
+    InvalidDesiredVolumeError,
+    ensure_desired_audio_schema,
 )
-import store_audio_pending
+import store_audio_desired
 from receiver_contract import (
     AudioControlAcknowledgement,
     EndpointStateAcknowledgement,
@@ -606,7 +606,7 @@ def startup_event():
         # Additive, and safe on every boot. A pending mixer change must
         # survive an HQ restart - outliving a disconnection is its whole
         # purpose - so unlike live readings it has to live in the database.
-        ensure_pending_audio_schema(engine)
+        ensure_desired_audio_schema(engine)
         broadcast_recording.ensure_recording_schema(engine)
         # Anything left mid-flight by a crash is resolved BEFORE the first
         # request can read it. An unfinished .part is never promoted to
@@ -3039,9 +3039,36 @@ async def _finish_recording(session_id: int) -> None:
 
 
 _IDLE_COMMAND_IDS: dict[int, int] = {}
-#: Which idle command id, per Store, was the attempt to apply a PENDING
-#: change. Only that exact command's acknowledgement may clear the row.
-_PENDING_COMMAND_IDS: dict[int, int] = {}
+#: Store -> (command id, monotonic time it was sent). This is what makes
+#: APPLYING mean "a command is on the wire" rather than merely "these two
+#: numbers differ", which is the normal resting state of a Store whose staff
+#: moved the slider.
+_IN_FLIGHT_COMMANDS: dict[int, tuple[int, float]] = {}
+
+#: After this long with no answer, a command stops being described as APPLYING.
+#: Receivers acknowledge in milliseconds - the load runs put p95 under a second
+#: even with a deliberately slow Store - so silence for this long means it did
+#: not arrive, and saying APPLYING for ever would be a promise nobody is
+#: keeping.
+IN_FLIGHT_SECONDS = 10.0
+
+
+def _mark_in_flight(store_id: int, command_id: int) -> None:
+    import time as _time
+
+    _IN_FLIGHT_COMMANDS[store_id] = (command_id, _time.monotonic())
+
+
+def _is_in_flight(store_id: int) -> bool:
+    import time as _time
+
+    entry = _IN_FLIGHT_COMMANDS.get(store_id)
+    if entry is None:
+        return False
+    if _time.monotonic() - entry[1] > IN_FLIGHT_SECONDS:
+        _IN_FLIGHT_COMMANDS.pop(store_id, None)
+        return False
+    return True
 
 
 def _next_idle_command_id(store_id: int) -> int:
@@ -3080,7 +3107,7 @@ def _broadcast_owner_of_store(store_id: int) -> tuple[int, int] | None:
 def _master_volume_rows(user: HQUser) -> tuple[list[MasterVolumeStoreOut], list[str]]:
     scope = resolve_store_scope(engine, user)
     stores = master_volume_api.installed_stores(engine, store_ids=scope)
-    pending = store_audio_pending.all_pending(engine)
+    desired_by_store = store_audio_desired.all_desired(engine)
     rows: list[MasterVolumeStoreOut] = []
     for store in stores:
         state = store_master_audio.registry.state_for(store.store_id)
@@ -3095,7 +3122,12 @@ def _master_volume_rows(user: HQUser) -> tuple[list[MasterVolumeStoreOut], list[
             getattr(capabilities, "output_control_status", state.endpoint_status)
             if (online and capabilities) else state.endpoint_status
         )
-        waiting = pending.get(store.store_id)
+        desired = desired_by_store.get(store.store_id)
+        # APPLYING only while a command this Store has not answered is in
+        # flight. Otherwise a Store that a member of staff has turned down is
+        # OUT_OF_SYNC, which is a standing observation rather than a promise
+        # that something is about to happen.
+        applying = _is_in_flight(store.store_id)
         rows.append(MasterVolumeStoreOut(
             store_id=store.store_id,
             store_code=store.store_code,
@@ -3113,52 +3145,65 @@ def _master_volume_rows(user: HQUser) -> tuple[list[MasterVolumeStoreOut], list[
             endpoint_status=endpoint_status,
             updated_at=state.updated_at.isoformat() if state.updated_at else None,
             last_seen_at=state.last_seen_at.isoformat() if state.last_seen_at else None,
-            pending_volume_percent=waiting.volume_percent if waiting else None,
-            pending_muted=waiting.muted if waiting else None,
-            pending_created_at=waiting.created_at if waiting else None,
-            pending_status=waiting.status if waiting else None,
-            pending_error=waiting.last_error if waiting else None,
+            desired_volume_percent=desired.volume_percent if desired else None,
+            desired_muted=desired.muted if desired else None,
+            desired_updated_at=desired.updated_at if desired else None,
+            sync_state=store_audio_desired.sync_state(
+                desired=desired,
+                actual_volume_percent=state.volume_percent,
+                actual_muted=state.muted,
+                online=online,
+                applying=applying),
+            sync_error=desired.last_error if desired else None,
         ))
     zones = sorted({row.zone for row in rows if row.zone})
     return rows, zones
 
 
 
-async def _apply_pending_master_volume(store_id: int, device_id: int | None) -> None:
-    """Apply a change queued while a Store was offline. Best effort, honest.
+async def _apply_desired_master_volume(store_id: int, device_id: int | None) -> None:
+    """Bring a reconnected Store to what HQ wants, if it is not there already.
+
+    ORDER MATTERS, and it is the order in the operator brief:
+
+    the Receiver has already authenticated, been confirmed as this Store's
+    active primary, and reported what its endpoint ACTUALLY is - all before
+    this runs. Only then is the desired state compared with reality, and only
+    a genuine difference produces a command.
 
     Deliberately conservative. It refuses rather than guesses whenever the
-    world has moved on since the operator asked:
+    world has moved on since the operator expressed their intention:
 
-    * a broadcast now owns the Store - two writers must never race one endpoint;
-    * the Device that came back is not the one the change was created for -
-      the machine was replaced, and the old instruction is not about this one;
+    * a broadcast now owns the Store - the single-writer rule outranks this,
+      and the desired state simply keeps waiting;
+    * the Device that came back is not the one the intention was recorded
+      against - the machine was replaced, and applying one machine's settings
+      to another is exactly the blind inheritance this must not do;
     * the Receiver reports no controllable output - nothing to apply it to.
 
-    The pending row is cleared ONLY after the Receiver confirms it applied the
-    change. Clearing on attempt would make a failure indistinguishable from a
-    success, which is the one outcome this whole feature exists to avoid.
+    The desired state is NEVER cleared here. It is a standing intention rather
+    than a one-shot command: knowing a shop is meant to be at 70% is what makes
+    it possible to notice tomorrow that it is not.
     """
     try:
-        waiting = store_audio_pending.get_pending(engine, store_id=store_id)
+        desired = store_audio_desired.get_desired(engine, store_id=store_id)
     except Exception:
         return
-    if waiting is None:
+    if desired is None:
         return
 
-    if device_id is not None and waiting.device_id != device_id:
-        # A different machine. The instruction was authored against a Device
-        # that is no longer this Store's Receiver, so it is dropped rather
-        # than retargeted - retargeting would silently apply one machine's
-        # settings to another.
-        store_audio_pending.mark_failed(
+    if device_id is not None and desired.device_id != device_id:
+        # A different machine. The intention was recorded against a Device that
+        # is no longer this Store's Receiver, so it is not applied - and it is
+        # not silently retargeted either.
+        store_audio_desired.mark_sync_failed(
             engine, store_id=store_id,
-            error="the Receiver Device changed since this change was requested")
+            error="the Receiver Device changed since this setting was chosen")
         return
 
     if _broadcast_owner_of_store(store_id) is not None:
-        # Left pending on purpose. The broadcast will end, and the change can
-        # be applied then; forcing it now would fight the announcement.
+        # Left waiting on purpose. The broadcast will end, and the operator can
+        # decide then; forcing it now would fight the announcement.
         return
 
     state = store_master_audio.registry.state_for(store_id)
@@ -3169,21 +3214,18 @@ async def _apply_pending_master_volume(store_id: int, device_id: int | None) -> 
     if state.endpoint_status != store_master_audio.ENDPOINT_READY:
         return
 
-    volume = (waiting.volume_percent if waiting.volume_percent is not None
-              else (state.volume_percent if state.volume_percent is not None else 100))
-    muted = waiting.muted if waiting.muted is not None else bool(state.muted)
-    command_id = _next_idle_command_id(store_id)
-    _PENDING_COMMAND_IDS[store_id] = command_id
-    try:
-        await manager.send_to_receiver(
-            store_id,
-            build_set_audio_control_message(
-                session_id=None, command_id=command_id,
-                volume_percent=volume, muted=muted),
-        )
-    except Exception as failure:
-        store_audio_pending.mark_failed(
-            engine, store_id=store_id, error=str(failure)[:200])
+    # Already where it should be. Sending a command anyway would put pointless
+    # traffic on the socket and briefly show APPLYING for a Store that is fine.
+    volume_matches = (desired.volume_percent is None
+                      or desired.volume_percent == state.volume_percent)
+    mute_matches = (desired.muted is None
+                    or bool(desired.muted) == bool(state.muted))
+    if volume_matches and mute_matches:
+        store_audio_desired.clear_sync_error(engine, store_id=store_id)
+        return
+
+    await _send_desired_to_store(store_id, desired, state)
+
 
 @api.get("/store-audio/master", response_model=MasterVolumeOut)
 def read_master_volume(user: HQUser = Depends(require("store_audio.control"))):
@@ -3213,7 +3255,16 @@ def read_master_volume_summary(
         muted_online=sum(1 for r in rows if r.online and r.muted),
         low_volume_online=sum(
             1 for r in rows if r.online and r.level_class == "low"),
-        pending_changes=sum(1 for r in rows if r.pending_status is not None),
+        synced=sum(1 for r in rows if r.sync_state == "SYNCED"),
+        waiting_for_sync=sum(1 for r in rows if r.sync_state == "WAITING_FOR_SYNC"),
+        out_of_sync=sum(1 for r in rows if r.sync_state == "OUT_OF_SYNC"),
+        # From DESIRED, so these say what HQ intends rather than what any
+        # particular shop happens to be doing at this moment.
+        desired_muted=sum(1 for r in rows if r.desired_muted),
+        desired_low_volume=sum(
+            1 for r in rows
+            if r.desired_volume_percent is not None
+            and r.desired_volume_percent <= 20),
     )
 
 
@@ -3238,28 +3289,38 @@ async def set_master_volume(
     payload: MasterVolumeUpdate,
     user: HQUser = Depends(require("store_audio.control")),
 ):
-    """Change one Store's Windows master volume, broadcast or not."""
+    """Set what HQ wants this Store's Windows mixer to be.
+
+    WHAT THIS ROUTE WILL NOT DO
+
+    It will not refuse because a Store is switched off. Choosing a shop's
+    volume and that shop being reachable this second are different questions,
+    and letting the second one gate the first produced a greyed-out slider
+    answering a question the operator never asked.
+
+    So the DESIRED state is always recorded. What varies is only whether a
+    command goes out now, and nothing here ever claims a mixer moved.
+    """
     store = _require_master_volume_store(store_id, user)
     if payload.volume_percent is None and payload.muted is None:
         raise HTTPException(
             status_code=400, detail="Requesting nothing changes nothing.")
 
     owner = _broadcast_owner_of_store(store_id)
-    online = manager.is_receiver_online(store_id)
 
     # ---- a broadcast owns this Store -------------------------------------
+    # Checked BEFORE anything is recorded. A broadcast is the single writer
+    # while it runs, and quietly banking a desired state that would be applied
+    # the moment it ends is a decision for the operator to make afterwards
+    # rather than a side effect of a refused click.
     if owner is not None:
         session_id, owner_user_id = owner
         if owner_user_id != user.id:
-            # Refused rather than queued. Quietly steering a shop somebody else
-            # is broadcasting to is an invisible, continuous intervention, and
-            # the operator on the other end has no way to tell it is happening.
             raise HTTPException(
                 status_code=409,
                 detail="That Store is being controlled by an active broadcast.")
-        # Routed THROUGH the broadcast's own authority - the same registry,
-        # the same command ids, the same acknowledgements. There is deliberately
-        # no second command channel to race with the first.
+        # Routed THROUGH the broadcast's own authority - same registry, same
+        # command ids, same acknowledgements. No second channel to race.
         state = store_audio_registry.request(
             session_id=session_id, store_id=store_id,
             volume_percent=payload.volume_percent, muted=payload.muted)
@@ -3277,60 +3338,78 @@ async def set_master_volume(
         rows, zones = _master_volume_rows(user)
         return MasterVolumeOut(stores=rows, zones=zones)
 
-    # ---- offline: remember the wish, never claim it was granted -----------
-    if not online:
-        try:
-            store_audio_pending.set_pending(
-                engine, store_id=store_id, device_id=store.device_id,
-                volume_percent=payload.volume_percent, muted=payload.muted,
-                created_by=user.id)
-        except EmptyPendingCommandError as refusal:
-            raise HTTPException(status_code=400, detail=str(refusal))
-        except InvalidPendingVolumeError as refusal:
-            raise HTTPException(status_code=400, detail=str(refusal))
-        _log_master_volume(
-            f"Master Volume change pending on reconnect for store {store_id} "
-            f"requested by {user.username}")
-        rows, zones = _master_volume_rows(user)
-        return MasterVolumeOut(stores=rows, zones=zones)
+    # ---- record the intention. Always. -----------------------------------
+    try:
+        desired = store_audio_desired.set_desired(
+            engine, store_id=store_id, device_id=store.device_id,
+            volume_percent=payload.volume_percent, muted=payload.muted,
+            created_by=user.id)
+    except EmptyDesiredStateError as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+    except InvalidDesiredVolumeError as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
 
-    # ---- online and idle: command it directly -----------------------------
+    _log_master_volume(
+        f"Master Volume desired state for store {store_id} set to "
+        f"volume={desired.volume_percent} muted={desired.muted} "
+        f"by {user.username}")
+
+    # ---- send it now if, and only if, the Store can actually take it -----
+    online = manager.is_receiver_online(store_id)
     state = store_master_audio.registry.state_for(store_id)
-    if state.endpoint_status != store_master_audio.ENDPOINT_READY:
-        raise HTTPException(
-            status_code=409,
-            detail="That Store has no controllable Windows audio output.")
+    if online and state.endpoint_status == store_master_audio.ENDPOINT_READY:
+        await _send_desired_to_store(store_id, desired, state)
 
-    command_id = _next_idle_command_id(store_id)
-    volume = (payload.volume_percent if payload.volume_percent is not None
-              else (state.volume_percent if state.volume_percent is not None else 100))
-    muted = payload.muted if payload.muted is not None else bool(state.muted)
-    await manager.send_to_receiver(
-        store_id,
-        # session_id is None on purpose: no broadcast owns this Store, and
-        # naming one would be a lie the Receiver would rightly reject.
-        build_set_audio_control_message(
-            session_id=None, command_id=command_id,
-            volume_percent=volume, muted=muted),
-    )
-    # Deliberately does NOT set volume_percent here. The panel shows what the
-    # Store reports, and a command that has been sent is not yet a fact about
-    # a mixer. "Currently 70%" may only come from the Receiver's readback.
+    # Deliberately does NOT set the actual volume anywhere. A command that has
+    # been sent is not a fact about a mixer, and "Current 70%" may only ever
+    # come from the Receiver reading Windows back.
     rows, zones = _master_volume_rows(user)
     return MasterVolumeOut(stores=rows, zones=zones)
 
 
+async def _send_desired_to_store(store_id: int, desired, state) -> None:
+    """Put the desired state on the wire. Never raises into a request.
+
+    The command carries WHOLE state rather than a delta, so one that is lost or
+    arrives late can never leave a Store at a level nobody asked for.
+    """
+    volume = (desired.volume_percent if desired.volume_percent is not None
+              else (state.volume_percent if state.volume_percent is not None else 100))
+    muted = desired.muted if desired.muted is not None else bool(state.muted)
+    command_id = _next_idle_command_id(store_id)
+    _mark_in_flight(store_id, command_id)
+    try:
+        await manager.send_to_receiver(
+            store_id,
+            # session_id is None on purpose: no broadcast owns this Store, and
+            # naming one would be a lie the Receiver would rightly reject.
+            build_set_audio_control_message(
+                session_id=None, command_id=command_id,
+                volume_percent=volume, muted=muted),
+        )
+    except Exception as failure:
+        _IN_FLIGHT_COMMANDS.pop(store_id, None)
+        store_audio_desired.mark_sync_failed(
+            engine, store_id=store_id, error=str(failure)[:200])
+
+
 @api.delete("/store-audio/master/{store_id}/pending",
             response_model=MasterVolumeOut)
-def cancel_master_volume_pending(
+def clear_master_volume_desired(
     store_id: int,
     user: HQUser = Depends(require("store_audio.control")),
 ):
-    """Withdraw a change that was waiting for a Store to come back."""
+    """Stop having an opinion about this Store's volume.
+
+    Not a cancel-the-command button - there is no queue to cancel. It removes
+    HQ's standing intention, so the Store stops being reported as out of sync
+    with something nobody wants any more. Whatever the shop is currently set to
+    is left exactly as it is; forgetting an intention must not change a mixer.
+    """
     _require_master_volume_store(store_id, user)
-    store_audio_pending.clear_pending(engine, store_id=store_id)
+    store_audio_desired.clear_desired(engine, store_id=store_id)
     _log_master_volume(
-        f"Master Volume pending change cancelled for store {store_id} "
+        f"Master Volume desired state cleared for store {store_id} "
         f"by {user.username}")
     rows, zones = _master_volume_rows(user)
     return MasterVolumeOut(stores=rows, zones=zones)
@@ -5027,7 +5106,7 @@ async def ws_receiver(websocket: WebSocket):
             # confirmed as this Store's active primary, and reported what its
             # mixer actually is - never before, or it would be applied on top
             # of an assumption about where the Store started.
-            await _apply_pending_master_volume(store_id, identity.device_id)
+            await _apply_desired_master_volume(store_id, identity.device_id)
 
         # If a broadcast is reaching this Store, send PLAY immediately so a
         # Receiver that reconnected mid-announcement rejoins it.
@@ -5165,6 +5244,24 @@ async def ws_receiver(websocket: WebSocket):
                         store_id=store_id,
                         endpoint_status=store_master_audio.ENDPOINT_READY)
 
+                # A reading that MATCHES the desired state is proof the
+                # command arrived, whether or not its acknowledgement did.
+                # Without this a Store would sit at APPLYING while visibly
+                # already correct, which is the opposite of informative.
+                try:
+                    wanted = store_audio_desired.get_desired(
+                        engine, store_id=store_id)
+                except Exception:
+                    wanted = None
+                if wanted is not None and _IN_FLIGHT_COMMANDS.get(store_id):
+                    volume_ok = (wanted.volume_percent is None
+                                 or wanted.volume_percent
+                                 == acknowledgement.volume_percent)
+                    mute_ok = (wanted.muted is None
+                               or bool(wanted.muted) == bool(acknowledgement.muted))
+                    if volume_ok and mute_ok:
+                        _IN_FLIGHT_COMMANDS.pop(store_id, None)
+
                 master_state = store_master_audio.registry.observe(
                     store_id=store_id,
                     state_sequence=acknowledgement.state_sequence,
@@ -5209,14 +5306,19 @@ async def ws_receiver(websocket: WebSocket):
                 # answer to a pending change, that change is now resolved -
                 # cleared on success, kept with its reason on failure.
                 if acknowledgement.session_id is None:
-                    expected = _PENDING_COMMAND_IDS.get(store_id)
-                    if expected == acknowledgement.command_id:
-                        _PENDING_COMMAND_IDS.pop(store_id, None)
+                    entry = _IN_FLIGHT_COMMANDS.get(store_id)
+                    if entry is not None and entry[0] == acknowledgement.command_id:
+                        _IN_FLIGHT_COMMANDS.pop(store_id, None)
                         if acknowledgement.result == "applied":
-                            store_audio_pending.clear_pending(
+                            # The desired state SURVIVES a successful apply. It
+                            # is a standing intention, and keeping it is what
+                            # lets HQ notice later that a shop has drifted.
+                            # SYNCED comes from the Receiver's readback
+                            # matching it, never from this acknowledgement.
+                            store_audio_desired.clear_sync_error(
                                 engine, store_id=store_id)
                         else:
-                            store_audio_pending.mark_failed(
+                            store_audio_desired.mark_sync_failed(
                                 engine, store_id=store_id,
                                 error=acknowledgement.details
                                 or acknowledgement.result)
