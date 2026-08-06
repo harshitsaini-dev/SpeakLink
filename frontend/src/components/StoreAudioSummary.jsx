@@ -76,18 +76,40 @@ export default function StoreAudioSummary() {
           {summary.low_volume_online}
         </dd>
 
-        {summary.pending_changes > 0 && (
+        {/* Sync counts describe HQ's INTENTION against reality, which is a
+            different question from how loud anything is right now. */}
+        <dt className="text-slate-500">Synced</dt>
+        <dd data-testid="summary-synced" className="text-right font-medium">
+          {summary.synced}
+        </dd>
+
+        <dt className="text-slate-500">Waiting for sync</dt>
+        <dd data-testid="summary-waiting" className="text-right font-medium">
+          {summary.waiting_for_sync}
+        </dd>
+
+        {summary.out_of_sync > 0 && (
           <>
-            <dt className="text-slate-500">Pending on reconnect</dt>
-            <dd data-testid="summary-pending" className="text-right font-medium">
-              {summary.pending_changes}
+            <dt className="text-slate-500">Changed at the Store</dt>
+            <dd data-testid="summary-out-of-sync" className="text-right font-medium">
+              {summary.out_of_sync}
+            </dd>
+          </>
+        )}
+
+        {summary.desired_muted > 0 && (
+          <>
+            <dt className="text-slate-500">Desired muted</dt>
+            <dd data-testid="summary-desired-muted" className="text-right font-medium">
+              {summary.desired_muted}
             </dd>
           </>
         )}
       </dl>
 
       <p className="text-xs text-slate-400">
-        Counts exclude offline Stores, whose last known values are not current.
+        Muted and low counts are live Stores only; an offline Store's last
+        reported value is not current. Sync counts include every Store.
       </p>
 
       <Link

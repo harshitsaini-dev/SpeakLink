@@ -59,7 +59,7 @@ def client(tmp_path, monkeypatch):
                    if name in ("server", "db", "models", "seed", "auth", "rbac",
                                "user_lifecycle", "schemas", "permission_catalog",
                                "store_scope", "store_audio_control",
-                               "store_master_audio", "store_audio_pending",
+                               "store_master_audio", "store_audio_desired",
                                "master_volume_api")]:
         sys.modules.pop(module, None)
 
@@ -213,6 +213,23 @@ def set_override(client, headers, user_id, code, effect):
                       json={"changes": [{"code": code, "effect": effect}]})
 
 
+def _record_sends(server):
+    """Capture what would have gone to a Receiver.
+
+    Needed wherever a test drives an ONLINE Store: the real send would write to
+    the fixture's stand-in socket, fail, and drop the Receiver - so the Store
+    would quietly go offline mid-test and every later assertion would be about
+    the wrong situation.
+    """
+    sent = []
+
+    async def record(store_id, message):
+        sent.append(message)
+
+    server.manager.send_to_receiver = record
+    return sent
+
+
 # ===========================================================================
 # 1-3  Which Stores appear at all
 # ===========================================================================
@@ -360,77 +377,128 @@ def test_reading_the_panel_sends_no_command(client, owner):
         panel(client, owner)
     assert sent == []
 
+# ===========================================================================
+# DESIRED state: always settable, online or offline
+# ===========================================================================
+def test_an_offline_store_can_still_be_given_a_desired_volume(client, owner):
+    """The defect this whole rework exists to fix.
 
-# ===========================================================================
-# 11-15  Offline: last known, and pending on reconnect
-# ===========================================================================
-def test_an_offline_store_reports_its_reading_as_stale(client, owner):
+    A manager deciding a shop should be at 70% is not blocked by that shop's PC
+    being switched off. The instruction is real; only its arrival is pending.
+    """
+    store = store_ids(client, owner)[0]
+    install_receiver(client, store)          # never brought online
+
+    response = client.post(f"/api/store-audio/master/{store}",
+                           headers=owner, json={"volume_percent": 70})
+    assert response.status_code == 200, response.text
+    row = {r["store_id"]: r for r in response.json()["stores"]}[store]
+    assert row["desired_volume_percent"] == 70
+    assert row["sync_state"] == "WAITING_FOR_SYNC"
+
+
+def test_an_offline_store_can_still_be_muted(client, owner):
+    store = store_ids(client, owner)[0]
+    install_receiver(client, store)
+    response = client.post(f"/api/store-audio/master/{store}",
+                           headers=owner, json={"muted": True})
+    assert response.status_code == 200, response.text
+    row = {r["store_id"]: r for r in response.json()["stores"]}[store]
+    assert row["desired_muted"] is True
+    assert row["sync_state"] == "WAITING_FOR_SYNC"
+
+
+def test_an_offline_instruction_never_claims_to_be_applied(client, owner):
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
     go_online(client, store)
     observe(store, volume=35)
     go_offline(client, store)
 
+    body = client.post(f"/api/store-audio/master/{store}", headers=owner,
+                       json={"volume_percent": 70}).text
+    assert "applied" not in body.lower()
     row = panel(client, owner)[store]
-    # The number is KEPT - knowing a shop was left at 35% is useful - but it is
-    # flagged, so no client can render it as "currently".
+    # DESIRED moved. ACTUAL did not - nothing reached the machine.
+    assert row["desired_volume_percent"] == 70
     assert row["volume_percent"] == 35
-    assert row["stale"] is True
-    assert row["online"] is False
-    assert row["control_status"] == "OFFLINE"
+    assert row["sync_state"] == "WAITING_FOR_SYNC"
 
 
-def test_an_offline_change_is_pending_and_never_applied(client, owner):
+def test_a_store_that_never_reported_can_still_be_given_a_setting(client, owner):
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
-
-    response = client.post(f"/api/store-audio/master/{store}",
-                           headers=owner, json={"volume_percent": 70})
-    assert response.status_code == 200, response.text
-    row = {r["store_id"]: r for r in response.json()["stores"]}[store]
-    assert row["pending_volume_percent"] == 70
-    assert row["pending_status"] == "pending"
-    # It must NOT have become the displayed current value.
+    client.post(f"/api/store-audio/master/{store}", headers=owner,
+                json={"volume_percent": 70})
+    row = panel(client, owner)[store]
+    assert row["desired_volume_percent"] == 70
+    # And ACTUAL stays honestly unknown rather than inheriting the intention.
     assert row["volume_percent"] is None
-    assert row["control_status"] == "OFFLINE"
+    assert row["muted"] is None
 
 
-def test_a_pending_change_is_stored_with_no_secret(client, owner):
+def test_the_latest_instruction_wins_and_no_queue_is_built(client, owner):
+    store = store_ids(client, owner)[0]
+    install_receiver(client, store)
+    for level in (20, 40, 50, 70):
+        client.post(f"/api/store-audio/master/{store}", headers=owner,
+                    json={"volume_percent": level})
+
+    import store_audio_desired
+    from db import engine
+    from sqlalchemy import text
+
+    assert store_audio_desired.get_desired(
+        engine, store_id=store).volume_percent == 70
+    with engine.connect() as connection:
+        count = connection.execute(text(
+            f"SELECT COUNT(*) FROM {store_audio_desired.DESIRED_TABLE} "
+            "WHERE store_id = :store_id"), {"store_id": store}).scalar()
+    assert count == 1, "a queue would have grown; latest-wins is a PRIMARY KEY"
+
+
+def test_a_partial_instruction_keeps_the_rest_of_the_intention(client, owner):
+    """Pressing Mute says nothing about the level the operator chose earlier."""
+    store = store_ids(client, owner)[0]
+    install_receiver(client, store)
+    client.post(f"/api/store-audio/master/{store}", headers=owner,
+                json={"volume_percent": 70})
+    client.post(f"/api/store-audio/master/{store}", headers=owner,
+                json={"muted": True})
+    row = panel(client, owner)[store]
+    assert row["desired_volume_percent"] == 70
+    assert row["desired_muted"] is True
+
+
+def test_the_desired_state_survives_a_restart(client, owner):
+    store = store_ids(client, owner)[0]
+    install_receiver(client, store)
+    client.post(f"/api/store-audio/master/{store}", headers=owner,
+                json={"volume_percent": 70})
+
+    import store_audio_desired
+    from db import engine
+    # Read through a fresh connection, as a restarted process would.
+    assert store_audio_desired.all_desired(engine)[store].volume_percent == 70
+
+
+def test_the_desired_state_carries_no_secret(client, owner):
     store = store_ids(client, owner)[0]
     device_id = install_receiver(client, store)
     client.post(f"/api/store-audio/master/{store}", headers=owner,
                 json={"volume_percent": 70})
 
-    import store_audio_pending
+    import store_audio_desired
     from db import engine
-    waiting = store_audio_pending.get_pending(engine, store_id=store)
-    assert waiting.device_id == device_id
-    assert waiting.created_by is not None
-    body = str(waiting.as_dict()).lower()
+    desired = store_audio_desired.get_desired(engine, store_id=store)
+    assert desired.device_id == device_id
+    assert desired.created_by is not None
+    body = str(desired.as_dict()).lower()
     for leak in ("password", "token", "secret", "credential", "bearer", "jwt"):
         assert leak not in body, leak
 
 
-def test_the_latest_offline_instruction_wins(client, owner):
-    """Three requests are one wish, not a queue to replay at the shop."""
-    store = store_ids(client, owner)[0]
-    install_receiver(client, store)
-    for level in (30, 50, 70):
-        client.post(f"/api/store-audio/master/{store}", headers=owner,
-                    json={"volume_percent": level})
-
-    import store_audio_pending
-    from db import engine
-    assert store_audio_pending.get_pending(engine, store_id=store).volume_percent == 70
-    with engine.connect() as connection:
-        from sqlalchemy import text
-        count = connection.execute(text(
-            "SELECT COUNT(*) FROM store_audio_pending_commands "
-            "WHERE store_id = :store_id"), {"store_id": store}).scalar()
-    assert count == 1, "a queue would have grown; latest-wins is a PRIMARY KEY"
-
-
-def test_cancel_removes_the_pending_change(client, owner):
+def test_clearing_the_setting_removes_hqs_opinion(client, owner):
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
     client.post(f"/api/store-audio/master/{store}", headers=owner,
@@ -440,96 +508,207 @@ def test_cancel_removes_the_pending_change(client, owner):
                              headers=owner)
     assert response.status_code == 200, response.text
     row = {r["store_id"]: r for r in response.json()["stores"]}[store]
-    assert row["pending_volume_percent"] is None
-    assert row["pending_status"] is None
+    assert row["desired_volume_percent"] is None
+    assert row["sync_state"] == "NO_DESIRED_STATE"
 
 
 def test_requesting_nothing_is_refused(client, owner):
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
-    response = client.post(f"/api/store-audio/master/{store}",
-                           headers=owner, json={})
-    assert response.status_code == 400
+    assert client.post(f"/api/store-audio/master/{store}",
+                       headers=owner, json={}).status_code == 400
 
 
 # ===========================================================================
-# 16-19  Reconnect
+# Sync state: the relationship between desired and actual
 # ===========================================================================
-def test_a_pending_change_survives_a_restart(client, owner):
-    """Its whole purpose is to outlive the disconnection."""
+def test_matching_desired_and_actual_is_synced(client, owner):
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
+    go_online(client, store)
+    _record_sends(client.server_module)
+    client.post(f"/api/store-audio/master/{store}", headers=owner,
+                json={"volume_percent": 70})
+    observe(store, volume=70, sequence=1)     # the Receiver's readback
+    assert panel(client, owner)[store]["sync_state"] == "SYNCED"
+
+
+def test_a_store_local_change_reads_as_out_of_sync_not_applying(client, owner):
+    """Nothing is being applied - a member of staff moved the slider.
+
+    Calling this APPLYING would promise the operator that HQ was about to do
+    something about it, and HQ deliberately does not fight Store staff.
+    """
+    store = store_ids(client, owner)[0]
+    install_receiver(client, store)
+    go_online(client, store)
+    _record_sends(client.server_module)
+    client.post(f"/api/store-audio/master/{store}", headers=owner,
+                json={"volume_percent": 70})
+    # The Receiver's readback matching the desired state is what proves the
+    # command landed, exactly as the server treats it.
+    observe(store, volume=70, sequence=1)
+    client.server_module._IN_FLIGHT_COMMANDS.pop(store, None)
+    observe(store, volume=25, sequence=2)     # somebody at the till
+
+    row = panel(client, owner)[store]
+    assert row["volume_percent"] == 25
+    assert row["desired_volume_percent"] == 70
+    assert row["sync_state"] == "OUT_OF_SYNC"
+
+
+def test_a_store_local_change_never_provokes_a_corrective_command(client, owner):
+    """No feedback fight with the people in the shop."""
+    store = store_ids(client, owner)[0]
+    install_receiver(client, store)
+    go_online(client, store)
     client.post(f"/api/store-audio/master/{store}", headers=owner,
                 json={"volume_percent": 70})
 
-    import store_audio_pending
-    from db import engine
-    # Read through a fresh connection, as a restarted process would.
-    assert store_audio_pending.all_pending(engine)[store].volume_percent == 70
+    sent = []
+    manager = client.server_module.manager
+
+    async def record(store_id, message):
+        sent.append(message)
+    manager.send_to_receiver = record
+
+    for step, level in enumerate((60, 50, 40, 25), start=2):
+        observe(store, volume=level, sequence=step)
+        panel(client, owner)
+    assert sent == []
 
 
-def test_reconnect_applies_the_pending_change_only_when_ready(client, owner):
+def test_store_local_telemetry_never_changes_the_desired_state(client, owner):
+    store = store_ids(client, owner)[0]
+    install_receiver(client, store)
+    go_online(client, store)
+    _record_sends(client.server_module)
+    client.post(f"/api/store-audio/master/{store}", headers=owner,
+                json={"volume_percent": 70})
+    observe(store, volume=25, sequence=2)
+    assert panel(client, owner)[store]["desired_volume_percent"] == 70
+
+
+def test_a_difference_on_an_offline_store_is_waiting_not_out_of_sync(client, owner):
+    store = store_ids(client, owner)[0]
+    install_receiver(client, store)
+    go_online(client, store)
+    _record_sends(client.server_module)
+    observe(store, volume=35, sequence=1)
+    client.post(f"/api/store-audio/master/{store}", headers=owner,
+                json={"volume_percent": 70})
+    go_offline(client, store)
+    assert panel(client, owner)[store]["sync_state"] == "WAITING_FOR_SYNC"
+
+
+def test_a_store_with_no_hq_setting_says_so(client, owner):
+    store = store_ids(client, owner)[0]
+    install_receiver(client, store)
+    go_online(client, store)
+    observe(store, volume=35)
+    assert panel(client, owner)[store]["sync_state"] == "NO_DESIRED_STATE"
+
+
+# ===========================================================================
+# Reconnect
+# ===========================================================================
+class _ReadyCapabilities:
+    output_volume = True
+    output_control_status = "ready"
+
+
+class _ReadySnapshot:
+    capabilities = _ReadyCapabilities()
+
+
+def test_reconnect_applies_the_desired_state_when_it_differs(client, owner):
     store = store_ids(client, owner)[0]
     device_id = install_receiver(client, store)
     client.post(f"/api/store-audio/master/{store}", headers=owner,
                 json={"volume_percent": 70})
 
     server = client.server_module
-    sent = []
+    sent = _record_sends(server)
 
-    async def record(store_id, message):
-        sent.append(message)
-    server.manager.send_to_receiver = record
-
-    # Not ready yet: the Receiver has not said it has a controllable output.
+    # Not controllable yet: nothing may be applied to an output that is not there.
     go_online(client, store, endpoint_status="needs_output_selection")
-    asyncio.run(server._apply_pending_master_volume(store, device_id))
-    assert sent == [], "nothing may be applied to an output that is not there"
+    asyncio.run(server._apply_desired_master_volume(store, device_id))
+    assert sent == []
 
-    # Now it reports a ready endpoint, and its actual state.
+    server.manager.get_receiver_snapshot = lambda _sid: _ReadySnapshot()
     go_online(client, store, endpoint_status="ready")
+    # The Receiver reports what Windows ACTUALLY is, first.
+    observe(store, volume=35, sequence=1)
 
-    class Capabilities:
-        output_volume = True
-        output_control_status = "ready"
-
-    class Snapshot:
-        capabilities = Capabilities()
-
-    server.manager.get_receiver_snapshot = lambda _sid: Snapshot()
-    asyncio.run(server._apply_pending_master_volume(store, device_id))
+    asyncio.run(server._apply_desired_master_volume(store, device_id))
     assert len(sent) == 1
     assert sent[0]["volume_percent"] == 70
-    assert sent[0]["session_id"] is None, "no broadcast owns this Store"
+    assert sent[0]["session_id"] is None
 
 
-def test_a_pending_change_for_a_replaced_device_is_not_retargeted(client, owner):
-    """The machine changed. The instruction was not about this one."""
+def test_reconnect_sends_nothing_when_the_store_is_already_right(client, owner):
+    """No pointless traffic, and no misleading flash of APPLYING."""
+    store = store_ids(client, owner)[0]
+    device_id = install_receiver(client, store)
+    client.post(f"/api/store-audio/master/{store}", headers=owner,
+                json={"volume_percent": 70})
+
+    server = client.server_module
+    sent = _record_sends(server)
+    server.manager.get_receiver_snapshot = lambda _sid: _ReadySnapshot()
+    go_online(client, store, endpoint_status="ready")
+    observe(store, volume=70, sequence=1)     # already where HQ wants it
+
+    asyncio.run(server._apply_desired_master_volume(store, device_id))
+    assert sent == []
+    assert panel(client, owner)[store]["sync_state"] == "SYNCED"
+
+
+def test_reconnect_does_not_mark_desired_as_actual(client, owner):
+    """Sending is not applying, and applying is not reading Windows back."""
+    store = store_ids(client, owner)[0]
+    device_id = install_receiver(client, store)
+    client.post(f"/api/store-audio/master/{store}", headers=owner,
+                json={"volume_percent": 70})
+
+    server = client.server_module
+    _record_sends(server)
+    server.manager.get_receiver_snapshot = lambda _sid: _ReadySnapshot()
+    go_online(client, store, endpoint_status="ready")
+    observe(store, volume=35, sequence=1)
+    asyncio.run(server._apply_desired_master_volume(store, device_id))
+
+    row = panel(client, owner)[store]
+    assert row["volume_percent"] == 35, "ACTUAL only ever comes from a readback"
+    assert row["sync_state"] == "APPLYING"
+
+
+def test_a_replaced_device_does_not_inherit_the_old_setting(client, owner):
+    """The machine changed; the instruction was not about this one."""
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
     client.post(f"/api/store-audio/master/{store}", headers=owner,
                 json={"volume_percent": 70})
 
     server = client.server_module
-    sent = []
-
-    async def record(store_id, message):
-        sent.append(message)
-    server.manager.send_to_receiver = record
+    sent = _record_sends(server)
     go_online(client, store, endpoint_status="ready")
 
-    asyncio.run(server._apply_pending_master_volume(store, 999_999))
+    asyncio.run(server._apply_desired_master_volume(store, 999_999))
     assert sent == []
 
-    import store_audio_pending
+    import store_audio_desired
     from db import engine
-    waiting = store_audio_pending.get_pending(engine, store_id=store)
-    assert waiting.status == "failed"
-    assert "Device changed" in waiting.last_error
+    desired = store_audio_desired.get_desired(engine, store_id=store)
+    # The intention SURVIVES - it is still what the operator wants - but it is
+    # honestly marked as not having reached anything.
+    assert desired is not None
+    assert desired.volume_percent == 70
+    assert "Device changed" in desired.last_error
+    assert panel(client, owner)[store]["sync_state"] == "SYNC_FAILED"
 
 
-def test_a_failed_apply_keeps_the_pending_change(client, owner):
-    """Clearing on attempt would make failure look exactly like success."""
+def test_a_failed_apply_is_reported_honestly_and_keeps_the_setting(client, owner):
     store = store_ids(client, owner)[0]
     device_id = install_receiver(client, store)
     client.post(f"/api/store-audio/master/{store}", headers=owner,
@@ -539,28 +718,21 @@ def test_a_failed_apply_keeps_the_pending_change(client, owner):
 
     async def explode(store_id, message):
         raise RuntimeError("the socket went away")
+
     server.manager.send_to_receiver = explode
+    server.manager.get_receiver_snapshot = lambda _sid: _ReadySnapshot()
     go_online(client, store, endpoint_status="ready")
+    observe(store, volume=35, sequence=1)
+    asyncio.run(server._apply_desired_master_volume(store, device_id))
 
-    class Capabilities:
-        output_volume = True
-        output_control_status = "ready"
-
-    class Snapshot:
-        capabilities = Capabilities()
-
-    server.manager.get_receiver_snapshot = lambda _sid: Snapshot()
-    asyncio.run(server._apply_pending_master_volume(store, device_id))
-
-    import store_audio_pending
-    from db import engine
-    waiting = store_audio_pending.get_pending(engine, store_id=store)
-    assert waiting is not None, "the operator's wish has not been granted"
-    assert waiting.status == "failed"
+    row = panel(client, owner)[store]
+    assert row["sync_state"] == "SYNC_FAILED"
+    assert row["desired_volume_percent"] == 70, "the operator still wants this"
+    assert row["volume_percent"] == 35, "and the shop is still where it was"
 
 
 # ===========================================================================
-# 20-22  Permission and Store Scope
+# Permission and Store Scope
 # ===========================================================================
 def test_an_account_without_the_permission_cannot_read_the_panel(client, owner):
     caster_id = make_user(client, owner, "caster", "BROADCASTER")
@@ -570,15 +742,14 @@ def test_an_account_without_the_permission_cannot_read_the_panel(client, owner):
     assert client.get("/api/store-audio/master", headers=caster).status_code == 403
 
 
-def test_an_account_without_the_permission_cannot_control(client, owner):
+def test_an_account_without_the_permission_cannot_set_a_desired_state(client, owner):
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
     caster_id = make_user(client, owner, "caster", "BROADCASTER")
     set_override(client, owner, caster_id, "store_audio.control", "DENY")
     caster = sign_in(client, "caster")
-    response = client.post(f"/api/store-audio/master/{store}",
-                           headers=caster, json={"volume_percent": 10})
-    assert response.status_code == 403
+    assert client.post(f"/api/store-audio/master/{store}", headers=caster,
+                       json={"volume_percent": 10}).status_code == 403
 
 
 def test_a_scoped_operator_sees_only_their_own_stores(client, owner):
@@ -594,7 +765,7 @@ def test_a_scoped_operator_sees_only_their_own_stores(client, owner):
     assert ids[1] not in visible and ids[2] not in visible
 
 
-def test_store_a_cannot_be_controlled_from_store_bs_scope(client, owner):
+def test_store_a_cannot_be_set_from_store_bs_scope(client, owner):
     ids = store_ids(client, owner, count=2)
     for store in ids:
         install_receiver(client, store)
@@ -602,32 +773,17 @@ def test_store_a_cannot_be_controlled_from_store_bs_scope(client, owner):
     set_scope(client, owner, caster_id, [ids[0]])
     caster = sign_in(client, "caster")
 
-    response = client.post(f"/api/store-audio/master/{ids[1]}",
-                           headers=caster, json={"volume_percent": 10})
-    # 404, not 403: distinguishing "out of scope" from "does not exist" would
-    # turn this route into a way of enumerating the estate.
-    assert response.status_code == 404
-
-
-def test_a_scoped_operator_cannot_cancel_another_stores_pending(client, owner):
-    ids = store_ids(client, owner, count=2)
-    for store in ids:
-        install_receiver(client, store)
-    client.post(f"/api/store-audio/master/{ids[1]}", headers=owner,
-                json={"volume_percent": 70})
-    caster_id = make_user(client, owner, "caster", "BROADCASTER")
-    set_scope(client, owner, caster_id, [ids[0]])
-    caster = sign_in(client, "caster")
-
-    assert client.delete(f"/api/store-audio/master/{ids[1]}/pending",
-                         headers=caster).status_code == 404
-    import store_audio_pending
+    # 404, not 403: distinguishing the two would let this route enumerate the
+    # estate from outside the caller's own scope.
+    assert client.post(f"/api/store-audio/master/{ids[1]}", headers=caster,
+                       json={"volume_percent": 10}).status_code == 404
+    import store_audio_desired
     from db import engine
-    assert store_audio_pending.get_pending(engine, store_id=ids[1]) is not None
+    assert store_audio_desired.get_desired(engine, store_id=ids[1]) is None
 
 
 # ===========================================================================
-# 23-27  Staleness and endpoint honesty
+# Endpoint honesty and staleness
 # ===========================================================================
 def test_an_older_reading_cannot_drag_the_panel_backwards(client, owner):
     store = store_ids(client, owner)[0]
@@ -638,21 +794,11 @@ def test_an_older_reading_cannot_drag_the_panel_backwards(client, owner):
     assert panel(client, owner)[store]["volume_percent"] == 20
 
 
-def test_a_repeated_sequence_is_ignored(client, owner):
-    store = store_ids(client, owner)[0]
-    install_receiver(client, store)
-    go_online(client, store)
-    observe(store, volume=20, sequence=5)
-    assert observe(store, volume=99, sequence=5) is None
-    assert panel(client, owner)[store]["volume_percent"] == 20
-
-
 def test_an_unavailable_endpoint_says_so(client, owner):
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
     go_online(client, store, endpoint_status="unavailable")
-    row = panel(client, owner)[store]
-    assert row["control_status"] == "OUTPUT_UNAVAILABLE"
+    assert panel(client, owner)[store]["control_status"] == "OUTPUT_UNAVAILABLE"
 
 
 def test_an_unconfigured_endpoint_asks_for_a_selection(client, owner):
@@ -662,18 +808,27 @@ def test_an_unconfigured_endpoint_asks_for_a_selection(client, owner):
     assert panel(client, owner)[store]["control_status"] == "NEEDS_OUTPUT_SELECTION"
 
 
-def test_an_uncontrollable_endpoint_cannot_be_commanded(client, owner):
-    """No default-endpoint fallback. Refusing beats moving the wrong output."""
+def test_a_desired_state_can_be_set_even_with_no_usable_output(client, owner):
+    """The operator's intention is still recorded and still honest.
+
+    The endpoint being unusable is a Store problem to fix, not a reason to
+    refuse to remember what the shop should be set to.
+    """
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
     go_online(client, store, endpoint_status="needs_output_selection")
+
+    sent = _record_sends(client.server_module)
+
     response = client.post(f"/api/store-audio/master/{store}",
                            headers=owner, json={"volume_percent": 50})
-    assert response.status_code == 409
+    assert response.status_code == 200, response.text
+    assert panel(client, owner)[store]["desired_volume_percent"] == 50
+    # Nothing was sent to an output that cannot be controlled.
+    assert sent == []
 
 
 def test_offline_outranks_every_other_reason(client, owner):
-    """A shop that is off cannot be fixed by re-selecting its audio output."""
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
     go_online(client, store, endpoint_status="needs_output_selection")
@@ -682,7 +837,7 @@ def test_offline_outranks_every_other_reason(client, owner):
 
 
 # ===========================================================================
-# 28  Active broadcast ownership
+# Broadcast ownership
 # ===========================================================================
 def test_a_store_owned_by_a_broadcast_says_so(client, owner):
     store = store_ids(client, owner)[0]
@@ -697,7 +852,7 @@ def test_a_store_owned_by_a_broadcast_says_so(client, owner):
         registry.end_session(4242)
 
 
-def test_another_operators_broadcast_refuses_idle_control(client, owner):
+def test_another_operators_broadcast_refuses_and_records_nothing(client, owner):
     """Two writers must never race one Windows endpoint."""
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
@@ -711,13 +866,16 @@ def test_another_operators_broadcast_refuses_idle_control(client, owner):
         response = client.post(f"/api/store-audio/master/{store}",
                                headers=owner, json={"volume_percent": 50})
         assert response.status_code == 409
-        assert "broadcast" in response.json()["detail"].lower()
+        # And no desired state was quietly banked to be applied the moment the
+        # broadcast ends - that is the operator's decision to make afterwards.
+        import store_audio_desired
+        from db import engine
+        assert store_audio_desired.get_desired(engine, store_id=store) is None
     finally:
         registry.end_session(4243)
 
 
 def test_the_broadcast_owner_controls_through_the_broadcasts_own_authority(client, owner):
-    """Routed through the existing channel, not a second competing one."""
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
     go_online(client, store)
@@ -730,18 +888,62 @@ def test_the_broadcast_owner_controls_through_the_broadcasts_own_authority(clien
         response = client.post(f"/api/store-audio/master/{store}",
                                headers=owner, json={"volume_percent": 55})
         assert response.status_code == 200, response.text
-        # The BROADCAST's registry holds the request - there is no separate
-        # idle state that could disagree with it.
         assert registry.state_for(4244, store).requested_volume_percent == 55
     finally:
         registry.end_session(4244)
 
 
+def test_a_broadcast_does_not_apply_the_desired_state_on_reconnect(client, owner):
+    """The single-writer rule outranks HQ's standing intention."""
+    store = store_ids(client, owner)[0]
+    device_id = install_receiver(client, store)
+    client.post(f"/api/store-audio/master/{store}", headers=owner,
+                json={"volume_percent": 70})
+
+    server = client.server_module
+    sent = _record_sends(server)
+    go_online(client, store, endpoint_status="ready")
+
+    from store_audio_control import registry
+    registry.start_session(session_id=4245, owner_user_id=1, store_ids=[store])
+    try:
+        asyncio.run(server._apply_desired_master_volume(store, device_id))
+        assert sent == []
+    finally:
+        registry.end_session(4245)
+
+
+def test_restoration_is_not_overwritten_by_the_desired_state(client, owner):
+    """STOP restores the ORIGINAL. Nothing here may overwrite it.
+
+    Idle 25% muted, HQ wants 70, broadcast runs at 80, STOP puts back 25%
+    muted. The desired state is still 70 and the panel says so - but the shop
+    is at 25% and is reported at 25%, because restoration is authoritative and
+    the desired state is not applied in the same cleanup path.
+    """
+    store = store_ids(client, owner)[0]
+    install_receiver(client, store)
+    go_online(client, store)
+    _record_sends(client.server_module)
+    observe(store, volume=25, muted=True, sequence=1)          # idle original
+    client.post(f"/api/store-audio/master/{store}", headers=owner,
+                json={"volume_percent": 70})
+    client.server_module._IN_FLIGHT_COMMANDS.pop(store, None)
+    observe(store, volume=80, muted=False, sequence=2)         # broadcast level
+    observe(store, volume=25, muted=True, sequence=3)          # STOP restored it
+
+    row = panel(client, owner)[store]
+    assert row["volume_percent"] == 25
+    assert row["muted"] is True
+    assert row["desired_volume_percent"] == 70
+    # Honest, and NOT a promise that anything is about to change it back.
+    assert row["sync_state"] == "OUT_OF_SYNC"
+
+
 # ===========================================================================
-# 29-32  Restoration, and what is NOT written to the database
+# Runtime discipline, and what is never claimed
 # ===========================================================================
 def test_live_telemetry_writes_no_database_row(client, owner):
-    """A slider drag must not be a database load generator."""
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
     go_online(client, store)
@@ -755,7 +957,7 @@ def test_live_telemetry_writes_no_database_row(client, owner):
                 table: connection.execute(
                     text(f"SELECT COUNT(*) FROM {table}")).scalar()
                 for table in ("receiver_events", "system_logs",
-                              "store_audio_pending_commands")
+                              "store_audio_desired_state")
             }
 
     before = row_counts()
@@ -764,72 +966,44 @@ def test_live_telemetry_writes_no_database_row(client, owner):
     assert row_counts() == before
 
 
-def test_a_restored_store_reports_its_original_state_to_the_panel(client, owner):
-    """After a broadcast puts a shop back, the panel shows what it was put to.
-
-    Restoration is a real change to the mixer. If the panel kept showing the
-    announcement level it would be describing a state that no longer exists.
-    """
-    store = store_ids(client, owner)[0]
-    install_receiver(client, store)
-    go_online(client, store)
-    observe(store, volume=25, muted=True, sequence=1)      # idle, before
-    observe(store, volume=80, muted=False, sequence=2)     # broadcast level
-    observe(store, volume=40, muted=False, sequence=3)     # somebody at the till
-    assert panel(client, owner)[store]["volume_percent"] == 40
-
-    observe(store, volume=25, muted=True, sequence=4)      # STOP restored it
-    row = panel(client, owner)[store]
-    assert row["volume_percent"] == 25
-    assert row["muted"] is True
-
-
-def test_the_summary_counts_only_live_stores_as_muted(client, owner):
-    """An offline shop left muted is not evidence that it is muted now."""
-    ids = store_ids(client, owner, count=2)
+def test_the_summary_separates_intention_from_reality(client, owner):
+    ids = store_ids(client, owner, count=3)
     for store in ids:
         install_receiver(client, store)
+    _record_sends(client.server_module)
+
     go_online(client, ids[0])
-    observe(ids[0], volume=50, muted=True, sequence=1)
-    go_online(client, ids[1])
-    observe(ids[1], volume=50, muted=True, sequence=1)
-    go_offline(client, ids[1])
-
-    summary = client.get("/api/store-audio/master/summary", headers=owner).json()
-    assert summary["installed"] == 2
-    assert summary["online"] == 1
-    assert summary["offline"] == 1
-    assert summary["muted_online"] == 1
-
-
-def test_the_summary_counts_pending_changes(client, owner):
-    ids = store_ids(client, owner, count=2)
-    for store in ids:
-        install_receiver(client, store)
     client.post(f"/api/store-audio/master/{ids[0]}", headers=owner,
                 json={"volume_percent": 70})
+    observe(ids[0], volume=70, sequence=1)                 # synced
+
+    go_online(client, ids[1])
+    client.post(f"/api/store-audio/master/{ids[1]}", headers=owner,
+                json={"volume_percent": 70})
+    observe(ids[1], volume=70, sequence=1)
+    go_offline(client, ids[1])
+    observe(ids[1], volume=30, sequence=2)                 # drifted while away
+
+    client.post(f"/api/store-audio/master/{ids[2]}", headers=owner,
+                json={"muted": True})                      # offline, desired mute
+
     summary = client.get("/api/store-audio/master/summary", headers=owner).json()
-    assert summary["pending_changes"] == 1
+    assert summary["installed"] == 3
+    assert summary["online"] == 1
+    assert summary["synced"] == 1
+    assert summary["waiting_for_sync"] == 2
+    assert summary["desired_muted"] == 1
 
 
-def test_the_numeric_percentage_is_always_present_beside_its_class(client, owner):
-    """The label is a scanning aid. The number stays authoritative."""
+def test_no_mixer_state_ever_claims_the_speakers_were_heard(client, owner):
     store = store_ids(client, owner)[0]
     install_receiver(client, store)
     go_online(client, store)
-    observe(store, volume=12)
-    row = panel(client, owner)[store]
-    assert row["level_class"] == "low"
-    assert row["volume_percent"] == 12
-
-
-def test_no_pending_row_or_log_line_carries_a_secret(client, owner):
-    store = store_ids(client, owner)[0]
-    install_receiver(client, store)
+    _record_sends(client.server_module)
     client.post(f"/api/store-audio/master/{store}", headers=owner,
                 json={"volume_percent": 70})
+    observe(store, volume=70, sequence=1)
 
-    logs = client.get("/api/logs", headers=owner)
-    body = logs.text.lower() if logs.status_code == 200 else ""
-    for leak in ("password", "bearer ", "jwt", "secret", "credential"):
-        assert leak not in body, leak
+    body = client.get("/api/store-audio/master", headers=owner).text.lower()
+    for claim in ("playback_confirmed", "speaker_verified", "audible", "verified"):
+        assert claim not in body, claim

@@ -381,13 +381,21 @@ class MasterVolumeStoreOut(BaseModel):
     endpoint_status: str = "unknown"
     updated_at: Optional[str] = None
     last_seen_at: Optional[str] = None
-    #: The desired state waiting for this Store to come back. Never presented
-    #: as applied and never as current.
-    pending_volume_percent: Optional[int] = None
-    pending_muted: Optional[bool] = None
-    pending_created_at: Optional[str] = None
-    pending_status: Optional[str] = None
-    pending_error: Optional[str] = None
+    # ---- DESIRED: what HQ wants. Settable at any time, online or not. ----
+    #: None means nobody has ever said what this Store should be set to, which
+    #: is different from wanting it at 0%.
+    desired_volume_percent: Optional[int] = None
+    desired_muted: Optional[bool] = None
+    desired_updated_at: Optional[str] = None
+    #: SYNCED | APPLYING | OUT_OF_SYNC | WAITING_FOR_SYNC | SYNC_FAILED
+    #: | NO_DESIRED_STATE
+    #:
+    #: Derived on every read by comparing desired with actual. Never stored: a
+    #: stored status would be a fourth thing to keep in step with the three
+    #: facts it comes from.
+    sync_state: str = "NO_DESIRED_STATE"
+    #: Why the last attempt to reach the desired state failed, if it did.
+    sync_error: Optional[str] = None
 
 
 class MasterVolumeOut(BaseModel):
@@ -406,7 +414,19 @@ class MasterVolumeSummaryOut(BaseModel):
     #: number that quietly drifts from reality as machines go off.
     muted_online: int
     low_volume_online: int
-    pending_changes: int
+    #: Stores whose actual state matches what HQ wants.
+    synced: int = 0
+    #: Stores whose Receiver has to come back before HQ's intention can reach
+    #: it. Deliberately separate from `offline` - an offline Store nobody has
+    #: expressed an intention about is not waiting for anything.
+    waiting_for_sync: int = 0
+    #: Online, reachable, and different from what HQ wants - normally because
+    #: somebody at the till moved the slider.
+    out_of_sync: int = 0
+    #: Counted from DESIRED state, so it says what HQ intends rather than what
+    #: any shop is currently doing.
+    desired_muted: int = 0
+    desired_low_volume: int = 0
 
 
 class MasterVolumeUpdate(BaseModel):

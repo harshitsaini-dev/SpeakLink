@@ -38,11 +38,11 @@ function row(overrides = {}) {
     endpoint_status: "ready",
     updated_at: new Date().toISOString(),
     last_seen_at: new Date().toISOString(),
-    pending_volume_percent: null,
-    pending_muted: null,
-    pending_created_at: null,
-    pending_status: null,
-    pending_error: null,
+    desired_volume_percent: 65,
+    desired_muted: false,
+    desired_updated_at: new Date().toISOString(),
+    sync_state: "SYNCED",
+    sync_error: null,
     ...overrides,
   };
 }
@@ -71,7 +71,8 @@ afterEach(cleanup);
 test("an installed online Store appears with its live level", async () => {
   await show([row({ volume_percent: 65 })]);
   expect(await screen.findByTestId("master-volume-card-TN")).toBeTruthy();
-  expect(screen.getByTestId("master-volume-value-TN").textContent).toBe("65%");
+  expect(screen.getByTestId("master-volume-actual-TN").textContent)
+    .toBe("Current: 65%");
   expect(screen.getByTestId("master-volume-status-TN").textContent).toBe("ONLINE");
 });
 
@@ -95,188 +96,196 @@ test("the Store's zone is shown", async () => {
 });
 
 // ===========================================================================
-// Current versus remembered - the wording rule
+// THE CONTROLS ARE NEVER DISABLED BY A CONNECTION STATE
 // ===========================================================================
-test("an online Store says Currently", async () => {
-  await show([row({ volume_percent: 65 })]);
-  expect((await screen.findByTestId("master-volume-freshness-TN")).textContent)
-    .toBe("Currently 65%");
-});
-
-test("an offline Store says Last known and never Currently", async () => {
+test("an OFFLINE Store still has a usable slider", async () => {
+  // The defect this rework exists to fix. A manager deciding a shop should be
+  // at 30% is not blocked by that shop's PC being switched off.
   await show([row({ online: false, stale: true, control_status: "OFFLINE",
-                    volume_percent: 35 })]);
-  const freshness = await screen.findByTestId("master-volume-freshness-TN");
-  expect(freshness.textContent).toBe("Last known");
-  expect(freshness.textContent).not.toMatch(/Currently/);
-  // The number is still shown - knowing a shop was left at 35% is useful.
-  expect(screen.getByTestId("master-volume-value-TN").textContent).toBe("35%");
+                    volume_percent: 35, desired_volume_percent: 70,
+                    sync_state: "WAITING_FOR_SYNC" })]);
+  expect((await screen.findByTestId("master-volume-slider-TN")).disabled)
+    .toBe(false);
 });
 
-test("an offline Store says immediate control is unavailable", async () => {
-  await show([row({ online: false, stale: true, control_status: "OFFLINE" })]);
-  expect((await screen.findByTestId("master-volume-offline-note-TN")).textContent)
-    .toBe("Immediate control unavailable.");
-});
-
-test("a Store that has never reported shows no invented number", async () => {
+test("an OFFLINE Store still has a usable mute button", async () => {
   await show([row({ online: false, stale: true, control_status: "OFFLINE",
-                    volume_percent: null, muted: null })]);
-  expect((await screen.findByTestId("master-volume-value-TN")).textContent).toBe("—");
-  expect(screen.getByTestId("master-volume-freshness-TN").textContent)
-    .toBe("Never reported");
+                    sync_state: "WAITING_FOR_SYNC" })]);
+  expect((await screen.findByTestId("master-volume-mute-TN")).disabled)
+    .toBe(false);
 });
 
-test("a muted Store is labelled muted", async () => {
-  await show([row({ muted: true })]);
-  expect(await screen.findByText("Muted")).toBeTruthy();
+test("an OFFLINE Store never says immediate control is unavailable", async () => {
+  await show([row({ online: false, stale: true, control_status: "OFFLINE",
+                    sync_state: "WAITING_FOR_SYNC" })]);
+  const note = await screen.findByTestId("master-volume-offline-note-TN");
+  expect(note.textContent).toMatch(/will sync when it reconnects/);
+  expect(note.textContent).not.toMatch(/unavailable/i);
+});
+
+test("a Store with no controllable output can still be given a setting", async () => {
+  await show([row({ control_status: "NEEDS_OUTPUT_SELECTION",
+                    endpoint_status: "needs_output_selection" })]);
+  expect((await screen.findByTestId("master-volume-slider-TN")).disabled)
+    .toBe(false);
+});
+
+// ===========================================================================
+// DESIRED versus ACTUAL - the wording rule
+// ===========================================================================
+test("an online Store's reading is called Current", async () => {
+  await show([row({ volume_percent: 70, desired_volume_percent: 70 })]);
+  expect((await screen.findByTestId("master-volume-actual-TN")).textContent)
+    .toBe("Current: 70%");
+});
+
+test("an offline Store's reading is Last reported, never Current", async () => {
+  await show([row({ online: false, stale: true, control_status: "OFFLINE",
+                    volume_percent: 35, desired_volume_percent: 70,
+                    sync_state: "WAITING_FOR_SYNC" })]);
+  const actual = await screen.findByTestId("master-volume-actual-TN");
+  expect(actual.textContent).toBe("Last reported: 35%");
+  expect(actual.textContent).not.toMatch(/Current/);
+});
+
+test("a Store that never reported says its Windows state is Unknown", async () => {
+  await show([row({ online: false, stale: true, control_status: "OFFLINE",
+                    volume_percent: null, muted: null,
+                    desired_volume_percent: 70,
+                    sync_state: "WAITING_FOR_SYNC" })]);
+  expect((await screen.findByTestId("master-volume-actual-TN")).textContent)
+    .toBe("Current Windows state: Unknown");
+  // ...and the desired setting is shown anyway.
+  expect(screen.getByTestId("master-volume-desired-TN").textContent)
+    .toBe("Desired: 70%");
+});
+
+test("the desired value is shown separately from the actual one", async () => {
+  await show([row({ volume_percent: 35, desired_volume_percent: 70,
+                    sync_state: "OUT_OF_SYNC" })]);
+  expect((await screen.findByTestId("master-volume-actual-TN")).textContent)
+    .toBe("Current: 35%");
+  expect(screen.getByTestId("master-volume-desired-TN").textContent)
+    .toBe("Desired: 70%");
+});
+
+test("nothing ever says Applied", async () => {
+  await show([row({ online: false, stale: true, control_status: "OFFLINE",
+                    volume_percent: 35, desired_volume_percent: 70,
+                    sync_state: "WAITING_FOR_SYNC" })]);
+  const card = await screen.findByTestId("master-volume-card-TN");
+  expect(card.textContent).not.toMatch(/Applied/i);
+});
+
+test("a Store with no HQ setting says so rather than inventing one", async () => {
+  await show([row({ desired_volume_percent: null, desired_muted: null,
+                    sync_state: "NO_DESIRED_STATE" })]);
+  expect((await screen.findByTestId("master-volume-desired-TN")).textContent)
+    .toBe("Desired: not set");
+});
+
+// ===========================================================================
+// Sync wording
+// ===========================================================================
+test("matching desired and actual reads as Synced", async () => {
+  await show([row({ volume_percent: 70, desired_volume_percent: 70,
+                    sync_state: "SYNCED" })]);
+  expect((await screen.findByTestId("master-volume-sync-TN")).textContent)
+    .toBe("Synced");
+});
+
+test("an offline difference reads as waiting for sync", async () => {
+  await show([row({ online: false, stale: true, control_status: "OFFLINE",
+                    volume_percent: 35, desired_volume_percent: 70,
+                    sync_state: "WAITING_FOR_SYNC" })]);
+  expect((await screen.findByTestId("master-volume-sync-TN")).textContent)
+    .toBe("Waiting for Receiver sync");
+});
+
+test("a Store changed by its own staff says so, not Applying", async () => {
+  // Nothing is being applied. Saying otherwise would promise the operator
+  // that HQ was about to act, and HQ deliberately does not fight Store staff.
+  await show([row({ volume_percent: 25, desired_volume_percent: 70,
+                    sync_state: "OUT_OF_SYNC" })]);
+  expect((await screen.findByTestId("master-volume-sync-TN")).textContent)
+    .toBe("Changed at the Store");
+});
+
+test("a command genuinely in flight reads as Applying", async () => {
+  await show([row({ volume_percent: 35, desired_volume_percent: 70,
+                    sync_state: "APPLYING" })]);
+  expect((await screen.findByTestId("master-volume-sync-TN")).textContent)
+    .toBe("Applying…");
+});
+
+test("a failed sync is reported with its reason", async () => {
+  await show([row({ online: false, stale: true, control_status: "OFFLINE",
+                    desired_volume_percent: 70, sync_state: "SYNC_FAILED",
+                    sync_error: "the Receiver Device changed" })]);
+  expect((await screen.findByTestId("master-volume-sync-TN")).textContent)
+    .toBe("Last sync attempt failed");
+  expect(screen.getByTestId("master-volume-sync-error-TN").textContent)
+    .toBe("the Receiver Device changed");
 });
 
 // ===========================================================================
 // Control
 // ===========================================================================
-test("moving the slider sends exactly one command", async () => {
-  await show([row({ volume_percent: 65 })]);
-  api.post.mockResolvedValue(payload([row({ volume_percent: 65 })]));
-
-  const slider = await screen.findByTestId("master-volume-slider-TN");
-  fireEvent.change(slider, { target: { value: "70" } });
-
-  await waitFor(() => expect(api.post).toHaveBeenCalledTimes(1));
-  expect(api.post).toHaveBeenCalledWith("/store-audio/master/31",
-                                        { volume_percent: 70 });
+test("the slider position is the DESIRED value", async () => {
+  await show([row({ volume_percent: 25, desired_volume_percent: 70 })]);
+  expect((await screen.findByTestId("master-volume-slider-TN")).value).toBe("70");
 });
 
-test("mute sends the opposite of what the Store currently reports", async () => {
-  await show([row({ muted: false })]);
-  api.post.mockResolvedValue(payload([row({ muted: true })]));
+test("moving the slider on an OFFLINE Store still sends the intention", async () => {
+  await show([row({ online: false, stale: true, control_status: "OFFLINE",
+                    desired_volume_percent: 40,
+                    sync_state: "WAITING_FOR_SYNC" })]);
+  api.post.mockResolvedValue(payload([row({ online: false, stale: true,
+                                            control_status: "OFFLINE",
+                                            desired_volume_percent: 70 })]));
+
+  fireEvent.change(await screen.findByTestId("master-volume-slider-TN"),
+                   { target: { value: "70" } });
+  await waitFor(() => expect(api.post).toHaveBeenCalledWith(
+    "/store-audio/master/31", { volume_percent: 70 }));
+});
+
+test("mute toggles the DESIRED mute, not the reported one", async () => {
+  // The Store currently reports itself unmuted, but HQ already wants it muted.
+  // Pressing the button must UNDO the intention, not repeat it.
+  await show([row({ muted: false, desired_muted: true })]);
+  api.post.mockResolvedValue(payload([row({ desired_muted: false })]));
+
+  fireEvent.click(await screen.findByTestId("master-volume-mute-TN"));
+  await waitFor(() => expect(api.post).toHaveBeenCalledWith(
+    "/store-audio/master/31", { muted: false }));
+});
+
+test("an offline mute is still accepted", async () => {
+  await show([row({ online: false, stale: true, control_status: "OFFLINE",
+                    desired_muted: false, sync_state: "WAITING_FOR_SYNC" })]);
+  api.post.mockResolvedValue(payload([row({ desired_muted: true })]));
 
   fireEvent.click(await screen.findByTestId("master-volume-mute-TN"));
   await waitFor(() => expect(api.post).toHaveBeenCalledWith(
     "/store-audio/master/31", { muted: true }));
 });
 
-test("an offline Store's controls are disabled", async () => {
-  await show([row({ online: false, stale: true, control_status: "OFFLINE" })]);
-  expect((await screen.findByTestId("master-volume-slider-TN")).disabled).toBe(true);
-  expect(screen.getByTestId("master-volume-mute-TN").disabled).toBe(true);
+test("clearing the HQ setting is offered only when there is one", async () => {
+  await show([row({ desired_volume_percent: null, desired_muted: null,
+                    sync_state: "NO_DESIRED_STATE" })]);
+  await screen.findByTestId("master-volume-card-TN");
+  expect(screen.queryByTestId("master-volume-clear-TN")).toBeNull();
 });
 
-test("a Store with no selected output cannot be controlled", async () => {
-  await show([row({ control_status: "NEEDS_OUTPUT_SELECTION",
-                    endpoint_status: "needs_output_selection" })]);
-  expect((await screen.findByTestId("master-volume-slider-TN")).disabled).toBe(true);
-  expect(screen.getByTestId("master-volume-status-TN").textContent)
-    .toBe("Re-select the Store audio output");
-});
+test("clearing the HQ setting withdraws the intention", async () => {
+  await show([row({ desired_volume_percent: 70 })]);
+  api.delete.mockResolvedValue(payload([row({ desired_volume_percent: null,
+                                              sync_state: "NO_DESIRED_STATE" })]));
 
-test("an unavailable output is reported honestly", async () => {
-  await show([row({ control_status: "OUTPUT_UNAVAILABLE",
-                    endpoint_status: "unavailable" })]);
-  expect((await screen.findByTestId("master-volume-status-TN")).textContent)
-    .toBe("Store audio output unavailable");
-});
-
-// ===========================================================================
-// NO FEEDBACK LOOP
-// ===========================================================================
-test("incoming state refreshes never generate a command", async () => {
-  // The loop this guards against: HQ draws a reading, answers it with a
-  // command, hears the resulting reading, and never stops.
-  jest.useFakeTimers();
-  try {
-    api.get.mockResolvedValue(payload([row({ volume_percent: 20 })]));
-    render(<MasterVolume />);
-    await screen.findByTestId("master-volume-page");
-
-    for (let tick = 0; tick < 5; tick += 1) {
-      api.get.mockResolvedValue(payload([row({ volume_percent: 20 + tick })]));
-      await act(async () => { jest.advanceTimersByTime(3100); });
-    }
-    expect(api.post).not.toHaveBeenCalled();
-    expect(api.delete).not.toHaveBeenCalled();
-  } finally {
-    jest.useRealTimers();
-  }
-});
-
-test("a Store-local change moves the page with no interaction at all", async () => {
-  jest.useFakeTimers();
-  try {
-    api.get.mockResolvedValue(payload([row({ volume_percent: 70 })]));
-    render(<MasterVolume />);
-    expect((await screen.findByTestId("master-volume-value-TN")).textContent)
-      .toBe("70%");
-
-    // Somebody at the till drags the Windows slider to 20.
-    api.get.mockResolvedValue(payload([row({ volume_percent: 20, level_class: "low" })]));
-    await act(async () => { jest.advanceTimersByTime(3100); });
-
-    expect(screen.getByTestId("master-volume-value-TN").textContent).toBe("20%");
-    expect(api.post).not.toHaveBeenCalled();
-  } finally {
-    jest.useRealTimers();
-  }
-});
-
-// ===========================================================================
-// Pending on reconnect
-// ===========================================================================
-test("a pending change says pending, never applied", async () => {
-  await show([row({
-    online: false, stale: true, control_status: "OFFLINE", volume_percent: 35,
-    pending_volume_percent: 70, pending_muted: false, pending_status: "pending",
-  })]);
-  const pending = await screen.findByTestId("master-volume-pending-TN");
-  expect(pending.textContent).toMatch(/Pending — will apply when Receiver reconnects/);
-  expect(pending.textContent).toMatch(/70%/);
-  expect(pending.textContent).not.toMatch(/Applied/);
-  expect(pending.textContent).not.toMatch(/Currently 70/);
-});
-
-test("a failed pending attempt stays truthful", async () => {
-  await show([row({
-    online: false, stale: true, control_status: "OFFLINE",
-    pending_volume_percent: 70, pending_status: "failed",
-    pending_error: "the Receiver Device changed",
-  })]);
-  const pending = await screen.findByTestId("master-volume-pending-TN");
-  expect(pending.textContent).toMatch(/last attempt failed/);
-  expect(pending.textContent).toMatch(/the Receiver Device changed/);
-  expect(pending.textContent).not.toMatch(/Applied/);
-});
-
-test("Cancel Pending Change withdraws it", async () => {
-  await show([row({
-    online: false, stale: true, control_status: "OFFLINE",
-    pending_volume_percent: 70, pending_status: "pending",
-  })]);
-  api.delete.mockResolvedValue(payload([row({
-    online: false, stale: true, control_status: "OFFLINE" })]));
-
-  fireEvent.click(await screen.findByTestId("master-volume-cancel-TN"));
+  fireEvent.click(await screen.findByTestId("master-volume-clear-TN"));
   await waitFor(() => expect(api.delete).toHaveBeenCalledWith(
     "/store-audio/master/31/pending"));
-  await waitFor(() =>
-    expect(screen.queryByTestId("master-volume-pending-TN")).toBeNull());
-});
-
-test("a Store with no pending change shows no pending block", async () => {
-  await show([row()]);
-  await screen.findByTestId("master-volume-card-TN");
-  expect(screen.queryByTestId("master-volume-pending-TN")).toBeNull();
-});
-
-// ===========================================================================
-// Active broadcast ownership
-// ===========================================================================
-test("a Store an active broadcast owns says so and stays visible", async () => {
-  await show([row({ control_status: "CONTROLLED_BY_BROADCAST" })]);
-  expect((await screen.findByTestId("master-volume-status-TN")).textContent)
-    .toBe("Controlled by active broadcast");
-  // Still visible, and still controllable - the request is routed through the
-  // broadcast's own authority rather than a second competing channel.
-  expect(screen.getByTestId("master-volume-slider-TN").disabled).toBe(false);
 });
 
 test("a refusal from the server is shown rather than swallowed", async () => {
@@ -289,6 +298,55 @@ test("a refusal from the server is shown rather than swallowed", async () => {
   fireEvent.click(await screen.findByTestId("master-volume-mute-TN"));
   expect((await screen.findByTestId("master-volume-error")).textContent)
     .toMatch(/controlled by an active broadcast/);
+});
+
+// ===========================================================================
+// NO FEEDBACK LOOP
+// ===========================================================================
+test("incoming state refreshes never generate a command", async () => {
+  jest.useFakeTimers();
+  try {
+    api.get.mockResolvedValue(payload([row({ volume_percent: 20 })]));
+    render(<MasterVolume />);
+    await screen.findByTestId("master-volume-page");
+
+    for (let tick = 0; tick < 5; tick += 1) {
+      api.get.mockResolvedValue(payload([row({
+        volume_percent: 20 + tick, desired_volume_percent: 70,
+        sync_state: "OUT_OF_SYNC" })]));
+      await act(async () => { jest.advanceTimersByTime(3100); });
+    }
+    expect(api.post).not.toHaveBeenCalled();
+    expect(api.delete).not.toHaveBeenCalled();
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("a Store-local change moves ACTUAL and leaves DESIRED alone", async () => {
+  jest.useFakeTimers();
+  try {
+    api.get.mockResolvedValue(payload([row({ volume_percent: 70,
+                                             desired_volume_percent: 70 })]));
+    render(<MasterVolume />);
+    expect((await screen.findByTestId("master-volume-actual-TN")).textContent)
+      .toBe("Current: 70%");
+
+    // Somebody at the till drags the Windows slider to 20.
+    api.get.mockResolvedValue(payload([row({ volume_percent: 20,
+                                             desired_volume_percent: 70,
+                                             level_class: "low",
+                                             sync_state: "OUT_OF_SYNC" })]));
+    await act(async () => { jest.advanceTimersByTime(3100); });
+
+    expect(screen.getByTestId("master-volume-actual-TN").textContent)
+      .toBe("Current: 20%");
+    expect(screen.getByTestId("master-volume-desired-TN").textContent)
+      .toBe("Desired: 70%");
+    expect(api.post).not.toHaveBeenCalled();
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 // ===========================================================================
@@ -308,11 +366,12 @@ test("search narrows by Store code and name", async () => {
   expect(screen.getByTestId("master-volume-card-TS")).toBeTruthy();
 });
 
-test("the offline filter shows only offline Stores", async () => {
+test("the offline filter narrows the list without disabling anything", async () => {
   await show([
     row(),
     row({ store_id: 32, store_code: "TS", store_name: "Testville South",
-          online: false, stale: true, control_status: "OFFLINE" }),
+          online: false, stale: true, control_status: "OFFLINE",
+          sync_state: "WAITING_FOR_SYNC" }),
   ]);
   await screen.findByTestId("master-volume-card-TN");
 
@@ -320,20 +379,20 @@ test("the offline filter shows only offline Stores", async () => {
                    { target: { value: "offline" } });
   await waitFor(() =>
     expect(screen.queryByTestId("master-volume-card-TN")).toBeNull());
-  expect(screen.getByTestId("master-volume-card-TS")).toBeTruthy();
+  expect(screen.getByTestId("master-volume-slider-TS").disabled).toBe(false);
 });
 
-test("the endpoint filter finds Stores needing a re-selection", async () => {
+test("the sync filter finds Stores waiting to be synced", async () => {
   await show([
     row(),
     row({ store_id: 32, store_code: "TS", store_name: "Testville South",
-          control_status: "NEEDS_OUTPUT_SELECTION",
-          endpoint_status: "needs_output_selection" }),
+          online: false, stale: true, control_status: "OFFLINE",
+          sync_state: "WAITING_FOR_SYNC" }),
   ]);
   await screen.findByTestId("master-volume-card-TN");
 
-  fireEvent.change(screen.getByTestId("master-volume-endpoint"),
-                   { target: { value: "needs_output_selection" } });
+  fireEvent.change(screen.getByTestId("master-volume-sync"),
+                   { target: { value: "WAITING_FOR_SYNC" } });
   await waitFor(() =>
     expect(screen.queryByTestId("master-volume-card-TN")).toBeNull());
   expect(screen.getByTestId("master-volume-card-TS")).toBeTruthy();
@@ -350,22 +409,12 @@ test("the default view shows every installed Store, online or not", async () => 
   expect(screen.getByTestId("master-volume-count").textContent).toBe("2 of 2 Stores");
 });
 
-// ===========================================================================
-// The number stays authoritative
-// ===========================================================================
-test("a low Store still shows its exact percentage", async () => {
-  await show([row({ volume_percent: 12, level_class: "low" })]);
-  // The class is a scanning aid for forty Stores. It never replaces the number.
-  expect((await screen.findByTestId("master-volume-value-TN")).textContent)
-    .toBe("12%");
-});
-
 test("nothing on the page claims a speaker was heard", async () => {
   await show([
     row(),
     row({ store_id: 32, store_code: "TS", store_name: "Testville South",
           online: false, stale: true, control_status: "OFFLINE",
-          pending_volume_percent: 70, pending_status: "pending" }),
+          desired_volume_percent: 70, sync_state: "WAITING_FOR_SYNC" }),
   ]);
   await screen.findByTestId("master-volume-card-TN");
   const page = screen.getByTestId("master-volume-page").textContent.toLowerCase();

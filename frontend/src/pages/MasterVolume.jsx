@@ -5,33 +5,44 @@ import { api } from "@/lib/api";
 /**
  * The estate's Windows master volumes, independent of any broadcast.
  *
- * WHY THIS PAGE EXISTS OUTSIDE THE BROADCAST CONSOLE
+ * WHY THE CONTROLS ARE NEVER DISABLED
  *
- * Setting a shop's volume is done before opening, after a complaint, or when
- * somebody notices a Store has been left muted since Friday - almost never
- * with an announcement on air. Reaching a volume slider used to require
- * starting a broadcast, which made the most routine audio task depend on the
- * least routine one.
+ * They used to grey out whenever a Store was offline, which answered a
+ * question the operator had not asked. Choosing what a shop should be set to
+ * and that shop being reachable this second are different things, and letting
+ * the second decide the first meant a manager could not say "Rajouri should be
+ * at 30%" until somebody switched a PC on.
  *
- * THE THREE THINGS THIS SCREEN MUST NEVER CONFLATE
+ * So the slider and the mute button always work. What changes when a Store is
+ * offline is only what the screen CLAIMS - never what the operator may do.
  *
- *   what a Store IS      - a live reading, and only while it is connected
- *   what it WAS          - a memory, once it goes offline
- *   what we WANT it to be - a pending change that has not happened yet
+ * THE THREE FACTS, WHICH ARE NEVER MERGED
  *
- * Every piece of wording below exists to keep those apart. An offline Store
- * says "Last known", never "Currently"; a queued change says "Pending on
- * reconnect", never "Applied".
+ *   DESIRED     what HQ wants        - the slider position, always settable
+ *   ACTUAL      what Windows reports - only ever from the Receiver's readback
+ *   CONNECTION  can it be applied now - ONLINE or OFFLINE
+ *
+ * "Applied 70%" would be DESIRED wearing ACTUAL's clothes, so it is never
+ * said. A number is only ever called Current when a Receiver read it back.
  */
 
 const REFRESH_MS = 3000;
 
-const STATUS_TEXT = {
+const CONNECTION_TEXT = {
   ONLINE: { label: "ONLINE", tone: "ok" },
   OFFLINE: { label: "OFFLINE", tone: "off" },
   NEEDS_OUTPUT_SELECTION: { label: "Re-select the Store audio output", tone: "warn" },
   OUTPUT_UNAVAILABLE: { label: "Store audio output unavailable", tone: "bad" },
   CONTROLLED_BY_BROADCAST: { label: "Controlled by active broadcast", tone: "warn" },
+};
+
+const SYNC_TEXT = {
+  SYNCED: { label: "Synced", tone: "ok" },
+  APPLYING: { label: "Applying…", tone: "warn" },
+  OUT_OF_SYNC: { label: "Changed at the Store", tone: "warn" },
+  WAITING_FOR_SYNC: { label: "Waiting for Receiver sync", tone: "off" },
+  SYNC_FAILED: { label: "Last sync attempt failed", tone: "bad" },
+  NO_DESIRED_STATE: { label: "No HQ setting", tone: "off" },
 };
 
 const TONE_CLASS = {
@@ -58,6 +69,14 @@ function timeAgo(iso) {
   return new Date(iso).toLocaleString();
 }
 
+/** What the ACTUAL line says. Never "Current" unless a Receiver read it. */
+function actualLine(row) {
+  const known = row.volume_percent !== null && row.volume_percent !== undefined;
+  if (!known) return "Current Windows state: Unknown";
+  if (row.online) return `Current: ${row.volume_percent}%`;
+  return `Last reported: ${row.volume_percent}%`;
+}
+
 export default function MasterVolume() {
   const [rows, setRows] = React.useState([]);
   const [zones, setZones] = React.useState([]);
@@ -69,6 +88,7 @@ export default function MasterVolume() {
   const [zone, setZone] = React.useState("all");
   const [presence, setPresence] = React.useState("all");
   const [endpoint, setEndpoint] = React.useState("all");
+  const [sync, setSync] = React.useState("all");
 
   const apply = React.useCallback((data) => {
     setRows(data.stores || []);
@@ -94,10 +114,10 @@ export default function MasterVolume() {
   }, [refresh]);
 
   /**
-   * Sending is the ONLY thing that produces a command. Incoming state - the
-   * poll above, or a pushed update - updates what is drawn and nothing else.
-   * If displaying a reading could issue a command, HQ would answer its own
-   * telemetry, hear the result, and never stop.
+   * An operator gesture is the ONLY thing that produces a command. The refresh
+   * above updates what is drawn and nothing else - if displaying a reading
+   * could issue a command, HQ would answer its own telemetry for ever, and a
+   * member of staff adjusting a shop's volume would find HQ fighting them.
    */
   const send = async (store, body) => {
     setBusy((current) => ({ ...current, [store.store_id]: true }));
@@ -108,19 +128,19 @@ export default function MasterVolume() {
       setError(null);
     } catch (failure) {
       setError(failure?.response?.data?.detail
-        || `Could not change ${store.store_code}.`);
+        || `Could not set ${store.store_code}.`);
     } finally {
       setBusy((current) => ({ ...current, [store.store_id]: false }));
     }
   };
 
-  const cancelPending = async (store) => {
+  const clearDesired = async (store) => {
     try {
       const response = await api.delete(
         `/store-audio/master/${store.store_id}/pending`);
       apply(response.data);
     } catch (failure) {
-      setError(failure?.response?.data?.detail || "Could not cancel.");
+      setError(failure?.response?.data?.detail || "Could not clear.");
     }
   };
 
@@ -133,6 +153,7 @@ export default function MasterVolume() {
     if (presence === "online" && !row.online) return false;
     if (presence === "offline" && row.online) return false;
     if (endpoint !== "all" && row.endpoint_status !== endpoint) return false;
+    if (sync !== "all" && row.sync_state !== sync) return false;
     return true;
   });
 
@@ -142,8 +163,8 @@ export default function MasterVolume() {
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Master Volume</h1>
           <p className="text-sm text-slate-500">
-            Windows output level for every Store with an installed Receiver.
-            No broadcast required.
+            Choose the Windows output level for any Store with an installed
+            Receiver, online or not. No broadcast required.
           </p>
         </div>
         <button
@@ -206,6 +227,24 @@ export default function MasterVolume() {
         </label>
 
         <label className="text-sm text-slate-600">
+          <span className="sr-only">Sync state</span>
+          <select
+            value={sync}
+            onChange={(event) => setSync(event.target.value)}
+            data-testid="master-volume-sync"
+            className="px-2 py-2 border border-slate-300 rounded-md text-sm"
+          >
+            <option value="all">Any sync state</option>
+            <option value="SYNCED">Synced</option>
+            <option value="WAITING_FOR_SYNC">Waiting for sync</option>
+            <option value="OUT_OF_SYNC">Changed at the Store</option>
+            <option value="APPLYING">Applying</option>
+            <option value="SYNC_FAILED">Sync failed</option>
+            <option value="NO_DESIRED_STATE">No HQ setting</option>
+          </select>
+        </label>
+
+        <label className="text-sm text-slate-600">
           <span className="sr-only">Audio output state</span>
           <select
             value={endpoint}
@@ -236,12 +275,28 @@ export default function MasterVolume() {
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {visible.map((row) => {
-          const status = STATUS_TEXT[row.control_status]
+          const connection = CONNECTION_TEXT[row.control_status]
             || { label: row.control_status, tone: "off" };
-          const controllable = row.control_status === "ONLINE"
-            || row.control_status === "CONTROLLED_BY_BROADCAST";
+          const syncState = SYNC_TEXT[row.sync_state]
+            || { label: row.sync_state, tone: "off" };
           const working = Boolean(busy[row.store_id]);
-          const known = row.volume_percent !== null && row.volume_percent !== undefined;
+          const hasDesired = row.desired_volume_percent !== null
+            && row.desired_volume_percent !== undefined;
+          const desiredMuted = Boolean(row.desired_muted);
+
+          // The slider shows what HQ WANTS. Falling back to the last reported
+          // reading only when nobody has expressed an intention yet, and to a
+          // neutral position when even that is unknown.
+          const sliderValue = hasDesired
+            ? row.desired_volume_percent
+            : (row.volume_percent ?? 50);
+
+          // Nothing about the CONNECTION disables these controls. A Store an
+          // active broadcast owns is refused by the server with a message the
+          // operator can read, which is a genuine conflict rather than a
+          // reason to grey out the control before they have even tried.
+          // Only an in-flight request of this operator's own disables it, to
+          // stop a drag producing a burst of overlapping writes.
 
           return (
             <article
@@ -263,45 +318,64 @@ export default function MasterVolume() {
                 </div>
                 <span
                   data-testid={`master-volume-status-${row.store_code}`}
-                  className={`text-xs px-2 py-1 rounded ${TONE_CLASS[status.tone]}`}
+                  className={`text-xs px-2 py-1 rounded ${TONE_CLASS[connection.tone]}`}
                 >
-                  {status.label}
+                  {connection.label}
                 </span>
               </header>
 
-              {/* The number, always. The class beside it is a scanning aid and
-                  never a replacement - the percentage is what is true. */}
-              <div className="flex items-baseline gap-2">
+              {/* ---- ACTUAL: only ever what a Receiver read back ---- */}
+              <div className="flex items-baseline gap-2 flex-wrap">
                 <span
-                  data-testid={`master-volume-value-${row.store_code}`}
-                  className={`text-2xl font-semibold ${LEVEL_CLASS[row.level_class] || ""}`}
+                  data-testid={`master-volume-actual-${row.store_code}`}
+                  className={`text-sm ${LEVEL_CLASS[row.level_class] || ""}`}
                 >
-                  {known ? `${row.volume_percent}%` : "—"}
+                  {actualLine(row)}
                 </span>
-                {row.muted && (
-                  <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-white">
+                {row.muted === true && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-white">
                     Muted
                   </span>
                 )}
+              </div>
+
+              {/* ---- DESIRED: what HQ wants, always settable ---- */}
+              <div className="flex items-baseline gap-2 flex-wrap">
                 <span
-                  data-testid={`master-volume-freshness-${row.store_code}`}
-                  className="text-xs text-slate-500"
+                  data-testid={`master-volume-desired-${row.store_code}`}
+                  className="text-2xl font-semibold text-slate-900"
                 >
-                  {/* The single most important word on this screen. */}
-                  {row.stale
-                    ? (known ? "Last known" : "Never reported")
-                    : `Currently ${known ? `${row.volume_percent}%` : "unknown"}`}
+                  {hasDesired ? `Desired: ${row.desired_volume_percent}%`
+                              : "Desired: not set"}
                 </span>
+                {desiredMuted && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-white">
+                    Desired muted
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span
+                  data-testid={`master-volume-sync-${row.store_code}`}
+                  className={`text-xs px-2 py-0.5 rounded ${TONE_CLASS[syncState.tone]}`}
+                >
+                  {syncState.label}
+                </span>
+                {row.sync_error && (
+                  <span data-testid={`master-volume-sync-error-${row.store_code}`}
+                        className="text-xs text-red-700">{row.sync_error}</span>
+                )}
               </div>
 
               <input
                 type="range"
                 min="0"
                 max="100"
-                value={known ? row.volume_percent : 0}
-                disabled={!controllable || working}
+                value={sliderValue}
+                disabled={working}
                 data-testid={`master-volume-slider-${row.store_code}`}
-                aria-label={`Master volume for ${row.store_name}`}
+                aria-label={`Desired master volume for ${row.store_name}`}
                 onChange={(event) =>
                   send(row, { volume_percent: Number(event.target.value) })}
                 className="w-full"
@@ -310,14 +384,14 @@ export default function MasterVolume() {
               <div className="flex items-center justify-between gap-2">
                 <button
                   type="button"
-                  disabled={!controllable || working}
+                  disabled={working}
                   data-testid={`master-volume-mute-${row.store_code}`}
-                  aria-pressed={Boolean(row.muted)}
-                  onClick={() => send(row, { muted: !row.muted })}
+                  aria-pressed={desiredMuted}
+                  onClick={() => send(row, { muted: !desiredMuted })}
                   className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border border-slate-300 text-sm disabled:opacity-50"
                 >
-                  {row.muted ? <VolumeX size={15} /> : <Volume2 size={15} />}
-                  {row.muted ? "Unmute" : "Mute"}
+                  {desiredMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                  {desiredMuted ? "Unmute" : "Mute"}
                 </button>
                 <span className="text-xs text-slate-400">
                   {row.online
@@ -327,41 +401,24 @@ export default function MasterVolume() {
               </div>
 
               {!row.online && (
+                // Explains, rather than excusing a control that has been taken
+                // away. The setting is real and it will be applied.
                 <p className="text-xs text-slate-500"
                    data-testid={`master-volume-offline-note-${row.store_code}`}>
-                  Immediate control unavailable.
+                  Receiver offline — this desired setting will sync when it
+                  reconnects.
                 </p>
               )}
 
-              {row.pending_status && (
-                <div
-                  data-testid={`master-volume-pending-${row.store_code}`}
-                  className="rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-900 space-y-1"
+              {hasDesired && (
+                <button
+                  type="button"
+                  onClick={() => clearDesired(row)}
+                  data-testid={`master-volume-clear-${row.store_code}`}
+                  className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-800"
                 >
-                  {/* Never "Applied", and never "Currently". Nothing has
-                      happened to this shop yet. */}
-                  <p className="font-medium">
-                    {row.pending_status === "failed"
-                      ? "Pending — last attempt failed"
-                      : "Pending — will apply when Receiver reconnects"}
-                  </p>
-                  <p>
-                    {row.pending_volume_percent !== null
-                      && row.pending_volume_percent !== undefined
-                      && `${row.pending_volume_percent}%`}
-                    {row.pending_muted !== null && row.pending_muted !== undefined
-                      && ` ${row.pending_muted ? "Muted" : "Unmuted"}`}
-                  </p>
-                  {row.pending_error && <p>{row.pending_error}</p>}
-                  <button
-                    type="button"
-                    onClick={() => cancelPending(row)}
-                    data-testid={`master-volume-cancel-${row.store_code}`}
-                    className="inline-flex items-center gap-1 mt-1 px-2 py-1 rounded border border-amber-300 hover:bg-amber-100"
-                  >
-                    <X size={13} /> Cancel Pending Change
-                  </button>
-                </div>
+                  <X size={13} /> Clear HQ setting
+                </button>
               )}
             </article>
           );
