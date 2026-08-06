@@ -384,9 +384,9 @@ class MasterVolumeStoreOut(BaseModel):
     # ---- DESIRED: what HQ wants. Settable at any time, online or not. ----
     #: None means nobody has ever said what this Store should be set to, which
     #: is different from wanting it at 0%.
-    desired_volume_percent: Optional[int] = None
-    desired_muted: Optional[bool] = None
-    desired_updated_at: Optional[str] = None
+    target_volume_percent: Optional[int] = None
+    target_muted: Optional[bool] = None
+    target_updated_at: Optional[str] = None
     #: SYNCED | APPLYING | OUT_OF_SYNC | WAITING_FOR_SYNC | SYNC_FAILED
     #: | NO_DESIRED_STATE
     #:
@@ -394,7 +394,7 @@ class MasterVolumeStoreOut(BaseModel):
     #: stored status would be a fourth thing to keep in step with the three
     #: facts it comes from.
     sync_state: str = "NO_DESIRED_STATE"
-    #: Why the last attempt to reach the desired state failed, if it did.
+    #: Why the last attempt to reach the target state failed, if it did.
     sync_error: Optional[str] = None
 
 
@@ -423,10 +423,10 @@ class MasterVolumeSummaryOut(BaseModel):
     #: Online, reachable, and different from what HQ wants - normally because
     #: somebody at the till moved the slider.
     out_of_sync: int = 0
-    #: Counted from DESIRED state, so it says what HQ intends rather than what
+    #: Counted from TARGET state, so it says what HQ intends rather than what
     #: any shop is currently doing.
-    desired_muted: int = 0
-    desired_low_volume: int = 0
+    target_muted: int = 0
+    target_low_volume: int = 0
 
 
 class MasterVolumeUpdate(BaseModel):

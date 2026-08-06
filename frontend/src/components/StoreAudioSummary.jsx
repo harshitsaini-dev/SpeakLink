@@ -97,11 +97,11 @@ export default function StoreAudioSummary() {
           </>
         )}
 
-        {summary.desired_muted > 0 && (
+        {summary.target_muted > 0 && (
           <>
-            <dt className="text-slate-500">Desired muted</dt>
+            <dt className="text-slate-500">Target muted</dt>
             <dd data-testid="summary-desired-muted" className="text-right font-medium">
-              {summary.desired_muted}
+              {summary.target_muted}
             </dd>
           </>
         )}
