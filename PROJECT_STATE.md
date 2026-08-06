@@ -6798,3 +6798,88 @@ recording. The frozen Receiver answers `core audio: reachable` and
 
 No live HQ deployment. No Store touched, BP included. No second Store.
 **No software state equals SPEAKER_VERIFIED.**
+
+---
+
+## Fix: Broadcast History showed "No recording" for recorded broadcasts
+
+Branch `fix/broadcast-history-recording-association`.
+
+### The symptom, and what it was not
+
+Seven completed broadcasts all displayed **No recording**, while
+`data/recordings/` visibly held audio. None of the obvious explanations was
+true: the audio was written, the files were finalized, the metadata rows
+existed and said `available`, and the frontend bundle being served was current.
+
+### Root cause, proven before any change
+
+Broadcast History in the browser reads **`/api/broadcast/history/search`** -
+the paginated endpoint added by the admin search work - and **not**
+`/api/broadcast/history`. Recording metadata was attached only to the second.
+
+Both endpoints were queried against the running HQ:
+
+| endpoint | used by the page | `recording` |
+|---|---|---|
+| `/api/broadcast/history` | no | populated for all 7 |
+| `/api/broadcast/history/search` | **yes** | `null` for all 7 |
+
+Two endpoints returning the same shape had drifted, and only one of them was
+ever looked at. The fix attaches recordings through the same shared helper so
+they cannot drift again; the regression test fails without it.
+
+### A second defect found while diagnosing
+
+Recordings resolve from `SPEAKLINK_DATA_DIR`, falling back to the repository's
+own `data/` - which on this machine is the **live** directory. `conftest` had
+scoped the database per worker since the beginning but never the data
+directory, so **any backend test that started a broadcast wrote its `.part`
+file into the folder holding real announcement audio**. Three zero-byte
+orphans appeared there during this task's own regression run. Now scoped, with
+a test asserting recordings can never resolve inside the repository.
+
+### Sessions 1-7: what was recoverable
+
+| session | metadata | file | verdict |
+|---|---|---|---|
+| 1 | `available`, 634,557 B | only a 0-byte `.part` | **not recoverable** |
+| 2 | `failed` (WinError 32 on rename) | 0-byte `.part` | **not recoverable** |
+| 3-7 | `available` | valid Opus/Matroska | **recoverable** |
+
+Sessions 3-7 were confirmed valid by read-only `ffprobe`. Nothing was renamed,
+reconciled or deleted during diagnosis.
+
+**The operator then deleted sessions 1-6 themselves** through the UI at
+12:27-12:28 UTC, between the inspection and the restart -
+`BROADCAST_HISTORY_DELETED by=superadmin`, recorded in `admin_deletion_events`.
+That was not this task and not the restart, and it produced live proof of the
+delete-cleanup path: those sessions' audio files are gone, session 7's
+survives, and the recordings directory itself is intact.
+
+### Live verification after the controlled restart
+
+Gate read 0 non-terminal sessions and 0 unreleased leases, with the stop issued
+**1 ms later from the same process**. Restart produced one worker; `/`,
+`/console`, `/history` and `/api/` all 200.
+
+On the running server, session 7 now returns `recording.status = available`
+from the paginated endpoint, and:
+
+* **Play** - HTTP 200, 87,047 bytes, `inline`
+* **Range** - HTTP 206, 100 bytes, `Content-Range: bytes 0-99/87047`
+* **Download** - HTTP 200, 87,047 bytes, `attachment; filename="broadcast-000007.webm"`
+* the downloaded file passes `ffprobe`: `opus`, `matroska,webm`
+
+### Known limitation
+
+`duration_seconds` is null for these recordings. MediaRecorder writes a
+streaming WebM header with no duration, so `ffprobe` reports `N/A` and the
+metadata honestly stores nothing rather than inventing a figure. Broadcast
+duration is shown separately in History from the session's own timestamps.
+
+### Not done
+
+BP not touched. No second Store. No Store Kit rebuilt - the Receiver source is
+unchanged by this fix, so **Kit 1.7.0 remains current**. No controlled test
+broadcast: that needs a person at the microphone.
