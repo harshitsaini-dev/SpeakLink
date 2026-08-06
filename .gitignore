@@ -308,6 +308,11 @@ build/pyi-work-*/
 **/recordings/*.webm
 **/recordings/*.webm.part
 
+# Test audio fixtures are GENERATED, never committed. The repository refuses
+# to track audio at all (test_repository_contains_no_committed_audio_artifact),
+# and a synthetic tone is no exception - it is built by FFmpeg on demand.
+/frontend/e2e/fixtures/
+
 # Belt and braces for the individual kinds, in case a data directory is
 # relocated with ECHOCAST_DATA_DIR and ends up somewhere else in the tree.
 **/echocast.db

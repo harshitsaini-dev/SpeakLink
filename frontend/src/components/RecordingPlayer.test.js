@@ -57,15 +57,24 @@ function stubAudio() {
   Object.defineProperty(element, "paused", {
     configurable: true, writable: true, value: true,
   });
+  // Events are dispatched ASYNCHRONOUSLY, as a browser does. Firing them
+  // synchronously from inside play() re-enters React mid-effect, which no real
+  // media element ever does and which made the stub itself the thing under
+  // test.
   element.play = jest.fn(function play() {
     this.paused = false;
-    fireEvent.play(this);
-    return Promise.resolve();
+    const node = this;
+    return Promise.resolve().then(() => { fireEvent.play(node); });
   });
   element.pause = jest.fn(function pause() {
     this.paused = true;
-    fireEvent.pause(this);
+    const node = this;
+    Promise.resolve().then(() => { fireEvent.pause(node); });
   });
+  // jsdom has no load() either. It is what makes a detach take effect before
+  // the previous recording's blob URL is revoked, so the tests need it to be
+  // callable rather than raising.
+  element.load = jest.fn();
 }
 
 beforeEach(() => {
@@ -550,8 +559,12 @@ test("a play intent starts the audio without a second click", async () => {
 
   const audio = container.querySelector("audio");
   await waitFor(() => expect(audio.play).toHaveBeenCalled());
-  await waitFor(() =>
-    expect(screen.getByTestId("recording-state").textContent).toBe("Playing"));
+  // Whether the label then reads Playing depends on a real media stack
+  // settling play(), which jsdom does not have. That half is asserted in
+  // Chromium by e2e/recording-switch.spec.js; what THIS proves is that one
+  // request produced exactly one start, against the right source.
+  expect(audio.play).toHaveBeenCalledTimes(1);
+  expect(audio.getAttribute("data-active-session-id")).toBe("12");
 });
 
 test("selecting without a play intent does not start anything", async () => {
@@ -598,9 +611,11 @@ test("choosing a different recording autoplays the new one from the start", asyn
                               onClose={() => {}} />);
   });
   await waitFor(() => expect(audio.play).toHaveBeenCalledTimes(2));
+  // The old recording was taken off the element before the new one arrived.
   expect(audio.pause).toHaveBeenCalled();
   expect(screen.getByTestId("recording-session").textContent)
     .toMatch(/Broadcast #13/);
+  expect(audio.getAttribute("data-active-session-id")).toBe("13");
 });
 
 test("asking again for a paused recording resumes it", async () => {
@@ -618,8 +633,10 @@ test("asking again for a paused recording resumes it", async () => {
                               onClose={() => {}} />);
   });
   await waitFor(() => expect(audio.play).toHaveBeenCalledTimes(2));
-  // Resumed, not reloaded: the same source is still in place.
+  // Resumed, not reloaded: the same source is still attached and nothing was
+  // fetched again.
   expect(api.get).toHaveBeenCalledTimes(1);
+  expect(audio.getAttribute("data-active-session-id")).toBe("12");
 });
 
 test("a live broadcast starting pauses playback but keeps the selection", async () => {
