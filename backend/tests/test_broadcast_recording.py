@@ -521,3 +521,21 @@ def test_the_recording_directory_is_git_ignored():
         ["git", "check-ignore", "data/recordings/broadcast-000123.webm"],
         cwd=REPOSITORY_ROOT, capture_output=True, text=True)
     assert result.returncode == 0, "recordings are not gitignored"
+
+
+def test_the_suite_can_never_write_into_the_live_recordings_directory():
+    """Recordings resolve outside the repository during tests.
+
+    This is not hypothetical. Backend tests that start a broadcast wrote their
+    .part files straight into the repository's data/recordings - which on the
+    HQ machine is the folder holding real announcement audio - and left
+    zero-byte orphans there with no metadata row pointing at them. The database
+    had been scoped since the beginning; the data directory had not, and a
+    stray .part file is invisible until somebody lists the folder.
+    """
+    from conftest import assert_recordings_directory_is_scoped
+
+    scoped = assert_recordings_directory_is_scoped()
+    live = (REPOSITORY_ROOT / "data" / "recordings").resolve()
+    assert scoped != live
+    assert REPOSITORY_ROOT.resolve() not in scoped.parents

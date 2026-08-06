@@ -35,6 +35,8 @@ from pathlib import Path
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
+#: The repository, whose data/ directory is the LIVE HQ's on this machine.
+REPOSITORY_ROOT = BACKEND_ROOT.parent
 PROTECTED_DATABASE = BACKEND_ROOT / "echocast_live.db"
 
 #: One throwaway file per worker. ``PYTEST_XDIST_WORKER`` is set by xdist and
@@ -51,6 +53,43 @@ _DEFAULT_ENGINE_DATABASE = (
 _configured = os.environ.get("ECHOCAST_DB_PATH")
 if not _configured or Path(_configured).resolve() == PROTECTED_DATABASE.resolve():
     os.environ["ECHOCAST_DB_PATH"] = str(_DEFAULT_ENGINE_DATABASE)
+
+# The same protection for the DATA directory, and for the same reason.
+#
+# Recordings resolve from ECHOCAST_DATA_DIR, falling back to the repository's
+# own ``data/`` - which on this machine is the LIVE HQ's directory. Any test
+# that starts a broadcast therefore wrote its .part file straight into the
+# folder holding real announcements, and left zero-byte orphans there with no
+# metadata row pointing at them. The database was scoped from the beginning;
+# the data directory was not, and nothing noticed because a stray .part file
+# is invisible until somebody lists the folder.
+#
+# Scoped per worker, like the database, so parallel workers cannot collide.
+_DEFAULT_DATA_DIR = Path(tempfile.gettempdir()) / f"echocast-tests-data-{_WORKER}"
+_configured_data = os.environ.get("ECHOCAST_DATA_DIR")
+if (not _configured_data
+        or Path(_configured_data).resolve() == (PROTECTED_DATABASE.parent).resolve()
+        or Path(_configured_data).resolve() == (REPOSITORY_ROOT / "data").resolve()):
+    _DEFAULT_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    os.environ["ECHOCAST_DATA_DIR"] = str(_DEFAULT_DATA_DIR)
+
+
+def assert_recordings_directory_is_scoped() -> Path:
+    """Prove recordings cannot land in the repository's live data directory.
+
+    Exposed as a function, not only a module-level side effect, so a test can
+    assert the guarantee rather than trusting that this file ran first.
+    """
+    import broadcast_recording
+
+    resolved = broadcast_recording.recordings_directory().resolve()
+    live = (REPOSITORY_ROOT / "data" / "recordings").resolve()
+    if resolved == live:
+        raise RuntimeError(
+            f"recordings resolved to the live directory ({resolved}). "
+            "Refusing: a test would write into real announcement audio.")
+    return resolved
+
 
 # The test suite is ALWAYS a development environment, whatever the machine it
 # runs on happens to be configured for.
