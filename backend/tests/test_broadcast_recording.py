@@ -533,9 +533,11 @@ def test_the_suite_can_never_write_into_the_live_recordings_directory():
     had been scoped since the beginning; the data directory had not, and a
     stray .part file is invisible until somebody lists the folder.
     """
-    from conftest import assert_recordings_directory_is_scoped
+    # conftest is not importable by name from a test module, so the guarantee
+    # is asserted directly against the same resolution the product uses.
+    import broadcast_recording
 
-    scoped = assert_recordings_directory_is_scoped()
+    scoped = broadcast_recording.recordings_directory().resolve()
     live = (REPOSITORY_ROOT / "data" / "recordings").resolve()
     assert scoped != live
     assert REPOSITORY_ROOT.resolve() not in scoped.parents
