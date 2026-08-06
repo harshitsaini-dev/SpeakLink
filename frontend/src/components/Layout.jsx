@@ -3,6 +3,8 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { Radio, LayoutDashboard, Store as StoreIcon, History, Radar, HardDrive, ScrollText, Users, KeyRound, LogOut, Menu, X, Signal } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { MENU_PERMISSION_BY_PATH } from "@/lib/menuPermissions";
+import RecordingPlayer, { PLAYER_BAR_HEIGHT } from "@/components/RecordingPlayer";
+import { useRecordingPlayback } from "@/contexts/RecordingPlaybackContext";
 
 const NAV = [
   { to: "/console", label: "Broadcast Console", icon: LayoutDashboard, testid: "nav-console" },
@@ -28,6 +30,8 @@ const NAV = [
 
 export default function Layout() {
   const { user, logout, can } = useAuth();
+  const { active, playToken, pauseToken, stopPlayback } =
+    useRecordingPlayback();
   const navigate = useNavigate();
   const [open, setOpen] = React.useState(false);
 
@@ -96,10 +100,23 @@ export default function Layout() {
           </button>
           <div className="text-xs uppercase tracking-[0.15em] text-slate-500">HQ Broadcast Console · v1.0</div>
         </header>
-        <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 md:p-6">
+        {/* Room reserved across EVERY page while the player is up, so no
+            table, pagination control or form action ends up underneath it. */}
+        <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 md:p-6"
+              style={active ? { paddingBottom: PLAYER_BAR_HEIGHT + 24 } : undefined}>
           <Outlet />
         </main>
       </div>
+
+      {/* ONE player for the application. It lives here rather than inside
+          Broadcast History because a recording an operator is listening to is
+          not a property of the page they happen to be on - navigating to
+          Receiver Status used to stop the audio and lose their place. */}
+      <RecordingPlayer
+        session={active}
+        playToken={playToken}
+        pauseToken={pauseToken}
+        onClose={stopPlayback} />
     </div>
   );
 }

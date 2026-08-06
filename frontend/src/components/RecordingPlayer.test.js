@@ -82,9 +82,10 @@ beforeEach(() => {
 afterEach(cleanup);
 
 /** Render the bar on a recording and wait for its audio to arrive. */
-async function showBar(active = session(12)) {
+async function showBar(active = session(12), playToken = 0) {
   api.get.mockResolvedValue({ data: new Blob(["audio"]) });
-  const view = render(<RecordingPlayer session={active} onClose={() => {}} />);
+  const view = render(
+    <RecordingPlayer session={active} playToken={playToken} onClose={() => {}} />);
   await waitFor(() =>
     expect(screen.getByTestId("recording-toggle").disabled).toBe(false));
   return view;
@@ -534,4 +535,107 @@ test("keyboard activation works on the row's Play", () => {
   // these are buttons rather than styled divs.
   fireEvent.click(play);
   expect(onPlay).toHaveBeenCalled();
+});
+
+
+// ===========================================================================
+// One click on History's Play means PLAY
+// ===========================================================================
+test("a play intent starts the audio without a second click", async () => {
+  // The defect this exists to stop: the row button opened the bar and the
+  // operator then had to press the footer's own Play.
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+  const { container } = render(
+    <RecordingPlayer session={session(12)} playToken={1} onClose={() => {}} />);
+
+  const audio = container.querySelector("audio");
+  await waitFor(() => expect(audio.play).toHaveBeenCalled());
+  await waitFor(() =>
+    expect(screen.getByTestId("recording-state").textContent).toBe("Playing"));
+});
+
+test("selecting without a play intent does not start anything", async () => {
+  const { container } = await showBar(session(12), 0);
+  expect(container.querySelector("audio").play).not.toHaveBeenCalled();
+});
+
+test("autoplay waits for the audio, and claims nothing before it", async () => {
+  // Nothing may say Playing until the element's own event fires.
+  let resolveFetch;
+  api.get.mockReturnValue(new Promise((resolve) => { resolveFetch = resolve; }));
+  const { container } = render(
+    <RecordingPlayer session={session(12)} playToken={1} onClose={() => {}} />);
+
+  // The point: nothing is played, and nothing claims to be playing, until
+  // there is actually audio to play.
+  expect(container.querySelector("audio").play).not.toHaveBeenCalled();
+  expect(screen.getByTestId("recording-state").textContent).not.toBe("Playing");
+
+  await act(async () => { resolveFetch({ data: new Blob(["audio"]) }); });
+  await waitFor(() =>
+    expect(container.querySelector("audio").play).toHaveBeenCalled());
+});
+
+test("a browser that refuses to autoplay says so truthfully", async () => {
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+  HTMLMediaElement.prototype.play = jest.fn(() =>
+    Promise.reject(new Error("not allowed")));
+
+  render(<RecordingPlayer session={session(12)} playToken={1} onClose={() => {}} />);
+  expect((await screen.findByTestId("recording-bar-error")).textContent)
+    .toMatch(/could not start automatically/i);
+});
+
+test("choosing a different recording autoplays the new one from the start", async () => {
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+  const { rerender, container } = render(
+    <RecordingPlayer session={session(12)} playToken={1} onClose={() => {}} />);
+  const audio = container.querySelector("audio");
+  await waitFor(() => expect(audio.play).toHaveBeenCalledTimes(1));
+
+  await act(async () => {
+    rerender(<RecordingPlayer session={session(13)} playToken={2}
+                              onClose={() => {}} />);
+  });
+  await waitFor(() => expect(audio.play).toHaveBeenCalledTimes(2));
+  expect(audio.pause).toHaveBeenCalled();
+  expect(screen.getByTestId("recording-session").textContent)
+    .toMatch(/Broadcast #13/);
+});
+
+test("asking again for a paused recording resumes it", async () => {
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+  const { rerender, container } = render(
+    <RecordingPlayer session={session(12)} playToken={1} onClose={() => {}} />);
+  const audio = container.querySelector("audio");
+  await waitFor(() => expect(audio.play).toHaveBeenCalledTimes(1));
+
+  await act(async () => { fireEvent.click(screen.getByTestId("recording-toggle")); });
+  expect(audio.paused).toBe(true);
+
+  await act(async () => {
+    rerender(<RecordingPlayer session={session(12)} playToken={2}
+                              onClose={() => {}} />);
+  });
+  await waitFor(() => expect(audio.play).toHaveBeenCalledTimes(2));
+  // Resumed, not reloaded: the same source is still in place.
+  expect(api.get).toHaveBeenCalledTimes(1);
+});
+
+test("a live broadcast starting pauses playback but keeps the selection", async () => {
+  // A recording out of the HQ speakers can be picked up by the HQ microphone.
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+  const { rerender, container } = render(
+    <RecordingPlayer session={session(12)} playToken={1} pauseToken={0}
+                     onClose={() => {}} />);
+  const audio = container.querySelector("audio");
+  await waitFor(() => expect(audio.play).toHaveBeenCalled());
+
+  await act(async () => {
+    rerender(<RecordingPlayer session={session(12)} playToken={1} pauseToken={1}
+                              onClose={() => {}} />);
+  });
+  expect(audio.pause).toHaveBeenCalled();
+  // Still selected, so the operator can carry on afterwards.
+  expect(screen.getByTestId("recording-player-bar")).toBeTruthy();
 });

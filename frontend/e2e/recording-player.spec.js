@@ -40,15 +40,18 @@ const SESSIONS = [
                  error: 'no space left on device' } },
 ];
 
-/** A tiny real WebM so the audio element has something legitimate to load. */
+const fs = require('fs');
+const path = require('path');
+
+// A REAL 13-second Opus/WebM, remuxed exactly as the backend now finalizes a
+// recording - so Chromium sees a finite duration and can seek immediately. A
+// stub header would prove nothing about seeking, which is the whole point.
+const FIXTURE = fs.readFileSync(path.join(__dirname, 'fixtures/recording-13s.webm'));
+
 async function serveRecordingAudio(page) {
   for (const kind of ['audio', 'download']) {
     await page.route(`**/api/broadcast/sessions/*/recording/${kind}`, (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: 'audio/webm',
-        body: Buffer.from('1a45dfa3', 'hex'),   // an EBML header and nothing more
-      }));
+      route.fulfill({ status: 200, contentType: 'audio/webm', body: FIXTURE }));
   }
 }
 
@@ -224,15 +227,34 @@ test('Download reaches the authenticated download route', async ({ page }) => {
   expect(seen.url()).not.toMatch(/token|password/);
 });
 
-test('the sidebar stays usable while the player is open', async ({ page }) => {
+test('the player survives navigation and keeps its place', async ({ page }) => {
+  // A recording an operator is listening to is not a property of the page
+  // they happen to be on.
   await page.goto('/history');
   await page.getByTestId('recording-play-8').click();
-  await expect(page.getByTestId('recording-player-bar')).toBeVisible();
+  await expect(page.getByTestId('recording-state')).toHaveText('Playing');
+
+  await page.waitForTimeout(1200);
+  const before = await page.locator('audio').first()
+    .evaluate((node) => node.currentTime);
+  expect(before).toBeGreaterThan(0);
 
   await page.getByTestId('nav-receivers').click();
   await expect(page).toHaveURL(/\/receivers/);
-  // Leaving History takes the player with it.
-  await expect(page.getByTestId('recording-player-bar')).toBeHidden();
+  await expect(page.getByTestId('recording-player-bar')).toBeVisible();
+  await expect(page.getByTestId('recording-state')).toHaveText('Playing');
+
+  await page.getByTestId('nav-stores').click();
+  await expect(page).toHaveURL(/\/stores/);
+  await expect(page.getByTestId('recording-player-bar')).toBeVisible();
+
+  const after = await page.locator('audio').first()
+    .evaluate((node) => node.currentTime);
+  // Carried on rather than restarting.
+  expect(after).toBeGreaterThan(before);
+
+  await page.getByTestId('nav-history').click();
+  await expect(page.getByTestId('recording-session')).toContainText('Broadcast #8');
 });
 
 test('a failed recording offers no player at all', async ({ page }) => {
@@ -249,4 +271,99 @@ test('the recording controls are reachable by keyboard', async ({ page }) => {
 
   await page.keyboard.press('Enter');
   await expect(page.getByTestId('recording-player-bar')).toBeVisible();
+});
+
+
+// ===========================================================================
+// One click means play
+// ===========================================================================
+test('ONE click on History Play actually plays', async ({ page }) => {
+  // The defect: the row button opened the bar and the operator then had to
+  // press the footer's own Play. This asserts real playback in real Chromium,
+  // with no second click anywhere.
+  await page.goto('/history');
+  await page.getByTestId('recording-play-8').click();
+
+  await expect(page.getByTestId('recording-player-bar')).toBeVisible();
+  await expect(page.getByTestId('recording-state')).toHaveText('Playing');
+
+  const advanced = await page.locator('audio').first().evaluate(async (node) => {
+    const start = node.currentTime;
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    return node.currentTime > start && !node.paused;
+  });
+  expect(advanced).toBe(true);
+});
+
+test('the footer button shows Pause once it is genuinely playing', async ({ page }) => {
+  await page.goto('/history');
+  await page.getByTestId('recording-play-8').click();
+  await expect(page.getByTestId('recording-state')).toHaveText('Playing');
+  // A red Play icon here would suggest another click is needed.
+  await expect(page.getByTestId('recording-toggle'))
+    .toHaveAttribute('aria-label', 'Pause');
+});
+
+test('choosing another recording plays it with one click', async ({ page }) => {
+  await page.goto('/history');
+  await page.getByTestId('recording-play-8').click();
+  await expect(page.getByTestId('recording-state')).toHaveText('Playing');
+
+  await page.getByTestId('recording-play-9').click();
+  await expect(page.getByTestId('recording-session')).toContainText('Broadcast #9');
+  await expect(page.getByTestId('recording-state')).toHaveText('Playing');
+  expect(await page.locator('audio').count()).toBe(1);
+});
+
+// ===========================================================================
+// Seeking works immediately
+// ===========================================================================
+test('a finished recording exposes its duration before it is played', async ({ page }) => {
+  await page.goto('/history');
+  await page.getByTestId('recording-play-8').click();
+
+  await expect(page.getByTestId('recording-duration')).toHaveText('0:13');
+  await expect(page.getByTestId('recording-seek')).toBeEnabled();
+});
+
+test('the operator can seek forward immediately, without listening through', async ({ page }) => {
+  // The reported defect: seeking only became possible after most of the clip
+  // had already played.
+  await page.goto('/history');
+  await page.getByTestId('recording-play-8').click();
+  await expect(page.getByTestId('recording-seek')).toBeEnabled();
+
+  const audio = page.locator('audio').first();
+  expect(await audio.evaluate((node) => node.currentTime)).toBeLessThan(3);
+
+  await page.getByTestId('recording-seek').fill('10');
+  expect(await audio.evaluate((node) => node.currentTime)).toBeGreaterThan(9);
+
+  // ...and back again, still without waiting.
+  await page.getByTestId('recording-seek').fill('2');
+  expect(await audio.evaluate((node) => node.currentTime)).toBeLessThan(3);
+});
+
+test('the ten second skips work immediately', async ({ page }) => {
+  await page.goto('/history');
+  await page.getByTestId('recording-play-8').click();
+  await expect(page.getByTestId('recording-seek')).toBeEnabled();
+
+  const audio = page.locator('audio').first();
+  await page.getByTestId('recording-forward').click();
+  expect(await audio.evaluate((node) => node.currentTime)).toBeGreaterThan(9);
+
+  await page.getByTestId('recording-back').click();
+  expect(await audio.evaluate((node) => node.currentTime)).toBeLessThan(3);
+});
+
+test('the bottom clearance follows the operator across pages', async ({ page }) => {
+  await page.goto('/history');
+  await page.getByTestId('recording-play-8').click();
+  await expect(page.getByTestId('recording-player-bar')).toBeVisible();
+
+  await page.getByTestId('nav-stores').click();
+  const padding = await page.locator('main').evaluate(
+    (node) => getComputedStyle(node).paddingBottom);
+  expect(parseInt(padding, 10)).toBeGreaterThan(90);
 });

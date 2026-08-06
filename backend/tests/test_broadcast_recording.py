@@ -541,3 +541,94 @@ def test_the_suite_can_never_write_into_the_live_recordings_directory():
     live = (REPOSITORY_ROOT / "data" / "recordings").resolve()
     assert scoped != live
     assert REPOSITORY_ROOT.resolve() not in scoped.parents
+
+
+# ===========================================================================
+# The finished file must be SEEKABLE, not merely playable
+# ===========================================================================
+def test_a_finished_recording_carries_a_finite_duration(engine, tmp_path):
+    """The defect this exists to stop.
+
+    MediaRecorder writes a STREAMING WebM: a header with no duration and no
+    cues, because when it starts it does not know how long the broadcast will
+    run. Appending its chunks produces a file every player can decode and none
+    can seek - Chromium refuses to let an operator drag the scrubber past what
+    it has buffered, so a thirteen-second announcement could not be skipped
+    through until it had nearly finished playing.
+    """
+    source = make_webm(tmp_path / "source.webm", seconds=13.0)
+    writer = broadcast_recording.RecordingWriter(
+        session_id=1, directory=tmp_path / "recordings")
+    status = write(writer, [source[i:i + 4096]
+                            for i in range(0, len(source), 4096)])
+    assert status == broadcast_recording.STATUS_AVAILABLE
+
+    probed = broadcast_recording.probe_recording(writer.final_path)
+    if not probed:
+        pytest.skip("ffprobe is not installed on this machine")
+    duration = probed.get("duration_seconds")
+    assert duration is not None, "a browser cannot seek a file with no duration"
+    assert 12.0 <= duration <= 14.0, duration
+
+
+def test_the_audio_is_stream_copied_and_never_re_encoded(engine, tmp_path):
+    """Same codec, same rate, same channels: only the container is rewritten."""
+    source = make_webm(tmp_path / "source.webm", seconds=2.0)
+    before = broadcast_recording.probe_recording(tmp_path / "source.webm")
+    if not before:
+        pytest.skip("ffprobe is not installed on this machine")
+
+    writer = broadcast_recording.RecordingWriter(
+        session_id=1, directory=tmp_path / "recordings")
+    write(writer, [source])
+    after = broadcast_recording.probe_recording(writer.final_path)
+
+    assert after["codec"] == before["codec"] == "opus"
+    assert writer.remuxed is True
+
+
+def test_the_input_survives_until_the_finished_file_exists(engine, tmp_path):
+    """A recording of a real announcement is not something to gamble with."""
+    directory = tmp_path / "recordings"
+    source = make_webm(tmp_path / "source.webm", seconds=1.0)
+    writer = broadcast_recording.RecordingWriter(session_id=1, directory=directory)
+    write(writer, [source])
+
+    # The .part is removed only after the final file is in place.
+    assert writer.final_path.exists()
+    assert not writer.part_path.exists()
+    assert not Path(str(writer.final_path) + ".remux").exists()
+
+
+def test_a_recording_is_still_published_when_the_remux_cannot_run(engine, tmp_path,
+                                                                  monkeypatch):
+    """A file that plays but seeks poorly beats no recording at all."""
+    monkeypatch.setattr(broadcast_recording, "_ffmpeg_binary", lambda: None)
+    writer = broadcast_recording.RecordingWriter(
+        session_id=1, directory=tmp_path / "recordings")
+    assert write(writer, [b"chunk-one", b"chunk-two"]) ==         broadcast_recording.STATUS_AVAILABLE
+
+    assert writer.final_path.read_bytes() == b"chunk-onechunk-two"
+    assert writer.remuxed is False
+    assert "ffmpeg" in writer.remux_error
+
+
+def test_a_remux_that_produces_rubbish_is_discarded(engine, tmp_path):
+    """The original is published rather than something worse."""
+    writer = broadcast_recording.RecordingWriter(
+        session_id=1, directory=tmp_path / "recordings")
+    # Not a WebM at all, so FFmpeg cannot copy it.
+    assert write(writer, [b"definitely not a container" * 50]) ==         broadcast_recording.STATUS_AVAILABLE
+    assert writer.remuxed is False
+    assert writer.final_path.exists()
+    assert not Path(str(writer.final_path) + ".remux").exists()
+
+
+def test_finalize_container_never_touches_the_input(engine, tmp_path):
+    source_bytes = make_webm(tmp_path / "in.webm", seconds=1.0)
+    part = tmp_path / "in.webm"
+    outcome = broadcast_recording.finalize_container(part, tmp_path / "out.webm")
+    if not outcome.get("remuxed"):
+        pytest.skip("ffmpeg is not installed on this machine")
+    # The input is byte-identical afterwards.
+    assert part.read_bytes() == source_bytes
