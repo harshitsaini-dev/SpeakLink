@@ -49,7 +49,19 @@ def test_the_repository_root_is_found_from_the_file_not_the_cwd(launcher):
     assert "parents[1]" in SOURCE
 
 
-def test_data_lives_inside_the_repository_by_default(launcher):
+@pytest.fixture()
+def default_data_environment(monkeypatch):
+    """Ask the launcher what it does when nothing overrides it.
+
+    The suite sets SPEAKLINK_DATA_DIR globally so a test that starts a broadcast
+    cannot write into the live recordings directory. These two tests are about
+    the DEFAULT, so they have to clear it - otherwise they would be asserting
+    the test harness's choice rather than the product's.
+    """
+    monkeypatch.delenv("SPEAKLINK_DATA_DIR", raising=False)
+
+
+def test_data_lives_inside_the_repository_by_default(launcher, default_data_environment):
     assert launcher.data_dir() == REPOSITORY_ROOT / "data"
     assert launcher.database_path() == REPOSITORY_ROOT / "data" / "speaklink.db"
     assert launcher.keys_dir() == REPOSITORY_ROOT / "data" / "keys"
@@ -63,7 +75,7 @@ def test_the_data_directory_can_be_relocated(launcher, tmp_path, monkeypatch):
     assert launcher.data_dir() == (tmp_path / "elsewhere").resolve()
 
 
-def test_nothing_resolves_through_appdata(launcher):
+def test_nothing_resolves_through_appdata(launcher, default_data_environment):
     """The whole point of the change.
 
     Checked as USE rather than as the word: the docstrings deliberately
