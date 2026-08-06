@@ -38,7 +38,10 @@ os.environ.setdefault(
     str(Path(tempfile.gettempdir()) / "echocast-tests-default-engine.db"),
 )
 
-from store_audio_control import StoreAudioControlRegistry  # noqa: E402
+from store_audio_control import (  # noqa: E402
+    InvalidVolumeError,
+    StoreAudioControlRegistry,
+)
 from tools.windows_endpoint_observer import EndpointObserver  # noqa: E402
 
 BP_ID = "{0.0.0.00000000}.{aaaaaaaa-1111-2222-3333-444444444444}"
@@ -222,8 +225,15 @@ def test_mute_telemetry_flows_both_ways(registry):
 
 
 def test_an_out_of_range_reading_is_refused(registry):
-    from store_audio_control import InvalidVolumeError
-
+    # InvalidVolumeError is imported at the TOP of this file, from the same
+    # import that produced StoreAudioControlRegistry, so the exception class
+    # and the object that raises it come from one module object.
+    #
+    # Importing it here instead would look identical and be wrong: other suites
+    # deliberately drop store_audio_control from sys.modules to build a clean
+    # server, so a later import returns a NEW module whose InvalidVolumeError
+    # is a different class - and pytest.raises would report "DID NOT RAISE"
+    # while the exception was in fact raised.
     with pytest.raises(InvalidVolumeError):
         registry.observe_endpoint_state(session_id=7, store_id=10,
                                         state_sequence=1, volume_percent=150,

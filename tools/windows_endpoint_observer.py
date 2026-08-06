@@ -34,6 +34,8 @@ waiting on a WebSocket.
 
 from __future__ import annotations
 
+import gc
+
 import threading
 from dataclasses import dataclass
 
@@ -249,3 +251,19 @@ def notifications_supported(*, backend=None) -> tuple[bool, str]:
                 control.UnregisterControlChangeNotify(probe)
             except Exception:
                 pass
+        # Release the COM pointers HERE, deterministically, instead of leaving
+        # them to whenever the garbage collector next runs.
+        #
+        # comtypes releases an interface from __del__. If that runs during a
+        # later collection - on another thread, or after COM has been torn
+        # down - the process dies with an access violation rather than an
+        # exception, and the traceback points at whatever unrelated code
+        # happened to allocate at that moment. That is exactly what this
+        # diagnostic caused when it was added: a crash during an import in a
+        # completely different test file.
+        #
+        # Dropping the references and collecting inside the function keeps the
+        # release in the same call, on the same thread, while COM is still up.
+        del control
+        del probe
+        gc.collect()
