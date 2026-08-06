@@ -6447,7 +6447,51 @@ pending change of 70 after 30 and 70 were sent (latest wins).
 | Restored to original | yes | yes | yes | yes |
 | CPU s · RSS MB | 0.25 · 85.7 | 0.47 · 87.1 | 0.73 · 90.1 | 1.3 · 96.5 |
 
+### Regression
+
+Backend **3430 passed, 0 failed**, frontend **260**, Playwright **300**,
+production build OK, `compileall` clean, `pip check` clean, `git diff --check`
+clean, secret scan clean.
+
+Three real defects were found by the suite and fixed rather than worked around:
+
+* Adding the change-notification line to Receiver diagnostics killed the whole
+  test process with a **Windows access violation** in an unrelated file.
+  `comtypes` releases an interface from `__del__`, so the probe's COM pointers
+  were released whenever the collector next ran - by then on another thread.
+  They are now dropped and collected inside the probe call.
+* The Master Volume page, the audio summary card and the recording player all
+  imported `@/lib/api` as a **default export**, which it does not have. The
+  production build caught it; the unit tests had not, because their mocks
+  invented a default export instead of describing the real module.
+* `RecordingWriter.start()` created its directory outside its own guard, so a
+  file in the way of the recordings folder would have raised into the path that
+  starts a broadcast.
+
+### Store Kit 1.6.0
+
+| | |
+|---|---|
+| ZIP | `artifacts/EchoCast-Store-Kit-1.6.0-eb20c17-20260806-090532.zip` |
+| SHA-256 | `ce7eb3be12b34e419c60185af78a06d42deca20c8d1dd5378e60998a2b79460c` |
+| Receiver **1.3.0** · Kit **1.6.0** | 1.2.0-1.5.3 retained, none overwritten |
+
+Verified inside the shipped executable by extracting the PYZ: `pycaw` (14
+modules), `comtypes` (44), the observer, and `ensure_endpoint_observer`,
+`stop_endpoint_observer`, `read_endpoint_state_now`,
+`_report_endpoint_state_now` and `endpoint_state` in the Receiver itself.
+
+Package audit found no database, credential, key, `.env`, log, `.git`,
+`.venv`, `node_modules`, recording or developer path. The frozen Receiver was
+asked directly and answered:
+
+```
+core audio     : reachable (3 active endpoint(s))
+change reports : yes - endpoint change notifications supported
+```
+
 ### Not done
 
-No live HQ deployment. No Store touched, BP included. No second Store. No
-physical acceptance. **No software state equals SPEAKER_VERIFIED.**
+No live HQ deployment. No Store touched, BP included. No second Store. Store
+Kit 1.6.0 **not installed anywhere**. No physical acceptance.
+**No software state equals SPEAKER_VERIFIED.**
