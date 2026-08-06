@@ -1,6 +1,6 @@
 import React from "react";
 import { Volume2, VolumeX, Search, RefreshCw, X } from "lucide-react";
-import api from "@/lib/api";
+import { api } from "@/lib/api";
 
 /**
  * The estate's Windows master volumes, independent of any broadcast.

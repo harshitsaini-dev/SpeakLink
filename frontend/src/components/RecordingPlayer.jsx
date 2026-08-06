@@ -1,6 +1,6 @@
 import React from "react";
 import { Play, AlertTriangle, FileX } from "lucide-react";
-import api from "@/lib/api";
+import { api } from "@/lib/api";
 
 /**
  * Plays back one broadcast's recording, honestly.
