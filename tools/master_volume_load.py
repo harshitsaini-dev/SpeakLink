@@ -180,9 +180,11 @@ async def _drive(paths, store_count: int, port: int, backend_pid: int) -> dict:
                 refusals[str(status)] = refusals.get(str(status), 0) + 1
         await asyncio.sleep(1.5)
 
-        # ---- the offline Store can only be given a pending change ---------
+        # ---- the offline Store is given a DESIRED state, and accepts it ----
+        # It is offline throughout, so this measures the case the whole rework
+        # exists for: the operator is never refused because a shop is off.
         offline_status = command(offline.store_id, volume_percent=70)
-        # Latest wins: three requests are one wish.
+        # Latest wins: three requests are one intention.
         command(offline.store_id, volume_percent=30)
         command(offline.store_id, volume_percent=70)
 
@@ -206,8 +208,8 @@ async def _drive(paths, store_count: int, port: int, backend_pid: int) -> dict:
             "offline_store_listed": offline.store_id in after,
             "offline_store_is_stale": offline_row.get("stale"),
             "offline_store_says_offline": offline_row.get("control_status") == "OFFLINE",
-            "offline_pending_volume": offline_row.get("pending_volume_percent"),
-            "offline_pending_status": offline_row.get("pending_status"),
+            "offline_desired_volume": offline_row.get("desired_volume_percent"),
+            "offline_sync_state": offline_row.get("sync_state"),
             "offline_command_status": offline_status,
             # 43 local changes must not become 43 frames on the wire.
             "telemetry_generated": sum(r.endpoint_states_generated for r in connecting),
