@@ -6228,3 +6228,82 @@ physical acceptance — **no software state equals SPEAKER_VERIFIED**.
 
 Any future HQ restart must again check LIVE/PENDING == 0 **and** unreleased
 leases == 0 in the same controlled operation immediately before the stop.
+
+---
+
+## Live HQ deployment — two-way volume sync (2026-08-06)
+
+Source deployed: `feature/windows-volume-two-way-sync` @ `3d452ad`, tree clean
+and equal to origin.
+
+### Gate and stop, in one operation
+
+The gate read 0 non-terminal sessions and 0 unreleased leases, and the stop was
+issued **1 ms later from the same process**. The query counts sessions whose
+status is **not** in the known-terminal set rather than matching `LIVE`/`PENDING`
+literally — this database stores them lowercase (`ended`, `failed`,
+`emergency_stopped`), so a literal match would have waved a live broadcast
+through. The safe direction is to require a known-finished status.
+
+| | |
+|---|---|
+| Rollback backup | `_live-hq-deployment-backups/speaklink-before-two-way-sync-20260806-114500.db` |
+| Size / SHA-256 | 692,224 bytes · `a44ad5f916b6e5c62137afc81a029661a561442d256e33fd779b5c8b24737734` |
+| Verified | `integrity_check ok`, `foreign_key_check` 0 rows, 25 tables |
+| Receiver key | `748a99f2…`, 470 bytes — unchanged before and after |
+
+Taken with SQLite's online-backup API, not a file copy: the live database
+carried a **4.1 MB WAL**, and the backup contains 1009 `receiver_events` where
+the stale `backend/speaklink_live.db` on the default path holds a July snapshot
+of 13 demo Stores. The live database is `data/speaklink.db` (44 Stores), which
+the launcher resolves — worth recording, because the default path looks
+plausible and is wrong.
+
+### Result
+
+Stop clean (pid 12500, port 8000 released, both PIDs gone). Start produced pid
+10452 with `--workers 1`, `Receiver key container present … reused unchanged`,
+and `SpeakLink startup complete`.
+
+**All 25 tables identical before and after**, no table added or lost, no
+migration pending (`schema_migrations` 1 → 1). `integrity_check ok`,
+`foreign_key_check` 0 rows.
+
+`/` 200, `/console` 200, `/api/` 200 on both the LAN address and localhost.
+
+The frontend was rebuilt from HEAD and produced the **identical content-hashed
+bundle** `main.94afa172.js`. The bundle was then fetched **from the running
+server** and its SHA-256 matched the file on disk byte for byte
+(`d242e41a…`), carrying `actual_volume_percent`, `actual_muted`, `Currently `
+and `Re-select the Store audio output`. `actual_state_sequence` is absent from
+the bundle and should be: it is server-side ordering, and the frontend never
+names it.
+
+The live server's own OpenAPI declares `StoreAudioStateOut` with
+`actual_volume_percent`, `actual_muted`, `actual_state_sequence` and
+`actual_state_updated_at` — fields that exist only in this source, so the new
+backend is genuinely the one answering.
+
+### BP was already offline before this deployment
+
+BP's Receiver did **not** reconnect, and the deployment did not cause that.
+Its last connection ended at **2026-08-06 04:13:41 UTC**, about 1 h 55 m before
+the stop at 06:08:40 UTC. Two independent observations agree: no
+`192.168.4.171` socket existed at the pre-stop baseline, and `receiver_events`
+1008/1009 record the connect and disconnect. `stores.status` for BP reads
+`offline`.
+
+BP's identity is untouched and intact: Device **13** `active`, credential
+**14** `active`, `revoked_at` and `replaced_at` both null. Nothing was
+re-enrolled, deleted, revoked or replaced.
+
+So the "BP reconnects with its existing credential" acceptance item is
+**unproven**, not failed. Proving it needs the Store PC, and this checkpoint is
+forbidden to touch it.
+
+### Not done
+
+BP not touched. No second Store. Store Kit 1.5.3 **not** installed. No
+broadcast started. No dynamic Store/Zone targeting.
+
+No rollback is indicated — HQ is healthy and serving the accepted build.
