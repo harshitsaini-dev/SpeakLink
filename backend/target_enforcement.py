@@ -230,5 +230,31 @@ class TargetEnforcementPolicy:
         return EnforcementDecision(True, ENFORCE)
 
 
+def _tuned(name: str, default: float) -> float:
+    """Read a policy bound from the environment.
+
+    Exists so the load harness can exercise the mechanism in a run that lasts
+    seconds rather than minutes. The DEFAULTS are the product behaviour; an
+    override only ever shortens a wait, and there is deliberately no way to
+    switch a bound off.
+    """
+    import os
+
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 #: One policy for the process, like the other runtime registries.
-policy = TargetEnforcementPolicy()
+policy = TargetEnforcementPolicy(
+    debounce_seconds=_tuned("SPEAKLINK_TARGET_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS),
+    cooldown_seconds=_tuned("SPEAKLINK_TARGET_COOLDOWN_SECONDS", COOLDOWN_SECONDS),
+    max_attempts=int(_tuned("SPEAKLINK_TARGET_MAX_ATTEMPTS", MAX_ATTEMPTS)),
+    post_broadcast_seconds=_tuned("SPEAKLINK_TARGET_POST_BROADCAST_SECONDS",
+                                  POST_BROADCAST_SECONDS),
+)
