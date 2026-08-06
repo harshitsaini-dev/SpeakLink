@@ -151,8 +151,12 @@ class SyntheticReceiver:
             while True:
                 await asyncio.sleep(interval)
                 reading, self._pending_state = self._pending_state, None
-                if reading is None or self.session_id is None or self._socket is None:
+                if reading is None or self._socket is None:
                     continue
+                # Reported whether or not a broadcast exists, exactly as the
+                # real Receiver now does: a shop's mixer is changed at the till
+                # on a quiet afternoon, and that is the case the Master Volume
+                # panel exists for.
                 volume_percent, muted = reading
                 self._state_sequence += 1
                 try:
@@ -255,6 +259,12 @@ class SyntheticReceiver:
                 applied_muted=self.endpoint_muted, result="applied",
                 output_device="index:0",
             )
+            # The real Receiver's endpoint observer fires when the mixer moves,
+            # whoever moved it - including EchoCast. Without this the harness
+            # would apply a command and never report the result, so HQ would
+            # keep displaying the reading from before its own command.
+            self._pending_state = (self.endpoint_volume, self.endpoint_muted)
+            self.endpoint_states_generated += 1
         self.audio_acks_sent += 1
         self.audio_latencies_ms.append((time.perf_counter() - arrived) * 1000)
 

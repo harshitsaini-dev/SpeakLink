@@ -7,6 +7,7 @@ import { useBroadcast } from "@/contexts/BroadcastContext";
 import { elapsedSeconds } from "@/lib/time";
 import StatusBadge from "@/components/StatusBadge";
 import StoreAudioControl from "@/components/StoreAudioControl";
+import StoreAudioSummary from "@/components/StoreAudioSummary";
 import { useStoreAudioControl } from "@/lib/audio/useStoreAudioControl";
 
 const TARGET_MODES = [
@@ -309,6 +310,11 @@ export default function BroadcastConsole() {
 
   return (
     <div className="space-y-6" data-testid="broadcast-console">
+      {/* A glance at how loud the estate is. Not the control surface - the
+          Master Volume page is - and it renders nothing for an account
+          without store_audio.control. */}
+      <StoreAudioSummary />
+
       {/* HEADER: live status + emergency stop */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Live card */}
