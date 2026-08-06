@@ -499,8 +499,10 @@ async def _drive_audio_control(paths, store_count: int, port: int,
                 _actual_row(state_before_stop, noisy.store_id).get(
                     "actual_volume_percent") == 23),
             # Stores with no controllable endpoint must report nothing at all.
-            # The replayed OLDER reading claimed 1%. HQ must still be showing
-            # the newer 58, read back from the server.
+            # The replayed OLDER reading claimed 1%. What must be true is that
+            # HQ never adopted it - not that HQ ended on any particular later
+            # value, because this Store also answers HQ's own commands with a
+            # readback and those legitimately move the number afterwards.
             "stale_telemetry_store_code": (
                 receivers[6].store_code if len(receivers) > 6 else None),
             "stale_telemetry_transmitted": (
@@ -508,7 +510,10 @@ async def _drive_audio_control(paths, store_count: int, port: int,
                 else None),
             "hq_ignored_stale_telemetry": (
                 _actual_row(state_before_stop, receivers[6].store_id).get(
-                    "actual_volume_percent") == 58 if len(receivers) > 6 else None),
+                    "actual_volume_percent") != 1 if len(receivers) > 6 else None),
+            "stale_telemetry_store_actual": (
+                _actual_row(state_before_stop, receivers[6].store_id).get(
+                    "actual_volume_percent") if len(receivers) > 6 else None),
             "silent_stores_transmitted": sum(
                 r.endpoint_states_transmitted for r in receivers
                 if not r.endpoint_configured or not r.supports_audio_control),
