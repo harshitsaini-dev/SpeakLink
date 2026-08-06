@@ -1,23 +1,28 @@
 /**
- * What Broadcast History is allowed to say about a recording.
+ * The Broadcast History recording bar, and the row actions that feed it.
  *
- * A recording has five states and only one of them is a Play button. The
- * others must explain themselves rather than offering a control that would do
- * nothing, and PARTIAL in particular must stay visibly different from
- * AVAILABLE - "some of it is there" and "all of it is there" are different
- * promises about the same file.
+ * TWO THINGS THESE TESTS EXIST TO PROTECT
+ *
+ * **The volume slider is local.** In every other part of SpeakLink a control
+ * labelled "volume" changes a shop's speakers. This one changes an
+ * HTMLAudioElement in the operator's own browser and must never generate a
+ * Store command. That is asserted explicitly rather than assumed.
+ *
+ * **Playback state must be true.** "Playing" comes from the audio element's
+ * own events, never from the fact that a button was pressed - so a file that
+ * fails to decode does not sit there claiming to play.
  */
 import React from "react";
-import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, cleanup, waitFor, fireEvent, act } from "@testing-library/react";
 
 import RecordingPlayer from "./RecordingPlayer";
+import RecordingActions from "./RecordingActions";
 import { api } from "@/lib/api";
 
-// Mocked as a NAMED export because that is what the module really has. A
-// default-export mock kept these tests green while the production build failed.
+// Mocked as a NAMED export because that is what the module really has.
 jest.mock("@/lib/api", () => ({
   __esModule: true,
-  api: { get: jest.fn() },
+  api: { get: jest.fn(), post: jest.fn(), delete: jest.fn() },
 }));
 
 function recording(overrides = {}) {
@@ -25,8 +30,8 @@ function recording(overrides = {}) {
     status: "available",
     container: "webm",
     codec: "opus",
-    byte_size: 262144,
-    duration_seconds: 64,
+    byte_size: 29696,
+    duration_seconds: null,
     chunks_written: 256,
     chunks_dropped: 0,
     started_at: "2026-08-06T10:00:00+00:00",
@@ -36,130 +41,96 @@ function recording(overrides = {}) {
   };
 }
 
+function session(id = 12, overrides = {}) {
+  return {
+    id,
+    campaign_name: id === 12 ? "Morning announcement" : "Evening reminder",
+    started_at: "2026-08-06T10:00:00+00:00",
+    recording: recording(),
+    ...overrides,
+  };
+}
+
+/** jsdom has no media stack, so the element's own behaviour is supplied. */
+function stubAudio() {
+  const element = HTMLMediaElement.prototype;
+  Object.defineProperty(element, "paused", {
+    configurable: true, writable: true, value: true,
+  });
+  element.play = jest.fn(function play() {
+    this.paused = false;
+    fireEvent.play(this);
+    return Promise.resolve();
+  });
+  element.pause = jest.fn(function pause() {
+    this.paused = true;
+    fireEvent.pause(this);
+  });
+}
+
 beforeEach(() => {
   api.get.mockReset();
-  // jsdom implements neither, and both are part of how the audio reaches the
-  // element without ever being a public URL.
-  //
-  // Re-created per test rather than once: CRA sets resetMocks, so a jest.fn()
-  // installed in beforeAll is reset to returning undefined after the first
-  // test - and a component that receives undefined for its blob URL renders
-  // no player at all, which looks exactly like a bug in the component.
+  api.post.mockReset();
+  api.delete.mockReset();
+  // Re-created per test: CRA sets resetMocks, so a jest.fn() installed once
+  // returns undefined afterwards - and a component handed undefined for its
+  // blob URL renders no player, which looks exactly like a component bug.
   global.URL.createObjectURL = jest.fn(() => "blob:recording");
   global.URL.revokeObjectURL = jest.fn();
+  stubAudio();
 });
 afterEach(cleanup);
 
-// ===========================================================================
-// The five states
-// ===========================================================================
-test("a broadcast with no recording says so plainly", () => {
-  render(<RecordingPlayer sessionId={12} recording={null} />);
-  expect(screen.getByTestId("recording-none-12").textContent).toBe("No recording");
-  expect(screen.queryByTestId("recording-play-12")).toBeNull();
-});
-
-test("an available recording offers playback with its duration and size", () => {
-  render(<RecordingPlayer sessionId={12} recording={recording()} />);
-  expect(screen.getByTestId("recording-play-12").textContent)
-    .toMatch(/Play Recording/);
-  expect(screen.getByTestId("recording-meta-12").textContent).toBe("1:04 · 256 KB");
-});
-
-test("a partial recording is playable AND visibly partial", () => {
-  // A recording with a gap is still the best evidence of what went out, so it
-  // must be playable - but it must never be presented as complete.
-  render(<RecordingPlayer sessionId={12}
-                          recording={recording({ status: "partial",
-                                                 chunks_dropped: 12 })} />);
-  expect(screen.getByTestId("recording-partial-12").textContent).toBe("Partial");
-  expect(screen.getByTestId("recording-play-12")).toBeTruthy();
-});
-
-test("a failed recording explains itself instead of offering Play", () => {
-  render(<RecordingPlayer sessionId={12}
-                          recording={recording({ status: "failed",
-                                                 error: "no space left on device" })} />);
-  expect(screen.getByTestId("recording-problem-12").textContent)
-    .toBe("Recording failed");
-  expect(screen.queryByTestId("recording-play-12")).toBeNull();
-});
-
-test("a missing file is distinguished from a failed one", () => {
-  // Different problems, different remedies: one is a disk that filled, the
-  // other is a file that is no longer where the record says it is.
-  render(<RecordingPlayer sessionId={12}
-                          recording={recording({ status: "missing" })} />);
-  expect(screen.getByTestId("recording-problem-12").textContent)
-    .toBe("Recording missing");
-  expect(screen.queryByTestId("recording-play-12")).toBeNull();
-});
-
-test("a recording still in progress is not offered for playback", () => {
-  render(<RecordingPlayer sessionId={12}
-                          recording={recording({ status: "recording",
-                                                 duration_seconds: null })} />);
-  expect(screen.getByTestId("recording-inprogress-12").textContent)
-    .toBe("Recording…");
-  expect(screen.queryByTestId("recording-play-12")).toBeNull();
-});
-
-// ===========================================================================
-// Playback goes through the authenticated API
-// ===========================================================================
-test("playing fetches through the API client, not a bare URL", async () => {
-  // The recordings folder is not a public mount. The token has to travel with
-  // the request, which is why this goes through the API client at all.
+/** Render the bar on a recording and wait for its audio to arrive. */
+async function showBar(active = session(12)) {
   api.get.mockResolvedValue({ data: new Blob(["audio"]) });
-  render(<RecordingPlayer sessionId={12} recording={recording()} />);
-
-  fireEvent.click(screen.getByTestId("recording-play-12"));
-  await waitFor(() => expect(api.get).toHaveBeenCalledWith(
-    "/broadcast/sessions/12/recording/audio", { responseType: "blob" }));
-
-  const player = await screen.findByTestId("recording-audio-12");
-  expect(player.getAttribute("src")).toBe("blob:recording");
-  expect(player.hasAttribute("controls")).toBe(true);
-});
-
-test("an unauthorized recording is reported, not silently blank", async () => {
-  api.get.mockRejectedValue({ response: { status: 403 } });
-  render(<RecordingPlayer sessionId={12} recording={recording()} />);
-
-  fireEvent.click(screen.getByTestId("recording-play-12"));
-  expect((await screen.findByTestId("recording-error-12")).textContent)
-    .toBe("You do not have access to this recording.");
-  expect(screen.queryByTestId("recording-audio-12")).toBeNull();
-});
-
-test("a recording that vanished between listing and playing is reported", async () => {
-  api.get.mockRejectedValue({ response: { status: 404 } });
-  render(<RecordingPlayer sessionId={12} recording={recording()} />);
-
-  fireEvent.click(screen.getByTestId("recording-play-12"));
-  expect((await screen.findByTestId("recording-error-12")).textContent)
-    .toBe("This recording could not be loaded.");
-});
-
-test("no filesystem path is ever rendered", () => {
-  render(<RecordingPlayer sessionId={12} recording={recording()} />);
-  const body = screen.getByTestId("recording-12").textContent;
-  expect(body).not.toMatch(/[A-Za-z]:\\|\/data\/|\.part|broadcast-0000/);
-});
-
-test("nothing here claims the announcement was heard", () => {
-  render(<RecordingPlayer sessionId={12} recording={recording()} />);
-  expect(screen.getByTestId("recording-12").textContent.toLowerCase())
-    .not.toMatch(/verified|audible|confirmed/);
-});
+  const view = render(<RecordingPlayer session={active} onClose={() => {}} />);
+  await waitFor(() =>
+    expect(screen.getByTestId("recording-toggle").disabled).toBe(false));
+  return view;
+}
 
 // ===========================================================================
-// Download
+// The History row
 // ===========================================================================
-test("downloading fetches through the authenticated API", async () => {
+test("a recorded row offers Play and Download as SpeakLink actions", () => {
+  render(<RecordingActions sessionId={12} recording={recording()} onPlay={() => {}} />);
+  const play = screen.getByTestId("recording-play-12");
+  const download = screen.getByTestId("recording-download-12");
+  // The same shape Rights and Scope use in User Management.
+  for (const button of [play, download]) {
+    expect(button.tagName).toBe("BUTTON");
+    expect(button.className).toContain("inline-flex");
+    expect(button.className).toContain("rounded");
+    expect(button.className).toContain("border");
+  }
+  expect(play.textContent).toMatch(/Play/);
+  expect(download.textContent).toMatch(/Download/);
+});
+
+test("the row shows the recording size", () => {
+  render(<RecordingActions sessionId={12} recording={recording()} onPlay={() => {}} />);
+  expect(screen.getByTestId("recording-meta-12").textContent).toBe("29 KB");
+});
+
+test("the row never embeds an audio element", () => {
+  const { container } = render(
+    <RecordingActions sessionId={12} recording={recording()} onPlay={() => {}} />);
+  expect(container.querySelector("audio")).toBeNull();
+});
+
+test("the row's Play only asks the page to make this recording active", () => {
+  const onPlay = jest.fn();
+  render(<RecordingActions sessionId={12} recording={recording()} onPlay={onPlay} />);
+  fireEvent.click(screen.getByTestId("recording-play-12"));
+  expect(onPlay).toHaveBeenCalledWith(12);
+  // The row itself fetches nothing: the bar owns loading.
+  expect(api.get).not.toHaveBeenCalled();
+});
+
+test("the row's Download uses the authenticated download route", async () => {
   api.get.mockResolvedValue({ data: new Blob(["audio"]) });
-  render(<RecordingPlayer sessionId={12} recording={recording()} />);
-
+  render(<RecordingActions sessionId={12} recording={recording()} onPlay={() => {}} />);
   fireEvent.click(screen.getByTestId("recording-download-12"));
   await waitFor(() => expect(api.get).toHaveBeenCalledWith(
     "/broadcast/sessions/12/recording/download", { responseType: "blob" }));
@@ -167,34 +138,400 @@ test("downloading fetches through the authenticated API", async () => {
 
 test("the downloaded filename carries only the session id", async () => {
   api.get.mockResolvedValue({ data: new Blob(["audio"]) });
-  const clicked = [];
+  const names = [];
   const realCreate = document.createElement.bind(document);
   jest.spyOn(document, "createElement").mockImplementation((tag) => {
     const node = realCreate(tag);
-    if (tag === "a") {
-      node.click = () => clicked.push(node.download);
-    }
+    if (tag === "a") node.click = () => names.push(node.download);
     return node;
   });
 
-  render(<RecordingPlayer sessionId={12} recording={recording()} />);
+  render(<RecordingActions sessionId={12} recording={recording()} onPlay={() => {}} />);
   fireEvent.click(screen.getByTestId("recording-download-12"));
-  await waitFor(() => expect(clicked).toEqual(["broadcast-000012.webm"]));
+  await waitFor(() => expect(names).toEqual(["broadcast-000012.webm"]));
   document.createElement.mockRestore();
 });
 
-test("a refused download is reported rather than failing silently", async () => {
-  api.get.mockRejectedValue({ response: { status: 403 } });
-  render(<RecordingPlayer sessionId={12} recording={recording()} />);
+// ===========================================================================
+// The bar exists only when a recording is active
+// ===========================================================================
+test("no player is rendered until a recording is chosen", () => {
+  const { container } = render(
+    <RecordingPlayer session={null} onClose={() => {}} />);
+  expect(screen.queryByTestId("recording-player-bar")).toBeNull();
+  expect(container.querySelector("audio")).toBeNull();
+});
 
-  fireEvent.click(screen.getByTestId("recording-download-12"));
-  expect((await screen.findByTestId("recording-error-12")).textContent)
+test("choosing a recording shows a fixed bar at the bottom", async () => {
+  await showBar();
+  const bar = screen.getByTestId("recording-player-bar");
+  expect(bar.className).toContain("fixed");
+  expect(bar.className).toContain("bottom-0");
+  expect(bar.className).toContain("right-0");
+  // Starts where the sidebar ends, so it never covers the navigation.
+  expect(bar.className).toContain("md:left-64");
+});
+
+test("the bar is a labelled region, not a modal dialog", async () => {
+  // It is a toolbar the operator works alongside: no backdrop, no focus trap,
+  // and History's filters and pagination stay usable behind it.
+  await showBar();
+  const bar = screen.getByTestId("recording-player-bar");
+  expect(bar.tagName).toBe("SECTION");
+  expect(bar.getAttribute("role")).toBeNull();
+  expect(bar.getAttribute("aria-label")).toBe("Broadcast recording player");
+});
+
+test("the bar carries no anchored-popover positioning", async () => {
+  await showBar();
+  const bar = screen.getByTestId("recording-player-bar");
+  // Nothing measured from a button: no inline top/left placement survives.
+  expect(bar.style.top).toBe("");
+  expect(bar.style.left).toBe("");
+});
+
+test("the bar names the broadcast being listened to", async () => {
+  await showBar();
+  expect(screen.getByTestId("recording-campaign").textContent)
+    .toBe("Morning announcement");
+  expect(screen.getByTestId("recording-session").textContent)
+    .toMatch(/Broadcast #12/);
+});
+
+test("the audio is fetched through the authenticated API", async () => {
+  await showBar();
+  expect(api.get).toHaveBeenCalledWith(
+    "/broadcast/sessions/12/recording/audio", { responseType: "blob" });
+});
+
+test("the browser's native controls are never rendered", async () => {
+  const { container } = await showBar();
+  const audio = container.querySelector("audio");
+  expect(audio).toBeTruthy();
+  expect(audio.hasAttribute("controls")).toBe(false);
+  expect(audio.className).toContain("hidden");
+});
+
+// ===========================================================================
+// Playback
+// ===========================================================================
+test("the play control starts the audio element", async () => {
+  const { container } = await showBar();
+  const audio = container.querySelector("audio");
+
+  await act(async () => { fireEvent.click(screen.getByTestId("recording-toggle")); });
+  expect(audio.play).toHaveBeenCalled();
+  expect(screen.getByTestId("recording-state").textContent).toBe("Playing");
+});
+
+test("pressing it again pauses", async () => {
+  const { container } = await showBar();
+  const audio = container.querySelector("audio");
+
+  await act(async () => { fireEvent.click(screen.getByTestId("recording-toggle")); });
+  await act(async () => { fireEvent.click(screen.getByTestId("recording-toggle")); });
+  expect(audio.pause).toHaveBeenCalled();
+  expect(screen.getByTestId("recording-state").textContent).toBe("Paused");
+});
+
+test("the elapsed time follows the audio element", async () => {
+  const { container } = await showBar();
+  const audio = container.querySelector("audio");
+
+  Object.defineProperty(audio, "currentTime", { configurable: true, value: 62 });
+  fireEvent.timeUpdate(audio);
+  expect(screen.getByTestId("recording-position").textContent).toBe("1:02");
+});
+
+test("a duration the file does not carry is shown as unavailable", async () => {
+  // MediaRecorder writes a streaming WebM header with no duration, so the
+  // element may report Infinity for ever. A guess would be a lie, and 0:00
+  // would read as a real position.
+  const { container } = await showBar();
+  const audio = container.querySelector("audio");
+
+  Object.defineProperty(audio, "duration", { configurable: true, value: Infinity });
+  fireEvent.durationChange(audio);
+  expect(screen.getByTestId("recording-duration").textContent).toBe("—:—");
+  expect(screen.getByTestId("recording-seek").disabled).toBe(true);
+});
+
+test("seeking sets currentTime once a real duration is known", async () => {
+  const { container } = await showBar();
+  const audio = container.querySelector("audio");
+
+  Object.defineProperty(audio, "duration", { configurable: true, value: 90 });
+  let assigned = 0;
+  Object.defineProperty(audio, "currentTime", {
+    configurable: true, get: () => assigned, set: (value) => { assigned = value; },
+  });
+  fireEvent.loadedMetadata(audio);
+  expect(screen.getByTestId("recording-duration").textContent).toBe("1:30");
+
+  fireEvent.change(screen.getByTestId("recording-seek"), { target: { value: "45" } });
+  expect(assigned).toBe(45);
+});
+
+test("forward and back move by ten seconds", async () => {
+  const { container } = await showBar();
+  const audio = container.querySelector("audio");
+
+  Object.defineProperty(audio, "duration", { configurable: true, value: 90 });
+  let assigned = 30;
+  Object.defineProperty(audio, "currentTime", {
+    configurable: true, get: () => assigned, set: (value) => { assigned = value; },
+  });
+  fireEvent.loadedMetadata(audio);
+
+  fireEvent.click(screen.getByTestId("recording-forward"));
+  expect(assigned).toBe(40);
+  fireEvent.click(screen.getByTestId("recording-back"));
+  expect(assigned).toBe(30);
+});
+
+test("finishing is reported as finished, not as still playing", async () => {
+  const { container } = await showBar();
+  const audio = container.querySelector("audio");
+
+  await act(async () => { fireEvent.click(screen.getByTestId("recording-toggle")); });
+  fireEvent.ended(audio);
+  expect(screen.getByTestId("recording-state").textContent).toBe("Finished");
+});
+
+test("a file that cannot be decoded says so rather than claiming to play", async () => {
+  const { container } = await showBar();
+  fireEvent.error(container.querySelector("audio"));
+  expect(screen.getByTestId("recording-state").textContent).toBe("Playback failed");
+});
+
+// ===========================================================================
+// Volume is LOCAL
+// ===========================================================================
+test("the volume slider changes only the audio element", async () => {
+  const { container } = await showBar();
+  const audio = container.querySelector("audio");
+
+  fireEvent.change(screen.getByTestId("recording-volume"), { target: { value: "0.4" } });
+  expect(audio.volume).toBeCloseTo(0.4);
+});
+
+test("mute toggles only the audio element and keeps the chosen level", async () => {
+  const { container } = await showBar();
+  const audio = container.querySelector("audio");
+
+  fireEvent.change(screen.getByTestId("recording-volume"), { target: { value: "0.6" } });
+  fireEvent.click(screen.getByTestId("recording-mute"));
+  expect(audio.muted).toBe(true);
+  expect(audio.volume).toBeCloseTo(0.6, 5);   // the level survives the mute
+
+  fireEvent.click(screen.getByTestId("recording-mute"));
+  expect(audio.muted).toBe(false);
+});
+
+test("nothing in the player ever calls a Store audio control", async () => {
+  // The whole point. A volume slider in SpeakLink usually moves a shop's
+  // speakers; this one must not reach one.
+  await showBar();
+
+  fireEvent.change(screen.getByTestId("recording-volume"), { target: { value: "0.2" } });
+  fireEvent.click(screen.getByTestId("recording-mute"));
+  await act(async () => { fireEvent.click(screen.getByTestId("recording-toggle")); });
+
+  expect(api.post).not.toHaveBeenCalled();
+  expect(api.delete).not.toHaveBeenCalled();
+  const requested = api.get.mock.calls.map(([path]) => path);
+  expect(requested.every((path) => path.includes("/recording/"))).toBe(true);
+  expect(requested.some((path) => path.includes("store-audio"))).toBe(false);
+});
+
+// ===========================================================================
+// Download from the bar
+// ===========================================================================
+test("the bar's Download uses the authenticated download route", async () => {
+  await showBar();
+  api.get.mockClear();
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+
+  fireEvent.click(screen.getByTestId("recording-bar-download"));
+  await waitFor(() => expect(api.get).toHaveBeenCalledWith(
+    "/broadcast/sessions/12/recording/download", { responseType: "blob" }));
+});
+
+test("no request ever carries a token or a filesystem path", async () => {
+  await showBar();
+  fireEvent.click(screen.getByTestId("recording-bar-download"));
+  await waitFor(() => expect(api.get.mock.calls.length).toBeGreaterThan(1));
+  for (const [path] of api.get.mock.calls) {
+    expect(path).not.toMatch(/token|[A-Za-z]:\\|\/data\/|\.part/);
+  }
+});
+
+// ===========================================================================
+// Switching, closing and cleanup
+// ===========================================================================
+test("switching recordings pauses the first and releases its audio", async () => {
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+  const { rerender, container } = render(
+    <RecordingPlayer session={session(12)} onClose={() => {}} />);
+  await waitFor(() =>
+    expect(screen.getByTestId("recording-toggle").disabled).toBe(false));
+  const audio = container.querySelector("audio");
+  await act(async () => { fireEvent.click(screen.getByTestId("recording-toggle")); });
+
+  await act(async () => {
+    rerender(<RecordingPlayer session={session(13)} onClose={() => {}} />);
+  });
+
+  expect(audio.pause).toHaveBeenCalled();
+  expect(global.URL.revokeObjectURL).toHaveBeenCalledWith("blob:recording");
+  expect(screen.getByTestId("recording-session").textContent).toMatch(/Broadcast #13/);
+});
+
+test("there is only ever one audio element", async () => {
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+  const { rerender, container } = render(
+    <RecordingPlayer session={session(12)} onClose={() => {}} />);
+  await waitFor(() => expect(container.querySelectorAll("audio").length).toBe(1));
+
+  await act(async () => {
+    rerender(<RecordingPlayer session={session(13)} onClose={() => {}} />);
+  });
+  expect(container.querySelectorAll("audio").length).toBe(1);
+});
+
+test("Escape closes the player", async () => {
+  const onClose = jest.fn();
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+  render(<RecordingPlayer session={session(12)} onClose={onClose} />);
+  await screen.findByTestId("recording-player-bar");
+
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(onClose).toHaveBeenCalled();
+});
+
+test("the close button closes the player", async () => {
+  const onClose = jest.fn();
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+  render(<RecordingPlayer session={session(12)} onClose={onClose} />);
+  await screen.findByTestId("recording-player-bar");
+
+  fireEvent.click(screen.getByTestId("recording-close"));
+  expect(onClose).toHaveBeenCalled();
+});
+
+test("clicking elsewhere does NOT close the player", async () => {
+  // Unlike the popover this replaced. An operator scrolling History or
+  // ticking a checkbox must not silently lose what they are listening to.
+  const onClose = jest.fn();
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+  render(<RecordingPlayer session={session(12)} onClose={onClose} />);
+  await screen.findByTestId("recording-player-bar");
+
+  fireEvent.mouseDown(document.body);
+  fireEvent.click(document.body);
+  expect(onClose).not.toHaveBeenCalled();
+  expect(screen.getByTestId("recording-player-bar")).toBeTruthy();
+});
+
+test("unmounting pauses playback and releases the blob URL", async () => {
+  const { unmount, container } = await showBar();
+  const audio = container.querySelector("audio");
+  await act(async () => { fireEvent.click(screen.getByTestId("recording-toggle")); });
+
+  unmount();
+  expect(audio.pause).toHaveBeenCalled();
+  expect(global.URL.revokeObjectURL).toHaveBeenCalledWith("blob:recording");
+});
+
+test("clearing the active recording tears the player down", async () => {
+  // What the History page does when the row being played is deleted.
+  api.get.mockResolvedValue({ data: new Blob(["audio"]) });
+  const { rerender, container } = render(
+    <RecordingPlayer session={session(12)} onClose={() => {}} />);
+  await waitFor(() =>
+    expect(screen.getByTestId("recording-toggle").disabled).toBe(false));
+  const audio = container.querySelector("audio");
+
+  await act(async () => {
+    rerender(<RecordingPlayer session={null} onClose={() => {}} />);
+  });
+  expect(screen.queryByTestId("recording-player-bar")).toBeNull();
+  expect(audio.pause).toHaveBeenCalled();
+  expect(global.URL.revokeObjectURL).toHaveBeenCalledWith("blob:recording");
+});
+
+// ===========================================================================
+// The states that offer no player at all
+// ===========================================================================
+test("a failed recording has no Play", () => {
+  render(<RecordingActions sessionId={12}
+                           recording={recording({ status: "failed" })}
+                           onPlay={() => {}} />);
+  expect(screen.getByTestId("recording-problem-12").textContent).toBe("Recording failed");
+  expect(screen.queryByTestId("recording-play-12")).toBeNull();
+});
+
+test("a missing recording has no Play", () => {
+  render(<RecordingActions sessionId={12}
+                           recording={recording({ status: "missing" })}
+                           onPlay={() => {}} />);
+  expect(screen.getByTestId("recording-problem-12").textContent).toBe("Recording missing");
+  expect(screen.queryByTestId("recording-play-12")).toBeNull();
+});
+
+test("a recording still being written has no Play", () => {
+  render(<RecordingActions sessionId={12}
+                           recording={recording({ status: "recording" })}
+                           onPlay={() => {}} />);
+  expect(screen.getByTestId("recording-inprogress-12").textContent).toBe("Recording…");
+  expect(screen.queryByTestId("recording-play-12")).toBeNull();
+});
+
+test("a broadcast with no recording says so", () => {
+  render(<RecordingActions sessionId={12} recording={null} onPlay={() => {}} />);
+  expect(screen.getByTestId("recording-none-12").textContent).toBe("No recording");
+  expect(screen.queryByTestId("recording-play-12")).toBeNull();
+});
+
+test("a partial recording is playable and visibly partial", () => {
+  render(<RecordingActions sessionId={12}
+                           recording={recording({ status: "partial", chunks_dropped: 12 })}
+                           onPlay={() => {}} />);
+  expect(screen.getByTestId("recording-partial-12").textContent).toBe("Partial");
+  expect(screen.getByTestId("recording-play-12")).toBeTruthy();
+});
+
+// ===========================================================================
+// Failures and accessibility
+// ===========================================================================
+test("an unauthorized load is reported, not silently blank", async () => {
+  api.get.mockRejectedValue({ response: { status: 403 } });
+  render(<RecordingPlayer session={session(12)} onClose={() => {}} />);
+  expect((await screen.findByTestId("recording-bar-error")).textContent)
     .toBe("You do not have access to this recording.");
 });
 
-test("a failed recording offers neither Play nor Download", () => {
-  render(<RecordingPlayer sessionId={12}
-                          recording={recording({ status: "failed" })} />);
-  expect(screen.queryByTestId("recording-play-12")).toBeNull();
-  expect(screen.queryByTestId("recording-download-12")).toBeNull();
+test("every control is a real button with a name", async () => {
+  await showBar();
+  for (const id of ["recording-toggle", "recording-mute", "recording-close",
+                    "recording-back", "recording-forward"]) {
+    const control = screen.getByTestId(id);
+    expect(control.tagName).toBe("BUTTON");
+    expect(control.getAttribute("aria-label")).toBeTruthy();
+  }
+  expect(screen.getByTestId("recording-seek").getAttribute("aria-label")).toBe("Seek");
+  expect(screen.getByTestId("recording-volume").getAttribute("aria-label"))
+    .toBe("Playback volume");
+});
+
+test("keyboard activation works on the row's Play", () => {
+  const onPlay = jest.fn();
+  render(<RecordingActions sessionId={12} recording={recording()} onPlay={onPlay} />);
+  const play = screen.getByTestId("recording-play-12");
+  play.focus();
+  expect(document.activeElement).toBe(play);
+  // A real <button> fires click for Enter and Space, which is exactly why
+  // these are buttons rather than styled divs.
+  fireEvent.click(play);
+  expect(onPlay).toHaveBeenCalled();
 });
