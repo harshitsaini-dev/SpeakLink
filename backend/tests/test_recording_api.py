@@ -509,3 +509,79 @@ def test_an_unauthorized_account_cannot_delete_a_recording(client, owner):
     assert broadcast_recording.get_recording(engine, session_id=1) is not None
     assert (broadcast_recording.recordings_directory()
             / "broadcast-000001.webm").exists()
+
+
+# ===========================================================================
+# The paginated endpoint the History page actually reads
+# ===========================================================================
+def test_the_search_endpoint_attaches_recordings(client, owner):
+    """The bug this file exists to stop coming back.
+
+    Broadcast History in the browser reads /broadcast/history/SEARCH - the
+    paginated endpoint - not /broadcast/history. The recording metadata was
+    attached only to the second, so seven completed broadcasts whose audio was
+    on disk and whose rows said AVAILABLE all rendered as "No recording".
+
+    Two endpoints returning the same shape had drifted, and only one of them
+    was ever looked at.
+    """
+    make_session(client, session_id=1)
+    make_recording(client, 1)
+
+    response = client.get("/api/broadcast/history/search",
+                          headers=owner, params={"page": 1, "page_size": 10})
+    assert response.status_code == 200, response.text
+    row = next(r for r in response.json()["items"] if r["id"] == 1)
+    assert row["recording"] is not None, "the page would say No recording"
+    assert row["recording"]["status"] == "available"
+    assert row["recording"]["byte_size"] == len(AUDIO)
+
+
+def test_both_history_endpoints_agree_about_recordings(client, owner):
+    """They describe the same broadcasts and must not disagree."""
+    for session_id in (1, 2):
+        make_session(client, session_id=session_id)
+    make_recording(client, 1)
+    make_recording(client, 2, status="partial")
+
+    listed = {r["id"]: r["recording"]
+              for r in client.get("/api/broadcast/history", headers=owner).json()}
+    searched = {r["id"]: r["recording"]
+                for r in client.get("/api/broadcast/history/search", headers=owner,
+                                    params={"page": 1, "page_size": 10}).json()["items"]}
+    assert listed == searched
+
+
+def test_the_search_endpoint_says_nothing_for_a_broadcast_with_no_recording(
+        client, owner):
+    """Absent must stay absent - the fix must not invent a recording."""
+    make_session(client, session_id=1)
+    response = client.get("/api/broadcast/history/search", headers=owner,
+                          params={"page": 1, "page_size": 10})
+    row = next(r for r in response.json()["items"] if r["id"] == 1)
+    assert row["recording"] is None
+
+
+def test_the_search_endpoint_reports_a_failed_recording_honestly(client, owner):
+    make_session(client, session_id=1)
+    make_recording(client, 1, status="failed", write_file=False)
+    response = client.get("/api/broadcast/history/search", headers=owner,
+                          params={"page": 1, "page_size": 10})
+    row = next(r for r in response.json()["items"] if r["id"] == 1)
+    assert row["recording"]["status"] == "failed"
+
+
+def test_the_search_endpoint_still_applies_store_scope(client, owner):
+    """Attaching recordings must not widen who can see a broadcast."""
+    ids = store_ids(client, owner, count=2)
+    make_session(client, session_id=1, store_ids=[ids[1]])
+    make_recording(client, 1)
+
+    caster_id = make_user(client, owner, "caster", "BROADCASTER")
+    client.put(f"/api/users/{caster_id}/store-scope", headers=owner,
+               json={"entries": [{"scope_type": "STORE", "store_id": ids[0]}]})
+    caster = sign_in(client, "caster")
+
+    response = client.get("/api/broadcast/history/search", headers=caster,
+                          params={"page": 1, "page_size": 10})
+    assert all(r["id"] != 1 for r in response.json()["items"])
