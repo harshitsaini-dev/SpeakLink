@@ -13,11 +13,13 @@
 import React from "react";
 import { render, screen, cleanup, waitFor, act, fireEvent } from "@testing-library/react";
 import MasterVolume from "./MasterVolume";
-import api from "@/lib/api";
+import { api } from "@/lib/api";
 
+// Mocked as a NAMED export because that is what the module really has. A
+// default-export mock kept these tests green while the production build failed.
 jest.mock("@/lib/api", () => ({
   __esModule: true,
-  default: { get: jest.fn(), post: jest.fn(), delete: jest.fn() },
+  api: { get: jest.fn(), post: jest.fn(), delete: jest.fn() },
 }));
 
 function row(overrides = {}) {

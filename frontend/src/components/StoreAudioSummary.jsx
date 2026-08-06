@@ -1,7 +1,7 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import { Volume2 } from "lucide-react";
-import api from "@/lib/api";
+import { api } from "@/lib/api";
 
 /**
  * A compact "how loud is the estate" card for the Console.
