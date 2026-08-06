@@ -19,7 +19,7 @@ from typing import List, Optional, Set
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -36,7 +36,7 @@ from schemas import (
     BroadcastTargetStoreOut, BroadcastTargetsOut,
     SessionCreate, SessionOut, SessionDetailOut, TargetOut,
     StoreAudioControlUpdate, StoreAudioStateOut, StoreAudioControlOut,
-    MasterVolumeOut, MasterVolumeStoreOut,
+    MasterVolumeOut, MasterVolumeStoreOut, RecordingOut,
     MasterVolumeSummaryOut, MasterVolumeUpdate,
     SystemLogOut,
     EnrollmentCodeRequest, EnrollmentCodeResponse, EnrollmentCodeStatusOut,
@@ -226,6 +226,7 @@ from receiver_runtime_auth import (
 )
 import store_master_audio
 import master_volume_api
+import broadcast_recording
 from store_audio_pending import (
     EmptyPendingCommandError,
     InvalidPendingVolumeError,
@@ -606,6 +607,19 @@ def startup_event():
         # survive an HQ restart - outliving a disconnection is its whole
         # purpose - so unlike live readings it has to live in the database.
         ensure_pending_audio_schema(engine)
+        broadcast_recording.ensure_recording_schema(engine)
+        # Anything left mid-flight by a crash is resolved BEFORE the first
+        # request can read it. An unfinished .part is never promoted to
+        # AVAILABLE: HQ stopping mid-announcement is exactly when a recording
+        # is least trustworthy.
+        try:
+            resolved = broadcast_recording.reconcile_recordings(
+                engine, broadcast_recording.recordings_directory())
+            for outcome in resolved:
+                logger.info("Recording for session %s reconciled as %s",
+                            outcome["session_id"], outcome["status"])
+        except Exception as failure:
+            logger.warning("Recording reconciliation failed: %s", failure)
     except Exception:
         logger.warning("Receiver primary-device table could not be prepared", exc_info=False)
 
@@ -2761,12 +2775,21 @@ async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = 
                 build_prepare_message(session_id=session.id, store_id=sid_),
             )
             await manager.send_to_receiver(sid_, {"type": "play", "session_id": session.id, "campaign": session.campaign_name})
+    # One recording per broadcast, begun as the broadcast begins. It records
+    # the bytes arriving on the operator's microphone socket - which is HQ's
+    # OUTGOING audio, after the accepted gain and mute path - and can never
+    # contain Store ambient sound, because none of that travels on that socket.
+    _start_recording(session.id)
     await manager.notify_dashboards({"type": "session_started", "session_id": session.id})
     _write_log(db, "info", f"Session #{session.id} started; {session.online_store_count}/{session.selected_store_count} online")
     return session
 
 
 async def _end_session(db: Session, session: BroadcastSession, final_status: str, reason: str = "", broadcast_to_all: bool = False):
+    # Every way a broadcast can end arrives here - normal stop, emergency stop,
+    # a dropped microphone, server cleanup - which is exactly why finalization
+    # lives here rather than in the stop route. Idempotent, and it never raises.
+    await _finish_recording(session.id)
     now = datetime.now(timezone.utc)
     session.status = final_status
     session.ended_at = now
@@ -2946,6 +2969,75 @@ async def set_store_audio_control(
 #: the newest id it has seen and ignores anything older, exactly as it does for
 #: broadcast commands - so a rapid drag on an idle Store still resolves to the
 #: value the operator stopped on rather than to whichever command arrived last.
+#: One recording writer per LIVE broadcast. Runtime only - the metadata row is
+#: the durable record, and a writer is a file handle plus a queue.
+_RECORDING_WRITERS: dict[int, "broadcast_recording.RecordingWriter"] = {}
+
+
+def _start_recording(session_id: int) -> None:
+    """Begin recording one broadcast. Never raises into the broadcast path.
+
+    A recording that cannot start must not stop an announcement going out, so
+    every failure here is recorded against the row and swallowed.
+    """
+    try:
+        directory = broadcast_recording.recordings_directory()
+        writer = broadcast_recording.RecordingWriter(
+            session_id=session_id, directory=directory)
+        broadcast_recording.start_record(
+            engine, session_id=session_id, file_name=writer.file_name)
+        writer.start()
+        if writer.failed:
+            broadcast_recording.finish_record(
+                engine, session_id=session_id,
+                status=broadcast_recording.STATUS_FAILED, error=writer.error)
+            return
+        _RECORDING_WRITERS[session_id] = writer
+    except Exception as failure:
+        logger.warning("Recording could not start for session %s: %s",
+                       session_id, failure)
+
+
+async def _finish_recording(session_id: int) -> None:
+    """Finalize and publish. Called from EVERY path that ends a broadcast.
+
+    Normal stop, emergency stop, a dropped microphone and server cleanup all
+    arrive here, which is why it is idempotent and never raises.
+    """
+    writer = _RECORDING_WRITERS.pop(session_id, None)
+    if writer is None:
+        return
+    try:
+        status = await writer.close()
+        probed = {}
+        if status in (broadcast_recording.STATUS_AVAILABLE,
+                      broadcast_recording.STATUS_PARTIAL):
+            probed = broadcast_recording.probe_recording(writer.final_path)
+            # ffprobe present and refusing the file is real evidence it cannot
+            # be played. ffprobe ABSENT is evidence of nothing, so the file is
+            # kept rather than condemned by a missing tool.
+            if probed.get("error") or probed.get("has_audio") is False:
+                status = broadcast_recording.STATUS_FAILED
+        size = None
+        if writer.final_path.exists():
+            size = writer.final_path.stat().st_size
+        broadcast_recording.finish_record(
+            engine, session_id=session_id, status=status,
+            container=probed.get("container"), codec=probed.get("codec"),
+            byte_size=size, duration_seconds=probed.get("duration_seconds"),
+            chunks_written=writer.chunks_written,
+            chunks_dropped=writer.chunks_dropped,
+            error=writer.error or (
+                "some audio was dropped while writing to disk"
+                if writer.chunks_dropped else None))
+    except Exception as failure:
+        logger.warning("Recording could not be finalized for session %s: %s",
+                       session_id, failure)
+        broadcast_recording.finish_record(
+            engine, session_id=session_id,
+            status=broadcast_recording.STATUS_FAILED, error=str(failure))
+
+
 _IDLE_COMMAND_IDS: dict[int, int] = {}
 #: Which idle command id, per Store, was the attempt to apply a PENDING
 #: change. Only that exact command's acknowledgement may clear the row.
@@ -3783,7 +3875,7 @@ def broadcast_history(limit: int = 50, include_archived: bool = False,
     sessions = query.order_by(BroadcastSession.id.desc()).limit(limit).all()
     scope = resolve_store_scope(engine, user)
     if scope is None:
-        return sessions
+        return _with_recordings(sessions)
     # A scoped user sees only campaigns that reached at least one of their
     # Stores, and the counts on it are recomputed to that subset - never the
     # real totals, which would leak how many out-of-scope Stores were also
@@ -3800,7 +3892,166 @@ def broadcast_history(limit: int = 50, include_archived: bool = False,
             setattr(session, f"_scoped_{key}", value)
             setattr(session, key, value)
         visible.append(session)
-    return visible
+    return _with_recordings(visible)
+
+
+
+def _with_recordings(sessions):
+    """Attach each broadcast's recording metadata to its history row.
+
+    One query for the whole page rather than one per row: History is the screen
+    most likely to be opened with hundreds of sessions behind it.
+    """
+    rows = [SessionOut.model_validate(session) for session in sessions]
+    try:
+        recordings = broadcast_recording.all_recordings(engine)
+    except Exception:
+        # A recording metadata problem must not take Broadcast History down.
+        # The page is how an operator finds out what happened at all.
+        return rows
+    for row in rows:
+        record = recordings.get(row.id)
+        if record is not None:
+            row.recording = RecordingOut(**{
+                key: value for key, value in record.as_dict().items()
+                if key != "session_id"
+            })
+    return rows
+
+
+@api.get("/broadcast/sessions/{sid}/recording")
+def read_broadcast_recording(
+    sid: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require(Permission.VIEW_HISTORY)),
+):
+    """Recording metadata for one broadcast.
+
+    Gated on the SAME permission as Broadcast History itself. A recording is
+    the audio of a broadcast this account is already entitled to read about,
+    so inventing a second permission would only create a way to see that a
+    recording exists and never be allowed to hear it.
+    """
+    session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _require_history_store_scope(db, session, user)
+    record = broadcast_recording.get_recording(engine, session_id=sid)
+    if record is None:
+        raise HTTPException(status_code=404, detail="No recording for that broadcast")
+    return RecordingOut(**{key: value for key, value in record.as_dict().items()
+                           if key != "session_id"})
+
+
+def _require_history_store_scope(db: Session, session, user: HQUser) -> None:
+    """A scoped operator may only reach broadcasts touching their own Stores.
+
+    Broadcast History already applies Store Scope; a recording is the audio of
+    one of those broadcasts and must not be a way around it.
+    """
+    scope = resolve_store_scope(engine, user)
+    if scope is None:
+        return
+    target_ids = {
+        row.store_id for row in
+        db.query(BroadcastTarget).filter(BroadcastTarget.session_id == session.id).all()
+    }
+    if not target_ids & set(scope):
+        # 404, matching the rest of History: a 403 would confirm the broadcast
+        # exists and let an out-of-scope account enumerate the estate.
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+@api.get("/broadcast/sessions/{sid}/recording/audio")
+def stream_broadcast_recording(
+    sid: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require(Permission.VIEW_HISTORY)),
+):
+    """The audio itself, authenticated, with byte-range support.
+
+    NOT a static mount. The recordings directory is never served as a public
+    folder: every byte leaves through this route, which checks the same
+    permission and the same Store Scope as History.
+
+    Range support exists because a browser audio element asks for one - seeking
+    in a WebM without it means refetching the whole file, and some browsers
+    simply refuse to seek at all.
+    """
+    session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _require_history_store_scope(db, session, user)
+
+    record = broadcast_recording.get_recording(engine, session_id=sid)
+    if record is None or record.status not in (
+            broadcast_recording.STATUS_AVAILABLE,
+            broadcast_recording.STATUS_PARTIAL):
+        # PARTIAL is playable and deliberately allowed: a recording with a gap
+        # is still the best evidence of what went out.
+        raise HTTPException(status_code=404,
+                            detail="No playable recording for that broadcast")
+
+    directory = broadcast_recording.recordings_directory()
+    path = (directory / record.file_name).resolve()
+    if path.parent != directory.resolve() or not path.exists():
+        # The row says there is audio and there is not. Recorded honestly so
+        # the next History read stops offering a Play button.
+        broadcast_recording.finish_record(
+            engine, session_id=sid, status=broadcast_recording.STATUS_MISSING,
+            error="the recording file was not found")
+        raise HTTPException(status_code=404, detail="The recording file is missing")
+
+    total = path.stat().st_size
+    range_header = request.headers.get("range")
+    start, end = 0, total - 1
+    status_code = 200
+    if range_header and range_header.startswith("bytes="):
+        piece = range_header.split("=", 1)[1].split(",")[0]
+        first, _, last = piece.partition("-")
+        try:
+            if first:
+                start = int(first)
+                end = int(last) if last else total - 1
+            elif last:
+                start = max(0, total - int(last))
+        except ValueError:
+            start, end = 0, total - 1
+        else:
+            status_code = 206
+        start = max(0, min(start, total - 1))
+        end = max(start, min(end, total - 1))
+
+    length = end - start + 1
+
+    def chunks():
+        # Streamed in pieces rather than read whole: an hour of announcements
+        # should not have to fit in memory to be played back.
+        with open(path, "rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                block = handle.read(min(65536, remaining))
+                if not block:
+                    break
+                remaining -= len(block)
+                yield block
+
+    headers = {
+        "Content-Length": str(length),
+        "Accept-Ranges": "bytes",
+        # An attachment name derived from the session id alone - no campaign
+        # name, no username, nothing that could carry something private into a
+        # downloads folder.
+        "Content-Disposition":
+            f'inline; filename="broadcast-{sid:06d}.webm"',
+    }
+    if status_code == 206:
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+
+    return StreamingResponse(chunks(), status_code=status_code,
+                             media_type="audio/webm", headers=headers)
 
 
 @api.get("/broadcast/sessions/{sid}", response_model=SessionDetailOut)
@@ -4042,9 +4293,39 @@ def delete_broadcast_sessions(payload: BulkIdsRequest,
     """
     _require_bulk_confirmation(payload, "DELETE")
     ids, matched = _resolve_bulk(payload, lambda f: _history_ids_matching(f, user, db))
+
+    # The audio goes FIRST, deliberately. Deleting the rows first and then
+    # discovering the file could not be removed would leave an orphan with
+    # nothing left pointing at it - unfindable, and never cleaned up. This
+    # order can at worst leave a row whose audio is gone, which the next read
+    # reports honestly as MISSING.
+    #
+    # Only these sessions' own files are touched. The recordings directory
+    # itself is never removed.
+    recordings_directory = broadcast_recording.recordings_directory()
+    known = broadcast_recording.all_recordings(engine)
+    for session_id in ids:
+        record = known.get(session_id)
+        if record is None:
+            continue
+        try:
+            broadcast_recording.remove_recording_file(
+                recordings_directory, record.file_name)
+        except Exception as failure:
+            logger.warning("Recording file for session %s could not be removed: %s",
+                           session_id, failure)
+
     result = delete_sessions_permanently(
         engine, session_ids=ids, actor_user_id=user.id,
         filters=payload.filters)
+    # The metadata rows follow their sessions. A FOREIGN KEY with ON DELETE
+    # CASCADE covers this when SQLite has foreign keys enabled, but that is a
+    # per-connection PRAGMA and this must not depend on it.
+    for session_id in ids:
+        try:
+            broadcast_recording.delete_record(engine, session_id=session_id)
+        except Exception:
+            pass
     _write_log(db, "warn",
                f"BROADCAST_HISTORY_DELETED count={result.affected} "
                f"requested={result.requested} by={user.username}")
@@ -5104,6 +5385,13 @@ async def ws_broadcaster(websocket: WebSocket, ticket: str = Query(...),
                 # set - which is what kept one operator's audio out of
                 # another's Stores.
                 await manager.fanout_audio(session_id, data)
+                # AFTER the fan-out, and never awaited on the disk. offer()
+                # only puts the chunk in a bounded queue; a background task
+                # does the file work. A slow disk costs a truthful recording
+                # status, never a delayed announcement.
+                recorder = _RECORDING_WRITERS.get(session_id)
+                if recorder is not None:
+                    recorder.offer(data)
             # text messages ignored for now
     except WebSocketDisconnect:
         pass

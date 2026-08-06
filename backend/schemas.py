@@ -493,6 +493,30 @@ class TargetOut(BaseModel):
         return _utc_iso(value)
 
 
+class RecordingOut(BaseModel):
+    """What History can honestly say about a broadcast's audio.
+
+    Deliberately carries NO path and no file name. A recording is addressed by
+    its session id; where it happens to live on the HQ machine is a deployment
+    detail, and a path in an API response is a path a client will eventually be
+    able to influence.
+    """
+
+    #: recording | available | partial | failed | missing
+    status: str
+    container: Optional[str] = None
+    codec: Optional[str] = None
+    byte_size: Optional[int] = None
+    duration_seconds: Optional[float] = None
+    chunks_written: int = 0
+    #: Non-zero means there is a real gap in the audio. It is the difference
+    #: between PARTIAL and AVAILABLE and must not be hidden.
+    chunks_dropped: int = 0
+    started_at: Optional[str] = None
+    finalized_at: Optional[str] = None
+    error: Optional[str] = None
+
+
 class SessionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -516,6 +540,9 @@ class SessionOut(BaseModel):
     online_store_count: int
     offline_store_count: int
     notes: Optional[str]
+    #: None when this broadcast predates recording, or never had one. Absent is
+    #: different from failed and the UI says so.
+    recording: Optional[RecordingOut] = None
     created_at: datetime
     # Carried on the row, not just implied by the filter: with include_archived
     # the list mixes both, and the operator has to see which is which.
