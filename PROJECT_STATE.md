@@ -6307,3 +6307,147 @@ BP not touched. No second Store. Store Kit 1.5.3 **not** installed. No
 broadcast started. No dynamic Store/Zone targeting.
 
 No rollback is indicated — HQ is healthy and serving the accepted build.
+
+---
+
+## Master Volume panel, and Broadcast recording
+
+Branch `feature/master-volume-panel-recording-history`.
+
+### Master Volume is independent of the Broadcast Console
+
+Its own navigation entry and its own page. Setting a shop's volume happens
+before opening, after a complaint, or when somebody notices a Store has been
+left muted since Friday - almost never with an announcement on air. Reaching a
+slider used to require starting a broadcast, which made the most routine audio
+task depend on the least routine one.
+
+**Which Stores appear:** every Store with an installed, **active, primary**
+Receiver Device, online or offline. Hiding an offline Store would hide exactly
+the ones worth looking at. Retired, disabled and deleted Devices are excluded -
+a Store whose Receiver was replaced has one current machine, and commanding a
+historical Device id would target something that is not in the shop.
+
+`Zone` is the existing `region` field surfaced under the name operators use.
+No new column was invented.
+
+### The three things the panel must never conflate
+
+| | source | wording |
+|---|---|---|
+| what a Store **IS** | live reading, only while connected | "Currently 65%" |
+| what it **WAS** | memory, once offline | "Last known", controls disabled |
+| what we **WANT** | pending change | "Pending — will apply when Receiver reconnects" |
+
+A Store that has never reported shows an em dash, not an invented zero.
+**"Currently N%" may only ever come from the Receiver's readback** - a command
+that has been sent is not a fact about a mixer, and echoing the request back
+would make a Store that is ignoring HQ look obedient.
+
+### Offline: pending on reconnect, never applied
+
+Persisted, because outliving a disconnection is the whole point. `store_id` is
+the PRIMARY KEY, so **latest wins is a property of the table** rather than a
+rule the application remembers - 30 then 50 then 70 leaves one row saying 70,
+and no command queue exists to replay at a shop when it wakes up.
+
+The row carries Store, Device, requested state, actor and timestamp. No
+credential, token, Settings Password or JWT.
+
+On reconnect the change is applied only after the Device has authenticated,
+been confirmed as this Store's current primary, and **reported what its mixer
+actually is**. It is refused if the Device was replaced, and left alone if a
+broadcast now owns the Store. The row is cleared **only on a confirmed apply**:
+clearing on attempt would make failure indistinguishable from success.
+
+### Single writer, always
+
+There is never a second command channel. When a broadcast owns a Store the
+panel routes through **that broadcast's own authority** if the caller is the
+operator running it, and otherwise refuses with `CONTROLLED_BY_BROADCAST`.
+
+### Observer lifecycle
+
+Observation now runs whenever the Receiver is **connected with a stable
+endpoint configured**, not between PREPARE and STOP. Readings carry a session
+id only when a broadcast is running. On reconnect the Receiver reads and
+reports its actual state before anything is applied - the observer reports only
+*changes*, so a Store returning at the volume it left at would otherwise say
+nothing and look stale.
+
+Only the saved MMDevice endpoint is ever observed or controlled. No default
+endpoint, no `index:N`, no friendly-name guess.
+
+**Restoration is unchanged and remains authoritative.** Original 25% muted,
+broadcast sets 80, someone at the till moves it to 40, HQ shows 40 - and STOP
+still restores **25% muted**. Restoration no longer stops the observer, so the
+restored state is reported back to the panel afterwards.
+
+A gap the load harness found: capabilities were only reported in
+`receiver_ready`, which happens at PREPARE, so a Store merely connected all day
+sat at `unknown` and had its slider refused. A reading is now taken as evidence
+the endpoint is readable - **promoted from `unknown` only**, so an explicit
+`needs_output_selection` or `unavailable` is never overridden by inference.
+
+### Broadcast recording
+
+Records the bytes on the broadcaster's microphone socket: HQ's **outgoing**
+audio, after the accepted gain and mute path, so muting the HQ microphone
+records silence. Store ambient sound and EchoGuard cannot appear because they
+never travel on that socket - a test asserts the recorder has exactly one call
+site and that it is the broadcaster handler, because an absent wire is a
+stronger guarantee than a filter.
+
+**A recording never delays an announcement.** The fan-out only `put_nowait`s
+into a bounded queue (240 chunks, ~1 minute) and a background task does the
+file work. A full queue drops the chunk and the recording becomes PARTIAL.
+
+Files live in `data/recordings/`, named `broadcast-000123.webm` - session id
+and nothing else. Gitignored explicitly. **No audio in SQLite**; the row holds
+status, codec, size, duration, counts and timestamps.
+
+Written to `.part`, validated with ffprobe, then atomically renamed. Five
+truthful states: `recording`, `available`, `partial`, `failed`, `missing`. On
+restart an unfinished `.part` is **never** promoted to AVAILABLE.
+
+Playback is an authenticated route with byte-range support, gated on the same
+permission and Store Scope as Broadcast History. The recordings folder is never
+a static mount, and no path or filename reaches the browser. Deleting history
+removes the audio **first**, so a failure can at worst leave a row reported as
+MISSING rather than an orphan file nothing points at.
+
+### Load results
+
+**Idle, no broadcast anywhere** (`tools/master_volume_load.py`):
+
+| | 5 | 10 | 20 | 40 |
+|---|---|---|---|---|
+| Panel rows | 5 | 10 | 20 | 40 |
+| Local changes generated | 47 | 57 | 77 | 117 |
+| Frames transmitted | 8 | 18 | 38 | 78 |
+| Noisy Store: generated → sent | 42 → 3 | 42 → 3 | 42 → 3 | 42 → 3 |
+| HQ matched the Store | yes | yes | yes | yes |
+| Unconfigured Store's frames | 0 | 0 | 0 | 0 |
+| Commands accepted / refused | 3 / 1 | 8 / 1 | 18 / 1 | 38 / 1 |
+| CPU s · RSS MB | 0.08 · 83.6 | 0.11 · 84.1 | 0.22 · 87.0 | 0.34 · 91.5 |
+
+The single refusal at every scale is the Store with no selected output - a 409,
+which is correct. The offline Store was listed, marked stale, and took a
+pending change of 70 after 30 and 70 were sent (latest wins).
+
+**Broadcast with recording enabled** (`tools/audio_control_load.py`):
+
+| | 5 | 10 | 20 | 40 |
+|---|---|---|---|---|
+| Recording status | available | available | available | available |
+| Codec · duration | opus · 4.008 s | opus · 4.008 s | opus · 4.008 s | opus · 4.008 s |
+| Chunks written / dropped | 21 / 0 | 21 / 0 | 21 / 0 | 21 / 0 |
+| Audio chunks dropped | 0 | 0 | 0 | 0 |
+| Max audio queue / capacity | 1 / 24 | 1 / 24 | 1 / 24 | 1 / 24 |
+| Restored to original | yes | yes | yes | yes |
+| CPU s · RSS MB | 0.25 · 85.7 | 0.47 · 87.1 | 0.73 · 90.1 | 1.3 · 96.5 |
+
+### Not done
+
+No live HQ deployment. No Store touched, BP included. No second Store. No
+physical acceptance. **No software state equals SPEAKER_VERIFIED.**
