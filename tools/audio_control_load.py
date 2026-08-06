@@ -107,6 +107,39 @@ def _actual_row(state: dict, store_id: int) -> dict:
     return {}
 
 
+def _recording_summary(base_url, token, session_id) -> dict:
+    """What the recording of this load run turned out to be.
+
+    Read from the API rather than the filesystem, because what matters is what
+    an operator would be told - and because a status the API cannot report is
+    a status that does not exist as far as the product is concerned.
+    """
+    import requests
+
+    try:
+        response = requests.get(
+            f"{base_url}/api/broadcast/sessions/{session_id}/recording",
+            headers={"Authorization": f"Bearer {token}"}, timeout=20)
+    except Exception as failure:
+        return {"unavailable": str(failure)[:120]}
+    if response.status_code != 200:
+        return {"unavailable": f"HTTP {response.status_code}"}
+    body = response.json()
+    return {
+        "status": body.get("status"),
+        "codec": body.get("codec"),
+        "container": body.get("container"),
+        "byte_size": body.get("byte_size"),
+        "duration_seconds": body.get("duration_seconds"),
+        "chunks_written": body.get("chunks_written"),
+        # Non-zero means the disk could not keep up. The announcement still
+        # went out - that is the entire point of the bounded queue - and the
+        # recording is honestly marked PARTIAL.
+        "chunks_dropped": body.get("chunks_dropped"),
+        "error": body.get("error"),
+    }
+
+
 def _latest_wins_summary(state: dict, receivers) -> dict:
     """Did the last value of the drag survive, on every Store that can apply it?
 
@@ -415,6 +448,7 @@ async def _drive_audio_control(paths, store_count: int, port: int,
             "audio_chunks_received": _summarise(
                 [float(r.chunks) for r in receivers]),
             "audio_queue": _summarise_queue_metrics(queue_metrics),
+            "recording": _recording_summary(base_url, token, session_id),
             "cpu_seconds": cpu_seconds,
             # _process_cost reports raw bytes under "rss"; converted here so
             # the report reads in the units a person thinks in.

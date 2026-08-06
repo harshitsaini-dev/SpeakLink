@@ -5149,6 +5149,22 @@ async def ws_receiver(websocket: WebSocket):
                 # about the Store whether or not a broadcast exists, and the
                 # Master Volume panel is not a broadcast screen. Most readings
                 # now arrive with no session id at all.
+                # A reading IS evidence that this Receiver can read its
+                # configured endpoint. Capabilities are otherwise only reported
+                # in receiver_ready, which happens at broadcast PREPARE - so a
+                # Store that has merely been connected all day would sit at
+                # "unknown" and its slider would be refused, despite the Store
+                # demonstrably reporting its mixer.
+                #
+                # Promoted from UNKNOWN only. An explicit needs_output_selection
+                # or unavailable came from the Receiver's own capability report
+                # and is never overridden by inference.
+                if (store_master_audio.registry.state_for(store_id).endpoint_status
+                        == store_master_audio.ENDPOINT_UNKNOWN):
+                    store_master_audio.registry.note_capability(
+                        store_id=store_id,
+                        endpoint_status=store_master_audio.ENDPOINT_READY)
+
                 master_state = store_master_audio.registry.observe(
                     store_id=store_id,
                     state_sequence=acknowledgement.state_sequence,
