@@ -62,6 +62,7 @@ __all__ = [
     "generate_join_password",
     "create_room",
     "get_room_for_session",
+    "get_room_by_id",
     "find_room_by_public_code",
     "rotate_password",
     "set_auto_approve",
@@ -755,3 +756,17 @@ def authenticate_listener(engine: Engine, *,
     if not room.is_open:
         return None
     return room, participant
+
+
+def get_room_by_id(engine: Engine, *, room_id: int) -> WebRoom | None:
+    """Look a room up by its internal id.
+
+    Used where a participant row is already in hand: the participant knows its
+    room, and re-deriving that through the session would be a longer path to
+    the same answer.
+    """
+    with engine.connect() as connection:
+        row = connection.exec_driver_sql(
+            f"SELECT {_ROOM_COLUMNS} FROM {ROOM_TABLE} WHERE id = ?", (room_id,),
+        ).fetchone()
+    return _room_from_row(row) if row else None
