@@ -83,7 +83,10 @@ function baseBroadcast(overrides = {}) {
   };
 }
 
-async function renderConsole(overrides = {}, permissions = ["broadcast.start", "broadcast.stop"]) {
+// Physical broadcaster by default: broadcast.store_delivery now decides
+// whether the Console asks for the target catalogue at all.
+async function renderConsole(overrides = {}, permissions = ["broadcast.start", "broadcast.stop",
+                                                            "broadcast.store_delivery"]) {
   mockBroadcast = baseBroadcast(overrides);
   mockPermissions = new Set(permissions);
   render(<BroadcastConsole />);

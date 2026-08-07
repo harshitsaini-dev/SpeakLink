@@ -47,7 +47,12 @@ jest.mock("@/lib/api", () => ({
 // eslint-disable-next-line import/first
 const { api } = require("@/lib/api");
 
-async function renderConsole(permissions = ["broadcast.start", "broadcast.stop"]) {
+// The default is a PHYSICAL broadcaster, which is what every test in this file
+// is about. broadcast.store_delivery is what now decides whether the Console
+// asks for the target catalogue at all, so omitting it here would silently turn
+// these into tests of a link-only operator.
+async function renderConsole(permissions = ["broadcast.start", "broadcast.stop",
+                                            "broadcast.store_delivery"]) {
   mockPermissions = new Set(permissions);
   render(<BroadcastConsole />);
   await act(async () => {});
@@ -96,8 +101,10 @@ test("the Console asks for broadcast targets, never the Store Management list", 
 });
 
 test("targets render for an operator with no Store Management permission", async () => {
-  // Exactly the operator's account: may broadcast, may not manage Stores.
-  await renderConsole(["broadcast.start", "broadcast.stop"]);
+  // Exactly the operator's account: may broadcast to Stores, may not manage
+  // them. Physical delivery is a separate right and this account keeps it -
+  // the missing permission under test here is menu.stores.view.
+  await renderConsole(["broadcast.start", "broadcast.stop", "broadcast.store_delivery"]);
   expect(mockPermissions.has("menu.stores.view")).toBe(false);
   expect(screen.getByTestId("store-row-BP")).toBeTruthy();
   expect(screen.getByTestId("store-row-RG")).toBeTruthy();
@@ -114,4 +121,38 @@ test("region options come from the scoped target response", async () => {
   // Derived from the returned Stores, so a scoped operator is never offered a
   // region they hold no Store in.
   expect(screen.getByRole("option", { name: "NORTH" })).toBeTruthy();
+});
+
+
+// ===========================================================================
+// The physical delivery boundary
+// ===========================================================================
+test("an operator without physical delivery is never offered Stores or Zones", async () => {
+  // The right that decides this is separate from being allowed to broadcast:
+  // this account may host a Broadcast, but may not put sound into a shop.
+  await renderConsole(["broadcast.start", "broadcast.stop"]);
+
+  expect(screen.queryByTestId("target-mode-select")).toBeNull();
+  expect(screen.queryByTestId("stores-search")).toBeNull();
+  const notice = screen.getByTestId("no-store-delivery-notice");
+  expect(notice.textContent).toMatch(/cannot broadcast to Stores or Zones/i);
+});
+
+test("the target catalogue is not even requested without physical delivery", async () => {
+  // Asking for what the account may not have and hiding the 403 is exactly the
+  // empty-table bug this file was opened for. It must not be reintroduced in a
+  // new shape.
+  await renderConsole(["broadcast.start", "broadcast.stop"]);
+
+  const requested = api.get.mock.calls.map(([url]) => url);
+  expect(requested).not.toContain("/broadcast/target-stores");
+});
+
+test("no Store name reaches the page without physical delivery", async () => {
+  // A disabled selector would still print every Store the account may not
+  // reach, which is the leak the control exists to prevent.
+  await renderConsole(["broadcast.start", "broadcast.stop"]);
+
+  expect(screen.queryByText(/Testville North/)).toBeNull();
+  expect(screen.queryByText(/Testville South/)).toBeNull();
 });

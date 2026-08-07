@@ -81,6 +81,21 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
     #: "may this account operate output volume at all", never "whose".
     PermissionDefinition("store_audio.control", "Broadcast",
                         "Control Store Output Volume"),
+    #: May this account deliver a broadcast to PHYSICAL Stores at all.
+    #:
+    #: A separate code because physical delivery and broadcasting are no longer
+    #: the same capability. A broadcast can now reach a web audience through a
+    #: shared link with no Store targets whatsoever, so "may broadcast" and "may
+    #: put sound into a shop" are genuinely different questions - and the second
+    #: is the one with a loudspeaker on the end of it.
+    #:
+    #: This is deliberately NOT solved through Store Scope. Scope answers WHICH
+    #: Stores, and a blank scope means unrestricted; using it to express "no
+    #: Stores at all" would overload a field whose empty value already means the
+    #: opposite. Missing this permission denies every physical target regardless
+    #: of what Scope says.
+    PermissionDefinition("broadcast.store_delivery", "Broadcast",
+                        "Broadcast to Stores / Zones"),
 
     PermissionDefinition("menu.stores.view", "Stores", "View Store Management"),
     PermissionDefinition("stores.create", "Stores", "Create Store"),
@@ -168,9 +183,14 @@ _ALL_CODES = frozenset(PERMISSION_CODES)
 #: stop it deafening one shop has been given the dangerous half of the job.
 #: Ownership still gates every individual command, so holding this grants
 #: nothing over anybody else's session.
+#: broadcast.store_delivery IS here, so every role that can already take the
+#: estate live keeps that ability across the upgrade. The new boundary exists to
+#: be REMOVED from an account deliberately - creating a link-only broadcaster -
+#: not to silently take physical delivery away from every operator who has it.
+#: VIEWER is unaffected: it holds none of these codes.
 _BROADCAST_CODES = frozenset({
     "menu.broadcast.view", "broadcast.start", "broadcast.stop",
-    "store_audio.control",
+    "store_audio.control", "broadcast.store_delivery",
 })
 _VIEW_ONLY_CODES = frozenset({
     "menu.broadcast.view", "menu.stores.view", "menu.receivers.view",

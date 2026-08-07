@@ -96,12 +96,21 @@ export default function BroadcastConsole() {
   // Regions and cities arrive in the same response, derived from the very
   // Stores listed here, so a scoped operator's dropdowns can no longer offer a
   // region they have no Store in.
+  // Physical Store delivery is now its own right, separate from being allowed
+  // to broadcast at all: an account may host a Broadcast without ever being
+  // able to put sound into a shop. For such an operator the target inventory is
+  // a 403, so it is not requested - a page that fetches what it may not have
+  // and then hides the error is how the empty-table bug happened before.
+  const mayDeliverToStores = can("broadcast.store_delivery");
+
   const load = React.useCallback(async () => {
-    const { data } = await api.get("/broadcast/target-stores");
-    setStores(data.stores || []);
-    setMeta({ regions: data.regions || [], cities: data.cities || [] });
+    if (mayDeliverToStores) {
+      const { data } = await api.get("/broadcast/target-stores");
+      setStores(data.stores || []);
+      setMeta({ regions: data.regions || [], cities: data.cities || [] });
+    }
     await loadBroadcast();
-  }, [loadBroadcast]);
+  }, [loadBroadcast, mayDeliverToStores]);
 
   React.useEffect(() => { load(); }, [load]);
 
@@ -497,6 +506,22 @@ export default function BroadcastConsole() {
                 disabled={isLive}
               />
             </div>
+            {!mayDeliverToStores && (
+              <div data-testid="no-store-delivery-notice"
+                   className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1">
+                  Target Mode
+                </p>
+                <p className="text-sm text-slate-700">
+                  This account cannot broadcast to Stores or Zones.
+                </p>
+                <p className="text-xs text-slate-500 mt-1">
+                  Ask an administrator for &ldquo;Broadcast to Stores / Zones&rdquo;
+                  if you need physical delivery.
+                </p>
+              </div>
+            )}
+            {mayDeliverToStores && (
             <div>
               <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Target Mode</label>
               <select
@@ -508,6 +533,7 @@ export default function BroadcastConsole() {
                 {TARGET_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
               </select>
             </div>
+            )}
 
             {targetMode === "region" && (
               <div>
@@ -608,7 +634,10 @@ export default function BroadcastConsole() {
         </div>
       </div>
 
-      {/* Store list */}
+      {/* Store list. Omitted entirely without physical delivery: a disabled
+          selector would still print the name of every Store the account may
+          not reach, which is the leak the control is meant to prevent. */}
+      {mayDeliverToStores && (
       <div className="border border-slate-200 bg-white rounded-md shadow-sm">
         <div className="p-4 border-b border-slate-200 flex flex-wrap items-center gap-3">
           <h3 className="font-semibold text-slate-900 mr-auto">Stores {targetMode === "selected" && <span className="text-slate-500 font-normal text-sm">— pick receivers to include</span>}</h3>
@@ -717,6 +746,7 @@ export default function BroadcastConsole() {
           </table>
         </div>
       </div>
+      )}
 
       {/* Confirm Modal */}
       {emergencyConfirmOpen && (
