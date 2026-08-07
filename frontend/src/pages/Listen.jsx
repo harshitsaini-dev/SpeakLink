@@ -28,7 +28,20 @@ const Phase = {
   LIVE: "LIVE",
   KICKED: "KICKED",
   ENDED: "ENDED",
+  //: This browser has no valid listener session. Distinct from ENDED, which
+  //: means the Broadcast itself is over - conflating them told an approved
+  //: listener their Broadcast had finished.
+  LOST: "LOST",
+  //: Admitted before the microphone opened. Waiting, not finished.
+  WAITING_BROADCAST: "WAITING_BROADCAST",
 };
+
+//: How long playback may fail to progress before the listener is told.
+//: Measured against the relay: one Cluster is 300 ms and the bootstrap is two
+//: of them, so anything past a few seconds is a real failure rather than a
+//: slow start. Buffering for ever while nothing happens is not a state, it is
+//: a bug wearing one.
+const NO_PROGRESS_TIMEOUT_MS = 8000;
 
 //: Bounded exponential backoff with jitter, in the same spirit as the Receiver.
 //: A listener whose Wi-Fi dropped should come back quickly; a hundred listeners
@@ -60,6 +73,7 @@ export default function Listen() {
   const heartbeatRef = React.useRef(null);
   const attemptRef = React.useRef(0);
   const retryRef = React.useRef(null);
+  const progressRef = React.useRef(null);
   const stoppedRef = React.useRef(false);
   //: The player reads this rather than `playback`, so the heartbeat always
   //: reports what the element is doing now and not what it was doing when the
@@ -70,6 +84,7 @@ export default function Listen() {
   const teardown = React.useCallback(() => {
     if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null; }
     if (retryRef.current) { clearTimeout(retryRef.current); retryRef.current = null; }
+    if (progressRef.current) { clearInterval(progressRef.current); progressRef.current = null; }
     if (socketRef.current) {
       const socket = socketRef.current;
       socketRef.current = null;
@@ -126,6 +141,13 @@ export default function Listen() {
         const started = await player.play();
         setNeedsTap(!started);
         startHeartbeat(message.heartbeat_seconds || 10);
+      } else if (message.type === "refused") {
+        // The server accepted the socket purely to say this. A refusal is not
+        // a network problem and must not be retried in a loop.
+        stoppedRef.current = true;
+        setPhase(message.reason === "not_started" ? Phase.WAITING_BROADCAST
+                                                  : Phase.LOST);
+        teardown();
       } else if (message.type === "kicked") {
         stoppedRef.current = true;
         setPhase(Phase.KICKED);
@@ -140,11 +162,15 @@ export default function Listen() {
     socket.onclose = (event) => {
       if (stoppedRef.current) return;
       if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null; }
-      // 4401 means the session is no longer valid - kicked, denied or the room
-      // has ended. Retrying that would be a loop that can never succeed.
+      if (progressRef.current) { clearInterval(progressRef.current); progressRef.current = null; }
+      // A refusal already set the phase and stopped us; anything else here is
+      // a genuine disconnect. The server now ACCEPTS before refusing, so a
+      // refusal arrives as a message rather than as a close code - a close
+      // before the handshake completes only ever reaches a browser as 1006,
+      // which is indistinguishable from a dropped network.
       if (event.code === 4401) {
         stoppedRef.current = true;
-        setPhase(Phase.ENDED);
+        setPhase(Phase.LOST);
         return;
       }
       setPlayback(ListenerPlaybackState.BUFFERING);
@@ -155,6 +181,27 @@ export default function Listen() {
         connect();                       // a reconnect is a fresh bootstrap
       }, reconnectDelay(attempt));
     };
+
+    // Watchdog: connected, but is anything actually playing?
+    if (progressRef.current) clearInterval(progressRef.current);
+    let lastTime = -1;
+    let stuckSince = Date.now();
+    progressRef.current = setInterval(() => {
+      const element = audioRef.current;
+      if (!element || stoppedRef.current) return;
+      if (element.paused) { stuckSince = Date.now(); return; }
+      if (element.currentTime > lastTime) {
+        lastTime = element.currentTime;
+        stuckSince = Date.now();
+        return;
+      }
+      if (Date.now() - stuckSince < NO_PROGRESS_TIMEOUT_MS) return;
+      // Connected and receiving, yet the clock has not moved. Say so, and try
+      // again from a fresh bootstrap rather than sitting on Buffering.
+      setError("Unable to start live audio. Reconnecting…");
+      stuckSince = Date.now();
+      try { socket.close(); } catch (ignored) { /* already closing */ }
+    }, 1000);
 
     function startHeartbeat(seconds) {
       if (heartbeatRef.current) clearInterval(heartbeatRef.current);
@@ -223,7 +270,14 @@ export default function Listen() {
         if (data.admission_status === "KICKED") { setPhase(Phase.KICKED); return; }
         if (data.admission_status === "ROOM_ENDED") { setPhase(Phase.ENDED); return; }
       } catch (failure) {
-        if (failure?.response?.status === 401) { setPhase(Phase.ENDED); return; }
+        if (failure?.response?.status === 401) {
+          // NOT "the Broadcast ended". 401 here means this browser has no
+          // valid listener session - which is what happened when the cookie
+          // was rejected - and telling somebody their Broadcast finished the
+          // moment they were approved is the worst possible reading of it.
+          setPhase(Phase.LOST);
+          return;
+        }
       }
       retryRef.current = setTimeout(tick, 2500);
     };
@@ -346,6 +400,26 @@ export default function Listen() {
         {phase === Phase.KICKED && (
           <Panel testId="listen-kicked">
             <p className="font-semibold">You were removed from this Broadcast.</p>
+          </Panel>
+        )}
+
+        {phase === Phase.WAITING_BROADCAST && (
+          <Panel testId="listen-not-started-yet">
+            <Loader2 size={28} className="mx-auto mb-3 animate-spin text-slate-400" />
+            <p className="font-semibold">The Broadcast hasn&rsquo;t started yet</p>
+            <p className="mt-1 text-sm text-slate-400">
+              You&rsquo;re admitted. Audio will begin when the broadcaster goes live.
+            </p>
+          </Panel>
+        )}
+
+        {phase === Phase.LOST && (
+          <Panel testId="listen-session-lost">
+            <p className="font-semibold">You&rsquo;re not connected to this Broadcast</p>
+            <p className="mt-1 text-sm text-slate-400">
+              Your access may have been removed, or this browser is blocking the
+              session. Try joining again.
+            </p>
           </Panel>
         )}
 

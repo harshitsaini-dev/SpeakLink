@@ -299,11 +299,14 @@ test("a refused session closes the page instead of looping", async () => {
     await act(async () => { fireEvent.click(screen.getByTestId("listen-join")); });
 
     const first = FakeSocket.last;
-    // 4401: kicked, denied, or the room has ended. Retrying can never succeed.
+    // 4401 means this browser has no valid listener session. Retrying can
+    // never succeed - but it is NOT the Broadcast ending, and saying so to
+    // somebody who was just approved is the defect this distinction fixes.
     await act(async () => { first.onclose({ code: 4401 }); });
     await act(async () => { jest.advanceTimersByTime(60_000); });
 
-    expect(screen.getByTestId("listen-ended")).toBeTruthy();
+    expect(screen.getByTestId("listen-session-lost")).toBeTruthy();
+    expect(screen.queryByTestId("listen-ended")).toBeNull();
     expect(FakeSocket.last).toBe(first);
   } finally {
     jest.useRealTimers();
@@ -333,4 +336,75 @@ test("an ordinary disconnect reconnects with backoff", async () => {
   } finally {
     jest.useRealTimers();
   }
+});
+
+
+// ===========================================================================
+// The refusal and progress defects found by manual LAN testing
+// ===========================================================================
+
+test("a refused socket reports the refusal instead of retrying for ever", async () => {
+  jest.useFakeTimers();
+  try {
+    api.post.mockResolvedValue({ data: {
+      admitted: true, admission_status: "PASSWORD_ADMITTED",
+      display_name: "Harshit", broadcast_live: true,
+    } });
+    render(<Listen />);
+    await act(async () => {});
+    fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "EC-7K4P92" } });
+    fireEvent.change(screen.getByTestId("listen-name"), { target: { value: "Harshit" } });
+    await act(async () => { fireEvent.click(screen.getByTestId("listen-join")); });
+
+    const first = FakeSocket.last;
+    // The server now ACCEPTS before refusing, so the reason arrives as a
+    // message. Closing before the handshake completes only ever reaches a
+    // browser as 1006, which is why a refusal used to look like a dropped
+    // network and buffer for ever.
+    await act(async () => {
+      first.onmessage({ data: JSON.stringify({ type: "refused", reason: "not_admitted" }) });
+    });
+    expect(screen.getByTestId("listen-session-lost")).toBeTruthy();
+
+    await act(async () => { jest.advanceTimersByTime(60_000); });
+    expect(FakeSocket.last).toBe(first);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("being admitted before the Broadcast starts is waiting, not ended", async () => {
+  api.post.mockResolvedValue({ data: {
+    admitted: true, admission_status: "PASSWORD_ADMITTED",
+    display_name: "Harshit", broadcast_live: false,
+  } });
+  await renderListen();
+  await fillAndJoin();
+
+  await act(async () => {
+    FakeSocket.last.onmessage({ data: JSON.stringify({
+      type: "refused", reason: "not_started" }) });
+  });
+  expect(screen.getByTestId("listen-not-started-yet")).toBeTruthy();
+  expect(screen.queryByTestId("listen-ended")).toBeNull();
+});
+
+test("a listener whose session is rejected is not told the Broadcast ended", async () => {
+  // The exact manual defect: Request Access, get approved, and the poll comes
+  // back 401 because the browser refused the cookie.
+  api.post.mockResolvedValue({ data: {
+    admitted: false, admission_status: "REQUESTED",
+    display_name: "Aman", broadcast_live: true,
+  } });
+  api.get.mockRejectedValue({ response: { status: 401 } });
+
+  await renderListen();
+  fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "EC-7K4P92" } });
+  fireEvent.change(screen.getByTestId("listen-name"), { target: { value: "Aman" } });
+  await act(async () => { fireEvent.click(screen.getByTestId("listen-request")); });
+  expect(screen.getByTestId("listen-waiting")).toBeTruthy();
+
+  await act(async () => { await new Promise((r) => setTimeout(r, 2000)); });
+  expect(screen.queryByTestId("listen-ended")).toBeNull();
+  expect(screen.getByTestId("listen-session-lost")).toBeTruthy();
 });
