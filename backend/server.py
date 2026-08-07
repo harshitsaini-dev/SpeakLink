@@ -2498,7 +2498,7 @@ def stores_meta(db: Session = Depends(get_db), user: HQUser = Depends(require("m
 @api.get("/broadcast/target-stores", response_model=BroadcastTargetsOut)
 def list_broadcast_target_stores(
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require("menu.broadcast.view")),
+    user: HQUser = Depends(require("broadcast.store_delivery")),
 ):
     """The Stores this account may point a broadcast at.
 
@@ -2565,7 +2565,25 @@ def list_broadcast_target_stores(
     )
 
 
+def _require_physical_delivery(user: HQUser) -> None:
+    """Refuse every physical Store target unless this account may deliver to one.
+
+    Checked here rather than only on the routes because this is the single
+    function through which every physical target is resolved. A guard on the
+    endpoints would have to be repeated, and the one that was forgotten would be
+    the one that mattered.
+
+    Deliberately independent of Store Scope. Scope answers WHICH Stores and
+    treats blank as unrestricted, so an account with no Scope and no physical
+    permission must still be refused - the absence of a restriction is not a
+    grant.
+    """
+    if not has_permission_code(engine, user, "broadcast.store_delivery"):
+        raise HTTPException(status_code=403, detail=RBAC_REFUSED)
+
+
 def _resolve_targets(db: Session, payload: SessionCreate, user: HQUser) -> List[Store]:
+    _require_physical_delivery(user)
     q = db.query(Store).filter(Store.is_active.is_(True))
     mode = payload.target_mode
     if mode == "all":
@@ -2896,6 +2914,10 @@ async def set_store_audio_control(
 ):
     """Set one Store's SpeakLink output level for the rest of this broadcast.
 
+    Also requires physical delivery. Steering a Store's loudspeaker is physical
+    delivery by any reasonable reading, so an account that may not target a
+    Store must not be able to reach one through its volume either.
+
     This controls the SpeakLink audio OUTPUT on the Store PC. The amplifier's
     physical volume control is separate, and nothing here can observe or change
     it - a Store reporting "applied 60" means its software output is at 60% of
@@ -2905,6 +2927,7 @@ async def set_store_audio_control(
     Store still marked pending. The applied value arrives later on the
     Receiver's own acknowledgement; a 200 here means "sent", never "applied".
     """
+    _require_physical_delivery(user)
     _require_audio_control_owner(sid, user)
 
     # Store Scope, enforced server-side and before anything is sent. A scoped

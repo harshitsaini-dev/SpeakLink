@@ -94,7 +94,9 @@ async function mountConsole() {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockPermissions = new Set(["broadcast.start", "broadcast.stop",
+  // Physical broadcaster: broadcast.store_delivery now decides whether the
+  // Console asks for the target catalogue at all.
+  mockPermissions = new Set(["broadcast.store_delivery", "broadcast.start", "broadcast.stop",
                              "store_audio.control"]);
   mockBroadcast = providerState();
   api.get.mockImplementation((path) => {
