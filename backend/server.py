@@ -5054,6 +5054,14 @@ async def ws_broadcaster(websocket: WebSocket, ticket: str = Query(...),
                 recorder = _RECORDING_WRITERS.get(session_id)
                 if recorder is not None:
                     recorder.offer(data)
+                # The web audience is the third sibling sink, and the same rule
+                # applies: offer() frames the stream and fills bounded
+                # per-listener queues, and never awaits a listener socket. A
+                # stream it cannot frame costs web listeners only - the Stores
+                # above and the recording beside it are already served.
+                relay = manager.broadcasts.web_relay(session_id)
+                if relay is not None:
+                    relay.offer(data)
             # text messages ignored for now
     except WebSocketDisconnect:
         pass
