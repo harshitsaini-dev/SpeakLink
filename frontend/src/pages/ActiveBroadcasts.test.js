@@ -48,6 +48,7 @@ function listBody(items, meta) {
     pages: 1, has_more: false,
     meta: {
       may_view_ownership: false, may_view_targets: false, may_stop_any: false,
+      may_manage_web_audience: false,
       ...meta,
     },
   };
@@ -331,4 +332,68 @@ test("a 403 on the list is reported, not rendered as an empty page", async () =>
 
   expect(screen.getByTestId("active-error").textContent)
     .toContain("do not have permission");
+});
+
+
+// ===========================================================================
+// Web Audience supervision
+// ===========================================================================
+
+test("the web room summary is shown only with view_ownership", async () => {
+  const withRoom = { ...BOB, web_room: {
+    public_code: "EC-K7Q92A", status: "OPEN", auto_approve: false,
+    password: "Q7KM-92PX", password_available: true,
+    waiting_count: 1, connected_count: 2, listening_count: 1 } };
+
+  // The backend does not send web_room at all without view_ownership, so the
+  // page cannot show it - which is the point. Here it IS sent.
+  await renderPage({ items: [withRoom], meta: { may_view_ownership: true } });
+  expect(screen.getByTestId("active-web-room-2").textContent).toContain("EC-K7Q92A");
+});
+
+test("no web room appears when the backend redacted it", async () => {
+  // Exactly what a caller without view_ownership receives: the key is absent.
+  await renderPage({ items: [redactOwner(BOB)], meta: {} });
+  expect(screen.queryByTestId("active-web-room-2")).toBeNull();
+  expect(screen.queryByText(/EC-/)).toBeNull();
+});
+
+test("Web Audience sits beside View Stores for an authorised supervisor", async () => {
+  await renderPage({ meta: { may_view_targets: true, may_manage_web_audience: true } });
+  expect(screen.getByTestId("active-view-stores-2")).toBeTruthy();
+  expect(screen.getByTestId("active-web-audience-2")).toBeTruthy();
+});
+
+test("Web Audience is absent without the manage permission", async () => {
+  // Reading who is broadcasting is not permission to touch their audience.
+  await renderPage({ meta: { may_view_ownership: true, may_view_targets: true } });
+  expect(screen.getByTestId("active-view-stores-2")).toBeTruthy();
+  expect(screen.queryByTestId("active-web-audience-2")).toBeNull();
+});
+
+test("your own broadcast always offers its Web Audience", async () => {
+  const mine = { ...ALICE, is_mine: true };
+  await renderPage({ items: [mine], meta: {} });
+  expect(screen.getByTestId(`active-web-audience-${mine.session_id}`)).toBeTruthy();
+});
+
+test("a Link Only broadcast offers Web Audience without View Stores", async () => {
+  // Zero Stores, so a View Stores button would be a broken control - but the
+  // audience is the whole point of the Broadcast.
+  const linkOnly = { ...BOB, session_id: 5, target_store_count: 0 };
+  await renderPage({ items: [linkOnly],
+                     meta: { may_manage_web_audience: true } });
+  expect(screen.getByTestId("active-store-count-5").textContent).toContain("0");
+  expect(screen.queryByTestId("active-view-stores-5")).toBeNull();
+  expect(screen.getByTestId("active-web-audience-5")).toBeTruthy();
+});
+
+test("clicking Web Audience opens the panel for that session", async () => {
+  await renderPage({ meta: { may_manage_web_audience: true } });
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("active-web-audience-2"));
+  });
+  expect(screen.getByTestId("supervised-audience-modal")).toBeTruthy();
+  expect(screen.getByTestId("supervised-audience-campaign").textContent)
+    .toContain("Weekend Offer");
 });
