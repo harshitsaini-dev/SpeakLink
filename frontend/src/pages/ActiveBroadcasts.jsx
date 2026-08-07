@@ -20,6 +20,7 @@
 import React from "react";
 import { Radio, Search, RefreshCcw, Square, X } from "lucide-react";
 import { api } from "@/lib/api";
+import SupervisedWebAudience from "@/components/SupervisedWebAudience";
 import { useAdminList } from "@/lib/adminList";
 
 const PAGE_SIZES = [20, 50];
@@ -46,6 +47,18 @@ export default function ActiveBroadcasts() {
   const mayViewOwnership = Boolean(meta?.may_view_ownership);
   const mayViewTargets = Boolean(meta?.may_view_targets);
   const mayStopAny = Boolean(meta?.may_stop_any);
+  // Managing another operator's audience is its own permission. Reading who is
+  // broadcasting does not confer it, and neither does being able to stop them.
+  const mayManageWebAudience = Boolean(meta?.may_manage_web_audience);
+  const [audienceFor, setAudienceFor] = React.useState(null);
+
+  // Built from the CURRENT origin, so a LAN pilot produces a LAN link and the
+  // HQ machine's own hostname never leaks into somebody else's browser.
+  const copyText = (value) => {
+    try { navigator.clipboard.writeText(value); } catch (ignored) { /* manual copy */ }
+  };
+  const copyListenerLink = (code) =>
+    copyText(`${window.location.origin}/listen/${code}`);
 
   const [detail, setDetail] = React.useState(null);      // { session, stores }
   const [detailError, setDetailError] = React.useState("");
@@ -250,6 +263,45 @@ export default function ActiveBroadcasts() {
                   {!mayViewOwnership && row.is_mine && (
                     <span className="ml-2 text-[10px] uppercase tracking-wide text-blue-700">you</span>
                   )}
+                  {/* The room summary arrives ONLY when the backend decided
+                      this caller may have it - the public code is a credential,
+                      so it follows the broadcaster's identity. There is no
+                      client-side condition here on purpose: if the key is
+                      present it was authorised, and if it is absent there is
+                      nothing to hide. */}
+                  {row.web_room && (
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-600"
+                         data-testid={`active-web-room-${row.session_id}`}>
+                      <span className="font-mono font-semibold text-slate-800">
+                        {row.web_room.public_code}
+                      </span>
+                      <button
+                        data-testid={`active-copy-link-${row.session_id}`}
+                        onClick={() => copyListenerLink(row.web_room.public_code)}
+                        className="rounded border border-slate-300 px-1.5 py-0.5 hover:bg-slate-100">
+                        Copy Link
+                      </button>
+                      {row.web_room.password_available ? (
+                        <button
+                          data-testid={`active-copy-password-${row.session_id}`}
+                          onClick={() => copyText(row.web_room.password)}
+                          className="rounded border border-slate-300 px-1.5 py-0.5 hover:bg-slate-100">
+                          Copy Password
+                        </button>
+                      ) : (
+                        // Only a hash exists. Asterisks would imply EchoCast
+                        // knows a value it is merely hiding.
+                        <span data-testid={`active-password-state-${row.session_id}`}>
+                          Password configured
+                        </span>
+                      )}
+                      <span className="text-slate-500">
+                        {row.web_room.waiting_count} waiting ·{" "}
+                        {row.web_room.connected_count} connected ·{" "}
+                        {row.web_room.listening_count} listening
+                      </span>
+                    </div>
+                  )}
                 </td>
                 <td className="px-3 py-2 text-xs text-slate-600">{row.started_at || "—"}</td>
                 <td className="px-3 py-2 text-xs" data-testid={`active-store-count-${row.session_id}`}>
@@ -263,6 +315,20 @@ export default function ActiveBroadcasts() {
                       className="text-xs px-2.5 py-1 rounded-md border border-slate-300 hover:bg-slate-100"
                     >
                       View Stores
+                    </button>
+                  )}
+                  {/* Beside View Stores, in the same compact action system.
+                      Offered for your OWN broadcast too - it is your audience -
+                      and otherwise only with the explicit manage permission.
+                      A Link Only broadcast has no Stores, so this must not
+                      depend on view_targets. */}
+                  {(row.is_mine || mayManageWebAudience) && (
+                    <button
+                      data-testid={`active-web-audience-${row.session_id}`}
+                      onClick={() => setAudienceFor(row)}
+                      className="ml-2 text-xs px-2.5 py-1 rounded-md border border-slate-300 hover:bg-slate-100"
+                    >
+                      Web Audience
                     </button>
                   )}
                   {/* Own broadcasts are stopped from the Console, which owns
@@ -283,6 +349,14 @@ export default function ActiveBroadcasts() {
           </tbody>
         </table>
       </div>
+
+      {audienceFor && (
+        <SupervisedWebAudience
+          sessionId={audienceFor.session_id}
+          campaignName={audienceFor.campaign_name}
+          onClose={() => setAudienceFor(null)}
+        />
+      )}
 
       {/* ---- pagination ---------------------------------------------------- */}
       <div className="flex items-center justify-between text-sm">
