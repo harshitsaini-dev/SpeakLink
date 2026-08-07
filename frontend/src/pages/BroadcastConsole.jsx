@@ -23,6 +23,21 @@ const PHYSICAL_TARGET_MODES = [
   { value: "online_only", label: "Online Stores Only" },
 ];
 const LINK_ONLY_MODE = { value: ONLY_WITH_LINK, label: "Only With Link" };
+
+//: A Store is ONLINE when its Receiver is currently reachable. `status` is
+//: painted by the backend from the live Receiver connection inventory on every
+//: inventory read - it is the only connectivity truth the Console has.
+//:
+//: NOT `is_online_store`, which is the Store Management checkbox labelled
+//: Online / Physical: an e-commerce classification that defaults to false. That
+//: column is what "Online Stores Only" used to filter on, which is why a
+//: console showing BP ONLINE resolved zero targets.
+export function isReceiverOnline(store) {
+  return store?.status === "online" || store?.status === "playing";
+}
+
+const STORE_PAGE_SIZES = [10, 20, 50];
+
 //: Every mode this Console can put in a confirmation dialog.
 const ALL_TARGET_MODES = [...PHYSICAL_TARGET_MODES, LINK_ONLY_MODE];
 
@@ -71,6 +86,13 @@ export default function BroadcastConsole() {
   const [stores, setStores] = React.useState([]);
   const [meta, setMeta] = React.useState({ regions: [], cities: [] });
   const [q, setQ] = React.useState("");
+  // Store picker filters. Deliberately separate from the TARGET modes below:
+  // filtering by a Zone changes which rows are visible, never who is targeted.
+  const [filterZone, setFilterZone] = React.useState("");
+  const [filterCity, setFilterCity] = React.useState("");
+  const [filterStatus, setFilterStatus] = React.useState("all");
+  const [storePage, setStorePage] = React.useState(1);
+  const [storePageSize, setStorePageSize] = React.useState(STORE_PAGE_SIZES[0]);
   const [selectedIds, setSelectedIds] = React.useState(new Set());
   // A link-only broadcaster has exactly one mode available, so that is where
   // their form starts rather than on a Store mode they cannot use.
@@ -203,11 +225,45 @@ export default function BroadcastConsole() {
   }, [current, stores]);
 
   const filteredStores = React.useMemo(() => {
-    const ql = q.toLowerCase();
-    return stores.filter((s) =>
-      !ql || s.store_name.toLowerCase().includes(ql) || s.store_code.toLowerCase().includes(ql) || s.city.toLowerCase().includes(ql)
-    );
-  }, [stores, q]);
+    const ql = q.trim().toLowerCase();
+    return stores.filter((store) => {
+      // Code, name, city and Zone: an operator searching "UN ZONE" or
+      // "Dwarka" means the same kind of thing as searching "BP".
+      const matchesSearch = !ql
+        || (store.store_name || "").toLowerCase().includes(ql)
+        || (store.store_code || "").toLowerCase().includes(ql)
+        || (store.city || "").toLowerCase().includes(ql)
+        || (store.region || "").toLowerCase().includes(ql);
+      const matchesZone = !filterZone || store.region === filterZone;
+      const matchesCity = !filterCity || store.city === filterCity;
+      const matchesStatus = filterStatus === "all"
+        || (filterStatus === "online" ? isReceiverOnline(store)
+                                      : !isReceiverOnline(store));
+      return matchesSearch && matchesZone && matchesCity && matchesStatus;
+    });
+  }, [stores, q, filterZone, filterCity, filterStatus]);
+
+  // Filtering changes what "page 3" means, so staying on it would show an empty
+  // table. The SELECTION is untouched: it belongs to the broadcast, not to
+  // whichever rows happen to be visible.
+  React.useEffect(() => {
+    setStorePage(1);
+  }, [q, filterZone, filterCity, filterStatus, storePageSize]);
+
+  const storePageCount = Math.max(
+    1, Math.ceil(filteredStores.length / storePageSize));
+  const safeStorePage = Math.min(storePage, storePageCount);
+  const visibleStores = React.useMemo(() => {
+    const start = (safeStorePage - 1) * storePageSize;
+    return filteredStores.slice(start, start + storePageSize);
+  }, [filteredStores, safeStorePage, storePageSize]);
+
+  const clearStoreFilters = () => {
+    setQ("");
+    setFilterZone("");
+    setFilterCity("");
+    setFilterStatus("all");
+  };
 
   const resolveTargetStoreIds = () => {
     // Link-only has no physical destination at all, which is the point of it.
@@ -216,7 +272,10 @@ export default function BroadcastConsole() {
     if (targetMode === "selected") return Array.from(selectedIds);
     if (targetMode === "region") return stores.filter((s) => s.region === region).map((s) => s.id);
     if (targetMode === "city") return stores.filter((s) => s.city === city).map((s) => s.id);
-    if (targetMode === "online_only") return stores.filter((s) => s.is_online_store).map((s) => s.id);
+    // Receiver connectivity, not the Online / Physical business flag. The
+    // server resolves this again at Start, so this is a preview - but a preview
+    // that disagreed with the server would be worse than none.
+    if (targetMode === "online_only") return stores.filter(isReceiverOnline).map((s) => s.id);
     return [];
   };
   // While a broadcast is LIVE the session's own target list is the truth, not
@@ -232,13 +291,29 @@ export default function BroadcastConsole() {
     : null;
   const targetIds = liveTargetIds ?? resolveTargetStoreIds();
   const targetStores = stores.filter((s) => targetIds.includes(s.id));
-  const onlineCount = targetStores.filter((s) => s.status === "online" || s.status === "playing").length;
+  const onlineCount = targetStores.filter(isReceiverOnline).length;
   const offlineCount = targetStores.length - onlineCount;
+  // Authorised physical Stores that Online Stores Only would leave out. Only
+  // meaningful in that mode, where "offline" describes exclusions rather than
+  // targets an operator chose.
+  const excludedOfflineCount = stores.filter((store) => !isReceiverOnline(store)).length;
 
   const toggleStore = (id) => {
     setSelectedIds((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   };
-  const selectAllFiltered = () => setSelectedIds(new Set(filteredStores.map((s) => s.id)));
+  // Two DIFFERENT bulk actions, each saying which it is. A single "Select all"
+  // beside a paginated table means one thing to the person who can see ten rows
+  // and another to the code, and the difference is a broadcast.
+  const selectPage = () => setSelectedIds((previous) => {
+    const next = new Set(previous);
+    visibleStores.forEach((store) => next.add(store.id));
+    return next;
+  });
+  const selectAllFiltered = () => setSelectedIds((previous) => {
+    const next = new Set(previous);
+    filteredStores.forEach((store) => next.add(store.id));
+    return next;
+  });
   const clearSelection = () => setSelectedIds(new Set());
 
   const startMicTest = async () => {
@@ -633,9 +708,17 @@ export default function BroadcastConsole() {
         <div className="border border-slate-200 bg-white rounded-md shadow-sm p-5 space-y-3" data-testid="target-summary">
           <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Broadcast Targets</div>
           <div className="grid grid-cols-3 gap-2">
-            <StatCard label="Selected" value={targetIds.length} testid="stat-selected" icon={<Users size={14} className="text-slate-500"/>} />
+            {/* TARGETS rather than SELECTED: nobody selects anything in the
+                automatic modes, and "Selected 0" beside a live Zone broadcast
+                reads as a fault. It means the same thing in every mode - the
+                Stores this broadcast would reach. */}
+            <StatCard label="Targets" value={targetIds.length} testid="stat-selected" icon={<Users size={14} className="text-slate-500"/>} />
             <StatCard label="Online" value={onlineCount} testid="stat-online" icon={<Wifi size={14} className="text-emerald-600"/>} color="emerald" />
-            <StatCard label="Offline" value={offlineCount} testid="stat-offline" icon={<WifiOff size={14} className="text-slate-400"/>} />
+            <StatCard
+              label={targetMode === "online_only" ? "Excluded" : "Offline"}
+              value={targetMode === "online_only" ? excludedOfflineCount : offlineCount}
+              testid="stat-offline"
+              icon={<WifiOff size={14} className="text-slate-400"/>} />
           </div>
           {isLive && (
             <div className="pt-2 border-t border-slate-100 space-y-2">
@@ -672,12 +755,84 @@ export default function BroadcastConsole() {
             <input data-testid="stores-search" value={q} onChange={(e) => setQ(e.target.value)}
                    placeholder="Search stores…" className="pl-7 pr-3 py-2 text-sm border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"/>
           </div>
+          <select data-testid="stores-filter-zone" value={filterZone}
+                  onChange={(e) => setFilterZone(e.target.value)}
+                  className="px-2 py-2 text-sm border border-slate-300 rounded-md bg-white">
+            <option value="">All Zones</option>
+            {(meta.regions || []).map((zone) => (
+              <option key={zone} value={zone}>{zone}</option>
+            ))}
+          </select>
+          <select data-testid="stores-filter-city" value={filterCity}
+                  onChange={(e) => setFilterCity(e.target.value)}
+                  className="px-2 py-2 text-sm border border-slate-300 rounded-md bg-white">
+            <option value="">All Cities</option>
+            {(meta.cities || []).map((city) => (
+              <option key={city} value={city}>{city}</option>
+            ))}
+          </select>
+          <select data-testid="stores-filter-status" value={filterStatus}
+                  onChange={(e) => setFilterStatus(e.target.value)}
+                  className="px-2 py-2 text-sm border border-slate-300 rounded-md bg-white">
+            <option value="all">All Statuses</option>
+            <option value="online">Online</option>
+            <option value="offline">Offline</option>
+          </select>
+          <button data-testid="stores-clear-filters" onClick={clearStoreFilters}
+                  className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">
+            Clear filters
+          </button>
           {targetMode === "selected" && (
             <>
-              <button data-testid="select-all-filtered-btn" onClick={selectAllFiltered} className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Select all shown</button>
-              <button data-testid="clear-selection-btn" onClick={clearSelection} className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Clear</button>
+              {/* Two named actions rather than one ambiguous "Select all".
+                  Beside a paginated table that phrase means one thing to
+                  somebody seeing ten rows and another to the code. */}
+              <button data-testid="select-page-btn" onClick={selectPage}
+                      className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">
+                Select page ({visibleStores.length})
+              </button>
+              <button data-testid="select-all-filtered-btn" onClick={selectAllFiltered}
+                      className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">
+                Select all {filteredStores.length} filtered
+              </button>
+              <button data-testid="clear-selection-btn" onClick={clearSelection}
+                      className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">
+                Clear selection
+              </button>
             </>
           )}
+        </div>
+
+        {/* What the filters actually produced, and where in it we are. The
+            total is of AUTHORISED Stores: a scoped operator is never told how
+            much fleet they cannot see. */}
+        <div className="px-4 py-2 border-b border-slate-200 flex flex-wrap items-center gap-3 text-xs text-slate-600">
+          <span data-testid="stores-result-count">
+            {filteredStores.length === 0
+              ? "No Stores match these filters"
+              : `Showing ${(safeStorePage - 1) * storePageSize + 1}\u2013${
+                  Math.min(safeStorePage * storePageSize, filteredStores.length)
+                } of ${filteredStores.length}`}
+            {filteredStores.length !== stores.length && ` (of ${stores.length} authorised)`}
+          </span>
+          {targetMode === "selected" && (
+            // Selection is independent of the visible page, so it is reported
+            // separately - otherwise hiding a selected Store looks like losing
+            // it.
+            <span data-testid="stores-selected-count" className="font-semibold text-slate-800">
+              {selectedIds.size} selected
+            </span>
+          )}
+          <span className="ml-auto flex items-center gap-2">
+            <label className="text-slate-500">Per page</label>
+            <select data-testid="stores-page-size" value={storePageSize}
+                    onChange={(e) => setStorePageSize(Number(e.target.value))}
+                    className="px-1.5 py-1 border border-slate-300 rounded bg-white">
+              {STORE_PAGE_SIZES.map((size) => (
+                <option key={size} value={size}>{size}</option>
+              ))}
+            </select>
+          </span>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -697,7 +852,7 @@ export default function BroadcastConsole() {
               </tr>
             </thead>
             <tbody>
-              {filteredStores.map((s) => {
+              {visibleStores.map((s) => {
                 const isTarget = targetIds.includes(s.id);
                 const t = targetsById.get(s.id);
                 const playStatus = isLive && isTarget ? (t?.play_status || "pending") : "—";
@@ -770,6 +925,26 @@ export default function BroadcastConsole() {
               )}
             </tbody>
           </table>
+        </div>
+
+        <div className="p-3 border-t border-slate-200 flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-slate-600" data-testid="stores-page-info">
+            Page {safeStorePage} of {storePageCount}
+          </span>
+          <span className="ml-auto flex gap-2">
+            <button data-testid="stores-prev-page"
+                    disabled={safeStorePage <= 1}
+                    onClick={() => setStorePage(safeStorePage - 1)}
+                    className="px-3 py-1.5 rounded-md border border-slate-300 disabled:opacity-40 hover:bg-slate-100">
+              Previous
+            </button>
+            <button data-testid="stores-next-page"
+                    disabled={safeStorePage >= storePageCount}
+                    onClick={() => setStorePage(safeStorePage + 1)}
+                    className="px-3 py-1.5 rounded-md border border-slate-300 disabled:opacity-40 hover:bg-slate-100">
+              Next
+            </button>
+          </span>
         </div>
       </div>
       )}
