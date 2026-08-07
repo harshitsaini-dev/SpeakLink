@@ -6984,3 +6984,113 @@ None of the listener-facing product exists yet:
 
 The relay is currently fed by every live Broadcast and has no listeners, because
 there is no way to become one yet. That is the next slice.
+
+---
+
+## Web audience rooms, listener admission and Only With Link
+
+Branch `feature/live-web-audience-dynamic-targets`. HQ backend, HQ frontend and
+a new public browser page. No Receiver source changed, no Store Kit rebuilt,
+nothing exposed to the public internet, no live HQ restarted.
+
+### One room per Broadcast
+
+Every Broadcast gets exactly one web room, created **with the session** rather
+than at start, so the operator can copy and share the link before going live.
+A listener admitted early hears nothing until the microphone is on - the socket
+refuses until the Broadcast is live, so pending audio cannot leak.
+
+Selected Stores, Zone and every other physical mode keep their Stores **and**
+get a room. Only With Link is the mode with no physical destination at all.
+Web listener count zero is perfectly valid and changes nothing about Store
+delivery.
+
+### Public identity and secrets
+
+The public code (`EC-…`) is random, drawn from an alphabet with `0/O/1/I/L`
+removed so it survives being read off one screen and typed into another. It is
+**never** the session id - that is a small consecutive integer, and publishing
+it would let one shared link enumerate every other Broadcast. Uniqueness is a
+database constraint; a collision is redrawn.
+
+The join password is **bcrypt-hashed only**. The plaintext is returned exactly
+once, at generation, and there is no column it could be read back from. After a
+refresh the console says *Password configured* and offers **Generate New
+Password** rather than showing a masked placeholder that would imply EchoCast
+knows it. Rotation replaces the future password and **does not eject the
+audience** - stopping new arrivals and removing current listeners are different
+decisions.
+
+Listener session tokens are stored only as a SHA-256 hash, travel in an
+**HttpOnly** cookie, and never appear in a URL. `Secure` is the default;
+`ECHOCAST_LAN_HTTP_LISTENERS=1` is an explicit named opt-in for the LAN pilot
+rather than a silent weakening of the production default.
+
+### Admission
+
+A correct password admits immediately and is unaffected by Auto Approve -
+knowing the password *is* the authorisation. A wrong password is refused **as a
+wrong password** and is never quietly converted into a join request; Request
+Access is a separate, explicit action. Auto Approve defaults OFF and is read
+inside the same transaction that creates the participant row, so a toggle
+racing a request produces one participant in one state. Approval is guarded on
+current status, so two broadcaster tabs clicking at once mint exactly one
+listener session. Denial is terminal.
+
+A waiting browser polls **its own** state with a signed pending claim that
+authorises nothing, so Approve reaches it without a refresh and nobody can poll
+by guessing a participant id.
+
+### Participant state, and what LISTENING does not mean
+
+Persisted: REQUESTED, APPROVED, PASSWORD_ADMITTED, DENIED, KICKED, LEFT,
+ROOM_ENDED. Runtime only: connected, last heartbeat, READY_TO_PLAY, BUFFERING,
+LISTENING, PAUSED, DISCONNECTED. There is **no database write per heartbeat**.
+
+**LISTENING means the listener's browser reported that its playback pipeline is
+running, from real media events.** It does not mean their volume is above zero,
+that headphones are connected, or that anyone can hear anything. It is client
+telemetry, not proof, and `SPEAKER_VERIFIED` is deliberately not reused.
+
+Counts stay separate - waiting, connected, listening - because
+approved-but-not-connected is not connected and connected is not listening.
+
+### Kick
+
+Invalidates the session **before** closing the socket, so a reconnect racing
+the close has nothing valid to present. It removes a **session, not a person**:
+somebody who clears their browser and asks again is a new participant and a new
+decision. There is no fingerprinting and no person-level ban.
+
+### The listener socket
+
+Authenticated by cookie only. The listener may send exactly one message type -
+a heartbeat carrying its own playback state. Audio, Store commands, unknown
+types, unparseable frames and oversized frames all **close** the connection
+rather than being ignored, so a client cannot probe for a tolerated message.
+
+The attach is atomic and anchored to a Cluster index, so no Cluster is lost or
+duplicated however the join is timed - proved at all 36 attach points of a real
+capture.
+
+### Room end and restart
+
+The room ends wherever the Broadcast ends - Stop, Emergency Stop, a dropped
+microphone, cleanup - clearing every listener token in the same transaction.
+The public code stops resolving, so a shared link does not linger. Listener
+socket state is runtime only and does not survive an HQ restart; a reconnect
+gets a fresh bootstrap at the live edge, and **no claim is made of
+uninterrupted audio across a restart**.
+
+### Public internet is NOT enabled
+
+This is LAN/pilot only. Before internet-wide listening: public DNS, HTTPS, WSS,
+valid TLS, firewall and reverse-proxy review, production rate limits, a CORS
+and cookie review, and a public threat-model review. No ports were opened, no
+domain configured, no CORS widened.
+
+### Still to come — the next slice
+
+Dynamic live Store targeting: Add, Pause, Resume and Remove individual Stores
+mid-Broadcast, plus Zone bulk actions, with original-mixer snapshots captured
+at add time and leases held across Pause.

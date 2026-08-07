@@ -23,6 +23,8 @@ const PHYSICAL_TARGET_MODES = [
   { value: "online_only", label: "Online Stores Only" },
 ];
 const LINK_ONLY_MODE = { value: ONLY_WITH_LINK, label: "Only With Link" };
+//: Every mode this Console can put in a confirmation dialog.
+const ALL_TARGET_MODES = [...PHYSICAL_TARGET_MODES, LINK_ONLY_MODE];
 
 // The only play_status values the backend ever writes (_persist_receiver_ack in
 // backend/server.py): pending, audio_receiving, playback_confirmed,
@@ -549,7 +551,7 @@ export default function BroadcastConsole() {
                 className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                 disabled={isLive}
               >
-                {[...PHYSICAL_TARGET_MODES, LINK_ONLY_MODE].map((m) => (
+                {ALL_TARGET_MODES.map((m) => (
                   <option key={m.value} value={m.value}>{m.label}</option>
                 ))}
               </select>
@@ -823,7 +825,7 @@ export default function BroadcastConsole() {
             </div>
             <div className="bg-slate-50 border border-slate-200 rounded-md p-3 text-sm space-y-1 my-3">
               <div><span className="text-slate-500">Campaign:</span> <span className="font-medium">{campaign}</span></div>
-              <div><span className="text-slate-500">Target Mode:</span> <span className="font-medium">{TARGET_MODES.find((m) => m.value === targetMode)?.label}</span></div>
+              <div><span className="text-slate-500">Target Mode:</span> <span className="font-medium">{ALL_TARGET_MODES.find((m) => m.value === targetMode)?.label}</span></div>
               <div><span className="text-slate-500">Stores:</span> <span className="font-medium">{targetIds.length}</span> ({onlineCount} online, {offlineCount} offline)</div>
             </div>
             {targetMode === "all" && (
