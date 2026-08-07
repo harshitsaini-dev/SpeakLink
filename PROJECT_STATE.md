@@ -7165,16 +7165,43 @@ it**, so it could be neither corrected nor measured, and a test asserting
 second, smaller contribution: the last `timeupdate` fires before the end, so
 `currentTime` at `ended` is routinely tens of milliseconds below `duration`.
 
-The played portion is now a real element behind a transparent range. A separate
-`visualProgressPercent` is **100 when Finished** — stated, not derived — while
-`position` and `duration` stay exactly what the media element reports. Nothing
-about the audio or the clock changed; only the paint. The control is still a
-real labelled input, so keyboard operation was not traded for the appearance.
+**Two further defects, found by manual acceptance and also measured.** The fill
+reached the end but the *point* still stopped short, because what was visible
+was still the **native thumb** — whose centre travels inside an inset equal to
+half its width (6 px on a 12 px thumb), which nothing outside the widget can
+change. And progress advanced in visible **steps**, because it was driven only
+by `timeupdate`, which fires roughly every **265 ms** (eight events in two
+seconds, measured in this player).
 
-Proved by **geometry** in real Chromium on 2-second and 13-second finalized
-recordings: the fill's right edge within 1 px of the track's, after the real
-`ended` event. Replay empties and refills the bar; switching recordings does not
-inherit a full one.
+The bar is now four layers: custom background, custom **fill**, custom **visual
+thumb**, and the real range on top with its own track and thumb made
+transparent. The fill and the thumb consume **one** `visualProgressPercent` —
+separate calculations are how a line and a point drift apart — and the thumb is
+centred with `translateX(-50%)`, so 100 % puts its **centre** exactly on the
+track edge and the circle overhangs by half its width. That overhang is correct:
+the centre is the position.
+
+A single `requestAnimationFrame` loop samples `audio.currentTime`. **The media
+element remains the clock** — nothing advances by wall time, so a throttled tab
+or a stalled stream stops the bar rather than running ahead of the audio.
+Exactly one loop exists; it starts on play and is cancelled on pause, ended,
+error, unmount and recording switch, and re-entering Play cannot schedule a
+second. Cleanup belongs to the global player above the router, so changing page
+stops neither the audio nor the bar.
+
+The range stays real and interactive — keyboard, focus, pointer, `aria-label` —
+and is neither hidden nor `pointer-events: none`; only the painted layers ignore
+the pointer. Seeking **jumps** rather than animating, and leaves the Finished
+state. `position` and `duration` stay exactly what the element reports, and
+Finished still comes **only** from the real `ended` event: being 100 % of the way
+through is not the same fact as having ended.
+
+Proved by **rendered pixels** in real Chromium on 2-second and 13-second
+finalized recordings: fill right edge **and thumb centre** each within 1 px of
+the track edge at Finished; fill and thumb within 1 px of each other mid-play;
+at least five distinct positions per second during playback; no drift while
+paused; immediate seek; replay that resets and advances; one-click A→B switch;
+and progress that survives navigating to another page.
 
 ### Still the next milestone
 
