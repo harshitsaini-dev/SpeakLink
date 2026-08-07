@@ -40,7 +40,7 @@ function ago(seconds) {
   return `${Math.round(seconds / 60)}m ago`;
 }
 
-export default function WebAudiencePanel({ sessionId }) {
+export default function WebAudiencePanel({ sessionId, compact = false }) {
   const [room, setRoom] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
@@ -218,7 +218,10 @@ export default function WebAudiencePanel({ sessionId }) {
             <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-2">
               Join Requests
             </p>
-            <ul className="divide-y divide-slate-200 rounded border border-slate-200">
+            {/* Bounded, because a hundred people waiting must not push the
+                Store table a thousand pixels down the page. The list scrolls
+                inside itself and every action stays reachable. */}
+            <ul className={`divide-y divide-slate-200 rounded border border-slate-200 ${compact ? "max-h-40 overflow-y-auto" : ""}`}>
               {room.waiting.map((person) => (
                 <li key={person.id}
                     data-testid={`web-request-${person.id}`}
@@ -258,7 +261,7 @@ export default function WebAudiencePanel({ sessionId }) {
               Nobody has joined yet. Share the link or the Broadcast ID.
             </p>
           ) : (
-            <ul className="divide-y divide-slate-200 rounded border border-slate-200">
+            <ul className={`divide-y divide-slate-200 rounded border border-slate-200 ${compact ? "max-h-48 overflow-y-auto" : ""}`}>
               {room.listeners.map((person) => (
                 <li key={person.id}
                     data-testid={`web-listener-${person.id}`}
