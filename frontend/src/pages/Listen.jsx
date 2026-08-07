@@ -22,6 +22,12 @@ import {
  */
 
 const Phase = {
+  //: The page starts here, not on the form. A refresh must not present
+  //: credentials to somebody who is already admitted - the HttpOnly session
+  //: cookie is still there, and the server is the authority on whether it is
+  //: valid. Starting on the form and discovering the session afterwards also
+  //: flashes a password box at every returning listener.
+  BOOTSTRAPPING: "BOOTSTRAPPING",
   FORM: "FORM",
   WAITING: "WAITING",
   DENIED: "DENIED",
@@ -60,7 +66,7 @@ export default function Listen() {
   const [code, setCode] = React.useState(publicCode || "");
   const [name, setName] = React.useState("");
   const [password, setPassword] = React.useState("");
-  const [phase, setPhase] = React.useState(Phase.FORM);
+  const [phase, setPhase] = React.useState(Phase.BOOTSTRAPPING);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
   const [playback, setPlayback] = React.useState(ListenerPlaybackState.CONNECTING);
@@ -74,6 +80,10 @@ export default function Listen() {
   const attemptRef = React.useRef(0);
   const retryRef = React.useRef(null);
   const progressRef = React.useRef(null);
+  //: The restore effect runs on mount, before connect/pollAdmission exist in
+  //: this scope. Refs rather than reordering the whole component.
+  const connectRef = React.useRef(() => {});
+  const pollRef = React.useRef(() => {});
   const stoppedRef = React.useRef(false);
   //: The player reads this rather than `playback`, so the heartbeat always
   //: reports what the element is doing now and not what it was doing when the
@@ -100,6 +110,46 @@ export default function Listen() {
     stoppedRef.current = false;
     return () => { stoppedRef.current = true; teardown(); };
   }, [teardown]);
+
+  // Ask the server who we are before drawing anything.
+  //
+  // A page refresh is not a new person: same browser, same cookie, same room
+  // means the same participant. The cookie is HttpOnly, so the page cannot read
+  // it - it simply calls the listener endpoint and the browser attaches it.
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get("/listen/me");
+        if (cancelled) return;
+        setBroadcastLive(!!data.broadcast_live);
+        if (data.display_name) setName(data.display_name);
+        if (data.public_code) setCode(data.public_code);
+
+        if (data.admitted) {
+          setPhase(Phase.LIVE);
+          connectRef.current();
+          return;
+        }
+        if (data.admission_status === "REQUESTED") {
+          setPhase(Phase.WAITING);
+          pollRef.current();
+          return;
+        }
+        if (data.admission_status === "KICKED") { setPhase(Phase.KICKED); return; }
+        if (data.admission_status === "DENIED") { setPhase(Phase.DENIED); return; }
+        if (data.admission_status === "ROOM_ENDED") { setPhase(Phase.ENDED); return; }
+        setPhase(Phase.FORM);
+      } catch (failure) {
+        // 401 simply means this browser has no session for any room yet, which
+        // is the ordinary first visit.
+        if (!cancelled) setPhase(Phase.FORM);
+      }
+    })();
+    return () => { cancelled = true; };
+    // Deliberately once, on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ---- the live socket ---------------------------------------------------
   const connect = React.useCallback(() => {
@@ -284,6 +334,11 @@ export default function Listen() {
     retryRef.current = setTimeout(tick, 1500);
   }, [connect]);
 
+  // Kept current so the mount-time restore can call them without the whole
+  // component having to be reordered around it.
+  connectRef.current = connect;
+  pollRef.current = pollAdmission;
+
   const tapToStart = React.useCallback(async () => {
     if (!playerRef.current) return;
     const started = await playerRef.current.play();
@@ -309,6 +364,13 @@ export default function Listen() {
         {/* Hidden: the listener controls playback through this page, and their
             device controls the volume. No native player chrome. */}
         <audio ref={audioRef} className="hidden" data-testid="listener-audio" />
+
+        {phase === Phase.BOOTSTRAPPING && (
+          <Panel testId="listen-bootstrapping">
+            <Loader2 size={28} className="mx-auto mb-3 animate-spin text-slate-400" />
+            <p className="text-sm text-slate-400">Checking your access…</p>
+          </Panel>
+        )}
 
         {phase === Phase.FORM && (
           <form

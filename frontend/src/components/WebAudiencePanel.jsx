@@ -94,7 +94,11 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
   const counts = room.counts || {};
 
   return (
-    <div className="border border-slate-200 bg-white rounded-md shadow-sm"
+    // In the Console row this is the VISIBLE card, so it is the thing that has
+    // to reach the row's bottom edge - stretching an invisible wrapper around
+    // it would leave the border ending early, which is the defect.
+    <div className={`border border-slate-200 bg-white rounded-md shadow-sm ${
+           compact ? "lg:h-full lg:flex lg:flex-col" : ""}`}
          data-testid="web-audience-panel">
       <div className="p-4 border-b border-slate-200 flex flex-wrap items-center gap-3">
         <h3 className="font-semibold text-slate-900 mr-auto flex items-center gap-2">
@@ -108,7 +112,7 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
         )}
       </div>
 
-      <div className="p-4 space-y-4">
+      <div className={`p-4 space-y-4 ${compact ? "lg:flex-1 lg:min-h-0 lg:overflow-y-auto" : ""}`}>
         {/* ---- identity and secrets ---- */}
         <div className="grid gap-4 md:grid-cols-2">
           <div>

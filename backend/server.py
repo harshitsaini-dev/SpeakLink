@@ -5671,6 +5671,20 @@ def public_room_join(public_code: str, payload: ListenerJoin, request: Request,
     except web_rooms.InvalidDisplayNameError as refusal:
         raise HTTPException(status_code=400, detail=str(refusal))
 
+    # Already admitted to THIS room in this browser? Resume rather than admit
+    # a second time.
+    #
+    # A refresh is not a new person. Creating another participant would leave
+    # the console showing one row Listening and a duplicate row not connected,
+    # for one listener - which is exactly what manual testing saw. Identity is
+    # the session, never the display name, so a different browser with the same
+    # name is still a different participant.
+    existing = web_rooms.authenticate_listener(
+        engine, token=request.cookies.get(LISTENER_COOKIE))
+    if existing is not None and existing[0].id == room.id:
+        return _listener_view(existing[0], existing[1],
+                              live=_session_is_live(room.session_id))
+
     # The submitted password is never logged, and never echoed back.
     if not web_rooms.verify_join_password(engine, room=room,
                                           password=payload.password or ""):
@@ -5700,6 +5714,15 @@ def public_room_request_access(public_code: str, payload: ListenerRequestAccess,
     web_join_limiter.record_attempt(key)
 
     room = _public_room_or_404(public_code)
+
+    # Same reasoning as the password join: a browser already admitted to this
+    # room is resumed, not admitted twice.
+    existing = web_rooms.authenticate_listener(
+        engine, token=request.cookies.get(LISTENER_COOKIE))
+    if existing is not None and existing[0].id == room.id:
+        return _listener_view(existing[0], existing[1],
+                              live=_session_is_live(room.session_id))
+
     try:
         name = web_rooms.normalise_display_name(payload.display_name)
     except web_rooms.InvalidDisplayNameError as refusal:
@@ -5899,7 +5922,10 @@ async def ws_listener(websocket: WebSocket):
         logger.info("listener socket ended after %s", type(failure).__name__)
     finally:
         # Only if THIS socket still holds the slot, so a late cleanup from a
-        # superseded socket cannot evict its replacement.
+        # superseded socket cannot evict its replacement. Removing the runtime
+        # IS the disconnect: _room_state reports a participant with no runtime
+        # as not connected, so a closed tab stops claiming to be Listening as
+        # soon as the close is observed rather than after a timeout.
         web_participants.detach(participant_id=participant.id, socket=websocket)
         live_relay = manager.broadcasts.web_relay(room.session_id)
         if live_relay is not None:

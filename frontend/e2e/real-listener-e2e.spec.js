@@ -198,12 +198,18 @@ test.describe('the public listener against a real backend', () => {
       return slice;
     });
 
-    // Feed at roughly the real 250 ms cadence so the relay behaves as it does
-    // live, then keep looping so a late joiner always has audio waiting.
-    let index = 0;
+    // The header goes once; after that only the media repeats.
+    //
+    // Looping the whole capture would re-send the EBML header in the middle of
+    // the stream, which the framer correctly rejects - a live MediaRecorder
+    // never does that. Tests shorter than one loop never noticed; longer ones
+    // saw the relay degrade and the listener buffer, which looked like a
+    // product fault and was a fixture fault.
+    socket.send(chunks[0]);
+    let index = 1;
     const pump = setInterval(() => {
       if (socket.readyState !== WebSocket.OPEN) return;
-      socket.send(chunks[index % chunks.length]);
+      socket.send(chunks[1 + ((index - 1) % (chunks.length - 1))]);
       index += 1;
     }, 60);
 
@@ -574,4 +580,242 @@ test.describe('the public listener against a real backend', () => {
       stopBroadcastPump(live);
     }
   });
+
+  // ======================================================================
+  // Lifecycle: closing, refreshing, reopening
+  // ======================================================================
+  // Manual testing found a closed tab still showing Listening, and a refresh
+  // asking for the password again and then creating a SECOND participant for
+  // the same browser - leaving one row Listening and a duplicate not connected.
+
+  async function joinAndListen(page, live, name = 'Harshit') {
+    await page.goto(`${base}/listen/${live.room.public_code}`);
+    await page.getByTestId('listen-name').fill(name);
+    await page.getByTestId('listen-password').fill(live.room.password);
+    await page.getByTestId('listen-join').click();
+    await expect(page.getByTestId('listen-status'))
+      .toHaveText('Listening', { timeout: 25_000 });
+  }
+
+  async function roomState(headers, sid) {
+    return (await api('GET', `/broadcast/sessions/${sid}/web-room`, headers)).body;
+  }
+
+  test('I: closing the tab stops the console claiming Listening',
+       async ({ page }) => {
+    test.setTimeout(150_000);
+    const headers = await signIn();
+    const live = await startLiveBroadcast(headers);
+
+    try {
+      await joinAndListen(page, live);
+
+      // The PAGE knows it is listening from its own media events at once; the
+      // SERVER learns on the next heartbeat, which is every 10 seconds. So this
+      // waits for the console to catch up rather than assuming it already has.
+      await expect.poll(async () => {
+        const state = await roomState(headers, live.sid);
+        return `${state.counts.connected}/${state.counts.listening}`;
+      }, { timeout: 25_000 }).toBe('1/1');
+      const participantId = (await roomState(headers, live.sid)).listeners[0].id;
+
+      // The tab goes away. The Broadcast keeps running.
+      await page.close();
+
+      await expect.poll(async () => {
+        const state = await roomState(headers, live.sid);
+        return `${state.counts.connected}/${state.counts.listening}`;
+      }, { timeout: 20_000 }).toBe('0/0');
+
+      // Admission survives - they were let in, and closing a tab is not a
+      // withdrawal of that. Only the runtime claim is gone.
+      const after = await roomState(headers, live.sid);
+      expect(after.counts.admitted).toBe(1);
+      expect(after.listeners).toHaveLength(1);
+      expect(after.listeners[0].id).toBe(participantId);
+      expect(after.listeners[0].playback_state).toBe('DISCONNECTED');
+      expect(after.listeners[0].connected).toBe(false);
+    } finally {
+      stopBroadcastPump(live);
+    }
+  });
+
+  test('J: a hard refresh resumes the same participant without asking again',
+       async ({ page }) => {
+    test.setTimeout(150_000);
+    const headers = await signIn();
+    const live = await startLiveBroadcast(headers);
+
+    try {
+      await joinAndListen(page, live);
+      const before = await roomState(headers, live.sid);
+      const participantId = before.listeners[0].id;
+      expect(before.counts.admitted).toBe(1);
+
+      await page.reload();
+
+      // NOT the join form. The browser still holds a valid session.
+      await expect(page.getByTestId('listen-live')).toBeVisible({ timeout: 25_000 });
+      await expect(page.getByTestId('listen-password')).toHaveCount(0);
+      await expect(page.getByTestId('listen-join')).toHaveCount(0);
+
+      // Playing again, from a fresh live-edge bootstrap.
+      await expect(page.getByTestId('listen-status'))
+        .toHaveText('Listening', { timeout: 25_000 });
+      const truth = await playbackTruth(page);
+      expect(truth.paused).toBe(false);
+      expect(truth.advanced).toBe(true);
+
+      // The SAME participant. No duplicate row, no second admission.
+      const after = await roomState(headers, live.sid);
+      expect(after.counts.admitted).toBe(1);
+      expect(after.listeners).toHaveLength(1);
+      expect(after.listeners[0].id).toBe(participantId);
+      expect(after.counts.listening).toBe(1);
+    } finally {
+      stopBroadcastPump(live);
+    }
+  });
+
+  test('K: reopening the link in the same browser resumes, not re-admits',
+       async ({ page, context }) => {
+    test.setTimeout(150_000);
+    const headers = await signIn();
+    const live = await startLiveBroadcast(headers);
+
+    try {
+      await joinAndListen(page, live);
+      const participantId = (await roomState(headers, live.sid)).listeners[0].id;
+      await page.close();
+
+      // A NEW page in the SAME context, so the HttpOnly cookie is still there.
+      const reopened = await context.newPage();
+      await reopened.goto(`${base}/listen/${live.room.public_code}`);
+
+      await expect(reopened.getByTestId('listen-live'))
+        .toBeVisible({ timeout: 25_000 });
+      await expect(reopened.getByTestId('listen-password')).toHaveCount(0);
+      await expect(reopened.getByTestId('listen-status'))
+        .toHaveText('Listening', { timeout: 25_000 });
+
+      const after = await roomState(headers, live.sid);
+      expect(after.counts.admitted).toBe(1);
+      expect(after.listeners[0].id).toBe(participantId);
+      await reopened.close();
+    } finally {
+      stopBroadcastPump(live);
+    }
+  });
+
+  test('L: joining again from the same browser does not duplicate',
+       async ({ page }) => {
+    test.setTimeout(150_000);
+    const headers = await signIn();
+    const live = await startLiveBroadcast(headers);
+
+    try {
+      await joinAndListen(page, live);
+      const participantId = (await roomState(headers, live.sid)).listeners[0].id;
+
+      // The same browser submits a join for the same room again. Identity is
+      // the session, so this resumes rather than admitting a second time.
+      const again = await page.evaluate(async (payload) => {
+        const response = await fetch(`/api/listen/rooms/${payload.code}/join`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ display_name: 'Harshit',
+                                 password: payload.password }),
+        });
+        return { status: response.status };
+      }, { code: live.room.public_code, password: live.room.password });
+
+      expect(again.status).toBe(200);
+      const after = await roomState(headers, live.sid);
+      expect(after.counts.admitted).toBe(1);
+      expect(after.listeners[0].id).toBe(participantId);
+    } finally {
+      stopBroadcastPump(live);
+    }
+  });
+
+  test('M: a different browser really is a different participant',
+       async ({ page, browser }) => {
+    test.setTimeout(150_000);
+    const headers = await signIn();
+    const live = await startLiveBroadcast(headers);
+    let second;
+
+    try {
+      await joinAndListen(page, live, 'Harshit');
+
+      // A separate context: its own cookie jar, like another device.
+      second = await browser.newContext();
+      const other = await second.newPage();
+      await other.goto(`${base}/listen/${live.room.public_code}`);
+      // The SAME display name on purpose - identity is the session, not the
+      // name, and duplicate names remain allowed.
+      await other.getByTestId('listen-name').fill('Harshit');
+      await other.getByTestId('listen-password').fill(live.room.password);
+      await other.getByTestId('listen-join').click();
+      await expect(other.getByTestId('listen-live')).toBeVisible({ timeout: 25_000 });
+
+      const after = await roomState(headers, live.sid);
+      expect(after.counts.admitted).toBe(2);
+      expect(new Set(after.listeners.map((row) => row.id)).size).toBe(2);
+    } finally {
+      if (second) await second.close();
+      stopBroadcastPump(live);
+    }
+  });
+
+  test('O: a refresh after a Kick does not restore listening', async ({ page }) => {
+    test.setTimeout(150_000);
+    const headers = await signIn();
+    const live = await startLiveBroadcast(headers);
+
+    try {
+      await joinAndListen(page, live);
+      const pid = (await roomState(headers, live.sid)).listeners[0].id;
+      await api('POST',
+        `/broadcast/sessions/${live.sid}/web-participants/${pid}/kick`, headers);
+      await expect(page.getByTestId('listen-kicked')).toBeVisible({ timeout: 20_000 });
+
+      await page.reload();
+
+      // A kicked session is invalid, so a refresh restores nothing.
+      await expect(page.getByTestId('listen-status')).toHaveCount(0);
+      await expect(page.getByTestId('listen-live')).toHaveCount(0);
+      const state = await roomState(headers, live.sid);
+      expect(state.counts.listening).toBe(0);
+      expect(state.counts.connected).toBe(0);
+    } finally {
+      stopBroadcastPump(live);
+    }
+  });
+
+  test('P: a refresh after a real Stop shows Ended, not a join form',
+       async ({ page }) => {
+    test.setTimeout(150_000);
+    const headers = await signIn();
+    const live = await startLiveBroadcast(headers);
+
+    try {
+      await joinAndListen(page, live);
+      expect((await api('POST', `/broadcast/sessions/${live.sid}/stop`, headers)).status)
+        .toBe(200);
+      stopBroadcastPump(live);
+      await expect(page.getByTestId('listen-ended')).toBeVisible({ timeout: 25_000 });
+
+      await page.reload();
+
+      // The room is gone, so its code no longer resolves - and the page must
+      // not invite anybody to type credentials for a Broadcast that is over.
+      await expect(page.getByTestId('listen-status')).toHaveCount(0);
+      const stillPlaying = await page.locator('[data-testid="listener-audio"]')
+        .evaluate((node) => !node.paused).catch(() => false);
+      expect(stillPlaying).toBe(false);
+    } finally {
+      stopBroadcastPump(live);
+    }
+  });
+
 });
