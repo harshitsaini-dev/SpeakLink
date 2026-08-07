@@ -19,7 +19,7 @@ from typing import List, Optional, Set
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.staticfiles import StaticFiles
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -31,6 +31,9 @@ from models import (
     Base, HQUser, Store, BroadcastSession, BroadcastTarget, ReceiverEvent, SystemLog
 )
 from schemas import (
+    ListenerJoin,
+    ListenerRequestAccess,
+    WebRoomAutoApproveUpdate,
     LoginRequest, LoginResponse, UserOut,
     StoreCreate, StoreUpdate, StoreOut, StoresMetaOut,
     BroadcastTargetStoreOut, BroadcastTargetsOut,
@@ -223,7 +226,15 @@ from receiver_runtime_auth import (
     LegacyStoreTokenRuntimeAuthenticator,
     MigrationAwareReceiverRuntimeAuthenticator,
 )
+import hashlib
+import secrets
 import broadcast_recording
+import web_rooms
+from web_participant_runtime import (
+    HEARTBEAT_INTERVAL_SECONDS,
+    PlaybackState,
+    WebParticipantRegistry,
+)
 from receiver_contract import (
     AudioControlAcknowledgement,
     EndpointStateAcknowledgement,
@@ -293,6 +304,34 @@ from login_guard import (
 LOGIN_GUARD = config_from_environment()
 TRUST_PROXY_HEADERS = proxy_headers_trusted()
 login_limiter = LoginRateLimiter(LOGIN_GUARD)
+
+# ---- web audience runtime -------------------------------------------------
+#: Live listener sockets, heartbeats and browser playback state. Memory only:
+#: none of it means anything after a restart, and persisting it would be a
+#: database write per heartbeat per listener.
+web_participants = WebParticipantRegistry()
+
+#: The one-time plaintext join password, held only for the lifetime of this
+#: process so the console can offer Copy Password on the page that created the
+#: Broadcast. It is NOT storage: a restart loses it, and the honest answer
+#: afterwards is "password configured" plus rotation, not a fabricated value.
+_ROOM_PASSWORD_ONCE: dict[int, str] = {}
+
+#: Listener session tokens minted by an Approve, waiting to be collected by the
+#: browser polling its own admission state. Memory only, and removed the moment
+#: it is collected: it is that listener's credential, and it is never returned
+#: to the broadcaster who approved them.
+_PENDING_LISTENER_TOKENS: dict[int, str] = {}
+
+#: Public join surfaces are unauthenticated, so they get the same treatment as
+#: login. Deliberately separate limiters: exhausting password attempts must not
+#: also block somebody looking a room up from a shared link.
+WEB_ROOM_LOOKUP_GUARD = LoginGuardConfig(max_attempts=30, window_seconds=60,
+                                         max_failures=30, lockout_seconds=60)
+WEB_JOIN_GUARD = LoginGuardConfig(max_attempts=8, window_seconds=300,
+                                  max_failures=8, lockout_seconds=300)
+web_lookup_limiter = LoginRateLimiter(WEB_ROOM_LOOKUP_GUARD)
+web_join_limiter = LoginRateLimiter(WEB_JOIN_GUARD)
 
 # The enrolment endpoint is unauthenticated by design - the code IS the
 # credential - so it gets its own budget rather than sharing the login one.
@@ -598,6 +637,7 @@ def startup_event():
         # survive an HQ restart - outliving a disconnection is its whole
         # purpose - so unlike live readings it has to live in the database.
         broadcast_recording.ensure_recording_schema(engine)
+        web_rooms.ensure_web_room_schema(engine)
         # Anything left mid-flight by a crash is resolved BEFORE the first
         # request can read it. An unfinished .part is never promoted to
         # AVAILABLE: HQ stopping mid-announcement is exactly when a recording
@@ -2582,7 +2622,17 @@ def _require_physical_delivery(user: HQUser) -> None:
         raise HTTPException(status_code=403, detail=RBAC_REFUSED)
 
 
+ONLY_WITH_LINK = "only_with_link"
+
+
 def _resolve_targets(db: Session, payload: SessionCreate, user: HQUser) -> List[Store]:
+    # Link-only is the one mode that asks for no physical delivery, so it is
+    # answered before the physical-delivery check rather than being refused by
+    # it. Zero Stores is the CORRECT result here, not an empty selection: this
+    # broadcast has a web audience and no shop.
+    if payload.target_mode == ONLY_WITH_LINK:
+        return []
+
     _require_physical_delivery(user)
     q = db.query(Store).filter(Store.is_active.is_(True))
     mode = payload.target_mode
@@ -2625,7 +2675,7 @@ def _resolve_targets(db: Session, payload: SessionCreate, user: HQUser) -> List[
 @api.post("/broadcast/sessions", response_model=SessionOut, status_code=201)
 def create_session(payload: SessionCreate, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.START_BROADCAST))):
     targets = _resolve_targets(db, payload, user)
-    if not targets:
+    if not targets and payload.target_mode != ONLY_WITH_LINK:
         raise HTTPException(status_code=400, detail="No stores match the selection criteria")
     online_ids = manager.online_store_ids()
     online_count = sum(1 for t in targets if t.id in online_ids)
@@ -2645,6 +2695,17 @@ def create_session(payload: SessionCreate, db: Session = Depends(get_db), user: 
         db.add(BroadcastTarget(session_id=session.id, store_id=t.id, play_status="pending"))
     db.commit()
     db.refresh(session)
+
+    # One web room per Broadcast, created with the session rather than at start
+    # so the operator can copy and share the link before going live. Listeners
+    # can be admitted early; they simply hear nothing until the Broadcast is
+    # live, because the relay has no audio to give them yet.
+    #
+    # The generated password is returned ONCE, here. There is no column it
+    # could be read back from, so the console keeps it for this page lifetime
+    # and offers rotation afterwards.
+    room, password = web_rooms.create_room(engine, session_id=session.id)
+    _ROOM_PASSWORD_ONCE[session.id] = password
     _write_log(db, "info", f"Session created #{session.id} '{session.campaign_name}' targets={len(targets)}")
     return session
 
@@ -2793,11 +2854,48 @@ async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = 
     return session
 
 
+async def _close_listener_socket(socket, payload: dict) -> None:
+    """Tell one listener why, then close. Never raises: cleanup runs regardless."""
+    try:
+        await socket.send_text(json.dumps(payload))
+    except Exception:
+        pass
+    try:
+        await socket.close(code=1000)
+    except Exception:
+        # A socket that is already gone is the ordinary case here.
+        pass
+
+
+async def _end_web_room(session_id: int, *, reason: str) -> None:
+    """End this Broadcast's room and disconnect its listeners. Idempotent."""
+    try:
+        web_rooms.end_room(engine, session_id=session_id)
+    except Exception as failure:
+        logger.warning("web room for session %s could not be ended: %s",
+                       session_id, type(failure).__name__)
+    room = None
+    try:
+        room = web_rooms.get_room_for_session(engine, session_id=session_id)
+    except Exception:
+        room = None
+    if room is None:
+        return
+    for socket in web_participants.drop_room(room.id):
+        await _close_listener_socket(
+            socket, {"type": "room_ended", "reason": reason})
+
+
 async def _end_session(db: Session, session: BroadcastSession, final_status: str, reason: str = "", broadcast_to_all: bool = False):
     # Every way a broadcast can end arrives here - normal stop, emergency stop,
     # a dropped microphone, server cleanup - which is exactly why finalization
     # lives here rather than in the stop route. Idempotent, and it never raises.
     await _finish_recording(session.id)
+    # The room ends with the Broadcast, wherever the end came from - normal
+    # stop, emergency stop, a dropped microphone, cleanup. Marking it ENDED
+    # also clears every listener session token, so no admitted listener can
+    # reconnect to a Broadcast that is over.
+    await _end_web_room(session.id, reason=reason or "broadcast_ended")
     now = datetime.now(timezone.utc)
     session.status = final_status
     session.ended_at = now
@@ -5106,6 +5204,545 @@ async def ws_broadcaster(websocket: WebSocket, ticket: str = Query(...),
                     _write_log(db, "warn", f"Session #{session.id} auto-stopped: broadcaster disconnected")
             finally:
                 db.close()
+
+
+# ================ WEB AUDIENCE (HQ side) ================
+#
+# Managing a room is managing YOUR OWN Broadcast's audience. Ownership is the
+# gate rather than a new permission: approving, denying and removing listeners
+# are as much a part of running your announcement as stopping it is, and a
+# second permission would only ever say yes wherever broadcast.start already
+# does.
+#
+# Deliberately NOT satisfied by broadcast.stop_any or broadcast.active_view, for
+# the same reason store volume is not: a supervisor entitled to END somebody's
+# broadcast is not thereby entitled to sit inside it deciding who may listen.
+
+
+def _require_web_room_owner(sid: int, user: HQUser) -> None:
+    """The signed-in account must own this Broadcast."""
+    with SessionLocal() as db:
+        session = db.query(BroadcastSession).filter(
+            BroadcastSession.id == sid).first()
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if session.started_by != user.id:
+            # 403 rather than 404: the caller is authenticated and the session
+            # exists. It is simply not theirs.
+            raise HTTPException(
+                status_code=403,
+                detail="You can only manage the web audience of your own Broadcast.")
+
+
+def _room_or_404(sid: int):
+    room = web_rooms.get_room_for_session(engine, session_id=sid)
+    if room is None:
+        raise HTTPException(status_code=404, detail="This Broadcast has no web room")
+    return room
+
+
+def _room_state(sid: int, *, room) -> dict:
+    """Everything the console needs to draw the Web Audience panel."""
+    participants = web_rooms.list_participants(engine, room_id=room.id)
+    waiting = [row for row in participants
+               if row.admission_status == web_rooms.AdmissionStatus.REQUESTED]
+    admitted = [row for row in participants if row.is_admitted]
+    counts = web_participants.counts_for_room(room.id)
+
+    relay = manager.broadcasts.web_relay(sid)
+    # A stream the framer cannot read costs web listeners and nothing else, so
+    # the panel says so rather than the Broadcast pretending it is fine.
+    delivery = "unavailable" if (relay is not None and relay.degraded_reason) else "ok"
+
+    def runtime_for(participant_id: int) -> dict:
+        runtime = web_participants.get(participant_id)
+        if runtime is None:
+            # Admitted but never connected, or connected and gone. Both are
+            # real states and neither is "listening".
+            return {"connected": False,
+                    "playback_state": PlaybackState.DISCONNECTED,
+                    "seconds_since_seen": None, "stale": False}
+        return runtime.public_dict()
+
+    return {
+        "public_code": room.public_code,
+        "status": room.status,
+        "auto_approve": room.auto_approve,
+        "delivery": delivery,
+        # Present only on the page lifetime that generated or rotated it. There
+        # is no column it could be read back from, and a masked placeholder
+        # would imply the application knows something it does not.
+        "password": _ROOM_PASSWORD_ONCE.get(sid) or None,
+        "password_configured": True,
+        "password_rotated_at": room.password_rotated_at,
+        "counts": {
+            "waiting": len(waiting),
+            "admitted": len(admitted),
+            "connected": counts["connected"],
+            "listening": counts["listening"],
+            "buffering": counts["buffering"],
+            "paused": counts["paused"],
+        },
+        "waiting": [row.public_dict() for row in waiting],
+        "listeners": [{**row.public_dict(), **runtime_for(row.id)}
+                      for row in admitted],
+    }
+
+
+@api.get("/broadcast/sessions/{sid}/web-room")
+def read_web_room(sid: int, user: HQUser = Depends(require(Permission.START_BROADCAST))):
+    _require_web_room_owner(sid, user)
+    return _room_state(sid, room=_room_or_404(sid))
+
+
+@api.post("/broadcast/sessions/{sid}/web-room/password/rotate")
+def rotate_web_room_password(
+    sid: int, user: HQUser = Depends(require(Permission.START_BROADCAST)),
+):
+    """Replace the join password and return the new plaintext, once.
+
+    Already-admitted listeners are untouched: the password governs who may
+    still come in, and removing the audience is what Kick is for.
+    """
+    _require_web_room_owner(sid, user)
+    _room_or_404(sid)
+    try:
+        password = web_rooms.rotate_password(engine, session_id=sid)
+    except web_rooms.RoomNotOpenError:
+        raise HTTPException(status_code=409, detail="This Broadcast has ended")
+    _ROOM_PASSWORD_ONCE[sid] = password
+    with SessionLocal() as db:
+        # The EVENT is recorded. The password never is.
+        _write_log(db, "info", f"Web room password rotated for session #{sid}")
+    return _room_state(sid, room=_room_or_404(sid))
+
+
+@api.put("/broadcast/sessions/{sid}/web-room/auto-approve")
+def set_web_room_auto_approve(
+    sid: int, payload: WebRoomAutoApproveUpdate,
+    user: HQUser = Depends(require(Permission.START_BROADCAST)),
+):
+    _require_web_room_owner(sid, user)
+    _room_or_404(sid)
+    try:
+        web_rooms.set_auto_approve(engine, session_id=sid,
+                                   enabled=payload.auto_approve)
+    except web_rooms.RoomNotOpenError:
+        raise HTTPException(status_code=409, detail="This Broadcast has ended")
+    return _room_state(sid, room=_room_or_404(sid))
+
+
+@api.get("/broadcast/sessions/{sid}/web-participants")
+def list_web_participants(sid: int,
+                          user: HQUser = Depends(require(Permission.START_BROADCAST))):
+    _require_web_room_owner(sid, user)
+    return _room_state(sid, room=_room_or_404(sid))
+
+
+@api.post("/broadcast/sessions/{sid}/web-participants/{pid}/approve")
+async def approve_web_participant(
+    sid: int, pid: int, user: HQUser = Depends(require(Permission.START_BROADCAST)),
+):
+    _require_web_room_owner(sid, user)
+    room = _room_or_404(sid)
+    try:
+        participant, token = web_rooms.approve_participant(
+            engine, room_id=room.id, participant_id=pid)
+    except web_rooms.ParticipantNotAdmissibleError as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    # The waiting browser is polling its own admission state, so it collects the
+    # token without a refresh. The token is NEVER returned to the broadcaster -
+    # it is that listener's credential, not theirs.
+    if token is not None:
+        _PENDING_LISTENER_TOKENS[participant.id] = token
+    return _room_state(sid, room=room)
+
+
+@api.post("/broadcast/sessions/{sid}/web-participants/{pid}/deny")
+async def deny_web_participant(
+    sid: int, pid: int, user: HQUser = Depends(require(Permission.START_BROADCAST)),
+):
+    _require_web_room_owner(sid, user)
+    room = _room_or_404(sid)
+    try:
+        web_rooms.deny_participant(engine, room_id=room.id, participant_id=pid)
+    except web_rooms.ParticipantNotAdmissibleError as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    _PENDING_LISTENER_TOKENS.pop(pid, None)
+    return _room_state(sid, room=room)
+
+
+@api.post("/broadcast/sessions/{sid}/web-participants/{pid}/kick")
+async def kick_web_participant(
+    sid: int, pid: int, user: HQUser = Depends(require(Permission.START_BROADCAST)),
+):
+    """Remove one listener: invalidate the session, THEN close the socket.
+
+    In that order. Marking the row first means that even if the close races a
+    reconnect, the reconnect has nothing valid left to present.
+    """
+    _require_web_room_owner(sid, user)
+    room = _room_or_404(sid)
+    try:
+        web_rooms.kick_participant(engine, room_id=room.id, participant_id=pid)
+    except web_rooms.ParticipantNotAdmissibleError as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+
+    _PENDING_LISTENER_TOKENS.pop(pid, None)
+    socket = web_participants.socket_for(pid)
+    web_participants.detach(participant_id=pid)
+    relay = manager.broadcasts.web_relay(sid)
+    if relay is not None:
+        await relay.remove_listener(str(pid))
+    if socket is not None:
+        await _close_listener_socket(socket, {"type": "kicked"})
+    return _room_state(sid, room=room)
+
+
+# ================ PUBLIC LISTENER SURFACE ================
+#
+# Everything below is reachable WITHOUT an HQ account. That is the whole point,
+# and it is also why each route is deliberately narrow.
+#
+# The listener credential these routes issue is scoped to one participant in one
+# room. It is not an HQ session, it carries no permission code, and no route
+# outside this section accepts it - so a listener holding one cannot read a
+# Store, a Device, a User or another Broadcast. It travels in an HttpOnly
+# cookie, never in a URL: Uvicorn logs request lines in full, and a credential
+# in a query string is a credential in a log file and in browser history.
+
+#: A heartbeat is a few dozen bytes. Anything larger is not one.
+MAX_LISTENER_FRAME_BYTES = 1024
+
+#: Signs the pending-claim handle. Process-local on purpose: a claim is
+#: only meaningful while the Broadcast that issued it is running, and a
+#: restart ends the Broadcast's runtime anyway.
+PENDING_CLAIM_SECRET = secrets.token_urlsafe(32)
+
+LISTENER_COOKIE = "echocast_listener"
+#: A listener session lives as long as the Broadcast, and a Broadcast is an
+#: announcement rather than a working day. Ending the room clears the token hash
+#: anyway, so this is a backstop rather than the primary control.
+LISTENER_COOKIE_MAX_AGE = 6 * 60 * 60
+
+#: HTTPS is required before this is exposed beyond a LAN, and Secure cookies do
+#: not survive plain HTTP. Rather than silently weakening the production default
+#: to make a pilot work, the LAN mode is an explicit, named opt-in.
+LISTENER_COOKIE_INSECURE = os.getenv("ECHOCAST_LAN_HTTP_LISTENERS", "") == "1"
+
+
+def _listener_cookie_kwargs() -> dict:
+    return {
+        "httponly": True,          # never readable by page script
+        "secure": not LISTENER_COOKIE_INSECURE,
+        # Lax, not None: the listener app is same-origin with HQ, so nothing
+        # needs to send this cookie cross-site, and SameSite=None would hand it
+        # to every third-party page that can make the browser issue a request.
+        "samesite": "lax",
+        "max_age": LISTENER_COOKIE_MAX_AGE,
+        "path": "/api/listen",
+    }
+
+
+def _client_key(request: Request) -> str:
+    return "listen:" + client_identifier(
+        request.client.host if request.client else None,
+        request.headers.get("x-forwarded-for"),
+        trust_proxy=TRUST_PROXY_HEADERS,
+    )
+
+
+def _refuse_if_limited(limiter, key: str) -> None:
+    wait = limiter.retry_after(key)
+    if wait is not None:
+        raise HTTPException(status_code=429,
+                            detail="Too many attempts. Please wait and try again.",
+                            headers={"Retry-After": str(wait)})
+
+
+def _public_room_or_404(public_code: str):
+    """Resolve a public code, revealing nothing about what does not exist.
+
+    An unknown code and an ended room deliberately answer the same way, because
+    a caller able to tell them apart can probe for which Broadcasts have
+    existed. Nothing here returns the internal session id.
+    """
+    room = web_rooms.find_room_by_public_code(engine, public_code=public_code)
+    if room is None or not room.is_open:
+        raise HTTPException(status_code=404,
+                            detail="No live Broadcast with that ID.")
+    return room
+
+
+def _session_is_live(session_id: int) -> bool:
+    with SessionLocal() as db:
+        session = db.query(BroadcastSession).filter(
+            BroadcastSession.id == session_id).first()
+        return bool(session and session.status == "live")
+
+
+def _listener_view(room, participant, *, live: bool) -> dict:
+    """What a listener may know. Never a Store, a session id or another person."""
+    return {
+        "public_code": room.public_code,
+        "display_name": participant.display_name,
+        "admission_status": participant.admission_status,
+        "admitted": participant.is_admitted,
+        "broadcast_live": live,
+        "heartbeat_seconds": HEARTBEAT_INTERVAL_SECONDS,
+    }
+
+
+@api.get("/listen/rooms/{public_code}")
+def public_room_lookup(public_code: str, request: Request):
+    """The minimum a join form needs: that this Broadcast exists."""
+    key = _client_key(request)
+    _refuse_if_limited(web_lookup_limiter, key)
+    web_lookup_limiter.record_attempt(key)
+    room = _public_room_or_404(public_code)
+    # Deliberately NOT included: the session id, the campaign name, the
+    # broadcaster, the Store count, or anything about physical targets.
+    return {
+        "public_code": room.public_code,
+        "broadcast_live": _session_is_live(room.session_id),
+        "auto_approve": room.auto_approve,
+    }
+
+
+@api.post("/listen/rooms/{public_code}/join")
+def public_room_join(public_code: str, payload: ListenerJoin, request: Request,
+                     response: Response):
+    """Join with the password. Correct password IS the authorisation.
+
+    A wrong password is refused as a wrong password. It is never quietly
+    converted into a join request: the listener asked to use a credential they
+    believe they have, and turning that into "waiting for approval" hides a
+    typo behind an unrelated outcome.
+    """
+    key = _client_key(request)
+    _refuse_if_limited(web_join_limiter, key)
+    web_join_limiter.record_attempt(key)
+
+    room = _public_room_or_404(public_code)
+    try:
+        name = web_rooms.normalise_display_name(payload.display_name)
+    except web_rooms.InvalidDisplayNameError as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+
+    # The submitted password is never logged, and never echoed back.
+    if not web_rooms.verify_join_password(engine, room=room,
+                                          password=payload.password or ""):
+        raise HTTPException(status_code=401, detail="Incorrect password.")
+
+    try:
+        participant, token = web_rooms.admit_with_password(
+            engine, room=room, display_name=name)
+    except web_rooms.RoomNotOpenError:
+        raise HTTPException(status_code=404, detail="No live Broadcast with that ID.")
+
+    web_join_limiter.forget(key)
+    response.set_cookie(LISTENER_COOKIE, token, **_listener_cookie_kwargs())
+    return _listener_view(room, participant, live=_session_is_live(room.session_id))
+
+
+@api.post("/listen/rooms/{public_code}/request-access")
+def public_room_request_access(public_code: str, payload: ListenerRequestAccess,
+                               request: Request, response: Response):
+    """Ask to be let in without a password.
+
+    Auto Approve is resolved inside the row-creating transaction, so a toggle
+    racing this request produces one participant in one state.
+    """
+    key = _client_key(request)
+    _refuse_if_limited(web_join_limiter, key)
+    web_join_limiter.record_attempt(key)
+
+    room = _public_room_or_404(public_code)
+    try:
+        name = web_rooms.normalise_display_name(payload.display_name)
+    except web_rooms.InvalidDisplayNameError as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+
+    try:
+        participant, token = web_rooms.request_access(
+            engine, room=room, display_name=name)
+    except web_rooms.RoomNotOpenError:
+        raise HTTPException(status_code=404, detail="No live Broadcast with that ID.")
+
+    if token is not None:
+        # Auto Approve admitted them at once.
+        response.set_cookie(LISTENER_COOKIE, token, **_listener_cookie_kwargs())
+    else:
+        # A pending participant still needs an identity to poll with, but it
+        # must not be an admitted listener session. A short-lived claim ticket
+        # naming only the participant serves that, and carries no authority.
+        response.set_cookie(f"{LISTENER_COOKIE}_pending",
+                            _pending_claim(participant.id),
+                            **_listener_cookie_kwargs())
+    return _listener_view(room, participant, live=_session_is_live(room.session_id))
+
+
+def _pending_claim(participant_id: int) -> str:
+    """An unguessable handle for a WAITING participant, signed by the server.
+
+    Not a listener session: it authorises nothing and is accepted only by the
+    admission-state route below. It exists so a waiting browser can be told it
+    has been approved without polling by participant id, which anyone could
+    guess.
+    """
+    digest = hashlib.sha256(
+        f"{PENDING_CLAIM_SECRET}:{participant_id}".encode("utf-8")).hexdigest()
+    return f"{participant_id}.{digest[:32]}"
+
+
+def _participant_from_claim(claim: str) -> int | None:
+    if not isinstance(claim, str) or "." not in claim:
+        return None
+    raw_id, _, provided = claim.partition(".")
+    if not raw_id.isdigit():
+        return None
+    expected = _pending_claim(int(raw_id))
+    # Constant-time: this is a signature check on an unauthenticated surface.
+    if not secrets.compare_digest(claim, expected):
+        return None
+    return int(raw_id)
+
+
+@api.get("/listen/me")
+def listener_admission_state(request: Request, response: Response):
+    """A listener's own state, and nothing about anybody else.
+
+    Serves two callers: an admitted listener holding a session cookie, and a
+    waiting one holding a pending claim. The second is how Approve reaches a
+    browser without a page refresh.
+    """
+    token = request.cookies.get(LISTENER_COOKIE)
+    resolved = web_rooms.authenticate_listener(engine, token=token) if token else None
+    if resolved is not None:
+        room, participant = resolved
+        return _listener_view(room, participant,
+                              live=_session_is_live(room.session_id))
+
+    claim = request.cookies.get(f"{LISTENER_COOKIE}_pending")
+    participant_id = _participant_from_claim(claim) if claim else None
+    if participant_id is None:
+        raise HTTPException(status_code=401, detail="Not admitted to a Broadcast.")
+
+    participant = web_rooms.get_participant(engine, participant_id=participant_id)
+    if participant is None:
+        raise HTTPException(status_code=401, detail="Not admitted to a Broadcast.")
+    room = web_rooms.get_room_by_id(engine, room_id=participant.room_id)
+    if room is None:
+        raise HTTPException(status_code=401, detail="Not admitted to a Broadcast.")
+
+    # Approved while waiting: hand over the listener session now, once.
+    if participant.is_admitted:
+        pending = _PENDING_LISTENER_TOKENS.pop(participant.id, None)
+        if pending is not None:
+            response.set_cookie(LISTENER_COOKIE, pending, **_listener_cookie_kwargs())
+    return _listener_view(room, participant, live=_session_is_live(room.session_id))
+
+
+# ================ LISTENER AUDIO SOCKET ================
+
+
+@app.websocket("/api/listen/ws")
+async def ws_listener(websocket: WebSocket):
+    """One admitted browser listener, receiving live audio and nothing else.
+
+    Authenticated by the listener cookie only. There is no ticket in the URL
+    and no query parameter, because this URL is logged in full.
+
+    The listener may SEND only a heartbeat carrying its browser playback state.
+    Audio, Store commands, Broadcast commands and everything else are refused -
+    this socket has no path to any of them, and unknown frames close it rather
+    than being ignored, so a client cannot probe for one that is tolerated.
+    """
+    token = websocket.cookies.get(LISTENER_COOKIE)
+    resolved = web_rooms.authenticate_listener(engine, token=token) if token else None
+    if resolved is None:
+        # 4401 for every reason - unknown, kicked, denied, room ended. Telling
+        # them which is telling them about a room they are not in.
+        await websocket.close(code=4401)
+        return
+    room, participant = resolved
+
+    if not _session_is_live(room.session_id):
+        # Admitted early, before the microphone is on. Not an error, but there
+        # is nothing to send yet.
+        await websocket.close(code=4409)
+        return
+
+    relay = manager.broadcasts.web_relay(room.session_id)
+    if relay is None or not relay.ready:
+        await websocket.close(code=4409)
+        return
+
+    await websocket.accept()
+    listener_key = str(participant.id)
+    runtime = web_participants.attach(
+        participant_id=participant.id, room_id=room.id,
+        session_id=room.session_id, socket=websocket)
+
+    async def send_cluster(frame: bytes) -> None:
+        await websocket.send_bytes(frame)
+
+    try:
+        # Attach is atomic in the relay and anchored to a Cluster index, so no
+        # Cluster is lost or repeated between the bootstrap and the live feed.
+        bootstrap = await relay.add_listener(listener_key, send_cluster)
+        if bootstrap is None:
+            await websocket.close(code=4409)
+            return
+
+        await websocket.send_text(json.dumps({
+            "type": "bootstrap",
+            "mime": "audio/webm;codecs=opus",
+            "clusters": len(bootstrap.clusters),
+            "heartbeat_seconds": HEARTBEAT_INTERVAL_SECONDS,
+        }))
+        await websocket.send_bytes(bootstrap.init_segment)
+        for cluster in bootstrap.clusters:
+            await websocket.send_bytes(cluster)
+
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            if message.get("bytes") is not None:
+                # A listener has no microphone here and never will. Publishing
+                # is not merely ignored, it ends the connection.
+                await websocket.close(code=4403)
+                return
+            text_frame = message.get("text")
+            if text_frame is None:
+                continue
+            if len(text_frame) > MAX_LISTENER_FRAME_BYTES:
+                await websocket.close(code=4403)
+                return
+            try:
+                payload = json.loads(text_frame)
+            except Exception:
+                await websocket.close(code=4403)
+                return
+            if not isinstance(payload, dict) or payload.get("type") != "heartbeat":
+                # Exactly one inbound message type. Anything else closes.
+                await websocket.close(code=4403)
+                return
+            web_participants.heartbeat(
+                participant_id=participant.id,
+                playback_state=payload.get("playback_state"))
+    except WebSocketDisconnect:
+        pass
+    except Exception as failure:
+        logger.info("listener socket ended after %s", type(failure).__name__)
+    finally:
+        # Only if THIS socket still holds the slot, so a late cleanup from a
+        # superseded socket cannot evict its replacement.
+        web_participants.detach(participant_id=participant.id, socket=websocket)
+        live_relay = manager.broadcasts.web_relay(room.session_id)
+        if live_relay is not None:
+            await live_relay.remove_listener(listener_key)
 
 
 # Include routes

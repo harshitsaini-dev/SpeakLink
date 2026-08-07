@@ -516,3 +516,28 @@ class SystemLogOut(BaseModel):
     @field_serializer("created_at", when_used="json")
     def _serialize_utc(self, value: datetime) -> Optional[str]:
         return _utc_iso(value)
+
+
+class WebRoomAutoApproveUpdate(BaseModel):
+    """Whether a passwordless request is admitted without the broadcaster.
+
+    A bare boolean rather than a general settings object: this toggle means
+    "anyone with the link may enter", and it should be impossible to change it
+    as a side effect of updating something else.
+    """
+    auto_approve: bool
+
+
+class ListenerJoin(BaseModel):
+    """A public listener joining with the room password.
+
+    The name is display text only - it is never an identifier, and two people
+    called Harshit are two participants.
+    """
+    display_name: str = Field(..., min_length=1, max_length=40)
+    password: Optional[str] = Field(default=None, max_length=128)
+
+
+class ListenerRequestAccess(BaseModel):
+    """A public listener asking the broadcaster to let them in."""
+    display_name: str = Field(..., min_length=1, max_length=40)
