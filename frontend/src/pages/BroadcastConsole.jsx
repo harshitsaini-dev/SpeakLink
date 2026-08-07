@@ -579,14 +579,21 @@ export default function BroadcastConsole() {
       )}
 
       {/* CONTROLS */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="lg:col-span-2 border border-slate-200 bg-white rounded-md shadow-sm p-5 space-y-4">
+      {/* Controls, audience, targets - in that order, on one row.
+          The Web Audience used to sit below the Store table, which during a
+          live broadcast meant scrolling past forty Stores to see who was
+          listening or to admit somebody waiting. It belongs where an operator
+          is already looking. Twelve columns rather than three so the middle
+          card can be the widest without the outer two becoming cramped. */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+        <div className="lg:col-span-4 border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-3"
+             data-testid="console-controls-card">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-slate-900">Broadcast Controls</h2>
+            <h2 className="text-base font-semibold text-slate-900">Broadcast Controls</h2>
             {error && <div data-testid="console-error" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1">{error}</div>}
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3">
             <div>
               <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Campaign Name</label>
               <input
@@ -704,8 +711,26 @@ export default function BroadcastConsole() {
           <div className="text-xs text-slate-500">Broadcaster: <span className="font-mono">{broadcasterStatus}</span></div>
         </div>
 
+        {/* The web audience, in the middle, where it is seen. Same component
+            and same business logic as before - only its placement changed, so
+            participant state has exactly one implementation. */}
+        <div className="lg:col-span-5" data-testid="console-audience-card">
+          {liveSessionId ? (
+            <WebAudiencePanel sessionId={liveSessionId} compact />
+          ) : (
+            <div className="border border-slate-200 bg-white rounded-md shadow-sm p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
+                Web Audience
+              </div>
+              <p className="mt-2 text-sm text-slate-500">
+                A shareable listener link is created when this Broadcast starts.
+              </p>
+            </div>
+          )}
+        </div>
+
         {/* Target summary */}
-        <div className="border border-slate-200 bg-white rounded-md shadow-sm p-5 space-y-3" data-testid="target-summary">
+        <div className="lg:col-span-3 border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-2.5" data-testid="target-summary">
           <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Broadcast Targets</div>
           <div className="grid grid-cols-3 gap-2">
             {/* TARGETS rather than SELECTED: nobody selects anything in the
@@ -953,7 +978,6 @@ export default function BroadcastConsole() {
           Stores and listeners are different delivery classes with different
           failure modes, and one merged list would invite reading a listener's
           Buffering as a shop problem. */}
-      {liveSessionId && <WebAudiencePanel sessionId={liveSessionId} />}
 
       {/* Confirm Modal */}
       {emergencyConfirmOpen && (
