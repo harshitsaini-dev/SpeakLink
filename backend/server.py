@@ -2651,7 +2651,19 @@ def _resolve_targets(db: Session, payload: SessionCreate, user: HQUser) -> List[
             raise HTTPException(status_code=400, detail="city required")
         targets = q.filter(Store.city == payload.city).all()
     elif mode == "online_only":
-        targets = q.filter(Store.is_online_store.is_(True)).all()
+        # CONNECTIVITY, not the Store's business classification.
+        #
+        # This used to filter on Store.is_online_store, which is the column
+        # Store Management edits with a checkbox labelled Online / Physical -
+        # an e-commerce flag that defaults to False and has nothing to do with
+        # whether a Receiver is reachable. So "Online Stores Only" targeted the
+        # e-commerce stores and excluded every physical shop whose Receiver was
+        # connected, which read as zero targets on a console showing BP ONLINE.
+        #
+        # The authority is the live Receiver connection inventory, the same one
+        # the target inventory endpoint already uses to paint each row's status.
+        connected = manager.online_store_ids()
+        targets = [store for store in q.all() if store.id in connected]
     else:
         raise HTTPException(status_code=400, detail="Invalid target_mode")
 
@@ -2675,6 +2687,11 @@ def _resolve_targets(db: Session, payload: SessionCreate, user: HQUser) -> List[
 @api.post("/broadcast/sessions", response_model=SessionOut, status_code=201)
 def create_session(payload: SessionCreate, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.START_BROADCAST))):
     targets = _resolve_targets(db, payload, user)
+    if not targets and payload.target_mode == "online_only":
+        # Its own answer: "no Stores match" would send an operator hunting
+        # through filters for a selection they never made.
+        raise HTTPException(status_code=409,
+                            detail="No authorized Stores are currently online.")
     if not targets and payload.target_mode != ONLY_WITH_LINK:
         raise HTTPException(status_code=400, detail="No stores match the selection criteria")
     online_ids = manager.online_store_ids()
@@ -2757,6 +2774,51 @@ def _refuse_busy_stores(db: Session, user: HQUser, target_store_ids) -> None:
         raise _store_busy_refusal(db, busy, scope)
 
 
+def _revalidate_online_targets(db: Session, session: BroadcastSession,
+                               user: HQUser, connected: set) -> list:
+    """Re-resolve an Online Stores Only session against live connectivity.
+
+    Rewrites this session's target rows to exactly the Stores that are
+    authorised AND connected right now, and refuses rather than starting a
+    physical broadcast with nothing on the other end.
+    """
+    _require_physical_delivery(user)
+    scope = resolve_store_scope(engine, user)
+
+    eligible = db.query(Store).filter(Store.is_active.is_(True)).all()
+    resolved = [store for store in eligible
+                if store.id in connected
+                and (scope is None or store.id in scope)]
+
+    if not resolved:
+        # Truthful refusal. Silently falling back to every Store, or to the
+        # offline ones, or to a link-only broadcast, would each put a campaign
+        # somewhere the operator did not ask for.
+        raise HTTPException(
+            status_code=409,
+            detail="No authorized Stores are currently online.")
+
+    # Replace the preview rows with what was just resolved, so the target rows,
+    # the leases and the PREPARE commands below all describe the same set.
+    keep = {store.id for store in resolved}
+    for row in db.query(BroadcastTarget).filter(
+            BroadcastTarget.session_id == session.id).all():
+        if row.store_id not in keep:
+            db.delete(row)
+    existing = {row.store_id for row in db.query(BroadcastTarget).filter(
+        BroadcastTarget.session_id == session.id).all()}
+    for store_id in keep - existing:
+        db.add(BroadcastTarget(session_id=session.id, store_id=store_id,
+                               play_status="pending"))
+    session.selected_store_count = len(keep)
+    # Committed, not merely flushed: the reservation and lease work below opens
+    # its own connection on the same SQLite file, and pending writes here would
+    # hold the write lock against it.
+    db.commit()
+    return db.query(BroadcastTarget).filter(
+        BroadcastTarget.session_id == session.id).all()
+
+
 @api.post("/broadcast/sessions/{sid}/start", response_model=SessionOut)
 async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = Depends(require(Permission.START_BROADCAST))):
     session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
@@ -2767,6 +2829,24 @@ async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = 
 
     targets = db.query(BroadcastTarget).filter(BroadcastTarget.session_id == sid).all()
     online_ids = manager.online_store_ids()
+
+    # ONLINE STORES ONLY is resolved AGAIN, here, against connectivity as it is
+    # at this instant.
+    #
+    # The set stored at session creation is a preview: a Store may have dropped
+    # or reconnected in the seconds since, and the browser's copy is older
+    # still. Re-resolving means a stale page cannot start a broadcast to a
+    # Receiver that is no longer there, and a Store that came back is not
+    # excluded for having been offline a moment ago.
+    #
+    # What this deliberately does NOT do is keep tracking. Once Start succeeds
+    # the set is frozen for the life of the broadcast: a Store connecting later
+    # is not added, because joining an announcement half way through is a
+    # decision an operator makes, not something a heartbeat does. Adding and
+    # removing Stores mid-broadcast is its own milestone.
+    if session.target_mode == "online_only":
+        targets = _revalidate_online_targets(db, session, user, online_ids)
+
     target_store_ids = {t.store_id for t in targets}
 
     # A Store conflict is reported BEFORE the one-broadcast-at-a-time gate

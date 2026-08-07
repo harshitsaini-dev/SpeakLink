@@ -119,8 +119,12 @@ test("region options come from the scoped target response", async () => {
                      { target: { value: "region" } });
   });
   // Derived from the returned Stores, so a scoped operator is never offered a
-  // region they hold no Store in.
-  expect(screen.getByRole("option", { name: "NORTH" })).toBeTruthy();
+  // region they hold no Store in. Scoped to the TARGET selector: the Store
+  // picker now has its own Zone FILTER, which offers the same names for an
+  // entirely different purpose.
+  const zoneSelect = screen.getByTestId("region-select");
+  expect(Array.from(zoneSelect.querySelectorAll("option")).map((o) => o.value))
+    .toContain("NORTH");
 });
 
 
