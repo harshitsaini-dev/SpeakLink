@@ -128,6 +128,27 @@ def feed_audio(client, sid, chunk_count=8):
     return relay
 
 
+
+def expect_refusal(client, reason: str) -> None:
+    """The socket is ACCEPTED, told why, then closed.
+
+    Closing before the handshake completes cannot deliver an application close
+    code - a browser only ever sees 1006, indistinguishable from a dropped
+    network - which is what made a refused listener retry for ever behind
+    Buffering. Accepting first costs one frame and lets the page tell the truth,
+    so a refusal now arrives as a message and these tests read it.
+    """
+    from starlette.websockets import WebSocketDisconnect
+
+    with client.websocket_connect("/api/listen/ws") as socket:
+        message = json.loads(socket.receive_text())
+        assert message["type"] == "refused", message
+        assert message["reason"] == reason, message
+        # And then it really does close, rather than lingering.
+        with pytest.raises(WebSocketDisconnect):
+            socket.receive_text()
+
+
 # ===========================================================================
 # Only With Link: the absences
 # ===========================================================================
@@ -325,13 +346,9 @@ def test_a_listener_cannot_publish_audio(client, owner):
 
 
 def test_a_socket_without_a_listener_session_is_refused(client, owner):
-    from starlette.websockets import WebSocketDisconnect
-
     sid = link_only_session(client, owner)
     go_live(client, owner, sid)
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/api/listen/ws") as socket:
-            socket.receive_text()
+    expect_refusal(client, "not_admitted")
 
 
 def test_a_waiting_participant_has_no_socket(client, owner):
@@ -344,9 +361,7 @@ def test_a_waiting_participant_has_no_socket(client, owner):
     client.post(f"/api/listen/rooms/{room['public_code']}/request-access",
                 json={"display_name": "Aman"})
 
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/api/listen/ws") as socket:
-            socket.receive_text()
+    expect_refusal(client, "not_admitted")
 
 
 @requires_capture
@@ -364,9 +379,7 @@ def test_a_kicked_listener_cannot_reconnect(client, owner):
         f"/api/broadcast/sessions/{sid}/web-participants/{pid}/kick",
         headers=owner).status_code == 200
 
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/api/listen/ws") as socket:
-            socket.receive_text()
+    expect_refusal(client, "not_admitted")
 
 
 @requires_capture
@@ -381,9 +394,9 @@ def test_a_listener_of_an_ended_broadcast_cannot_connect(client, owner):
     assert client.post(f"/api/broadcast/sessions/{sid}/stop",
                        headers=owner).status_code == 200
 
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/api/listen/ws") as socket:
-            socket.receive_text()
+    # Ending the room cleared every listener token, so this is no longer an
+    # admitted listener rather than a listener of an unstarted Broadcast.
+    expect_refusal(client, "not_admitted")
 
 
 def test_a_listener_cannot_connect_before_the_broadcast_is_live(client, owner):
@@ -394,9 +407,8 @@ def test_a_listener_cannot_connect_before_the_broadcast_is_live(client, owner):
     room = room_of(client, owner, sid)
     admit(client, room)          # admitted while the session is still pending
 
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/api/listen/ws") as socket:
-            socket.receive_text()
+    # Waiting, explicitly NOT ended: the page should sit tight, not give up.
+    expect_refusal(client, "not_started")
 
 
 @requires_capture
