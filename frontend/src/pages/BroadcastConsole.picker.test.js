@@ -51,10 +51,14 @@ function fleet() {
   }));
 }
 
-/** The operator's own fleet: BP connected, RG not. */
-const BP = { id: 101, store_code: "BP", store_name: "Bindapur", city: "DELHI",
+/** A connected Store and an unconnected one.
+ *
+ * Deliberately synthetic names: the frontend must never embed the canonical
+ * Store catalogue, and a guard in the backend suite enforces that.
+ */
+const BP = { id: 101, store_code: "BP", store_name: "Test Store North", city: "DELHI",
              region: "UN ZONE", is_online_store: false, status: "online" };
-const RG = { id: 102, store_code: "RG", store_name: "Rohini Gardens",
+const RG = { id: 102, store_code: "RG", store_name: "Test Store South",
              city: "DELHI", region: "UN ZONE", is_online_store: false,
              status: "offline" };
 //: An e-commerce Store: flagged Online in Store Management, no Receiver.
@@ -249,8 +253,8 @@ test("no Store appears twice across pages", async () => {
 test("search matches code, name, city and Zone", async () => {
   await renderConsole([BP, RG, WEB, ...fleet()]);
 
-  for (const [term, expected] of [["BP", "BP"], ["Bindapur", "BP"],
-                                  ["rohini", "RG"]]) {
+  for (const [term, expected] of [["BP", "BP"], ["Test Store North", "BP"],
+                                  ["south", "RG"]]) {
     await act(async () => {
       fireEvent.change(screen.getByTestId("stores-search"), { target: { value: term } });
     });
