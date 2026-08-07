@@ -54,6 +54,7 @@ PAGE_CODE = "broadcast.active_view"
 OWNERSHIP_CODE = "broadcast.view_ownership"
 TARGETS_CODE = "broadcast.view_targets"
 STOP_ANY_CODE = "broadcast.stop_any"
+MANAGE_WEB_AUDIENCE_CODE = "broadcast.manage_web_audience"
 
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
@@ -86,6 +87,10 @@ class Visibility:
     may_view_ownership: bool
     may_view_targets: bool
     may_stop_any: bool
+    #: Manage ANOTHER operator's web audience. Deliberately its own question:
+    #: reading who is broadcasting and ejecting their listeners are different
+    #: powers, and the second is invisible to the operator it happens to.
+    may_manage_web_audience: bool = False
 
     def as_dict(self) -> dict:
         """Sent to the client so it can render the right controls.
@@ -98,6 +103,7 @@ class Visibility:
             "may_view_ownership": self.may_view_ownership,
             "may_view_targets": self.may_view_targets,
             "may_stop_any": self.may_stop_any,
+            "may_manage_web_audience": self.may_manage_web_audience,
         }
 
 
@@ -107,7 +113,51 @@ def resolve_visibility(engine: Engine, user) -> Visibility:
         may_view_ownership=has_permission_code(engine, user, OWNERSHIP_CODE),
         may_view_targets=has_permission_code(engine, user, TARGETS_CODE),
         may_stop_any=has_permission_code(engine, user, STOP_ANY_CODE),
+        may_manage_web_audience=has_permission_code(
+            engine, user, MANAGE_WEB_AUDIENCE_CODE),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class WebRoomSummary:
+    """The compact room facts an authorised supervisor may see on the list.
+
+    Deliberately small. The participant lists live behind their own route, for
+    exactly the reason the Store targets do: fifty sessions multiplied by every
+    listener is the payload this page exists to avoid.
+
+    ``password`` is present only when the running process still holds the
+    plaintext it generated. It is never read back from storage, because it is
+    not stored - only a bcrypt hash is. ``password_available`` says which of
+    those two worlds the caller is in, so the UI can be truthful rather than
+    printing asterisks for a value nothing knows.
+    """
+
+    public_code: str
+    status: str
+    auto_approve: bool
+    password: str | None
+    waiting_count: int
+    connected_count: int
+    listening_count: int
+
+    @property
+    def password_available(self) -> bool:
+        return bool(self.password)
+
+    def as_dict(self) -> dict:
+        return {
+            "public_code": self.public_code,
+            "status": self.status,
+            "auto_approve": self.auto_approve,
+            # The plaintext when this process still has it, and null - never a
+            # masked placeholder - when it does not.
+            "password": self.password,
+            "password_available": self.password_available,
+            "waiting_count": self.waiting_count,
+            "connected_count": self.connected_count,
+            "listening_count": self.listening_count,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +198,9 @@ class ActiveRow:
     #: serialized.
     all_target_store_ids: frozenset[int]
     is_mine: bool
+    #: This Broadcast's web room, or None if it has none. Held unredacted like
+    #: everything else on this row; ``serialize`` is the only way out.
+    web_room: "WebRoomSummary | None" = None
 
     def serialize(self, visibility: Visibility) -> dict:
         """The wire shape, redacted to this account.
@@ -177,6 +230,14 @@ class ActiveRow:
             row["owner_user_id"] = self.owner_user_id
             row["owner_username"] = self.owner_username
             row["owner_display_name"] = self.owner_display_name
+            # The room's public code IS a credential: anybody holding it can
+            # attempt to join, and with Auto Approve on they are in. So it is
+            # governed by the same permission as the broadcaster's identity,
+            # and for a caller without it the key is absent entirely rather
+            # than present-and-null - an absent key cannot be un-hidden by a
+            # frontend, and a null one invites somebody to try.
+            if self.web_room is not None:
+                row["web_room"] = self.web_room.as_dict()
         return row
 
 
@@ -188,6 +249,7 @@ def collect_active_rows(
     store_lookup,
     scope: frozenset[int] | None,
     viewer_user_id: int,
+    web_room_lookup=None,
 ) -> list[ActiveRow]:
     """Build the unredacted row set from the ONE active-truth source.
 
@@ -246,6 +308,8 @@ def collect_active_rows(
             visible_targets=targets,
             all_target_store_ids=all_targets,
             is_mine=is_mine,
+            web_room=(web_room_lookup(session_id)
+                      if web_room_lookup is not None else None),
         ))
     return rows
 
