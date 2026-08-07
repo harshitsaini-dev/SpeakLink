@@ -135,7 +135,10 @@ test("an operator without physical delivery is never offered Stores or Zones", a
   expect(screen.queryByTestId("target-mode-select")).toBeNull();
   expect(screen.queryByTestId("stores-search")).toBeNull();
   const notice = screen.getByTestId("no-store-delivery-notice");
-  expect(notice.textContent).toMatch(/cannot broadcast to Stores or Zones/i);
+  // The notice now names the mode this account DOES have rather than only what
+  // it lacks, which is the more useful half of the same fact.
+  expect(notice.textContent).toMatch(/only with link/i);
+  expect(notice.textContent).toMatch(/does not play in any Store/i);
 });
 
 test("the target catalogue is not even requested without physical delivery", async () => {
@@ -155,4 +158,56 @@ test("no Store name reaches the page without physical delivery", async () => {
 
   expect(screen.queryByText(/Testville North/)).toBeNull();
   expect(screen.queryByText(/Testville South/)).toBeNull();
+});
+
+
+// ===========================================================================
+// Only With Link
+// ===========================================================================
+test("a link-only broadcaster starts in Only With Link with no Store table", async () => {
+  // The only mode this account has, so the form opens on it rather than on a
+  // Store mode they cannot use.
+  await renderConsole(["broadcast.start", "broadcast.stop"]);
+
+  expect(screen.getByTestId("link-only-mode").textContent).toMatch(/only with link/i);
+  expect(screen.queryByTestId("target-mode-select")).toBeNull();
+  expect(screen.queryByTestId("stores-search")).toBeNull();
+});
+
+test("a physical broadcaster is offered Only With Link alongside the Store modes", async () => {
+  await renderConsole();
+  const options = Array.from(
+    screen.getByTestId("target-mode-select").querySelectorAll("option"));
+  const values = options.map((option) => option.value);
+
+  expect(values).toContain("only_with_link");
+  // ...and the existing physical modes are untouched.
+  for (const mode of ["selected", "all", "region", "city", "online_only"]) {
+    expect(values).toContain(mode);
+  }
+});
+
+test("choosing Only With Link hides the Store table", async () => {
+  await renderConsole();
+  expect(screen.getByTestId("stores-search")).toBeTruthy();
+
+  await act(async () => {
+    fireEvent.change(screen.getByTestId("target-mode-select"),
+                     { target: { value: "only_with_link" } });
+  });
+  // A Broadcast with no physical destination has no Store selection to make.
+  expect(screen.queryByTestId("stores-search")).toBeNull();
+});
+
+test("Only With Link can go live with no Stores chosen", async () => {
+  // Every other mode needs at least one target. This one needs none, and the
+  // button must not be disabled for the absence that defines the mode.
+  await renderConsole();
+  await act(async () => {
+    fireEvent.change(screen.getByTestId("target-mode-select"),
+                     { target: { value: "only_with_link" } });
+    fireEvent.change(screen.getByTestId("campaign-name-input"),
+                     { target: { value: "Link only announcement" } });
+  });
+  expect(screen.getByTestId("start-broadcast-btn").disabled).toBe(false);
 });

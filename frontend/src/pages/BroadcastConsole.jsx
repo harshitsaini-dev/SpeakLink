@@ -8,14 +8,21 @@ import { elapsedSeconds } from "@/lib/time";
 import StatusBadge from "@/components/StatusBadge";
 import StoreAudioControl from "@/components/StoreAudioControl";
 import { useStoreAudioControl } from "@/lib/audio/useStoreAudioControl";
+import WebAudiencePanel from "@/components/WebAudiencePanel";
 
-const TARGET_MODES = [
+export const ONLY_WITH_LINK = "only_with_link";
+
+//: Every mode reaches the web room. Only With Link is the one that reaches
+//: NOTHING ELSE - it is a Broadcast with an audience and no shop, not a
+//: physical Broadcast whose Store selection came out empty.
+const PHYSICAL_TARGET_MODES = [
   { value: "selected", label: "Selected Stores" },
   { value: "all", label: "All Stores" },
   { value: "region", label: "By Zone" },
   { value: "city", label: "By City" },
   { value: "online_only", label: "Online Stores Only" },
 ];
+const LINK_ONLY_MODE = { value: ONLY_WITH_LINK, label: "Only With Link" };
 
 // The only play_status values the backend ever writes (_persist_receiver_ack in
 // backend/server.py): pending, audio_receiving, playback_confirmed,
@@ -49,6 +56,8 @@ function fmtDur(sec) {
 
 export default function BroadcastConsole() {
   const { can } = useAuth();
+  const canDeliverToStores = React.useCallback(
+    () => can("broadcast.store_delivery"), [can]);
   const {
     current, load: loadBroadcast, isLive, meter, micLevels, broadcasterStatus,
     micVolumePercent, micMuted, setMicVolume, setMicMute, micEffectivelySilent,
@@ -61,7 +70,10 @@ export default function BroadcastConsole() {
   const [meta, setMeta] = React.useState({ regions: [], cities: [] });
   const [q, setQ] = React.useState("");
   const [selectedIds, setSelectedIds] = React.useState(new Set());
-  const [targetMode, setTargetMode] = React.useState("selected");
+  // A link-only broadcaster has exactly one mode available, so that is where
+  // their form starts rather than on a Store mode they cannot use.
+  const [targetMode, setTargetMode] = React.useState(
+    () => (canDeliverToStores() ? "selected" : ONLY_WITH_LINK));
   const [region, setRegion] = React.useState("");
   const [city, setCity] = React.useState("");
   const [campaign, setCampaign] = React.useState("");
@@ -101,7 +113,7 @@ export default function BroadcastConsole() {
   // able to put sound into a shop. For such an operator the target inventory is
   // a 403, so it is not requested - a page that fetches what it may not have
   // and then hides the error is how the empty-table bug happened before.
-  const mayDeliverToStores = can("broadcast.store_delivery");
+  const mayDeliverToStores = canDeliverToStores();
 
   const load = React.useCallback(async () => {
     if (mayDeliverToStores) {
@@ -196,6 +208,8 @@ export default function BroadcastConsole() {
   }, [stores, q]);
 
   const resolveTargetStoreIds = () => {
+    // Link-only has no physical destination at all, which is the point of it.
+    if (targetMode === ONLY_WITH_LINK) return [];
     if (targetMode === "all") return stores.map((s) => s.id);
     if (targetMode === "selected") return Array.from(selectedIds);
     if (targetMode === "region") return stores.filter((s) => s.region === region).map((s) => s.id);
@@ -512,12 +526,17 @@ export default function BroadcastConsole() {
                 <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1">
                   Target Mode
                 </p>
-                <p className="text-sm text-slate-700">
-                  This account cannot broadcast to Stores or Zones.
+                <p className="text-sm font-semibold text-slate-900"
+                   data-testid="link-only-mode">
+                  Only With Link
+                </p>
+                <p className="text-sm text-slate-700 mt-1">
+                  This Broadcast reaches web listeners through a shared link.
+                  It does not play in any Store.
                 </p>
                 <p className="text-xs text-slate-500 mt-1">
                   Ask an administrator for &ldquo;Broadcast to Stores / Zones&rdquo;
-                  if you need physical delivery.
+                  if you need to broadcast to shops.
                 </p>
               </div>
             )}
@@ -530,7 +549,9 @@ export default function BroadcastConsole() {
                 className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                 disabled={isLive}
               >
-                {TARGET_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                {[...PHYSICAL_TARGET_MODES, LINK_ONLY_MODE].map((m) => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
               </select>
             </div>
             )}
@@ -579,7 +600,10 @@ export default function BroadcastConsole() {
                 <button
                   data-testid="start-broadcast-btn"
                   onClick={() => setConfirmOpen(true)}
-                  disabled={busy || targetIds.length === 0 || !campaign.trim() || (targetMode === "region" && !region) || (targetMode === "city" && !city)}
+                  disabled={busy || !campaign.trim()
+                    || (targetMode !== ONLY_WITH_LINK && targetIds.length === 0)
+                    || (targetMode === "region" && !region)
+                    || (targetMode === "city" && !city)}
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-semibold text-white bg-blue-700 hover:bg-blue-800 disabled:bg-slate-400"
                 >
                   <Play size={16}/> Start Live Broadcast
@@ -637,7 +661,7 @@ export default function BroadcastConsole() {
       {/* Store list. Omitted entirely without physical delivery: a disabled
           selector would still print the name of every Store the account may
           not reach, which is the leak the control is meant to prevent. */}
-      {mayDeliverToStores && (
+      {mayDeliverToStores && targetMode !== ONLY_WITH_LINK && (
       <div className="border border-slate-200 bg-white rounded-md shadow-sm">
         <div className="p-4 border-b border-slate-200 flex flex-wrap items-center gap-3">
           <h3 className="font-semibold text-slate-900 mr-auto">Stores {targetMode === "selected" && <span className="text-slate-500 font-normal text-sm">— pick receivers to include</span>}</h3>
@@ -747,6 +771,12 @@ export default function BroadcastConsole() {
         </div>
       </div>
       )}
+
+      {/* The web audience, kept entirely separate from the Store table above.
+          Stores and listeners are different delivery classes with different
+          failure modes, and one merged list would invite reading a listener's
+          Buffering as a shop problem. */}
+      {liveSessionId && <WebAudiencePanel sessionId={liveSessionId} />}
 
       {/* Confirm Modal */}
       {emergencyConfirmOpen && (

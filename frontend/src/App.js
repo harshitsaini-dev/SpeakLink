@@ -7,6 +7,7 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 import Layout from "@/components/Layout";
 import { RecordingPlaybackProvider } from "@/contexts/RecordingPlaybackContext";
 import Login from "@/pages/Login";
+import Listen from "@/pages/Listen";
 import BroadcastConsole from "@/pages/BroadcastConsole";
 import ActiveBroadcasts from "@/pages/ActiveBroadcasts";
 import StoreManagement from "@/pages/StoreManagement";
@@ -25,6 +26,12 @@ export default function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          {/* PUBLIC. Outside ProtectedRoute and outside Layout on purpose: a
+              listener has no HQ account, no sidebar and nowhere else to go.
+              Nothing rendered under here can name a Store, a Zone, a Receiver
+              or an operator. */}
+          <Route path="/listen" element={<Listen />} />
+          <Route path="/listen/:publicCode" element={<Listen />} />
           {/* /receiver is deliberately not routed. The page connected to
               /ws/receiver/{token}, a backend route that does not exist, and
               reaching it required a Store credential in the URL. A Receiver
