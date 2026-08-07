@@ -279,6 +279,21 @@ export default function RecordingPlayer({ session, onClose,
   // Only a source that belongs to the SELECTED recording counts as attached.
   const attached = loaded && loaded.sessionId === sessionId ? loaded : null;
   const seekable = Number.isFinite(duration) && duration > 0;
+  /**
+   * How full the bar LOOKS. Deliberately separate from position and duration,
+   * which stay exactly what the media element reports.
+   *
+   * A finished recording is 100% by definition, and it has to be stated rather
+   * than derived: the last timeupdate fires slightly before the end, so
+   * currentTime at `ended` is routinely a few tens of milliseconds short of
+   * duration. Deriving the bar from that leaves it visibly unfinished on a
+   * recording that has finished - and "nearly" is not what Finished means.
+   *
+   * This never changes the audio or the clock. Only the paint.
+   */
+  const visualProgressPercent = ended ? 100
+    : seekable ? Math.min(100, Math.max(0, (position / duration) * 100))
+    : 0;
   const state = error ? "Playback failed"
     : loading ? "Preparing…"
     : ended ? "Finished"
@@ -374,18 +389,46 @@ export default function RecordingPlayer({ session, onClose,
                   data-testid="recording-position">
               {formatClock(position)}
             </span>
-            <input
-              type="range"
-              min="0"
-              max={seekable ? duration : 1}
-              step="0.1"
-              value={seekable ? Math.min(position, duration) : 0}
-              disabled={!seekable}
-              aria-label="Seek"
-              data-testid="recording-seek"
-              onChange={(event) => seekTo(Number(event.target.value))}
-              className="flex-1 accent-red-500"
-            />
+            {/* The played portion is a real element, not the browser's own
+                paint.
+
+                A native range draws its accent fill up to the THUMB CENTRE, and
+                the thumb's travel is inset by half its width at each end - so
+                at value === max the fill stops about nine pixels short and the
+                operator sees a grey sliver on a recording that has finished.
+                Nothing in the DOM represents that fill either, so it could
+                neither be corrected nor measured.
+
+                So the fill is drawn here and the range sits on top of it,
+                transparent. The control is still a real input: keyboard, focus
+                and the Seek label are unchanged. */}
+            <div className="relative flex-1 h-4 flex items-center"
+                 data-testid="recording-seek-track">
+              <div className="absolute inset-x-0 h-1 rounded bg-slate-700" />
+              <div
+                className="absolute left-0 h-1 rounded bg-red-500"
+                data-testid="recording-seek-fill"
+                style={{ width: `${visualProgressPercent}%` }}
+              />
+              <input
+                type="range"
+                min="0"
+                max={seekable ? duration : 1}
+                step="0.1"
+                value={seekable ? Math.min(position, duration) : 0}
+                disabled={!seekable}
+                aria-label="Seek"
+                data-testid="recording-seek"
+                onChange={(event) => seekTo(Number(event.target.value))}
+                className="absolute inset-x-0 w-full appearance-none bg-transparent
+                           accent-red-500 cursor-pointer
+                           [&::-webkit-slider-thumb]:appearance-none
+                           [&::-webkit-slider-thumb]:h-3
+                           [&::-webkit-slider-thumb]:w-3
+                           [&::-webkit-slider-thumb]:rounded-full
+                           [&::-webkit-slider-thumb]:bg-red-500"
+              />
+            </div>
             <span className="text-[11px] tabular-nums text-slate-400 w-10"
                   data-testid="recording-duration">
               {/* A WebM written by MediaRecorder carries no duration in its
