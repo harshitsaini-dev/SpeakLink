@@ -755,3 +755,215 @@ test("switching recordings does not inherit a finished bar", async () => {
   });
   expect(screen.getByTestId("recording-seek-fill").style.width).not.toBe("100%");
 });
+
+
+// ===========================================================================
+// Smooth progress and the visual thumb
+// ===========================================================================
+// timeupdate fires roughly every 265ms in Chromium - measured, not assumed - so
+// a bar driven by it alone advances in visible quarter-second jumps. The frame
+// loop samples the media element instead. The element stays the clock: nothing
+// here advances by elapsed wall time.
+
+/** A deterministic requestAnimationFrame the test drives by hand. */
+function stubFrames() {
+  const pending = new Map();
+  let next = 1;
+  global.requestAnimationFrame = jest.fn((callback) => {
+    pending.set(next, callback);
+    return next++;
+  });
+  global.cancelAnimationFrame = jest.fn((handle) => { pending.delete(handle); });
+  return {
+    get live() { return pending.size; },
+    /** Run every scheduled callback once, as a real frame would. */
+    tick() {
+      const due = Array.from(pending.entries());
+      pending.clear();
+      due.forEach(([, callback]) => callback());
+    },
+  };
+}
+
+test("the fill and the thumb are driven by ONE value", async () => {
+  const audio = await renderPlaying();
+  audio.currentTime = 6.5;                       // half of 13 seconds
+  await act(async () => { fireEvent.timeUpdate(audio); });
+
+  const fill = screen.getByTestId("recording-seek-fill").style.width;
+  const thumb = screen.getByTestId("recording-seek-thumb").style.left;
+  // Separate calculations are how a line and a point drift apart.
+  expect(thumb).toBe(fill);
+});
+
+test("a finished recording puts the thumb centre at the very end", async () => {
+  const audio = await renderPlaying();
+  await act(async () => { fireEvent.ended(audio); });
+
+  expect(screen.getByTestId("recording-seek-fill").style.width).toBe("100%");
+  expect(screen.getByTestId("recording-seek-thumb").style.left).toBe("100%");
+  // translateX(-50%) is what makes `left` mean the CENTRE, so 100% puts the
+  // centre on the track right edge rather than the circle left side.
+  expect(screen.getByTestId("recording-seek-thumb").style.transform)
+    .toBe("translateX(-50%)");
+});
+
+test("the visible thumb is a custom element and the input stays interactive", async () => {
+  await renderPlaying();
+  const input = screen.getByTestId("recording-seek");
+  const thumb = screen.getByTestId("recording-seek-thumb");
+
+  expect(input.tagName).toBe("INPUT");
+  expect(input.type).toBe("range");
+  expect(input.getAttribute("aria-label")).toBe("Seek");
+  // The input is not hidden and not click-through; only its own thumb is
+  // transparent. The painted parts are the ones that ignore the pointer.
+  expect(input.className).not.toMatch(/pointer-events-none/);
+  expect(input.className).not.toMatch(/\bhidden\b/);
+  expect(thumb.className).toMatch(/pointer-events-none/);
+  expect(screen.getByTestId("recording-seek-fill").className)
+    .toMatch(/pointer-events-none/);
+});
+
+test("playback starts exactly one frame loop", async () => {
+  const frames = stubFrames();
+  const audio = await renderPlaying();
+
+  await act(async () => { fireEvent.play(audio); });
+  expect(frames.live).toBe(1);
+
+  // Re-entering Play must not schedule a second loop: two would both write
+  // position, and cancelling one would leave the other running invisibly.
+  await act(async () => { fireEvent.play(audio); fireEvent.play(audio); });
+  expect(frames.live).toBe(1);
+});
+
+test("the loop samples the audio element, not a clock", async () => {
+  const frames = stubFrames();
+  const audio = await renderPlaying();
+  audio.paused = false;
+  await act(async () => { fireEvent.play(audio); });
+
+  audio.currentTime = 3.25;
+  await act(async () => { frames.tick(); });
+  expect(parseFloat(screen.getByTestId("recording-seek-fill").style.width))
+    .toBeCloseTo(25, 0);
+
+  // No timeupdate fired; the position came from the element itself.
+  audio.currentTime = 9.75;
+  await act(async () => { frames.tick(); });
+  expect(parseFloat(screen.getByTestId("recording-seek-fill").style.width))
+    .toBeCloseTo(75, 0);
+});
+
+test("pausing cancels the loop", async () => {
+  const frames = stubFrames();
+  const audio = await renderPlaying();
+  audio.paused = false;
+  await act(async () => { fireEvent.play(audio); });
+  expect(frames.live).toBe(1);
+
+  audio.paused = true;
+  await act(async () => { fireEvent.pause(audio); });
+  expect(frames.live).toBe(0);
+});
+
+test("ending cancels the loop", async () => {
+  const frames = stubFrames();
+  const audio = await renderPlaying();
+  audio.paused = false;
+  await act(async () => { fireEvent.play(audio); });
+
+  await act(async () => { fireEvent.ended(audio); });
+  expect(frames.live).toBe(0);
+});
+
+test("a playback error cancels the loop", async () => {
+  const frames = stubFrames();
+  const audio = await renderPlaying();
+  audio.paused = false;
+  await act(async () => { fireEvent.play(audio); });
+
+  await act(async () => { fireEvent.error(audio); });
+  expect(frames.live).toBe(0);
+});
+
+test("repeated play and pause leave no loops behind", async () => {
+  const frames = stubFrames();
+  const audio = await renderPlaying();
+  for (let round = 0; round < 4; round += 1) {
+    audio.paused = false;
+    await act(async () => { fireEvent.play(audio); });
+    audio.paused = true;
+    await act(async () => { fireEvent.pause(audio); });
+  }
+  expect(frames.live).toBe(0);
+});
+
+test("unmounting cancels the loop", async () => {
+  const frames = stubFrames();
+  const audio = await renderPlaying();
+  audio.paused = false;
+  await act(async () => { fireEvent.play(audio); });
+  expect(frames.live).toBe(1);
+
+  await act(async () => { lastView.unmount(); });
+  expect(frames.live).toBe(0);
+});
+
+test("switching recordings cancels the previous loop", async () => {
+  const frames = stubFrames();
+  const audio = await renderPlaying();
+  audio.paused = false;
+  await act(async () => { fireEvent.play(audio); });
+  expect(frames.live).toBe(1);
+
+  const previousHandle = global.requestAnimationFrame.mock.results[0].value;
+
+  // The new recording legitimately starts its OWN loop, so the property is not
+  // "none left" - it is that the previous one was cancelled and there is never
+  // more than one. Two loops would both write position, and cancelling one
+  // would leave the other running invisibly.
+  await act(async () => { rerenderPlayer({ session: session(13), playToken: 2 }); });
+  expect(global.cancelAnimationFrame).toHaveBeenCalledWith(previousHandle);
+  expect(frames.live).toBeLessThanOrEqual(1);
+});
+
+test("seeking moves the bar immediately, without animating", async () => {
+  const audio = await renderPlaying();
+  await act(async () => {
+    fireEvent.change(screen.getByTestId("recording-seek"), { target: { value: "9.1" } });
+  });
+
+  // A seek is a jump. A bar that slid there would describe playback that
+  // never happened.
+  expect(parseFloat(screen.getByTestId("recording-seek-fill").style.width))
+    .toBeCloseTo(70, 0);
+  expect(screen.getByTestId("recording-seek-thumb").style.left)
+    .toBe(screen.getByTestId("recording-seek-fill").style.width);
+  expect(audio.currentTime).toBeCloseTo(9.1, 1);
+});
+
+test("seeking away from the end leaves the Finished state", async () => {
+  const audio = await renderPlaying();
+  await act(async () => { fireEvent.ended(audio); });
+  expect(screen.getByTestId("recording-state").textContent).toBe("Finished");
+
+  await act(async () => {
+    fireEvent.change(screen.getByTestId("recording-seek"), { target: { value: "2.0" } });
+  });
+  expect(screen.getByTestId("recording-state").textContent).not.toBe("Finished");
+  expect(parseFloat(screen.getByTestId("recording-seek-fill").style.width))
+    .toBeLessThan(20);
+});
+
+test("Finished is never inferred from the percentage", async () => {
+  const audio = await renderPlaying();
+  audio.currentTime = 13.0;                       // exactly the duration
+  await act(async () => { fireEvent.timeUpdate(audio); });
+
+  // Being 100% of the way through is not the same fact as having ended.
+  expect(screen.getByTestId("recording-state").textContent).not.toBe("Finished");
+  await act(async () => { fireEvent.ended(audio); });
+  expect(screen.getByTestId("recording-state").textContent).toBe("Finished");
+});

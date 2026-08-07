@@ -68,6 +68,11 @@ export default function RecordingPlayer({ session, onClose,
   const [playing, setPlaying] = React.useState(false);
   const [ended, setEnded] = React.useState(false);
   const [position, setPosition] = React.useState(0);
+  //: The one animation frame handle. A ref rather than state because starting
+  //: or stopping the loop must not itself cause a render, and because the
+  //: cleanup paths need the CURRENT handle, not the one captured by whichever
+  //: render happened to schedule it.
+  const frameRef = React.useRef(null);
   const [duration, setDuration] = React.useState(null);
   const [volume, setVolume] = React.useState(1);
   const [muted, setMuted] = React.useState(false);
@@ -105,6 +110,12 @@ export default function RecordingPlayer({ session, onClose,
    * to make the detach take effect BEFORE the URL is revoked.
    */
   const detachAndRelease = React.useCallback(() => {
+    // The previous recording's frame loop dies with the previous recording. A
+    // surviving loop would keep writing A's position while B is attached.
+    if (frameRef.current !== null) {
+      cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
     const audio = audioRef.current;
     if (audio) {
       audio.pause();
@@ -211,6 +222,54 @@ export default function RecordingPlayer({ session, onClose,
     return () => document.removeEventListener("keydown", onKey);
   }, [sessionId, onClose]);
 
+  /**
+   * Stop following playback. Safe to call when nothing is running.
+   *
+   * Every path that ends playback calls this - pause, ended, error, close,
+   * unmount, a switch to another recording - because a loop that outlives its
+   * audio keeps painting a bar for a recording nobody is playing.
+   */
+  const stopFollowing = React.useCallback(() => {
+    if (frameRef.current !== null) {
+      cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
+  }, []);
+
+  /**
+   * Follow real playback, one frame at a time.
+   *
+   * `timeupdate` fires roughly every 265 ms in Chromium - measured, not
+   * assumed - so a bar driven by it alone advances in visible quarter-second
+   * jumps. This samples the media element every animation frame instead.
+   *
+   * The element remains the clock. Nothing here advances position by elapsed
+   * wall time: a loop that counted milliseconds would drift away from the audio
+   * the moment the browser throttled it, and would keep "playing" through a
+   * stall. If the audio is not moving, neither is the bar.
+   */
+  const startFollowing = React.useCallback(() => {
+    // Exactly one loop. Re-entering Play while already following must not
+    // schedule a second one - two loops would both call setPosition, and
+    // cancelling one would leave the other running invisibly.
+    if (frameRef.current !== null) return;
+    const step = () => {
+      const audio = audioRef.current;
+      if (!audio || audio.paused || audio.ended) {
+        frameRef.current = null;
+        return;
+      }
+      setPosition(audio.currentTime);
+      frameRef.current = requestAnimationFrame(step);
+    };
+    frameRef.current = requestAnimationFrame(step);
+  }, []);
+
+  // Cleanup belongs to THIS component, which lives above the router - not to
+  // whichever page happened to start the recording. Navigating from History to
+  // Active Broadcasts must not stop the audio or the bar.
+  React.useEffect(() => stopFollowing, [stopFollowing]);
+
   if (sessionId === null) return null;
 
   const togglePlay = async () => {
@@ -236,11 +295,16 @@ export default function RecordingPlayer({ session, onClose,
     setPosition(audio.currentTime);
   };
 
+
   const seekTo = (value) => {
     const audio = audioRef.current;
     if (!audio || !Number.isFinite(duration) || !duration) return;
     audio.currentTime = value;
+    // Immediately, not on the next frame and not animated: a seek is a jump,
+    // and a bar that slid to the new position would be describing playback
+    // that never happened.
     setPosition(value);
+    setEnded(false);
   };
 
   const changeVolume = (value) => {
@@ -324,10 +388,34 @@ export default function RecordingPlayer({ session, onClose,
         // Every event is ignored unless the attached source is still the
         // selected recording: a late `play` from the previous one must never
         // mark the new one as playing.
-        onPlay={() => { if (isCurrent()) { setPlaying(true); setEnded(false); } }}
-        onPause={() => { if (isCurrent()) setPlaying(false); }}
-        onEnded={() => { if (isCurrent()) { setPlaying(false); setEnded(true); } }}
-        onError={() => { if (isCurrent()) setError("Playback failed."); }}
+        onPlay={() => {
+          if (!isCurrent()) return;
+          setPlaying(true);
+          setEnded(false);
+          startFollowing();
+        }}
+        onPause={() => {
+          if (!isCurrent()) return;
+          setPlaying(false);
+          // Cancelled here rather than left to notice on its own, so the bar
+          // stops exactly where the audio stopped.
+          stopFollowing();
+          const audio = audioRef.current;
+          if (audio) setPosition(audio.currentTime);
+        }}
+        onEnded={() => {
+          if (!isCurrent()) return;
+          setPlaying(false);
+          stopFollowing();
+          setEnded(true);
+        }}
+        onError={() => {
+          if (!isCurrent()) return;
+          stopFollowing();
+          setError("Playback failed.");
+        }}
+        // Still honoured: it is the only position source while a seek happens
+        // on a paused element, and it costs nothing beside the frame loop.
         onTimeUpdate={(event) => setPosition(event.target.currentTime)}
         onLoadedMetadata={(event) => {
           const value = event.target.duration;
@@ -402,31 +490,60 @@ export default function RecordingPlayer({ session, onClose,
                 So the fill is drawn here and the range sits on top of it,
                 transparent. The control is still a real input: keyboard, focus
                 and the Seek label are unchanged. */}
-            <div className="relative flex-1 h-4 flex items-center"
+            {/* Everything visible is ours; the range is real but invisible.
+                A native thumb's CENTRE travels inside an inset equal to half
+                its width, so at value === max it sits ~6px short of the right
+                edge - measured, not assumed. That is unfixable from outside the
+                widget, so the thumb that is SEEN is our own element, positioned
+                by the same percentage as the fill.
+
+                The input keeps its size, focus, keyboard and pointer handling.
+                It is not hidden, not display:none and not pointer-events:none -
+                only its own track and thumb are made transparent. */}
+            <div className="relative flex-1 h-4 flex items-center overflow-visible"
                  data-testid="recording-seek-track">
-              <div className="absolute inset-x-0 h-1 rounded bg-slate-700" />
+              <div className="pointer-events-none absolute inset-x-0 h-1 rounded bg-slate-700"
+                   data-testid="recording-seek-background" />
               <div
-                className="absolute left-0 h-1 rounded bg-red-500"
+                className="pointer-events-none absolute left-0 h-1 rounded bg-red-500"
                 data-testid="recording-seek-fill"
                 style={{ width: `${visualProgressPercent}%` }}
               />
+              {seekable && (
+                <div
+                  className="pointer-events-none absolute h-3 w-3 rounded-full bg-red-500 shadow"
+                  data-testid="recording-seek-thumb"
+                  // translateX(-50%) is what makes `left` mean the thumb's
+                  // CENTRE. At 100% the centre lands exactly on the track's
+                  // right edge and the circle overhangs by half its width,
+                  // which is correct - the centre is the position.
+                  style={{ left: `${visualProgressPercent}%`,
+                           transform: "translateX(-50%)" }}
+                />
+              )}
               <input
                 type="range"
                 min="0"
                 max={seekable ? duration : 1}
-                step="0.1"
+                step="0.01"
                 value={seekable ? Math.min(position, duration) : 0}
                 disabled={!seekable}
                 aria-label="Seek"
                 data-testid="recording-seek"
                 onChange={(event) => seekTo(Number(event.target.value))}
-                className="absolute inset-x-0 w-full appearance-none bg-transparent
-                           accent-red-500 cursor-pointer
+                className="absolute inset-x-0 w-full h-4 appearance-none bg-transparent
+                           cursor-pointer focus:outline-none
+                           [&::-webkit-slider-runnable-track]:bg-transparent
                            [&::-webkit-slider-thumb]:appearance-none
                            [&::-webkit-slider-thumb]:h-3
                            [&::-webkit-slider-thumb]:w-3
                            [&::-webkit-slider-thumb]:rounded-full
-                           [&::-webkit-slider-thumb]:bg-red-500"
+                           [&::-webkit-slider-thumb]:bg-transparent
+                           [&::-moz-range-track]:bg-transparent
+                           [&::-moz-range-thumb]:h-3
+                           [&::-moz-range-thumb]:w-3
+                           [&::-moz-range-thumb]:border-0
+                           [&::-moz-range-thumb]:bg-transparent"
               />
             </div>
             <span className="text-[11px] tabular-nums text-slate-400 w-10"
