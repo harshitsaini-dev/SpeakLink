@@ -4,6 +4,10 @@ import { HQBroadcaster } from "@/lib/audio/HQBroadcaster";
 import { createBeforeUnloadGuard } from "@/lib/beforeUnloadGuard";
 import { useOptionalRecordingPlayback } from "@/contexts/RecordingPlaybackContext";
 
+//: The one target mode with no physical destination. Declared here rather than
+//: imported from the Console page, so this context does not depend on a route.
+const ONLY_WITH_LINK = "only_with_link";
+
 const BroadcastCtx = createContext(null);
 
 /**
@@ -157,11 +161,22 @@ export function BroadcastProvider({ children }) {
     pauseForBroadcast();
     setError("");
     if (!campaign.trim()) throw new Error("Please enter a campaign name");
-    if (ids.length === 0) throw new Error("No stores selected for broadcast");
+    // Zero Stores is the CORRECT result for Only With Link - that mode reaches
+    // a web audience through a shared link and no shop at all. This check used
+    // to be unconditional, so the one mode whose whole point is having no
+    // physical target was the one mode that could not start.
+    //
+    // Every physical mode keeps the rule: an operator who meant to reach Stores
+    // and resolved none has made a mistake worth stopping.
+    if (targetMode !== ONLY_WITH_LINK && ids.length === 0) {
+      throw new Error("No stores selected for broadcast");
+    }
 
     const { data: session } = await api.post("/broadcast/sessions", {
       campaign_name: campaign.trim(),
       target_mode: targetMode,
+      // Only the mode that owns them. A leftover Selected-mode draft must not
+      // travel with an automatic or link-only request.
       store_ids: targetMode === "selected" ? ids : undefined,
       region: targetMode === "region" ? region : undefined,
       city: targetMode === "city" ? city : undefined,

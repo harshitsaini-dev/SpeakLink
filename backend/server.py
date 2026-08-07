@@ -2631,6 +2631,16 @@ def _resolve_targets(db: Session, payload: SessionCreate, user: HQUser) -> List[
     # it. Zero Stores is the CORRECT result here, not an empty selection: this
     # broadcast has a web audience and no shop.
     if payload.target_mode == ONLY_WITH_LINK:
+        # Contradictory physical intent is REFUSED, not quietly dropped.
+        #
+        # A request that says "no physical destination" while naming Stores is
+        # two different instructions, and silently honouring the first would
+        # hide the second from whoever sent it. Refusing says which one the
+        # server acted on.
+        if payload.store_ids or payload.region or payload.city:
+            raise HTTPException(
+                status_code=400,
+                detail="Only With Link reaches no Stores, so it cannot name any.")
         return []
 
     _require_physical_delivery(user)

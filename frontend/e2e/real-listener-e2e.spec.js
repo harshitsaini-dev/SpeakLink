@@ -61,7 +61,24 @@ const E2E_PORT = 8017;
 const E2E_ORIGIN = `http://127.0.0.1:${E2E_PORT}`;
 
 function ensureSameOriginBuild() {
-  if (fs.existsSync(path.join(E2E_BUILD, 'index.html'))) return true;
+  // Rebuild when any source is newer than the bundle. Returning early on mere
+  // existence meant this suite could silently exercise yesterday's code - which
+  // it did, and a fix that was present in the tree appeared to fail.
+  const built = path.join(E2E_BUILD, 'index.html');
+  if (fs.existsSync(built)) {
+    const builtAt = fs.statSync(built).mtimeMs;
+    const newestSource = (dir) => {
+      let newest = 0;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        newest = Math.max(newest, entry.isDirectory()
+          ? newestSource(full) : fs.statSync(full).mtimeMs);
+      }
+      return newest;
+    };
+    if (newestSource(path.join(REPO, 'frontend', 'src')) < builtAt) return true;
+    fs.rmSync(E2E_BUILD, { recursive: true, force: true });
+  }
   try {
     execFileSync('npx', ['craco', 'build'], {
       cwd: path.join(REPO, 'frontend'),

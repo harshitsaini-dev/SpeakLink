@@ -487,3 +487,59 @@ test("the microphone level survives navigating away and back", async () => {
   expect(window.__broadcast.micVolumePercent).toBe(40);
   expect(window.__broadcast.micMuted).toBe(true);
 });
+
+// ===========================================================================
+// Only With Link starts with no Stores
+// ===========================================================================
+test("Only With Link starts with zero Stores", async () => {
+  // The defect: this check was unconditional, so the one mode whose whole
+  // point is having no physical target was the one mode that could not start.
+  await mount();
+  // The request is refused by a sentinel, so this test measures ONE thing:
+  // whether validation let it through. Driving the whole microphone path would
+  // measure the mock instead.
+  const sentinel = new Error("reached the server");
+  api.post.mockRejectedValue(sentinel);
+
+  let thrown = null;
+  await act(async () => {
+    try {
+      await window.__broadcast.startBroadcast({
+        campaign: "Web only", targetMode: "only_with_link", ids: [] });
+    } catch (e) { thrown = e; }
+  });
+
+  expect(thrown).toBe(sentinel);
+  const created = api.post.mock.calls.find(([url]) => url === "/broadcast/sessions");
+  expect(created).toBeTruthy();
+  expect(created[1].target_mode).toBe("only_with_link");
+  // A leftover Selected-mode draft must not travel with it.
+  expect(created[1].store_ids).toBeUndefined();
+});
+
+test("a physical mode with no Stores is still refused", async () => {
+  await mount();
+  let thrown = null;
+  await act(async () => {
+    try {
+      await window.__broadcast.startBroadcast({
+        campaign: "Physical", targetMode: "selected", ids: [] });
+    } catch (e) { thrown = e; }
+  });
+  expect(thrown).toBeTruthy();
+  expect(String(thrown.message)).toMatch(/No stores selected/i);
+});
+
+test("a stale Selected draft never travels with Only With Link", async () => {
+  await mount();
+  api.post.mockRejectedValue(new Error("reached the server"));
+
+  await act(async () => {
+    try {
+      await window.__broadcast.startBroadcast({
+        campaign: "Web only", targetMode: "only_with_link", ids: [101, 102] });
+    } catch (ignored) { /* the sentinel; the payload is what matters */ }
+  });
+  const created = api.post.mock.calls.find(([url]) => url === "/broadcast/sessions");
+  expect(created[1].store_ids).toBeUndefined();
+});
