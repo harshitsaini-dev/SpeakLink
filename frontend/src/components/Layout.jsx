@@ -42,10 +42,23 @@ export default function Layout() {
   });
 
   return (
-    <div className="h-screen flex bg-slate-50 overflow-hidden">
+    // The shell is exactly one viewport tall and never scrolls itself, so the
+    // document is never the vertical scroll owner. Main owns scrolling.
+    <div className="h-screen bg-slate-50 overflow-hidden">
       {/* Sidebar */}
-      <aside className={`${open ? "translate-x-0" : "-translate-x-full"} md:translate-x-0 fixed md:sticky md:top-0 z-40 w-64 h-screen shrink-0 bg-slate-900 text-slate-100 flex flex-col transition-transform`}>
-        <div className="h-16 px-5 flex items-center gap-2 border-b border-slate-800">
+      {/* FIXED to the viewport, on every screen size and in every state.
+          It was md:sticky, which keeps a sticky element in normal flow and
+          leaves its position dependent on which ancestor happens to scroll.
+          Fixed takes it out of flow entirely and anchors it to the viewport, so
+          no page, modal or live state can move it. Because it is out of flow,
+          the main shell carries the matching md:ml-64 offset below. */}
+      <aside
+        data-testid="app-sidebar"
+        className={`${open ? "translate-x-0" : "-translate-x-full"} md:translate-x-0
+                    fixed inset-y-0 left-0 z-40 w-64 h-screen
+                    bg-slate-900 text-slate-100 flex flex-col transition-transform`}>
+        {/* Brand and account never scroll away: only the middle list does. */}
+        <div className="h-16 shrink-0 px-5 flex items-center gap-2 border-b border-slate-800">
           <Radio className="text-red-500" size={22} />
           <div>
             <div className="font-bold tracking-tight text-white text-lg leading-none">SpeakLink</div>
@@ -70,7 +83,7 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
-        <div className="p-3 border-t border-slate-800">
+        <div className="shrink-0 p-3 border-t border-slate-800">
           <div className="px-3 py-2 mb-2">
             <div className="text-xs text-slate-400">Signed in as</div>
             <div className="text-sm font-medium text-white">{user?.username}</div>
@@ -89,7 +102,9 @@ export default function Layout() {
       {open && <div className="fixed inset-0 bg-black/40 z-30 md:hidden" onClick={() => setOpen(false)} />}
 
       {/* Main */}
-      <div className="flex-1 flex flex-col min-w-0 h-screen">
+      {/* md:ml-64 matches the w-64 sidebar exactly. A fixed sidebar is out of
+          flow, so without this offset the page would sit underneath it. */}
+      <div className="md:ml-64 flex flex-col min-w-0 h-screen">
         <header className="h-16 shrink-0 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6">
           <button
             data-testid="sidebar-toggle-btn"

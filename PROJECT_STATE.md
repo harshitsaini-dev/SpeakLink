@@ -7383,3 +7383,60 @@ persistence).
 
 Dynamic mid-Broadcast Store targeting: Add / Pause / Resume / Remove and Zone
 bulk actions. Still pending.
+
+---
+
+## The HQ navigation shell — final contract
+
+**Desktop: `position: fixed`.** Not sticky. Not "it stays because main happens
+to scroll".
+
+It was `md:sticky md:top-0`, which keeps the element in normal flow and leaves
+its position dependent on which ancestor scrolls — correct at the time, and
+quietly dependent on a layout relationship any future page could change. Fixed
+takes it out of flow and anchors it to the viewport, so no page, live Broadcast
+state or modal can move it.
+
+| | |
+|---|---|
+| Sidebar | `fixed inset-y-0 left-0 z-40 w-64 h-screen flex flex-col` |
+| Main shell | `md:ml-64` — matches `w-64` exactly |
+| Root shell | `h-screen overflow-hidden` |
+| Main content | `flex-1 min-h-0 overflow-y-auto overflow-x-hidden` |
+
+**Scroll ownership:** `<main>` only. `document.documentElement.scrollTop` and
+`window.scrollY` stay **0** on desktop — measured, not assumed. `min-h-0` is
+what makes the flex child actually own its overflow.
+
+**Three zones:** brand `shrink-0`, nav `flex-1 min-h-0 overflow-y-auto`, account
+`shrink-0`. On a short viewport **only the nav list** scrolls — the logo stays at
+the top and Log out stays on screen.
+
+**Mobile** keeps its off-canvas drawer below `md`, with no desktop offset forced
+onto the content and no horizontal overflow.
+
+**Modals** may block sidebar *clicks* via the backdrop (`z-50` over `z-40`).
+They may not move it — asserted separately.
+
+**Recording player** starts exactly where the sidebar ends (`md:left-64`, the
+same width) and covers neither the sidebar nor Log out — proved by rectangle
+intersection, not by comparing vertical edges, which would call two elements in
+different columns a collision.
+
+**Positioning lives in `Layout.jsx` only.** No page carries sidebar CSS, and no
+JavaScript scroll handler is involved.
+
+### Measured geometry
+
+At 1920×1080, 1600×900, 1440×900, 1366×768, 1280×720 and 1024×768 the sidebar
+reports `top=0 left=0 position=fixed`, height equal to the viewport, before and
+after scrolling main to its end; `mainScrollTop` was 239/465/503/635/727/691
+respectively. Verified on all nine authenticated routes, in idle, live Selected
+Stores and live Only With Link Consoles (sampled at 0/25/50/75/100 % of the
+scroll), with the confirmation modal open, on a short 1366×600 viewport, with
+the recording player open, and on a 500 px phone.
+
+### Still pending
+
+Store → HQ Windows volume telemetry, the listener lifecycle items (tests I and
+J), and dynamic mid-Broadcast Store targeting. Unchanged by this work.
