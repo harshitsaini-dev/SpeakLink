@@ -110,10 +110,12 @@ class ListenerQueue:
     """
 
     __slots__ = ("listener_id", "_capacity", "_items", "_closed", "_available",
-                 "_enqueued", "_delivered", "_max_depth", "_slow", "_bytes_out")
+                 "_enqueued", "_delivered", "_max_depth", "_slow", "_bytes_out",
+                 "_since_index", "_skipped")
 
     def __init__(self, *, listener_id: str,
-                 capacity: int = DEFAULT_LISTENER_QUEUE_CAPACITY) -> None:
+                 capacity: int = DEFAULT_LISTENER_QUEUE_CAPACITY,
+                 since_index: int = 0) -> None:
         if (isinstance(capacity, bool) or not isinstance(capacity, int)
                 or not MIN_LISTENER_QUEUE_CAPACITY <= capacity <= MAX_LISTENER_QUEUE_CAPACITY):
             raise ValueError("listener queue capacity is outside the supported range")
@@ -127,6 +129,11 @@ class ListenerQueue:
         self._max_depth = 0
         self._bytes_out = 0
         self._slow = False
+        #: The first Cluster index this listener still needs. Everything at or
+        #: before it is already in the bootstrap it was handed, so re-sending it
+        #: would duplicate audio the decoder has.
+        self._since_index = since_index
+        self._skipped = 0
 
     @property
     def capacity(self) -> int:
@@ -156,16 +163,25 @@ class ListenerQueue:
             "bytes_delivered": self._bytes_out,
             "slow": self._slow,
             "closed": self._closed,
+            "since_index": self._since_index,
+            "skipped_already_bootstrapped": self._skipped,
         }
 
-    def enqueue(self, frame: bytes) -> bool:
+    def enqueue(self, frame: bytes, *, index: int | None = None) -> bool:
         """Offer one frame. False means this listener is too slow to continue.
 
         Never raises for an ordinary overflow: the audio path calls this and
         must not be interrupted by one listener's network.
+
+        A frame the listener already received in its bootstrap is skipped rather
+        than delivered twice. That is what makes attaching safe regardless of
+        when, relative to a Cluster completing, the listener arrived.
         """
         if self._closed:
             raise ListenerQueueClosedError("this listener queue is closed")
+        if index is not None and index < self._since_index:
+            self._skipped += 1
+            return True
         self._enqueued += 1
         if len(self._items) >= self._capacity:
             # Marked, not dropped. Dropping a Cluster leaves the decoder a hole
@@ -294,7 +310,7 @@ class WebAudienceRelay:
         too_slow: list[str] = []
         for listener_id, queue in self._queues.items():
             try:
-                if not queue.enqueue(frame.data):
+                if not queue.enqueue(frame.data, index=frame.index):
                     too_slow.append(listener_id)
             except ListenerQueueClosedError:
                 continue
@@ -335,8 +351,17 @@ class WebAudienceRelay:
         if self._closed:
             return None
         await self.remove_listener(listener_id)
+
+        # Bootstrap and registration happen with no await between them, and the
+        # queue records the index the bootstrap ended at. Both matter: the first
+        # keeps a Cluster from completing in the gap, and the second means that
+        # even if a future change introduces a gap, a Cluster already in the
+        # bootstrap is skipped rather than played twice. Neither alone is
+        # enough - one prevents a hole, the other prevents a stutter.
         boot = self.bootstrap()
-        queue = ListenerQueue(listener_id=listener_id, capacity=self._capacity)
+        since = boot.next_cluster_index if boot is not None else 0
+        queue = ListenerQueue(listener_id=listener_id, capacity=self._capacity,
+                              since_index=since)
         self._queues[listener_id] = queue
         self._tasks[listener_id] = asyncio.create_task(
             self._pump(queue, sender), name=f"echocast-web-listener-{listener_id}")
