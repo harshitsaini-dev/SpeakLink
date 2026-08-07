@@ -214,13 +214,27 @@ export function BroadcastProvider({ children }) {
       throw failure;
     }
 
-    setBroadcasterStatus("waiting for receiver readiness");
-    const readyIds = await waitForReceiverReady(ids);
-    if (readyIds.length === 0) {
-      throw new Error(
-        "No Receiver reported READY, so no audio was sent. Check that the " +
-        "Receiver is running and that FFmpeg is available on it."
-      );
+    // Only a PHYSICAL broadcast waits for a Receiver.
+    //
+    // This gate polls /broadcast/current for twenty seconds and then refuses if
+    // nothing reported READY. With Only With Link the target list is empty, so
+    // the filter could never match: the mode whose entire point is having no
+    // Receivers sat for the full timeout and was then told no Receiver was
+    // ready - about a system that takes no part in it.
+    //
+    // A link-only broadcast is ready when the session, the room, the recorder
+    // and the microphone are, and none of those involve a Store.
+    if (targetMode !== ONLY_WITH_LINK) {
+      setBroadcasterStatus("waiting for receiver readiness");
+      const readyIds = await waitForReceiverReady(ids);
+      if (readyIds.length === 0) {
+        throw new Error(
+          "No Receiver reported READY, so no audio was sent. Check that the " +
+          "Receiver is running and that FFmpeg is available on it."
+        );
+      }
+    } else {
+      setBroadcasterStatus("opening web audience");
     }
 
     const { data: uplink } = await api.post("/auth/ws-ticket", { audience: "broadcaster" });

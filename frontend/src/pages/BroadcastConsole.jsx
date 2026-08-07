@@ -736,7 +736,17 @@ export default function BroadcastConsole() {
 
         {/* Target summary */}
         <div className="lg:col-span-3 lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-2.5" data-testid="target-summary">
-          <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Broadcast Targets</div>
+          <div className="flex items-center gap-2">
+            <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Broadcast Targets</div>
+            {targetMode === ONLY_WITH_LINK && (
+              // Zero targets is correct here, so it is labelled rather than
+              // left looking like a Broadcast that failed to find any.
+              <span data-testid="web-only-badge"
+                    className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-600">
+                Web only
+              </span>
+            )}
+          </div>
           <div className="grid grid-cols-3 gap-2">
             {/* TARGETS rather than SELECTED: nobody selects anything in the
                 automatic modes, and "Selected 0" beside a live Zone broadcast
@@ -1024,7 +1034,14 @@ export default function BroadcastConsole() {
               <div className="p-2 rounded bg-red-100 text-red-700"><Radio size={20}/></div>
               <div>
                 <h3 className="text-lg font-semibold">Confirm Live Broadcast</h3>
-                <p className="text-sm text-slate-500">Your voice will be transmitted to the selected stores in real-time.</p>
+                {/* A link-only broadcast reaches nobody in a shop, and telling
+                    an operator otherwise at the moment they confirm is the
+                    worst place to be wrong. */}
+                <p className="text-sm text-slate-500" data-testid="confirm-delivery-copy">
+                  {targetMode === ONLY_WITH_LINK
+                    ? "Your voice will be broadcast to approved web listeners in real time. No Store will play it."
+                    : "Your voice will be transmitted to the selected stores in real-time."}
+                </p>
               </div>
             </div>
             <div className="bg-slate-50 border border-slate-200 rounded-md p-3 text-sm space-y-1 my-3">

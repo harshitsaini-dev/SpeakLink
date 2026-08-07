@@ -543,3 +543,65 @@ test("a stale Selected draft never travels with Only With Link", async () => {
   const created = api.post.mock.calls.find(([url]) => url === "/broadcast/sessions");
   expect(created[1].store_ids).toBeUndefined();
 });
+
+test("Only With Link never waits for a Receiver", async () => {
+  // The defect: this gate polls /broadcast/current for twenty seconds and then
+  // refuses if nothing reported READY. With an empty target list the filter
+  // could never match, so the one mode with no Receivers sat for the full
+  // timeout and was then told no Receiver was ready.
+  jest.useFakeTimers();
+  try {
+    await mount();
+    const sentinel = new Error("reached the ws-ticket step");
+    api.post.mockImplementation(async (url) => {
+      if (url === "/broadcast/sessions") return { data: { id: 9 } };
+      if (url.endsWith("/start")) return { data: {} };
+      throw sentinel;              // stop just past the readiness gate
+    });
+    api.get.mockResolvedValue({ data: { ready_receivers: [] } });
+
+    let thrown = null;
+    await act(async () => {
+      try {
+        await window.__broadcast.startBroadcast({
+          campaign: "Web only", targetMode: "only_with_link", ids: [] });
+      } catch (e) { thrown = e; }
+    });
+
+    // Past the gate, and NOT refused for a Receiver.
+    expect(thrown).toBe(sentinel);
+    expect(String(thrown.message)).not.toMatch(/Receiver/i);
+
+    // The poller runs every 400ms for twenty seconds, so it would leave about
+    // fifty calls behind. The ordinary page load makes one; the gate makes
+    // none. Counting rather than forbidding keeps this honest about which
+    // call is which.
+    const polled = api.get.mock.calls.filter(([url]) => url === "/broadcast/current");
+    expect(polled.length).toBeLessThanOrEqual(2);
+    // And the operator was never told we were waiting for a Receiver.
+    expect(window.__broadcast.broadcasterStatus).not.toMatch(/receiver/i);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("a physical broadcast still waits for a Receiver", async () => {
+  await mount();
+  api.post.mockImplementation(async (url) => {
+    if (url === "/broadcast/sessions") return { data: { id: 10 } };
+    if (url.endsWith("/start")) return { data: {} };
+    return { data: {} };
+  });
+  // Never ready, so the gate must refuse rather than open a microphone.
+  api.get.mockResolvedValue({ data: { ready_receivers: [] } });
+
+  let thrown = null;
+  await act(async () => {
+    try {
+      await window.__broadcast.startBroadcast({
+        campaign: "Physical", targetMode: "selected", ids: [101] });
+    } catch (e) { thrown = e; }
+  });
+  expect(thrown).toBeTruthy();
+  expect(String(thrown.message)).toMatch(/No Receiver reported READY/i);
+}, 30000);
