@@ -656,3 +656,102 @@ test("a live broadcast starting pauses playback but keeps the selection", async 
   // Still selected, so the operator can carry on afterwards.
   expect(screen.getByTestId("recording-player-bar")).toBeTruthy();
 });
+
+
+/**
+ * A bar showing a 13-second recording that has metadata and is playing.
+ * The duration has to come from a real loadedmetadata, because that is the only
+ * thing that makes the bar seekable and therefore fillable.
+ */
+async function renderPlaying() {
+  const view = await showBar(session(12), 1);
+  const audio = screen.getByTestId("recording-audio");
+  Object.defineProperty(audio, "duration", {
+    configurable: true, value: 13.0, writable: true,
+  });
+  await act(async () => { fireEvent.loadedMetadata(audio); });
+  view.rerenderPlayer = (props) => view.rerender(
+    <RecordingPlayer session={props.session} playToken={props.playToken}
+                     onClose={() => {}} />);
+  lastView = view;
+  return audio;
+}
+
+let lastView = null;
+function rerenderPlayer(props) { lastView.rerenderPlayer(props); }
+
+
+// ===========================================================================
+// The Finished progress fill
+// ===========================================================================
+// A native range paints its accent fill up to the THUMB CENTRE, whose travel is
+// inset by half the thumb width - so at max it stops short and leaves a grey
+// sliver on a recording that has finished. Nothing in the DOM represented that
+// fill, so it could be neither corrected nor measured. It is a real element now.
+
+test("a finished recording fills the bar completely", async () => {
+  const audio = await renderPlaying();
+
+  await act(async () => { fireEvent.ended(audio); });
+
+  expect(screen.getByTestId("recording-state").textContent).toBe("Finished");
+  // Stated, not derived: the last timeupdate fires before the end, so
+  // currentTime at `ended` is routinely short of duration.
+  expect(screen.getByTestId("recording-seek-fill").style.width).toBe("100%");
+});
+
+test("the clock stays truthful when the bar is full", async () => {
+  const audio = await renderPlaying();
+  audio.currentTime = 12.94;
+  await act(async () => { fireEvent.timeUpdate(audio); });
+  await act(async () => { fireEvent.ended(audio); });
+
+  // The bar is full; the reported position is still what the element said.
+  expect(screen.getByTestId("recording-seek-fill").style.width).toBe("100%");
+  expect(Number(screen.getByTestId("recording-seek").value)).toBeCloseTo(12.94, 1);
+});
+
+test("the fill tracks real position while playing", async () => {
+  const audio = await renderPlaying();
+  audio.currentTime = 6.5;                       // half of the 13s duration
+  await act(async () => { fireEvent.timeUpdate(audio); });
+
+  const width = parseFloat(screen.getByTestId("recording-seek-fill").style.width);
+  expect(width).toBeGreaterThan(45);
+  expect(width).toBeLessThan(55);
+});
+
+test("replaying clears the finished bar", async () => {
+  const audio = await renderPlaying();
+  await act(async () => { fireEvent.ended(audio); });
+  expect(screen.getByTestId("recording-seek-fill").style.width).toBe("100%");
+
+  // A real play event is what ends the Finished state.
+  audio.currentTime = 0;
+  await act(async () => { fireEvent.play(audio); fireEvent.timeUpdate(audio); });
+
+  expect(screen.getByTestId("recording-state").textContent).not.toBe("Finished");
+  expect(parseFloat(screen.getByTestId("recording-seek-fill").style.width)).toBeLessThan(5);
+});
+
+test("the seek control is still a real, labelled input", async () => {
+  await renderPlaying();
+  const seek = screen.getByTestId("recording-seek");
+  // The custom fill sits BEHIND a real range: keyboard and assistive
+  // technology must not have been traded for the paint.
+  expect(seek.tagName).toBe("INPUT");
+  expect(seek.type).toBe("range");
+  expect(seek.getAttribute("aria-label")).toBe("Seek");
+});
+
+test("switching recordings does not inherit a finished bar", async () => {
+  // A stale 100% would paint the NEW recording as already over.
+  const audio = await renderPlaying();
+  await act(async () => { fireEvent.ended(audio); });
+  expect(screen.getByTestId("recording-seek-fill").style.width).toBe("100%");
+
+  await act(async () => {
+    rerenderPlayer({ session: session(13), playToken: 2 });
+  });
+  expect(screen.getByTestId("recording-seek-fill").style.width).not.toBe("100%");
+});
