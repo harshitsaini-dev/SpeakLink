@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from audio_streaming import DEFAULT_STORE_QUEUE_CAPACITY, AudioFanout
+from web_audience import WebAudienceRelay
 
 logger = logging.getLogger("speaklink.broadcast")
 
@@ -62,6 +63,11 @@ class LiveBroadcast:
     #: going live and its operator opening the console - a real state, not a
     #: missing one, and audio simply has no source until it is filled.
     broadcaster_ws: object | None = None
+    #: This Broadcast's web audience. One relay per Broadcast, created with the
+    #: session and closed with it, so one Broadcast's initialization segment and
+    #: Clusters can never reach another's listener. Web delivery is a sibling of
+    #: Store fanout and recording: none of the three can delay the others.
+    web_relay: WebAudienceRelay | None = None
     _started_stores: set = field(default_factory=set)
 
 
@@ -92,6 +98,7 @@ class BroadcastRuntime:
                 target_store_ids=frozenset(target_store_ids),
                 fanout=AudioFanout(capacity=self._capacity),
                 started_at=datetime.now(timezone.utc),
+                web_relay=WebAudienceRelay(session_id=session_id),
             )
             self._sessions[session_id] = live
             return live
@@ -114,6 +121,10 @@ class BroadcastRuntime:
             return None
 
         await live.fanout.stop_all()
+        if live.web_relay is not None:
+            # Closes every listener queue and sender task and clears this
+            # Broadcast's bootstrap cache, so no buffer outlives the session.
+            await live.web_relay.close()
         socket = live.broadcaster_ws
         live.broadcaster_ws = None
         if socket is not None:
@@ -245,3 +256,14 @@ class BroadcastRuntime:
         """Per-session, per-Store queue counters. Never an audio payload."""
         return {session_id: live.fanout.all_metrics()
                 for session_id, live in sorted(self._sessions.items())}
+
+    def web_relay(self, session_id: int) -> "WebAudienceRelay | None":
+        """This session's web audience relay, if the session is live."""
+        live = self._sessions.get(session_id)
+        return live.web_relay if live is not None else None
+
+    def web_metrics(self) -> dict:
+        """Per-session web listener counters. Never an audio payload."""
+        return {session_id: live.web_relay.metrics()
+                for session_id, live in sorted(self._sessions.items())
+                if live.web_relay is not None}
