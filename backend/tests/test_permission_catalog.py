@@ -148,10 +148,14 @@ def test_broadcaster_default_permissions_are_exactly_broadcast_and_read_only():
     # the output level of the Stores you are broadcasting to is part of running
     # an ordinary broadcast. Ownership of the session gates every individual
     # command, so holding it grants nothing over anybody else's broadcast.
+    # broadcast.store_delivery is included so that every account which could
+    # already take the estate live keeps that ability across the upgrade. It
+    # exists to be REMOVED deliberately, creating a link-only broadcaster, not
+    # to demote every operator who has physical delivery today.
     assert broadcaster == {
         "menu.broadcast.view", "broadcast.start", "broadcast.stop",
         "menu.history.view", "menu.receivers.view", "menu.stores.view",
-        "store_audio.control",
+        "store_audio.control", "broadcast.store_delivery",
     }
     # No Store modification, no Device security changes, no User management.
     assert not any(code.startswith("stores.") for code in broadcaster)

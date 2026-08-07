@@ -6883,3 +6883,104 @@ duration is shown separately in History from the session's own timestamps.
 BP not touched. No second Store. No Store Kit rebuilt - the Receiver source is
 unchanged by this fix, so **Kit 1.7.0 remains current**. No controlled test
 broadcast: that needs a person at the microphone.
+
+---
+
+## Live web audience: the two foundational slices
+
+Branch `feature/live-web-audience-dynamic-targets`. This is backend and HQ
+frontend only. No Receiver source changed, no Store Kit was rebuilt, nothing was
+exposed to the public internet, and no live HQ was restarted.
+
+### Why arbitrary MediaRecorder chunks are unsafe
+
+A listener joining a Broadcast in progress needs an initialization segment and a
+resume point its decoder can start from. Chromium's MediaRecorder gives neither
+for free. Measured over a real 34-second capture at the 250 ms timeslice HQ
+already uses, **0 of 113** non-initial chunks began with a Cluster identifier: a
+`dataavailable` boundary is not a container boundary.
+
+Forwarding whole timeslice chunks from an arbitrary point therefore hands the
+decoder a partial cluster. Chromium accepts that only **intermittently** - across
+repeated runs over identical captured bytes the 30-second join decoded on some
+runs and failed with an append error on others. Intermittent is not support, and
+measured once it would have looked like success.
+
+Resuming from a genuine Cluster boundary, with the initialization segment sent
+first, decoded and advanced at every offset and on every repeat. That is the
+accepted architecture.
+
+### One Cluster-aware relay per Broadcast
+
+`backend/webm_stream.py` frames the live byte stream into an initialization
+segment and whole Clusters. It finds a Cluster's end by walking its children,
+not by scanning for the Cluster identifier - those four bytes occur inside Opus
+payload, so a scan can split a cluster mid-block and cause the very corruption
+the module prevents. Clusters carry an unknown size; their children carry known
+sizes; the walk is deterministic.
+
+Framing does not depend on how bytes arrive: fed one byte at a time, in one
+blob, at timeslice boundaries or at random splits, it emits byte-identical
+frames, and what it emits is an exact prefix of the input. The buffer never
+holds more than the Cluster being assembled, and an init segment or Cluster that
+never ends fails closed rather than growing.
+
+`backend/web_audience.py` owns **one framer per Broadcast, not per listener** -
+framing depends on the stream, not the audience. `BroadcastRuntime` creates the
+relay with the session and closes it with the session, so no buffer outlives a
+Broadcast and one Broadcast's bytes can never reach another's listener.
+
+Measured: cluster media duration is a uniform **300 ms**, so waiting for a
+boundary adds at most one cluster of latency. That is announcement latency, not
+radio delay.
+
+### Bounded per-listener queues, and the slow-listener policy
+
+Each listener has an independent bounded queue and its own sender task. No
+listener socket is reachable from the broadcaster's read loop; Store fanout, the
+recording and web delivery are three siblings that share only the bytes.
+
+A slow listener is **disconnected, not degraded**. A Store queue drops its oldest
+chunk to stay live, which is right for a continuous decode. A listener is fed
+structured Clusters, and silently dropping one leaves a hole in a timeline the
+decoder is still tracking - so it is disconnected and may rejoin, receiving a
+fresh bootstrap at the live edge. A gap the listener knows about beats one it
+does not.
+
+With 250 listeners the whole offer loop for the stream costs 25 ms and peak
+queue depth is 1. At 40 Stores + 100 listeners + recording, with one Store that
+never drains and one browser that never reads, the audio path cost 17 ms for 37
+chunks, the recording saw every chunk, healthy Stores and listeners were
+unaffected, and no queue exceeded capacity.
+
+### New permission: Broadcast to Stores / Zones
+
+`broadcast.store_delivery`. A Broadcast can now reach a web audience with no
+Store targets, so "may broadcast" and "may put sound into a shop" are different
+questions.
+
+**A blank Store Scope does not bypass a missing physical permission.** Scope
+answers WHICH Stores and treats blank as unrestricted; using it to mean "no
+Stores at all" would overload a field whose empty value means the opposite. The
+new permission denies every physical target regardless of Scope, and Scope
+continues to narrow the accounts that hold it.
+
+Enforced at the single point through which every physical target is resolved,
+plus the Store inventory endpoint and live Store volume control. Existing
+operators keep the capability: the code sits in the broadcast role defaults, so
+OWNER, ADMIN and BROADCASTER hold it after the upgrade and VIEWER does not. The
+catalog reseeds on every start and reseeding twice leaves one row.
+
+### What is still missing
+
+None of the listener-facing product exists yet:
+
+* the web room, public Broadcast ID and join password
+* join requests, approval, denial and Auto Approve
+* the public `/listen` page and listener session cookie
+* the participant panel, participant states and Kick
+* the full Only With Link target mode and its zero-target session lifecycle
+* dynamic live Store targeting: Add, Pause, Resume, Remove and Zone bulk actions
+
+The relay is currently fed by every live Broadcast and has no listeners, because
+there is no way to become one yet. That is the next slice.
