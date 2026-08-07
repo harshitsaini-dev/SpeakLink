@@ -17,7 +17,9 @@ jest.mock("react-router-dom", () => ({
 
 jest.mock("@/lib/api", () => ({
   api: { get: jest.fn(), post: jest.fn() },
-  wsUrl: (path) => `ws://hq.test${path}`,
+  // Mirrors the real wsUrl, which supplies the /api prefix itself. A mock
+  // that echoed the path unchanged hid a doubled /api/api in the real URL.
+  wsUrl: (path) => `ws://hq.test/api${path}`,
 }));
 
 // eslint-disable-next-line import/first
