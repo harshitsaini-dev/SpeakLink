@@ -585,8 +585,13 @@ export default function BroadcastConsole() {
           listening or to admit somebody waiting. It belongs where an operator
           is already looking. Twelve columns rather than three so the middle
           card can be the widest without the outer two becoming cramped. */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-        <div className="lg:col-span-4 border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-3"
+      {/* items-stretch, not items-start. Grid stretches its children by
+          default; items-start was overriding that and letting each card end
+          wherever its content did, so three cards with aligned tops had three
+          different bottoms. Only at lg and above - stacked on a phone, a card
+          should be exactly as tall as what is in it. */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:items-stretch">
+        <div className="lg:col-span-4 lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-3"
              data-testid="console-controls-card">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-slate-900">Broadcast Controls</h2>
@@ -714,11 +719,11 @@ export default function BroadcastConsole() {
         {/* The web audience, in the middle, where it is seen. Same component
             and same business logic as before - only its placement changed, so
             participant state has exactly one implementation. */}
-        <div className="lg:col-span-5" data-testid="console-audience-card">
+        <div className="lg:col-span-5 lg:h-full" data-testid="console-audience-card">
           {liveSessionId ? (
             <WebAudiencePanel sessionId={liveSessionId} compact />
           ) : (
-            <div className="border border-slate-200 bg-white rounded-md shadow-sm p-4">
+            <div className="lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4">
               <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
                 Web Audience
               </div>
@@ -730,7 +735,7 @@ export default function BroadcastConsole() {
         </div>
 
         {/* Target summary */}
-        <div className="lg:col-span-3 border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-2.5" data-testid="target-summary">
+        <div className="lg:col-span-3 lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-2.5" data-testid="target-summary">
           <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Broadcast Targets</div>
           <div className="grid grid-cols-3 gap-2">
             {/* TARGETS rather than SELECTED: nobody selects anything in the

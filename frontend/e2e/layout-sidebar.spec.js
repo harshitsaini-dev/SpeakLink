@@ -149,3 +149,92 @@ test('a narrow viewport keeps its off-canvas navigation', async ({ page }) => {
   // The page itself must not gain a horizontal scrollbar because of it.
   expect(geometry.horizontalOverflow).toBe(false);
 });
+
+// ===========================================================================
+// The LIVE Console, which is where it was reported
+// ===========================================================================
+// Manual acceptance narrowed the symptom to "after the Broadcast goes live".
+// A non-live Console is therefore not sufficient evidence, so these drive the
+// live state: the on-air section, the three-card row, the Web Audience panel
+// and a full Store table.
+
+const LIVE_SESSION = {
+  live: true,
+  session: { id: 77, campaign_name: 'Evening announcement', target_mode: 'selected',
+             started_at: '2026-08-07T09:00:00+00:00', status: 'live',
+             selected_store_count: 40, online_store_count: 40, offline_store_count: 0 },
+  targets: [],
+};
+
+const LIVE_ROOM = {
+  public_code: 'EC-AAA111', status: 'OPEN', auto_approve: false, delivery: 'ok',
+  password: 'P-1', password_configured: true, password_rotated_at: null,
+  counts: { waiting: 3, admitted: 8, connected: 8, listening: 6, buffering: 2, paused: 0 },
+  waiting: Array.from({ length: 3 }, (_, i) => ({
+    id: 500 + i, display_name: `Waiting ${i + 1}`,
+    admission_status: 'REQUESTED', requested_at: '10:32:12' })),
+  listeners: Array.from({ length: 8 }, (_, i) => ({
+    id: 600 + i, display_name: `Listener ${i + 1}`, admitted_by: 'password',
+    admission_status: 'PASSWORD_ADMITTED', playback_state: 'LISTENING',
+    connected: true, seconds_since_seen: 1, stale: false })),
+};
+
+async function openLiveConsole(page) {
+  await mockBackend(page, { stores: FLEET, current: LIVE_SESSION });
+  await page.route('**/api/broadcast/sessions/*/web-room', (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json',
+                    body: JSON.stringify(LIVE_ROOM) }));
+  await page.goto('/console');
+  await expect(page.getByTestId('web-audience-panel')).toBeVisible();
+}
+
+test('CASE 1: the navigation stays put on a Console that is not live',
+     async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 800 });
+  await page.goto('/console');
+  await expect(page.getByTestId('stores-search')).toBeVisible();
+
+  const before = await sidebarGeometry(page);
+  await scrollFarDown(page);
+  const after = await sidebarGeometry(page);
+  expect(Math.abs(after.top - before.top)).toBeLessThanOrEqual(1);
+});
+
+test('CASE 2: the navigation stays put while the Broadcast is LIVE',
+     async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 800 });
+  await openLiveConsole(page);
+
+  const before = await sidebarGeometry(page);
+  await scrollFarDown(page);
+  const after = await sidebarGeometry(page);
+
+  console.log('LIVE SIDEBAR:', JSON.stringify({
+    beforeTop: +before.top.toFixed(1), afterTop: +after.top.toFixed(1),
+    documentScroll: after.documentScroll }));
+
+  expect(Math.abs(after.top - before.top),
+         `the navigation moved ${(after.top - before.top).toFixed(1)}px while live`)
+    .toBeLessThanOrEqual(1);
+  // The document must not be the scroller, or a sticky aside eventually leaves.
+  expect(after.documentScroll).toBe(0);
+  expect(after.horizontalOverflow).toBe(false);
+
+  // The TOP menu entries are what disappear first when this goes wrong.
+  await expect(page.getByTestId('nav-console')).toBeVisible();
+  await expect(page.getByTestId('nav-active-broadcasts')).toBeVisible();
+  await page.getByTestId('nav-active-broadcasts').click();
+  await expect(page).toHaveURL(/\/active-broadcasts/);
+});
+
+test('CASE 2b: log out stays reachable while the Broadcast is LIVE',
+     async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 800 });
+  await openLiveConsole(page);
+  await scrollFarDown(page);
+
+  const logout = page.getByTestId('logout-btn');
+  await expect(logout).toBeVisible();
+  const box = await logout.boundingBox();
+  expect(box.y + box.height).toBeLessThanOrEqual(800 + 1);
+});

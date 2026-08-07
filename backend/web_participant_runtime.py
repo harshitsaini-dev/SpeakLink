@@ -102,11 +102,19 @@ class ListenerRuntime:
         return self.seconds_since_seen(now=now) > HEARTBEAT_TIMEOUT_SECONDS
 
     def public_dict(self, *, now: float | None = None) -> dict[str, Any]:
-        """What the broadcaster sees. No socket, no address, no token."""
+        """What the broadcaster sees. No socket, no address, no token.
+
+        A runtime that has stopped reporting is presented as DISCONNECTED even
+        though its row still exists. The stored state is the last thing the
+        browser SAID; after the timeout it is no longer something we know, and
+        showing a closed tab as Listening is worse than showing nothing.
+        """
+        timed_out = self.has_timed_out(now=now)
         return {
             "participant_id": self.participant_id,
-            "connected": self.connected,
-            "playback_state": self.playback_state,
+            "connected": self.connected and not timed_out,
+            "playback_state": (PlaybackState.DISCONNECTED if timed_out
+                               else self.playback_state),
             "seconds_since_seen": round(self.seconds_since_seen(now=now), 1),
             "stale": self.is_stale(now=now),
         }
@@ -198,17 +206,22 @@ class WebParticipantRegistry:
         listening. Collapsing them would let a console report an audience that
         is not hearing anything.
         """
-        runtimes = self.for_room(room_id)
         now = time.monotonic()
+        # Counted from the SAME view the participant rows are rendered from, so
+        # a listener cannot be absent from the list and present in the total.
+        # A runtime past its heartbeat timeout counts as neither connected nor
+        # listening: sweep_timed_out existed but nothing ever called it, so a
+        # closed tab stayed Listening indefinitely.
+        live = [r for r in self.for_room(room_id) if not r.has_timed_out(now=now)]
         return {
-            "connected": sum(1 for r in runtimes if r.connected),
-            "listening": sum(1 for r in runtimes
+            "connected": sum(1 for r in live if r.connected),
+            "listening": sum(1 for r in live
                              if r.playback_state == PlaybackState.LISTENING),
-            "buffering": sum(1 for r in runtimes
+            "buffering": sum(1 for r in live
                              if r.playback_state == PlaybackState.BUFFERING),
-            "paused": sum(1 for r in runtimes
+            "paused": sum(1 for r in live
                           if r.playback_state == PlaybackState.PAUSED),
-            "stale": sum(1 for r in runtimes if r.is_stale(now=now)),
+            "stale": sum(1 for r in self.for_room(room_id) if r.is_stale(now=now)),
         }
 
     def drop_room(self, room_id: int) -> list[Any]:

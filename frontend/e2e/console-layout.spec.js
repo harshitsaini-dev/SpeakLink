@@ -169,3 +169,139 @@ test('a Broadcast that is not live explains the link instead of pretending',
   // No invented room code before a room exists.
   await expect(page.getByTestId('web-room-code')).toHaveCount(0);
 });
+
+// ===========================================================================
+// One row, one height
+// ===========================================================================
+// Grid stretches its children by default; `items-start` was overriding that and
+// letting each card end wherever its content did - three aligned tops, three
+// different bottoms. These measure the VISIBLE bordered cards, because
+// stretching an invisible wrapper would leave the border ending early, which is
+// exactly the defect.
+
+/** The visible bordered card of each column, not its wrapper. */
+async function cardBoxes(page) {
+  return page.evaluate(() => {
+    const box = (node) => {
+      if (!node) return null;
+      const r = node.getBoundingClientRect();
+      return { top: r.top, bottom: r.bottom, height: r.height, left: r.left };
+    };
+    const audienceColumn = document.querySelector('[data-testid="console-audience-card"]');
+    return {
+      controls: box(document.querySelector('[data-testid="console-controls-card"]')),
+      // The bordered panel inside the column, falling back to the placeholder
+      // card shown before a Broadcast is live.
+      audience: box(audienceColumn
+        && (audienceColumn.querySelector('[data-testid="web-audience-panel"]')
+            || audienceColumn.firstElementChild)),
+      targets: box(document.querySelector('[data-testid="target-summary"]')),
+    };
+  });
+}
+
+function expectOneRow(layout, label) {
+  for (const key of ['controls', 'audience', 'targets']) {
+    expect(layout[key], `${label}: ${key} card is missing`).not.toBeNull();
+  }
+  // Same top edge...
+  expect(Math.abs(layout.controls.top - layout.audience.top),
+         `${label}: tops differ`).toBeLessThanOrEqual(2);
+  expect(Math.abs(layout.audience.top - layout.targets.top),
+         `${label}: tops differ`).toBeLessThanOrEqual(2);
+  // ...same bottom edge...
+  expect(Math.abs(layout.controls.bottom - layout.audience.bottom),
+         `${label}: controls/audience bottoms differ by `
+         + `${Math.abs(layout.controls.bottom - layout.audience.bottom).toFixed(1)}px`)
+    .toBeLessThanOrEqual(2);
+  expect(Math.abs(layout.audience.bottom - layout.targets.bottom),
+         `${label}: audience/targets bottoms differ by `
+         + `${Math.abs(layout.audience.bottom - layout.targets.bottom).toFixed(1)}px`)
+    .toBeLessThanOrEqual(2);
+  // ...and therefore the same height.
+  expect(Math.abs(layout.controls.height - layout.audience.height))
+    .toBeLessThanOrEqual(2);
+  expect(Math.abs(layout.audience.height - layout.targets.height))
+    .toBeLessThanOrEqual(2);
+}
+
+function roomWith(waiting, listeners) {
+  return {
+    ...ROOM,
+    counts: { waiting: waiting.length, admitted: listeners.length,
+              connected: listeners.length, listening: listeners.length,
+              buffering: 0, paused: 0 },
+    waiting, listeners,
+  };
+}
+
+function someListeners(count) {
+  return Array.from({ length: count }, (_, i) => ({
+    id: 600 + i, display_name: `Listener ${i + 1}`, admitted_by: 'password',
+    admission_status: 'PASSWORD_ADMITTED', playback_state: 'LISTENING',
+    connected: true, seconds_since_seen: 1, stale: false }));
+}
+
+for (const [label, room] of [
+  ['an empty audience', roomWith([], [])],
+  ['one listener', roomWith([], someListeners(1))],
+  ['several listeners', roomWith([], someListeners(4))],
+  ['a large audience', ROOM],
+]) {
+  test(`the three cards share one height with ${label}`, async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await signIn(page);
+    await mockBackend(page, { stores: FLEET, current: LIVE });
+    await page.route('**/api/broadcast/sessions/*/web-room', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json',
+                      body: JSON.stringify(room) }));
+    await page.goto('/console');
+    await expect(page.getByTestId('web-audience-panel')).toBeVisible();
+
+    const layout = await cardBoxes(page);
+    console.log(`GEOMETRY ${label}:`, JSON.stringify({
+      controls: { top: +layout.controls.top.toFixed(1), bottom: +layout.controls.bottom.toFixed(1), height: +layout.controls.height.toFixed(1) },
+      audience: { top: +layout.audience.top.toFixed(1), bottom: +layout.audience.bottom.toFixed(1), height: +layout.audience.height.toFixed(1) },
+      targets: { top: +layout.targets.top.toFixed(1), bottom: +layout.targets.bottom.toFixed(1), height: +layout.targets.height.toFixed(1) },
+    }));
+    expectOneRow(layout, label);
+  });
+}
+
+test('a large audience scrolls inside its card rather than stretching the row',
+     async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await signIn(page);
+  await mockBackend(page, { stores: FLEET, current: LIVE });
+  await page.route('**/api/broadcast/sessions/*/web-room', (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json',
+                    body: JSON.stringify(ROOM) }));
+  await page.goto('/console');
+  await expect(page.getByTestId('web-audience-panel')).toBeVisible();
+
+  const layout = await cardBoxes(page);
+  expect(layout.audience.height).toBeLessThan(900);
+  // Thirty listeners and twelve requests, and the actions still reachable.
+  await expect(page.getByTestId('web-kick-600')).toBeAttached();
+  await expect(page.getByTestId('web-approve-500')).toBeAttached();
+});
+
+test('stacked cards keep their natural heights', async ({ page }) => {
+  // Equal height is a desktop-row idea. On a phone it would only add empty
+  // space to whichever card had least to say.
+  await page.setViewportSize({ width: 800, height: 900 });
+  await signIn(page);
+  await mockBackend(page, { stores: FLEET, current: LIVE });
+  await page.route('**/api/broadcast/sessions/*/web-room', (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json',
+                    body: JSON.stringify(ROOM) }));
+  await page.goto('/console');
+  await expect(page.getByTestId('web-audience-panel')).toBeVisible();
+
+  const layout = await cardBoxes(page);
+  expect(layout.audience.top).toBeGreaterThan(layout.controls.top);
+  expect(layout.targets.top).toBeGreaterThan(layout.audience.top);
+  // Not forced to match each other.
+  expect(Math.abs(layout.controls.height - layout.audience.height))
+    .toBeGreaterThan(2);
+});
