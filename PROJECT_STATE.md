@@ -7440,3 +7440,42 @@ the recording player open, and on a 500 px phone.
 
 Store → HQ Windows volume telemetry, the listener lifecycle items (tests I and
 J), and dynamic mid-Broadcast Store targeting. Unchanged by this work.
+
+### One scroll surface, not two
+
+The reported symptom was **two right-hand scrollbars**: scrolling the outer one
+carried the whole UI, header included, upward.
+
+**Cause:** `html`, `body` and `#root` carried no height or overflow rules at all
+— `height: auto`, `overflow: visible` — so they were free to grow past the
+viewport and present a second scroller beside main's own. The fixed sidebar was
+unaffected (it is viewport-anchored), which is why only the header and content
+moved.
+
+**Contract now, in `index.css` rather than any page:**
+
+```
+html, body, #root { height: 100%; overflow: hidden; }
+```
+
+plus `min-h-0` and `overflow-hidden` on the main shell, so `<main>` genuinely
+owns its overflow rather than expanding its parent.
+
+This makes the outer scroll **impossible**, not merely invisible. No scrollbar
+is hidden with `::-webkit-scrollbar` or `scrollbar-width` — there is one scroll
+container, not two with one painted out.
+
+**Measured at 1366×768** (live Selected Stores Console): html 768/768, body
+768/768, #root 768/768, main 704/907; `window.scrollY` 0 throughout; main
+reaches its maximum 1185 and **stays** there through repeated further wheeling,
+with the sidebar and header rects unchanged.
+
+Proved with **real `page.mouse.wheel` input**, not by setting `scrollTop` —
+which would only show that main *can* scroll, not that the wheel reaches it —
+and by continuing to wheel past the end, which is where the outer scroller used
+to take over. Verified across six desktop viewports, all authenticated routes,
+idle / Selected-live / Link-only-live Consoles, a 40-listener audience, the
+confirmation modal, the recording player, and a phone.
+
+Component-local scrollers (the Web Audience lists, the sidebar nav on a short
+viewport) are bounded areas and are deliberately not counted as page scrollers.

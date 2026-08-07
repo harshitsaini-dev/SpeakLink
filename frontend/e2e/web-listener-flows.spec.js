@@ -161,15 +161,27 @@ test.describe('the public SpeakLink listener', () => {
     await mockApi(page);
 
     let admitted = false;
-    await page.route('**/api/listen/me', (route) => route.fulfill({
-      status: 200, contentType: 'application/json',
-      body: JSON.stringify({ public_code: ROOM_CODE, display_name: 'Aman',
-        admission_status: admitted ? 'APPROVED' : 'REQUESTED',
-        admitted, broadcast_live: true, heartbeat_seconds: 10 }) }));
+    // Nobody has asked yet, so there is no session. The real server answers 401
+    // here, and the page must show the form rather than a waiting screen - it
+    // now asks /listen/me on load, so a mock that claimed a session regardless
+    // of cookie would put a first-time visitor straight into "waiting".
+    let hasRequested = false;
+    await page.route('**/api/listen/me', (route) => {
+      if (!hasRequested) {
+        return route.fulfill({ status: 401, contentType: 'application/json',
+                               body: JSON.stringify({ detail: 'Not admitted.' }) });
+      }
+      return route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ public_code: ROOM_CODE, display_name: 'Aman',
+          admission_status: admitted ? 'APPROVED' : 'REQUESTED',
+          admitted, broadcast_live: true, heartbeat_seconds: 10 }) });
+    });
 
     await page.goto(`/listen/${ROOM_CODE}`);
     await page.getByTestId('listen-name').fill('Aman');
     await page.getByTestId('listen-request').click();
+    hasRequested = true;
 
     await expect(page.getByTestId('listen-waiting')).toBeVisible();
     // No audio socket exists before admission.
