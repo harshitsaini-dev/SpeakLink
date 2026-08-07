@@ -7094,3 +7094,90 @@ domain configured, no CORS widened.
 Dynamic live Store targeting: Add, Pause, Resume and Remove individual Stores
 mid-Broadcast, plus Zone bulk actions, with original-mixer snapshots captured
 at add time and leases held across Pause.
+
+---
+
+## Active Broadcast web audience supervision, and the Finished progress bar
+
+### Room credentials follow the broadcaster's identity
+
+`broadcast.view_ownership` now governs whether a supervisor may see a live
+Broadcast's **web room**. The public code is a credential — anyone holding it
+can attempt to join, and with Auto Approve on they are in — so it travels with
+the broadcaster's identity rather than with permission to open the page.
+
+For a caller without it the `web_room` key is **absent from the JSON entirely**,
+not present-and-null. An absent key cannot be un-hidden by a frontend; a null
+one invites somebody to try. Redaction happens in `ActiveRow.serialize`, the
+single existing seam, so the list and the detail routes cannot disagree.
+
+The list carries only a **compact summary** — code, status, auto-approve,
+waiting/connected/listening counts. Participants live behind their own route,
+for the same reason the Stores do: fifty sessions multiplied by every listener
+is the payload this page exists to avoid.
+
+### A separate permission for touching somebody else's audience
+
+`broadcast.manage_web_audience` — *Active Broadcasts — Manage Web Audience*.
+
+Seeing who is broadcasting and removing a person from their audience are
+different powers, and the second happens where the owning operator cannot see
+it. So reading the page never confers it. **OWNER and ADMIN** hold it by role
+default; **BROADCASTER and VIEWER** do not, which falls out of the existing
+matrix without editing it. Reseed is idempotent.
+
+It covers Approve, Deny, Kick and Auto Approve. **Password rotation stays
+owner-only**: it replaces a credential the owner has already shared with an
+audience, and a supervisor doing that silently would lock the owner out of
+their own room's future joins.
+
+### Owner vs cross-owner
+
+The **owner** manages their own room from the Console exactly as before — no
+supervision permission, no regression, and rotation remains theirs.
+
+A **cross-owner** supervisor is subject to the same Store Scope containment
+rule as a cross-owner stop: a Broadcast reaching Stores this account may not
+supervise cannot be reached through its audience either. Without that the panel
+would be a way into a Broadcast whose physical half is out of bounds. **Only
+With Link** has no Stores, so containment is vacuous and authorization rests
+entirely on the explicit permission — which is the point of having one.
+
+One authorization function serves every audience route, so the endpoint written
+last cannot disagree with the one written first. Room lifecycle is called, never
+reimplemented. A cross-owner Kick is logged.
+
+### The UI
+
+A **Web Audience** button sits beside View Stores. It is not gated on
+`view_targets`: a Link Only Broadcast has zero Stores, shows no View Stores
+button, and its audience is the whole point. The panel renders from
+server-supplied capability flags rather than role names.
+
+### Recording player — Finished fills exactly
+
+**Root cause, measured.** The seek control was a native range with an accent
+colour. Chromium paints that fill up to the **thumb centre**, whose travel is
+inset by half the thumb width, so at `value === max` it stopped about half a
+thumb short. That fill is painted inside the widget — **no DOM node represented
+it**, so it could be neither corrected nor measured, and a test asserting
+`value === max` would have passed the whole time the operator saw the gap. A
+second, smaller contribution: the last `timeupdate` fires before the end, so
+`currentTime` at `ended` is routinely tens of milliseconds below `duration`.
+
+The played portion is now a real element behind a transparent range. A separate
+`visualProgressPercent` is **100 when Finished** — stated, not derived — while
+`position` and `duration` stay exactly what the media element reports. Nothing
+about the audio or the clock changed; only the paint. The control is still a
+real labelled input, so keyboard operation was not traded for the appearance.
+
+Proved by **geometry** in real Chromium on 2-second and 13-second finalized
+recordings: the fill's right edge within 1 px of the track's, after the real
+`ended` event. Replay empties and refills the bar; switching recordings does not
+inherit a full one.
+
+### Still the next milestone
+
+Dynamic live Store targeting: Add / Pause / Resume / Remove mid-Broadcast, with
+original-mixer snapshots at add time and leases held across Pause, plus Zone
+bulk actions. Unchanged by this work.
