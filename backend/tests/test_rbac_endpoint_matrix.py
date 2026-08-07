@@ -223,6 +223,18 @@ EXPECTED: dict[str, object] = {
     "search_receiver_status": "menu.receivers.view",
     "receiver_filter_options": "menu.receivers.view",
     "search_receiver_devices": "menu.receivers.view",
+
+    # Web audience. START_BROADCAST is the declared permission; OWNERSHIP of the
+    # Broadcast is enforced inside each handler, because approving and removing
+    # listeners is part of running your own announcement and must not be
+    # reachable through the supervision codes.
+    "read_web_room": "broadcast.start",
+    "rotate_web_room_password": "broadcast.start",
+    "set_web_room_auto_approve": "broadcast.start",
+    "list_web_participants": "broadcast.start",
+    "approve_web_participant": "broadcast.start",
+    "deny_web_participant": "broadcast.start",
+    "kick_web_participant": "broadcast.start",
 }
 
 #: Routes that take no HTTP session, each for a stated reason.
@@ -230,6 +242,16 @@ DELIBERATELY_UNAUTHENTICATED = {
     "root",            # a liveness probe
     "login",           # you cannot be signed in yet
     "enroll_receiver", # a Receiver computer has no credential yet; the code is the proof
+
+    # The PUBLIC listener surface. These are reached by people with no HQ
+    # account at all, which is the entire point of a shareable link. Each is
+    # rate limited, none reveals anything about the estate, and the credential
+    # they issue is scoped to one participant in one room and is accepted
+    # nowhere else.
+    "public_room_lookup",         # "does this Broadcast exist" - nothing more
+    "public_room_join",           # the join password is the authorisation
+    "public_room_request_access", # asking the broadcaster to be let in
+    "listener_admission_state",   # a listener's own state, via its own cookie
 }
 
 #: WebSocket routes. They authenticate, just not through ``get_current_user``,
@@ -244,7 +266,11 @@ DELIBERATELY_UNAUTHENTICATED = {
 #:
 #: Listed rather than ignored, so a fourth socket appearing has to be a decision
 #: somebody writes down here.
-WEBSOCKET_ROUTES = {"ws_receiver", "ws_hq", "ws_broadcaster"}
+#:   ws_listener     the listener cookie, which is HttpOnly and same-origin.
+#:                   No ticket and no query parameter: this URL is logged
+#:                   in full, so a credential in it would be a credential
+#:                   in a log file.
+WEBSOCKET_ROUTES = {"ws_receiver", "ws_hq", "ws_broadcaster", "ws_listener"}
 
 
 def _endpoints():
