@@ -7208,3 +7208,85 @@ and progress that survives navigating to another page.
 Dynamic live Store targeting: Add / Pause / Resume / Remove mid-Broadcast, with
 original-mixer snapshots at add time and leases held across Pause, plus Zone
 bulk actions. Unchanged by this work.
+
+---
+
+## Pre-Broadcast target resolution, and the Store picker
+
+### What ONLINE means, and what it used to mean
+
+**Authority: the live Receiver connection inventory** (`manager.online_store_ids()`),
+the same source the target list already uses to paint each row's `status`.
+
+It previously filtered on `Store.is_online_store` — the column Store Management
+edits with a checkbox labelled **Online / Physical**. That is an e-commerce
+classification, defaults to `False`, and says nothing about reachability. So
+*Online Stores Only* targeted the e-commerce stores and excluded every physical
+shop whose Receiver was connected: a console showing **BP ONLINE** resolved zero
+targets, which is exactly the 0/0/0 the operator reported.
+
+ONLINE means **currently reachable**. It does not mean READY,
+PLAYBACK_CONFIRMED or SPEAKER_VERIFIED.
+
+### Online Stores Only
+
+Targets every Store the operator may physically broadcast to **and** whose
+Receiver is connected right now. Store Scope and `broadcast.store_delivery`
+both still apply.
+
+**Start re-resolves it.** The set stored at creation is a preview — a Store may
+have dropped or reconnected since, and the browser's copy is older still. So a
+stale page cannot start a broadcast to a Receiver that has gone, and a Store
+that came back is not excluded for having been offline a moment ago. Target
+rows, leases and PREPARE all describe that one re-resolved set.
+
+**Then it freezes.** Once Start succeeds a Store connecting later is *not*
+added: joining an announcement half way through is a decision an operator makes,
+not something a heartbeat does. Add/Pause/Resume/Remove remains its own
+milestone.
+
+**Zero connected Stores refuses**, with its own message rather than the generic
+"no Stores match". No silent fallback to All Stores, to the offline ones, or to
+Only With Link.
+
+A stale `selected_store_ids` from Selected mode can neither narrow nor widen the
+automatic mode — proved both ways, including by crafted request.
+
+### Target counts
+
+The first card is **TARGETS**, not SELECTED — nobody selects anything in the
+automatic modes, and "Selected 0" beside a live Zone broadcast reads as a fault.
+In Online Stores Only the third card counts **Excluded** rather than Offline,
+since those are Stores left out rather than targets chosen.
+
+### The Store picker
+
+Client-side filtering and pagination over the existing `/broadcast/target-stores`
+response, which already returns the operator's authorised Stores and is
+deliberately small. **Store Scope and physical permission stay server-enforced**;
+no second Store-query system was introduced.
+
+Page size 10/20/50. Filters: search (code, name, city, Zone), Zone, City,
+connection status, and Clear filters. Filtering returns to page one.
+
+**Selection belongs to the broadcast, not to the visible page.** It survives
+paging, filtering, being hidden, and clearing filters; only *Clear selection*
+removes it, and a refresh does not discard it — a Store going offline is a status
+change, not a reason to deselect it.
+
+Two named bulk actions: **Select page** (visible rows) and **Select all N
+filtered** (every match across pages), both additive. A single "Select all"
+beside a paginated table means one thing to somebody seeing ten rows and another
+to the code.
+
+**Zone FILTER ≠ Zone TARGET MODE** — filtering changes which rows are visible and
+never what is targeted. Tested in both Jest and Chromium.
+
+The result count reports **authorised** Stores only, so a scoped operator is never
+told how much fleet they cannot see. Only With Link renders no picker at all, and
+an account without `broadcast.store_delivery` never requests the inventory.
+
+### Still the next milestone
+
+Dynamic mid-Broadcast targeting: Add / Pause / Resume / Remove and Zone bulk
+actions. Unchanged by this work.
