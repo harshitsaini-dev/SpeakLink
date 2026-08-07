@@ -154,6 +154,14 @@ api.interceptors.response.use(
   (r) => r,
   (err) => {
     if (err?.response?.status === 401) {
+      // The PUBLIC listener has no HQ session to expire. A 401 there means a
+      // wrong join password or an admission that is no longer valid, and
+      // bouncing that listener to the HQ sign-in screen would both lose their
+      // error message and show a stranger an administrator login. It would also
+      // clear the operator's token in another tab.
+      if (window.location.pathname.startsWith("/listen")) {
+        return Promise.reject(err);
+      }
       clearToken();
       if (!window.location.pathname.startsWith("/login") && !window.location.pathname.startsWith("/receiver")) {
         window.location.href = "/login";

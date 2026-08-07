@@ -78,7 +78,13 @@ export default function Listen() {
     if (playerRef.current) { playerRef.current.detach(); playerRef.current = null; }
   }, []);
 
-  React.useEffect(() => () => { stoppedRef.current = true; teardown(); }, [teardown]);
+  React.useEffect(() => {
+    // Reset on mount, not only on unmount. React 18 mounts, tears down and
+    // remounts in development, so a flag that is only ever SET by the cleanup
+    // stays set - and the page could then never open its socket at all.
+    stoppedRef.current = false;
+    return () => { stoppedRef.current = true; teardown(); };
+  }, [teardown]);
 
   // ---- the live socket ---------------------------------------------------
   const connect = React.useCallback(() => {
@@ -99,7 +105,8 @@ export default function Listen() {
     // No token, no password and no identifier of any kind in this URL. The
     // listener session travels in an HttpOnly cookie the browser attaches
     // itself - a credential in a query string is a credential in a server log.
-    const socket = new WebSocket(wsUrl("/api/listen/ws"));
+    // wsUrl() supplies the /api prefix itself.
+    const socket = new WebSocket(wsUrl("/listen/ws"));
     socket.binaryType = "arraybuffer";
     socketRef.current = socket;
 

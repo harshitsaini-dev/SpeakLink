@@ -176,3 +176,140 @@ def test_stores_web_listeners_and_recording_do_not_delay_each_other(stores, list
           f"web slow disconnects {web_metrics['slow_disconnects']}, "
           f"peak store depth {max(m['max_depth'] for m in store_metrics.values())}, "
           f"peak web depth {max(q['max_depth'] for q in web_metrics['queues'].values())}")
+
+
+# ===========================================================================
+# The room runtime at audience scale
+# ===========================================================================
+# The relay load tests above drive sender callbacks. These drive the REAL
+# participant registry too, so what is measured is the runtime an operator's
+# console actually reads: admission, heartbeats, per-listener playback state,
+# and the counts derived from them.
+
+@requires_capture
+@pytest.mark.parametrize("audience", [10, 50, 100, 250])
+def test_the_room_runtime_holds_a_whole_audience(audience):
+    from web_participant_runtime import PlaybackState, WebParticipantRegistry
+
+    async def scenario():
+        relay = WebAudienceRelay(session_id=1)
+        registry = WebParticipantRegistry()
+        chunks = timeslice_chunks()
+        for chunk in chunks[:4]:
+            relay.offer(chunk)
+
+        received = [0] * audience
+
+        def sender(index):
+            async def send(frame: bytes) -> None:
+                received[index] += 1
+            return send
+
+        joined_at = time.perf_counter()
+        for index in range(audience):
+            registry.attach(participant_id=index, room_id=1, session_id=1,
+                            socket=object())
+            await relay.add_listener(str(index), sender(index))
+        join_seconds = time.perf_counter() - joined_at
+
+        # Every browser reports its own state, as the real client does.
+        for index in range(audience):
+            registry.heartbeat(participant_id=index,
+                               playback_state=PlaybackState.LISTENING)
+
+        started = time.perf_counter()
+        for chunk in chunks[4:]:
+            relay.offer(chunk)
+            await asyncio.sleep(0)
+        audio_seconds = time.perf_counter() - started
+
+        await asyncio.sleep(0.2)
+        result = (join_seconds, audio_seconds, list(received),
+                  registry.counts_for_room(1), relay.metrics())
+        await relay.close()
+        return result
+
+    join_seconds, audio_seconds, received, counts, metrics = asyncio.run(scenario())
+
+    assert len(set(received)) == 1, "every listener received identical frames"
+    assert received[0] > 0
+    assert counts["connected"] == audience
+    assert counts["listening"] == audience
+    assert metrics["slow_disconnects"] == 0
+    for queue in metrics["queues"].values():
+        assert queue["max_depth"] <= queue["capacity"]
+
+    print(f"\n{audience:>4} admitted listeners: join {join_seconds * 1000:.0f} ms, "
+          f"audio path {audio_seconds * 1000:.0f} ms, "
+          f"clusters {metrics['clusters_distributed']}, "
+          f"peak queue {max(q['max_depth'] for q in metrics['queues'].values())}")
+
+
+@requires_capture
+def test_a_kicked_and_a_reconnecting_listener_do_not_disturb_the_rest():
+    """The messy real-world room: some leave, some come back, most just listen."""
+    from web_participant_runtime import PlaybackState, WebParticipantRegistry
+
+    async def scenario():
+        relay = WebAudienceRelay(session_id=1, capacity=4)
+        registry = WebParticipantRegistry()
+        chunks = timeslice_chunks()
+        for chunk in chunks[:4]:
+            relay.offer(chunk)
+
+        healthy = [0] * 20
+        stalled = asyncio.Event()
+
+        def sender(index):
+            async def send(frame: bytes) -> None:
+                healthy[index] += 1
+            return send
+
+        async def never_reads(frame: bytes) -> None:
+            await stalled.wait()
+
+        for index in range(20):
+            registry.attach(participant_id=index, room_id=1, session_id=1,
+                            socket=object())
+            await relay.add_listener(str(index), sender(index))
+        registry.attach(participant_id=90, room_id=1, session_id=1, socket=object())
+        await relay.add_listener("slow", never_reads)
+
+        await feed(relay, chunks[4:14])
+
+        # One is kicked mid-Broadcast...
+        registry.detach(participant_id=5)
+        await relay.remove_listener("5")
+        # ...and one reconnects, which is a fresh bootstrap rather than a
+        # resumed queue.
+        reconnect_started = time.perf_counter()
+        registry.attach(participant_id=7, room_id=1, session_id=1, socket=object())
+        boot = await relay.add_listener("7", sender(7))
+        reconnect_seconds = time.perf_counter() - reconnect_started
+
+        await feed(relay, chunks[14:])
+        await asyncio.sleep(0.2)
+
+        counts = registry.counts_for_room(1)
+        metrics = relay.metrics()
+        stalled.set()
+        result = (list(healthy), counts, metrics, boot, reconnect_seconds)
+        await relay.close()
+        return result
+
+    async def feed(relay, chunks):
+        for chunk in chunks:
+            relay.offer(chunk)
+            await asyncio.sleep(0)
+
+    healthy, counts, metrics, boot, reconnect_seconds = asyncio.run(scenario())
+
+    assert boot is not None, "a reconnect is bootstrapped again"
+    assert metrics["slow_disconnects"] >= 1, "the stalled browser was disconnected"
+    # Everybody except the kicked one kept receiving throughout.
+    still_here = [count for index, count in enumerate(healthy) if index != 5]
+    assert all(count > 0 for count in still_here)
+    assert "5" not in metrics["queues"], "the kicked listener's queue is gone"
+    print(f"\nreconnect bootstrap in {reconnect_seconds * 1000:.1f} ms, "
+          f"slow disconnects {metrics['slow_disconnects']}, "
+          f"listeners still served {len(still_here)}")
