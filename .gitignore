@@ -326,3 +326,9 @@ build/pyi-work-*/
 **/requirements.stamp
 
 # The one tracked thing under data/, so the folder exists in a fresh clone.
+
+# Generated MediaRecorder captures for the WebM framer tests. The repository
+# tracks no audio artifacts; these are produced on demand by
+# "ECHOCAST_CAPTURE_WEBM=1 npx playwright test e2e/capture-fixture.spec.js".
+/backend/tests/fixtures/mediarecorder-live.webm
+/backend/tests/fixtures/mediarecorder-live.chunks.json
