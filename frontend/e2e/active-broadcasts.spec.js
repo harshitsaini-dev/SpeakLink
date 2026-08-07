@@ -26,7 +26,11 @@
 const { test, expect } = require('@playwright/test');
 const { mockBackend, signIn } = require('./support/backend');
 
-const BASE = ['menu.broadcast.view', 'broadcast.start', 'broadcast.stop'];
+// broadcast.store_delivery is included: these operators are PHYSICAL
+// broadcasters, and that right now decides whether the Console shows any
+// Store or Zone targeting at all.
+const BASE = ['menu.broadcast.view', 'broadcast.start', 'broadcast.stop',
+              'broadcast.store_delivery'];
 
 const ALICE = {
   session_id: 31, campaign_name: 'Alice Diwali Offers',

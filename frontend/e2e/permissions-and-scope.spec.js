@@ -18,6 +18,9 @@ const VIEWER = { id: 4, username: 'anita', role: 'VIEWER' };
 
 const ALL_PERMISSION_CODES = [
   'menu.broadcast.view', 'broadcast.start', 'broadcast.stop', 'broadcast.emergency_stop',
+  // Physical delivery: these specs are about Store Scope narrowing WHICH
+  // Stores, which only has meaning for an account allowed Stores at all.
+  'broadcast.store_delivery',
   'menu.stores.view', 'stores.create', 'stores.update', 'stores.archive',
   'stores.delete_permanently',
   'menu.receivers.view', 'devices.enrollment.create', 'devices.primary.assign',
