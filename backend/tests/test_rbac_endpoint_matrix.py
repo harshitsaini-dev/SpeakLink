@@ -235,6 +235,17 @@ EXPECTED: dict[str, object] = {
     "approve_web_participant": "broadcast.start",
     "deny_web_participant": "broadcast.start",
     "kick_web_participant": "broadcast.start",
+
+    # Active Broadcast web audience supervision. The declared permission opens
+    # the supervision PAGE; whether this caller may reach into somebody else's
+    # room is decided per request by _authorize_web_audience, which needs
+    # broadcast.manage_web_audience plus the same Store Scope containment a
+    # cross-owner stop requires.
+    "active_management_web_audience": "broadcast.active_view",
+    "supervised_approve_participant": "broadcast.active_view",
+    "supervised_deny_participant": "broadcast.active_view",
+    "supervised_kick_participant": "broadcast.active_view",
+    "supervised_set_auto_approve": "broadcast.active_view",
 }
 
 #: Routes that take no HTTP session, each for a stated reason.

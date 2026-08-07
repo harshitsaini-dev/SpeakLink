@@ -3404,6 +3404,32 @@ def _active_management_rows(db: Session, user: HQUser, visibility) -> list:
             store_cache[store_id] = db.query(Store).filter(Store.id == store_id).first()
         return store_cache[store_id]
 
+    def web_room_lookup(session_id: int):
+        """The compact room summary for one live Broadcast, or None.
+
+        Built here rather than in the module so the redaction module stays free
+        of database and runtime imports. Whether the caller may SEE any of it is
+        decided later, in ActiveRow.serialize.
+        """
+        room = web_rooms.get_room_for_session(engine, session_id=session_id)
+        if room is None:
+            return None
+        participants = web_rooms.list_participants(engine, room_id=room.id)
+        counts = web_participants.counts_for_room(room.id)
+        return abm.WebRoomSummary(
+            public_code=room.public_code,
+            status=room.status,
+            auto_approve=room.auto_approve,
+            # Only if THIS process still holds the plaintext it generated.
+            # Nothing reads it back from storage, because nothing stores it.
+            password=_ROOM_PASSWORD_ONCE.get(session_id) or None,
+            waiting_count=sum(
+                1 for row in participants
+                if row.admission_status == web_rooms.AdmissionStatus.REQUESTED),
+            connected_count=counts["connected"],
+            listening_count=counts["listening"],
+        )
+
     return abm.collect_active_rows(
         runtime=manager.broadcasts,
         session_lookup=lambda sid: db.query(BroadcastSession).filter(
@@ -3412,6 +3438,7 @@ def _active_management_rows(db: Session, user: HQUser, visibility) -> list:
         store_lookup=store_lookup,
         scope=scope,
         viewer_user_id=user.id,
+        web_room_lookup=web_room_lookup,
     )
 
 
@@ -5743,6 +5770,220 @@ async def ws_listener(websocket: WebSocket):
         live_relay = manager.broadcasts.web_relay(room.session_id)
         if live_relay is not None:
             await live_relay.remove_listener(listener_key)
+
+
+# ================ ACTIVE BROADCAST -> WEB AUDIENCE SUPERVISION ================
+#
+# The owner of a Broadcast manages its audience from their own Console and needs
+# no supervision permission for that - it is their announcement. A supervisor
+# reaching into SOMEBODY ELSE'S room is a different act, and it is gated by
+# broadcast.manage_web_audience.
+#
+# Deliberately NOT satisfied by broadcast.view_ownership. Reading who is
+# broadcasting and ejecting a person from their audience are different powers,
+# and the second happens where the owning operator cannot see it.
+
+
+def _authorize_web_audience(sid: int, user: HQUser, *, db: Session):
+    """One decision for every audience route. Returns (row, visibility).
+
+    For a cross-owner supervisor the SAME Store Scope containment rule applies
+    as for a cross-owner stop: if the Broadcast reaches Stores this account may
+    not supervise, it may not reach into that Broadcast at all. Web listeners
+    have no Store identity, so without this the audience panel would be a way
+    into a Broadcast whose physical half is out of bounds.
+
+    An Only With Link Broadcast has no Stores, so containment is vacuous and
+    authorization rests entirely on the explicit permission - which is the point
+    of having an explicit permission.
+    """
+    visibility = abm.resolve_visibility(engine, user)
+    rows = _active_management_rows(db, user, visibility)
+    row = next((r for r in rows if r.session_id == sid), None)
+    if row is None:
+        # 404 for "not live" and "not visible to you" alike, so this cannot be
+        # used to probe which session ids exist.
+        raise HTTPException(status_code=404, detail="No such active broadcast")
+
+    if row.is_mine:
+        return row, visibility
+
+    if not visibility.may_manage_web_audience:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to manage another operator's web audience.")
+
+    scope = resolve_store_scope(engine, user)
+    outside = abm.stop_scope_refusal(row, scope)
+    if outside:
+        # The COUNT, never the ids or names.
+        raise HTTPException(
+            status_code=403,
+            detail=(f"This broadcast reaches {len(outside)} Store(s) outside your "
+                    "Store Scope, so its web audience was not opened."))
+    return row, visibility
+
+
+def _audience_capabilities(row, visibility) -> dict:
+    """What this caller may actually do, decided once and sent to the client.
+
+    The frontend renders from these rather than from role names, so a control
+    can never appear for somebody the backend would refuse - and a new role
+    cannot silently gain a button.
+    """
+    manages = row.is_mine or visibility.may_manage_web_audience
+    return {
+        # The public code is a credential: holding it is enough to attempt a
+        # join. It follows the broadcaster's identity.
+        "can_view_room_credentials": visibility.may_view_ownership or row.is_mine,
+        "can_manage_web_audience": manages,
+        "can_approve": manages,
+        "can_deny": manages,
+        "can_kick": manages,
+        "can_toggle_auto_approve": manages,
+        # Rotation is OWNER ONLY. It replaces a credential the owner has
+        # already shared with an audience, and a supervisor doing that silently
+        # would lock the owner out of their own room's future joins.
+        "can_rotate_password": row.is_mine,
+    }
+
+
+@api.get("/broadcast/active-management/{sid}/web-audience")
+def active_management_web_audience(
+    sid: int, db: Session = Depends(get_db),
+    user: HQUser = Depends(require(abm.PAGE_CODE)),
+):
+    """One live Broadcast's web audience, for a supervisor or its owner.
+
+    A separate route rather than more fields on the list, for the same reason
+    the Stores are: fifty sessions multiplied by every listener is the payload
+    the supervision page exists to avoid.
+    """
+    row, visibility = _authorize_web_audience(sid, user, db=db)
+    room = web_rooms.get_room_for_session(engine, session_id=sid)
+    if room is None:
+        raise HTTPException(status_code=404, detail="This Broadcast has no web room")
+
+    capabilities = _audience_capabilities(row, visibility)
+    state = _room_state(sid, room=room)
+
+    payload = {
+        "session_id": sid,
+        "campaign_name": row.campaign_name,
+        "started_at": row.started_at,
+        "is_mine": row.is_mine,
+        "target_store_count": len(row.visible_targets),
+        "status": state["status"],
+        "auto_approve": state["auto_approve"],
+        "delivery": state["delivery"],
+        "counts": state["counts"],
+        "waiting": state["waiting"],
+        "listeners": state["listeners"],
+        "capabilities": capabilities,
+    }
+    if capabilities["can_view_room_credentials"]:
+        payload["public_code"] = state["public_code"]
+        payload["password"] = state["password"]
+        payload["password_available"] = bool(state["password"])
+    if visibility.may_view_ownership or row.is_mine:
+        payload["owner_user_id"] = row.owner_user_id
+        payload["owner_display_name"] = row.owner_display_name
+    return payload
+
+
+def _supervised_participant_action(sid: int, pid: int, user: HQUser,
+                                   db: Session, action):
+    """Shared body for approve/deny/kick from the supervision page.
+
+    The room lifecycle lives in web_rooms and is called, never reimplemented:
+    a second copy of "is this participant in this room" would eventually
+    disagree with the first.
+    """
+    row, visibility = _authorize_web_audience(sid, user, db=db)
+    room = web_rooms.get_room_for_session(engine, session_id=sid)
+    if room is None:
+        raise HTTPException(status_code=404, detail="This Broadcast has no web room")
+    try:
+        return action(room)
+    except web_rooms.ParticipantNotAdmissibleError as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+
+
+@api.post("/broadcast/active-management/{sid}/web-audience/{pid}/approve")
+async def supervised_approve_participant(
+    sid: int, pid: int, db: Session = Depends(get_db),
+    user: HQUser = Depends(require(abm.PAGE_CODE)),
+):
+    def act(room):
+        participant, token = web_rooms.approve_participant(
+            engine, room_id=room.id, participant_id=pid)
+        if token is not None:
+            _PENDING_LISTENER_TOKENS[participant.id] = token
+        return _room_state(sid, room=room)
+    return _supervised_participant_action(sid, pid, user, db, act)
+
+
+@api.post("/broadcast/active-management/{sid}/web-audience/{pid}/deny")
+async def supervised_deny_participant(
+    sid: int, pid: int, db: Session = Depends(get_db),
+    user: HQUser = Depends(require(abm.PAGE_CODE)),
+):
+    def act(room):
+        web_rooms.deny_participant(engine, room_id=room.id, participant_id=pid)
+        _PENDING_LISTENER_TOKENS.pop(pid, None)
+        return _room_state(sid, room=room)
+    return _supervised_participant_action(sid, pid, user, db, act)
+
+
+@api.post("/broadcast/active-management/{sid}/web-audience/{pid}/kick")
+async def supervised_kick_participant(
+    sid: int, pid: int, db: Session = Depends(get_db),
+    user: HQUser = Depends(require(abm.PAGE_CODE)),
+):
+    """Remove one listener from another operator's Broadcast.
+
+    Session invalidated first, then the socket closed, exactly as the owner's
+    own Kick does - so a reconnect racing the close has nothing valid left.
+    """
+    row, _ = _authorize_web_audience(sid, user, db=db)
+    room = web_rooms.get_room_for_session(engine, session_id=sid)
+    if room is None:
+        raise HTTPException(status_code=404, detail="This Broadcast has no web room")
+    try:
+        web_rooms.kick_participant(engine, room_id=room.id, participant_id=pid)
+    except web_rooms.ParticipantNotAdmissibleError as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+
+    _PENDING_LISTENER_TOKENS.pop(pid, None)
+    socket = web_participants.socket_for(pid)
+    web_participants.detach(participant_id=pid)
+    relay = manager.broadcasts.web_relay(sid)
+    if relay is not None:
+        await relay.remove_listener(str(pid))
+    if socket is not None:
+        await _close_listener_socket(socket, {"type": "kicked"})
+    if not row.is_mine:
+        # A cross-owner intervention the owning operator cannot see happening
+        # is exactly the thing that must leave a trace.
+        _write_log(db, "warn",
+                   f"Cross-owner web listener removed: actor_user_id={user.id} "
+                   f"session_id={sid} participant_id={pid}")
+    return _room_state(sid, room=room)
+
+
+@api.put("/broadcast/active-management/{sid}/web-audience/auto-approve")
+async def supervised_set_auto_approve(
+    sid: int, payload: WebRoomAutoApproveUpdate, db: Session = Depends(get_db),
+    user: HQUser = Depends(require(abm.PAGE_CODE)),
+):
+    _authorize_web_audience(sid, user, db=db)
+    try:
+        web_rooms.set_auto_approve(engine, session_id=sid,
+                                   enabled=payload.auto_approve)
+    except web_rooms.RoomNotOpenError:
+        raise HTTPException(status_code=409, detail="This Broadcast has ended")
+    room = web_rooms.get_room_for_session(engine, session_id=sid)
+    return _room_state(sid, room=room)
 
 
 # Include routes

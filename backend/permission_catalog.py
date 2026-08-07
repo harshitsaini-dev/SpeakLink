@@ -71,6 +71,18 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
                         "Active Broadcasts - View Stores"),
     PermissionDefinition("broadcast.stop_any", "Broadcast",
                         "Active Broadcasts - Stop Other Broadcast"),
+    #: Manage the WEB AUDIENCE of somebody else's live Broadcast.
+    #:
+    #: Separate from broadcast.view_ownership on purpose. Seeing who is
+    #: broadcasting and removing a person from their audience are different
+    #: powers: the first is a disclosure, the second is an intervention the
+    #: owning operator cannot see happening. A supervisor trusted to read the
+    #: page is not thereby trusted to eject that page's listeners.
+    #:
+    #: Covers Approve, Deny, Kick and Auto Approve. Password rotation is
+    #: deliberately NOT included - see the room routes.
+    PermissionDefinition("broadcast.manage_web_audience", "Broadcast",
+                        "Active Broadcasts - Manage Web Audience"),
     #: Change a Store's SpeakLink OUTPUT volume/mute during a live broadcast.
     #:
     #: A new code rather than a reuse. broadcast.start is about beginning a
