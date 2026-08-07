@@ -18,6 +18,9 @@ const { mockBackend, signIn } = require('./support/backend');
 
 const BROADCAST_ONLY = [
   'menu.broadcast.view', 'broadcast.start', 'broadcast.stop',
+  // The permission missing in this spec is menu.stores.view, not physical
+  // delivery - this operator may broadcast to Stores, just not manage them.
+  'broadcast.store_delivery',
   'menu.history.view',
 ];
 

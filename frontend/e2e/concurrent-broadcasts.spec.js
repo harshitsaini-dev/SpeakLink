@@ -272,6 +272,7 @@ test('an Admin denied Emergency Stop does not get the button', async ({ browser 
   const admin = await operator(browser, {
     username: 'priya', role: 'ADMIN',
     permissions: ['menu.broadcast.view', 'broadcast.start', 'broadcast.stop',
+                  'broadcast.store_delivery',
                   'broadcast.view_ownership', 'broadcast.active_view',
                   'menu.stores.view', 'menu.receivers.view', 'menu.history.view'],
     activeSessions: [ALICE_SESSION],
@@ -292,6 +293,7 @@ test('an Admin denied ownership view keeps busy markers but loses the details',
   const admin = await operator(browser, {
     username: 'priya', role: 'ADMIN',
     permissions: ['menu.broadcast.view', 'broadcast.start', 'broadcast.stop',
+                  'broadcast.store_delivery',
                   'broadcast.emergency_stop', 'menu.stores.view',
                   'menu.receivers.view', 'menu.history.view'],
     activeSessions: [ALICE_SESSION],

@@ -78,7 +78,7 @@ const OPERATOR = { id: 1, username: 'pilot-operator', role: 'admin' };
 const ALL_PERMISSION_CODES = [
   'menu.broadcast.view', 'broadcast.start', 'broadcast.stop', 'broadcast.emergency_stop',
   'broadcast.view_ownership', 'broadcast.active_view', 'broadcast.view_targets',
-  'broadcast.stop_any', 'store_audio.control',
+  'broadcast.stop_any', 'store_audio.control', 'broadcast.store_delivery',
   'menu.stores.view', 'stores.create', 'stores.update', 'stores.archive',
   'stores.delete_permanently',
   'menu.receivers.view', 'devices.enrollment.create', 'devices.primary.assign',
@@ -107,9 +107,13 @@ const DEFAULT_ROLE_PERMISSIONS = {
   // store_audio.control IS here, unlike the supervision codes above: setting
   // the output level of the Stores you are broadcasting to is part of running
   // an ordinary broadcast, and ownership of the session gates every command.
+  // broadcast.store_delivery IS here too: BROADCASTER holds it by default in
+  // the catalog, so that every operator who could already take the estate live
+  // keeps physical delivery across the upgrade.
   BROADCASTER: ['menu.broadcast.view', 'broadcast.start', 'broadcast.stop',
                 'menu.history.view', 'menu.receivers.view',
-                'menu.stores.view', 'store_audio.control'],
+                'menu.stores.view', 'store_audio.control',
+                'broadcast.store_delivery'],
   VIEWER: ['menu.broadcast.view', 'menu.stores.view', 'menu.receivers.view',
            'menu.history.view', 'menu.logs.view'],
 };
