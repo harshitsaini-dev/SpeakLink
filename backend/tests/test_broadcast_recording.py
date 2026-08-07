@@ -506,13 +506,23 @@ def test_the_recorder_reads_only_the_broadcaster_socket(engine):
     source = (BACKEND_ROOT / "server.py").read_text(encoding="utf-8")
     offers = [line.strip() for line in source.splitlines()
               if ".offer(" in line and not line.strip().startswith("#")]
-    assert len(offers) == 1, f"the recorder is fed from {len(offers)} places: {offers}"
-    assert "recorder.offer(data)" in offers[0]
 
-    # And that one call site is inside the broadcaster WebSocket handler.
-    index = source.index("recorder.offer(data)")
-    preceding = source[:index]
-    assert preceding.rindex("/api/ws/broadcaster") > preceding.rindex("/api/ws/receiver")
+    # The RECORDER specifically is still fed from exactly one place.
+    recorder_offers = [line for line in offers if line.startswith("recorder.offer(")]
+    assert recorder_offers == ["recorder.offer(data)"], \
+        f"the recorder is fed from {len(recorder_offers)} places: {recorder_offers}"
+
+    # The web audience relay is the only other sink that takes live audio, and
+    # the same structural guarantee has to hold for it: a browser listener must
+    # be no more able to hear a shop than the recording is. So EVERY offer call
+    # site in the server is checked, not only the recorder's.
+    assert {line.split(".offer(")[0] for line in offers} == {"recorder", "relay"}, offers
+
+    for call in offers:
+        index = source.index(call)
+        preceding = source[:index]
+        assert preceding.rindex("/api/ws/broadcaster") > preceding.rindex("/api/ws/receiver"), \
+            f"{call} is not inside the broadcaster socket handler"
 
 
 def test_the_recording_directory_is_git_ignored():

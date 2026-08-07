@@ -161,7 +161,10 @@ EXPECTED: dict[str, object] = {
     # The broadcast TARGET catalog. Deliberately menu.broadcast.view and not
     # menu.stores.view: Store MANAGEMENT visibility must not decide whether an
     # operator can see the Stores they may broadcast to.
-    "list_broadcast_target_stores": "menu.broadcast.view",
+    # The physical Store inventory for broadcasting IS physical-delivery
+    # information, so it moved off "may open the Console" and onto "may
+    # deliver to a Store" when link-only broadcasting arrived.
+    "list_broadcast_target_stores": "broadcast.store_delivery",
     # Live per-Store output volume. store_audio.control rather than
     # broadcast.start: starting a broadcast and steering one are different
     # acts, and ownership of the session is enforced inside the route on top
