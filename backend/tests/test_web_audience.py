@@ -29,6 +29,7 @@ os.environ.setdefault(
     str(Path(tempfile.gettempdir()) / "speaklink-tests-default-engine.db"),
 )
 
+from webm_stream import WebmStreamFramer  # noqa: E402
 from web_audience import (  # noqa: E402
     DEFAULT_LISTENER_QUEUE_CAPACITY,
     ListenerQueue,
@@ -368,3 +369,94 @@ def test_the_relay_serves_a_whole_audience_without_dropping_a_cluster(audience):
     print(f"\n{audience:>4} listeners: offer loop {offer_seconds * 1000:.1f} ms, "
           f"clusters {metrics['clusters_distributed']}, "
           f"peak queue depth {max(q['max_depth'] for q in metrics['queues'].values())}")
+
+
+# ===========================================================================
+# The attach race
+# ===========================================================================
+# A listener is handed a bootstrap and then subscribed to future Clusters. If a
+# Cluster completes between those two things the listener either never hears it
+# (a hole the decoder cannot see) or hears it twice (a stutter). Neither is
+# acceptable, and neither is visible without looking for it - so this is tested
+# directly, at every possible interleaving rather than the convenient one.
+
+@requires_capture
+def test_no_cluster_is_lost_or_duplicated_whatever_the_attach_timing():
+    """Attach after every single chunk, and demand a perfect sequence each time."""
+    async def scenario(attach_after_chunk):
+        relay = WebAudienceRelay(session_id=1)
+        chunks = timeslice_chunks()
+        listener = Recorder()
+
+        boot = None
+        for position, chunk in enumerate(chunks):
+            relay.offer(chunk)
+            await asyncio.sleep(0)
+            if position == attach_after_chunk:
+                boot = await relay.add_listener("alice", listener)
+        await asyncio.sleep(0.05)
+        result = (boot, list(listener.frames))
+        await relay.close()
+        return result
+
+    # Every attach point across the whole stream, not a sampled few.
+    for attach_after in range(2, 38):
+        boot, frames = asyncio.run(scenario(attach_after))
+        assert boot is not None, f"no bootstrap when attaching after chunk {attach_after}"
+
+        # What the listener's decoder actually consumed, in order.
+        received = list(boot.clusters) + frames
+        assert len(received) == len(set(received)), \
+            f"a Cluster was delivered twice attaching after chunk {attach_after}"
+
+        # And it is a CONTIGUOUS run of the stream: bootstrap then live, with
+        # nothing missing in between.
+        framer = WebmStreamFramer()
+        every = []
+        for chunk in timeslice_chunks():
+            every.extend(f.data for f in framer.feed(chunk) if not f.is_init)
+        start = every.index(received[0])
+        assert every[start:start + len(received)] == received, \
+            f"a Cluster was lost attaching after chunk {attach_after}"
+
+
+@requires_capture
+def test_a_cluster_completing_during_attach_is_delivered_exactly_once():
+    """The specific interleaving: audio arrives while the listener is attaching."""
+    async def scenario():
+        relay = WebAudienceRelay(session_id=1)
+        chunks = timeslice_chunks()
+        for chunk in chunks[:12]:
+            relay.offer(chunk)
+
+        listener = Recorder()
+        # Offer more audio from a task that runs concurrently with the attach.
+        async def keep_broadcasting():
+            for chunk in chunks[12:24]:
+                relay.offer(chunk)
+                await asyncio.sleep(0)
+
+        pump = asyncio.create_task(keep_broadcasting())
+        boot = await relay.add_listener("alice", listener)
+        await pump
+        await asyncio.sleep(0.05)
+        result = (boot, list(listener.frames))
+        await relay.close()
+        return result
+
+    boot, frames = asyncio.run(scenario())
+    received = list(boot.clusters) + frames
+    assert len(received) == len(set(received)), "a Cluster was delivered twice"
+    assert frames, "the listener received live audio after attaching"
+
+
+@requires_capture
+def test_a_bootstrapped_cluster_is_never_sent_again():
+    """Directly: the queue skips what the bootstrap already carried."""
+    queue = ListenerQueue(listener_id="alice", capacity=8, since_index=5)
+    assert queue.enqueue(b"old", index=3) is True      # accepted, not delivered
+    assert queue.enqueue(b"old", index=4) is True
+    assert queue.depth == 0, "already-bootstrapped Clusters are not queued again"
+    assert queue.enqueue(b"new", index=5) is True
+    assert queue.depth == 1
+    assert queue.metrics()["skipped_already_bootstrapped"] == 2
