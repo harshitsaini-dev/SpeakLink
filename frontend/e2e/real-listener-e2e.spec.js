@@ -346,6 +346,126 @@ test.describe('the public listener against a real backend', () => {
   });
 
   // ======================================================================
+  // TEST D - autoplay blocked
+  // ======================================================================
+  test('D: an autoplay refusal asks for a tap, then really plays',
+       async ({ page }) => {
+    test.setTimeout(120_000);
+    const headers = await signIn();
+    const live = await startLiveBroadcast(headers);
+
+    try {
+      // Refuse the FIRST play() the way a browser autoplay policy does, and
+      // allow every later one - which is exactly what a user gesture changes.
+      await page.addInitScript(() => {
+        const real = window.HTMLMediaElement.prototype.play;
+        let refused = false;
+        window.HTMLMediaElement.prototype.play = function play(...args) {
+          if (!refused) {
+            refused = true;
+            return Promise.reject(
+              new DOMException('blocked by autoplay policy', 'NotAllowedError'));
+          }
+          return real.apply(this, args);
+        };
+      });
+
+      await page.goto(`${base}/listen/${live.room.public_code}`);
+      await page.getByTestId('listen-name').fill('Harshit');
+      await page.getByTestId('listen-password').fill(live.room.password);
+      await page.getByTestId('listen-join').click();
+
+      // A gesture is required. That is NOT buffering, and NOT an error.
+      await expect(page.getByTestId('listen-tap-to-start'))
+        .toBeVisible({ timeout: 25_000 });
+      await expect(page.getByTestId('listen-status'))
+        .toHaveText('Tap to Start Listening');
+      await expect(page.getByTestId('listen-ended')).toHaveCount(0);
+      await expect(page.getByTestId('listen-session-lost')).toHaveCount(0);
+
+      // The explicit user action.
+      await page.getByTestId('listen-tap-to-start').click();
+
+      await expect(page.getByTestId('listen-status'))
+        .toHaveText('Listening', { timeout: 25_000 });
+      const truth = await playbackTruth(page);
+      expect(truth.paused).toBe(false);
+      expect(truth.advanced, 'playback never advanced after the tap').toBe(true);
+    } finally {
+      stopBroadcastPump(live);
+    }
+  });
+
+  // ======================================================================
+  // TEST F - reconnect
+  // ======================================================================
+  test('F: a dropped listener socket reconnects and plays again',
+       async ({ page }) => {
+    test.setTimeout(150_000);
+    const headers = await signIn();
+    const live = await startLiveBroadcast(headers);
+
+    try {
+      // Count the listener sockets this page opens, so a reconnect can be told
+      // from a retry storm.
+      await page.addInitScript(() => {
+        window.__listenerSockets = 0;
+        const Real = window.WebSocket;
+        const Counted = function Counted(url, ...rest) {
+          const socket = new Real(url, ...rest);
+          if (String(url).includes('/api/listen/ws')) {
+            window.__listenerSockets += 1;
+            window.__lastListenerSocket = socket;
+          }
+          return socket;
+        };
+        Counted.prototype = Real.prototype;
+        Counted.OPEN = Real.OPEN;
+        Counted.CLOSED = Real.CLOSED;
+        window.WebSocket = Counted;
+      });
+
+      await page.goto(`${base}/listen/${live.room.public_code}`);
+      await page.getByTestId('listen-name').fill('Harshit');
+      await page.getByTestId('listen-password').fill(live.room.password);
+      await page.getByTestId('listen-join').click();
+      await expect(page.getByTestId('listen-status'))
+        .toHaveText('Listening', { timeout: 25_000 });
+
+      expect(await page.evaluate(() => window.__listenerSockets)).toBe(1);
+
+      // Break ONLY the listener's socket. The Broadcast keeps running.
+      await page.evaluate(() => window.__lastListenerSocket.close());
+
+      // A fresh socket, not a storm of them.
+      await expect.poll(() => page.evaluate(() => window.__listenerSockets),
+                        { timeout: 30_000 }).toBeGreaterThan(1);
+
+      // Back to real playback, from a fresh bootstrap at the live edge.
+      await expect(page.getByTestId('listen-status'))
+        .toHaveText('Listening', { timeout: 30_000 });
+      const truth = await playbackTruth(page);
+      expect(truth.paused).toBe(false);
+      expect(truth.advanced, 'playback did not resume after reconnecting').toBe(true);
+
+      // Never told the Broadcast ended, never asked to join again.
+      await expect(page.getByTestId('listen-ended')).toHaveCount(0);
+      await expect(page.getByTestId('listen-join')).toHaveCount(0);
+
+      // The SAME participant - a reconnect is not a new admission.
+      const room = await api('GET', `/broadcast/sessions/${live.sid}/web-room`, headers);
+      expect(room.body.counts.admitted).toBe(1);
+      expect(room.body.listeners.length).toBe(1);
+
+      // Bounded: a handful of attempts, not an unbounded retry loop.
+      const sockets = await page.evaluate(() => window.__listenerSockets);
+      expect(sockets, `${sockets} listener sockets were opened`).toBeLessThan(8);
+    } finally {
+      stopBroadcastPump(live);
+    }
+  });
+
+  // ======================================================================
   // TEST E - the room really ending
   // ======================================================================
   test('E: Ended appears only after the broadcaster actually stops',
