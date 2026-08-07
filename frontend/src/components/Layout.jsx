@@ -44,7 +44,7 @@ export default function Layout() {
   return (
     // The shell is exactly one viewport tall and never scrolls itself, so the
     // document is never the vertical scroll owner. Main owns scrolling.
-    <div className="h-screen bg-slate-50 overflow-hidden">
+    <div data-testid="app-shell" className="h-screen bg-slate-50 overflow-hidden">
       {/* Sidebar */}
       {/* FIXED to the viewport, on every screen size and in every state.
           It was md:sticky, which keeps a sticky element in normal flow and
@@ -104,8 +104,9 @@ export default function Layout() {
       {/* Main */}
       {/* md:ml-64 matches the w-64 sidebar exactly. A fixed sidebar is out of
           flow, so without this offset the page would sit underneath it. */}
-      <div className="md:ml-64 flex flex-col min-w-0 h-screen">
-        <header className="h-16 shrink-0 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6">
+      <div data-testid="app-main-shell"
+           className="md:ml-64 flex flex-col min-w-0 h-screen min-h-0 overflow-hidden">
+        <header data-testid="app-header" className="h-16 shrink-0 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6">
           <button
             data-testid="sidebar-toggle-btn"
             className="md:hidden p-2 rounded-md hover:bg-slate-100"
@@ -117,7 +118,8 @@ export default function Layout() {
         </header>
         {/* Room reserved across EVERY page while the player is up, so no
             table, pagination control or form action ends up underneath it. */}
-        <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 md:p-6"
+        <main data-testid="app-main-scroll"
+              className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 md:p-6"
               style={active ? { paddingBottom: PLAYER_BAR_HEIGHT + 24 } : undefined}>
           <Outlet />
         </main>
