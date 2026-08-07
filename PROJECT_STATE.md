@@ -7290,3 +7290,96 @@ an account without `broadcast.store_delivery` never requests the inventory.
 
 Dynamic mid-Broadcast targeting: Add / Pause / Resume / Remove and Zone bulk
 actions. Unchanged by this work.
+
+---
+
+## Public listener acceptance, and the live Console layout
+
+### The LAN Secure-cookie defect
+
+Manual LAN testing found two release-blocking failures **while the entire mocked
+Playwright suite was green**. One cause: the listener cookie carried `Secure`,
+and Chromium refuses a `Secure` cookie from an untrustworthy origin — which
+`http://192.168.4.134:8000` is. The browser stored nothing, so every listener
+request arrived anonymous.
+
+It never reproduced in the suite because **`http://localhost` is trustworthy**
+and keeps Secure cookies. The tests were right about the code and wrong about
+the world.
+
+**Two symptoms, one cause:**
+- *Request → Approve → "Broadcast Ended"* — the pending cookie was dropped,
+  `/listen/me` returned 401, and the client mapped 401 → `ENDED`.
+- *Password → Buffering for ever* — the socket handshake was refused for want of
+  a cookie, and **refusing before `accept()` cannot deliver an application close
+  code**: the browser sees only `1006`, indistinguishable from a dropped
+  network, so the client retried behind Buffering.
+
+### Cookie policy
+
+Decided **per request from the scheme the browser actually used**:
+
+| | HttpOnly | SameSite | Secure |
+|---|---|---|---|
+| LAN over HTTP | yes | Lax | **no** |
+| Production HTTPS | yes | Lax | **yes** |
+
+`X-Forwarded-Proto` is honoured **only** under the existing trusted-proxy
+setting. Path stays `/api/listen`. No global switch to forget, and production is
+never weakened to make a pilot work.
+
+### Listener states
+
+`ENDED` means the Broadcast is over. `LOST` means this browser has no valid
+listener session. `WAITING_BROADCAST` means admitted before the microphone
+opened. Conflating the first two is what told an approved listener their
+Broadcast had finished.
+
+The socket **accepts before refusing** so it can say `not_admitted` or
+`not_started` rather than leaving the page to guess from `1006`.
+
+**Buffering is bounded:** connected but `currentTime` unmoved for 8 s — long
+enough that a 300 ms Cluster and a two-Cluster bootstrap have had every chance —
+reports the failure and re-bootstraps. **LISTENING** still requires real
+playback progress.
+
+### Real-backend E2E: 8/8
+
+Nothing mocked — real FastAPI on a temp database and its own port (never 8000,
+which is the live HQ), real admission rows, the real `Set-Cookie`, real listener
+socket, relay and framer, real audio through the actual broadcaster socket, real
+Chromium MediaSource.
+
+A password → LISTENING · B request→approve → LISTENING · C wrong password ·
+**D autoplay blocked → tap → LISTENING** · E real Stop → Ended ·
+**F disconnect → reconnect → LISTENING** · G Kick · H rotation.
+
+### Console layout
+
+Controls **4/12** · Web Audience **5/12** · Targets **3/12**, then the Stores
+below. The audience used to sit under the Store table, which meant scrolling
+past forty Stores mid-broadcast. Same `WebAudiencePanel`, reused not forked; in
+the row its waiting and listener lists are bounded and internally scrollable.
+Asserted geometrically — order, aligned tops, relative widths, Stores below,
+card under 900 px with a large audience, and clean stacking at 800 px.
+
+### Sidebar
+
+The reported scroll-away **could not be reproduced on this branch**: measured at
+1920/1440/1280/1024/900/820/768/700 px the aside holds viewport top 0 and the
+document never scrolls. No production change was made; the missing regression
+tests were added instead. The live HQ at `192.168.4.134:8000` is an **older
+deployment** and is not evidence about this branch.
+
+### Preserved
+
+Online Stores Only from Receiver connectivity, Start-time revalidation, target
+freeze, zero-online refusal, the Store picker (search/Zone/City/status,
+10/20/50, Select Page, Select All Filtered, selection persistence), and the
+Recording Player (smooth RAF progress, exact thumb, one-click A→B, route
+persistence).
+
+### Next milestone
+
+Dynamic mid-Broadcast Store targeting: Add / Pause / Resume / Remove and Zone
+bulk actions. Still pending.
