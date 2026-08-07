@@ -64,9 +64,23 @@ test.describe('the public SpeakLink listener', () => {
       DrivenSocket.OPEN = 1;
       window.WebSocket = DrivenSocket;
 
+      // The page opens its socket only after the session bootstrap round trip,
+      // so a test that starts pushing the moment the join resolves can arrive
+      // before the socket exists. Wait for it rather than assume it.
+      window.__socket = async () => {
+        const deadline = performance.now() + 15_000;
+        while (window.__sockets.length === 0) {
+          if (performance.now() > deadline) {
+            throw new Error('the listener never opened a socket');
+          }
+          await new Promise((resume) => setTimeout(resume, 50));
+        }
+        return window.__sockets[window.__sockets.length - 1];
+      };
+
       // Push the bootstrap and then every Cluster, as the relay does.
-      window.__deliver = (fromCluster) => {
-        const socket = window.__sockets[window.__sockets.length - 1];
+      window.__deliver = async (fromCluster) => {
+        const socket = await window.__socket();
         const clusters = window.__listenerFrames.filter((f) => f.kind === 'cluster');
         const init = window.__listenerFrames.find((f) => f.kind === 'init');
         socket.onmessage({ data: JSON.stringify({
@@ -77,12 +91,12 @@ test.describe('the public SpeakLink listener', () => {
           socket.onmessage({ data: new Uint8Array(clusters[i].bytes).buffer });
         }
       };
-      window.__pushControl = (message) => {
-        const socket = window.__sockets[window.__sockets.length - 1];
+      window.__pushControl = async (message) => {
+        const socket = await window.__socket();
         socket.onmessage({ data: JSON.stringify(message) });
       };
-      window.__dropSocket = (code) => {
-        const socket = window.__sockets[window.__sockets.length - 1];
+      window.__dropSocket = async (code) => {
+        const socket = await window.__socket();
         socket.readyState = 3;
         socket.onclose({ code });
       };
