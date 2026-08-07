@@ -5532,16 +5532,51 @@ LISTENER_COOKIE = "echocast_listener"
 #: anyway, so this is a backstop rather than the primary control.
 LISTENER_COOKIE_MAX_AGE = 6 * 60 * 60
 
-#: HTTPS is required before this is exposed beyond a LAN, and Secure cookies do
-#: not survive plain HTTP. Rather than silently weakening the production default
-#: to make a pilot work, the LAN mode is an explicit, named opt-in.
+#: Kept only so an operator who set it does not get an error; the cookie policy
+#: is now decided per request from the scheme the browser actually used, which
+#: needs no configuration and cannot be forgotten. See _listener_cookie_kwargs.
 LISTENER_COOKIE_INSECURE = os.getenv("ECHOCAST_LAN_HTTP_LISTENERS", "") == "1"
 
 
-def _listener_cookie_kwargs() -> dict:
+def _request_is_https(request: Request) -> bool:
+    """Whether the BROWSER reached us over HTTPS.
+
+    A forwarded protocol header is honoured only when a proxy is explicitly
+    trusted, for the same reason X-Forwarded-For is: otherwise any caller could
+    assert it.
+    """
+    if TRUST_PROXY_HEADERS:
+        forwarded = request.headers.get("x-forwarded-proto", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip().lower() == "https"
+    return request.url.scheme == "https"
+
+
+def _listener_cookie_kwargs(request: Request) -> dict:
+    """Cookie flags for the listener session, decided per request.
+
+    ``secure`` follows the SCHEME THE BROWSER ACTUALLY USED, and this is the fix
+    for a release-blocking defect rather than a preference.
+
+    It used to be a global env flag, defaulting to Secure. On the LAN pilot HQ
+    is reached over plain HTTP at 192.168.x.x, and Chromium refuses to store a
+    Secure cookie from an untrustworthy origin - so the listener session was
+    dropped by the browser and every request arrived anonymous. A password join
+    then failed its WebSocket handshake and buffered for ever, and an approved
+    listener polling its own state got 401 and was shown "Broadcast ended".
+
+    None of that reproduced in the test suite, because http://localhost IS a
+    trustworthy origin and keeps Secure cookies. The tests were right about the
+    code and wrong about the world.
+
+    Deciding per request keeps production strict without a global switch: served
+    over HTTPS the cookie is Secure, served over plain HTTP on a LAN it is not,
+    and no deployment has to remember to set anything. HttpOnly, SameSite and
+    the /api/listen path are unchanged and unconditional.
+    """
     return {
         "httponly": True,          # never readable by page script
-        "secure": not LISTENER_COOKIE_INSECURE,
+        "secure": _request_is_https(request),
         # Lax, not None: the listener app is same-origin with HQ, so nothing
         # needs to send this cookie cross-site, and SameSite=None would hand it
         # to every third-party page that can make the browser issue a request.
@@ -5648,7 +5683,7 @@ def public_room_join(public_code: str, payload: ListenerJoin, request: Request,
         raise HTTPException(status_code=404, detail="No live Broadcast with that ID.")
 
     web_join_limiter.forget(key)
-    response.set_cookie(LISTENER_COOKIE, token, **_listener_cookie_kwargs())
+    response.set_cookie(LISTENER_COOKIE, token, **_listener_cookie_kwargs(request))
     return _listener_view(room, participant, live=_session_is_live(room.session_id))
 
 
@@ -5678,14 +5713,14 @@ def public_room_request_access(public_code: str, payload: ListenerRequestAccess,
 
     if token is not None:
         # Auto Approve admitted them at once.
-        response.set_cookie(LISTENER_COOKIE, token, **_listener_cookie_kwargs())
+        response.set_cookie(LISTENER_COOKIE, token, **_listener_cookie_kwargs(request))
     else:
         # A pending participant still needs an identity to poll with, but it
         # must not be an admitted listener session. A short-lived claim ticket
         # naming only the participant serves that, and carries no authority.
         response.set_cookie(f"{LISTENER_COOKIE}_pending",
                             _pending_claim(participant.id),
-                            **_listener_cookie_kwargs())
+                            **_listener_cookie_kwargs(request))
     return _listener_view(room, participant, live=_session_is_live(room.session_id))
 
 
@@ -5746,7 +5781,7 @@ def listener_admission_state(request: Request, response: Response):
     if participant.is_admitted:
         pending = _PENDING_LISTENER_TOKENS.pop(participant.id, None)
         if pending is not None:
-            response.set_cookie(LISTENER_COOKIE, pending, **_listener_cookie_kwargs())
+            response.set_cookie(LISTENER_COOKIE, pending, **_listener_cookie_kwargs(request))
     return _listener_view(room, participant, live=_session_is_live(room.session_id))
 
 
@@ -5765,24 +5800,43 @@ async def ws_listener(websocket: WebSocket):
     this socket has no path to any of them, and unknown frames close it rather
     than being ignored, so a client cannot probe for one that is tolerated.
     """
+    async def refuse(reason: str, code: int) -> None:
+        """Accept, say why, then close.
+
+        Closing BEFORE the handshake completes cannot deliver an application
+        close code: the browser only ever sees 1006, indistinguishable from a
+        dropped network. That is what made a refused listener retry for ever
+        showing Buffering instead of reporting the refusal. Accepting first
+        costs one frame and lets the page tell the truth.
+        """
+        try:
+            await websocket.accept()
+            await websocket.send_text(json.dumps({"type": "refused", "reason": reason}))
+        except Exception:
+            pass
+        try:
+            await websocket.close(code=code)
+        except Exception:
+            pass
+
     token = websocket.cookies.get(LISTENER_COOKIE)
     resolved = web_rooms.authenticate_listener(engine, token=token) if token else None
     if resolved is None:
-        # 4401 for every reason - unknown, kicked, denied, room ended. Telling
-        # them which is telling them about a room they are not in.
-        await websocket.close(code=4401)
+        # One reason for every cause - unknown, kicked, denied, room ended.
+        # Telling them which is telling them about a room they are not in.
+        await refuse("not_admitted", 4401)
         return
     room, participant = resolved
 
     if not _session_is_live(room.session_id):
-        # Admitted early, before the microphone is on. Not an error, but there
-        # is nothing to send yet.
-        await websocket.close(code=4409)
+        # Admitted early, before the microphone is on. Not an error, and
+        # explicitly NOT "ended" - the page should wait, not give up.
+        await refuse("not_started", 4409)
         return
 
     relay = manager.broadcasts.web_relay(room.session_id)
     if relay is None or not relay.ready:
-        await websocket.close(code=4409)
+        await refuse("not_started", 4409)
         return
 
     await websocket.accept()

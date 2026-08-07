@@ -332,3 +332,4 @@ build/pyi-work-*/
 # "ECHOCAST_CAPTURE_WEBM=1 npx playwright test e2e/capture-fixture.spec.js".
 /backend/tests/fixtures/mediarecorder-live.webm
 /backend/tests/fixtures/mediarecorder-live.chunks.json
+/frontend/build-e2e/
