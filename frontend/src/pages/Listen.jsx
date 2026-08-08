@@ -312,12 +312,16 @@ export default function Listen() {
     }
   }, [code, name, password, connect]);
 
-  // ---- starting over after a removal -------------------------------------
-  // Discards the spent session and returns to the join form. It admits nobody:
-  // the listener still has to supply the current password or ask again, and
-  // the broadcaster still decides. Without an explicit action here a Kick
-  // would either be permanent or undo itself, and neither is what it means.
-  const joinAgain = React.useCallback(async () => {
+  // ---- starting over after a removal or a denial --------------------------
+  // Discards the spent session and returns to the join form. It admits nobody
+  // and requests nothing: the listener still has to supply the current
+  // password or ask again, and the broadcaster still decides. Without an
+  // explicit action here a Kick or a Deny would either be permanent or undo
+  // itself, and neither is what either of them means.
+  //
+  // One function for both, because both are the same thing: an attempt that is
+  // over, and a listener who may make another one.
+  const startOver = React.useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
@@ -348,7 +352,15 @@ export default function Listen() {
     const tick = async () => {
       if (stoppedRef.current) return;
       try {
-        const { data } = await api.get("/listen/me");
+        // Scoped, exactly like the bootstrap. Unscoped, this asked "what is my
+        // state" with no room attached and took whatever came back - so a
+        // leftover session or claim from a DIFFERENT Broadcast could answer,
+        // and this page would show that other room's denial, removal or
+        // admission as though it were this one's.
+        const room = (code || "").trim();
+        const { data } = await api.get("/listen/me", {
+          params: room ? { public_code: room } : undefined,
+        });
         setBroadcastLive(!!data.broadcast_live);
         if (data.admitted) { setPhase(Phase.LIVE); connect(); return; }
         if (data.admission_status === "DENIED") { setPhase(Phase.DENIED); return; }
@@ -367,7 +379,7 @@ export default function Listen() {
       retryRef.current = setTimeout(tick, 2500);
     };
     retryRef.current = setTimeout(tick, 1500);
-  }, [connect]);
+  }, [connect, code]);
 
   // Kept current so the mount-time restore can call them without the whole
   // component having to be reordered around it.
@@ -491,6 +503,19 @@ export default function Listen() {
             <p className="mt-1 text-sm text-slate-400">
               The broadcaster did not admit you to this Broadcast.
             </p>
+            {/* A denial ends one attempt, not the listener's day. The button
+                returns them to the form; it does not resend the request, so
+                the broadcaster is never asked twice by a page nobody
+                touched. */}
+            <button
+              type="button"
+              data-testid="listen-request-again"
+              onClick={startOver}
+              disabled={busy}
+              className="mt-4 rounded-lg bg-white px-4 py-2 text-sm font-semibold
+                         text-slate-900 disabled:opacity-60">
+              Request again
+            </button>
           </Panel>
         )}
 
@@ -507,7 +532,7 @@ export default function Listen() {
             <button
               type="button"
               data-testid="listen-join-again"
-              onClick={joinAgain}
+              onClick={startOver}
               disabled={busy}
               className="mt-4 rounded-lg bg-white px-4 py-2 text-sm font-semibold
                          text-slate-900 disabled:opacity-60">
