@@ -5783,17 +5783,42 @@ def _participant_from_claim(claim: str) -> int | None:
     return int(raw_id)
 
 
+def _forget_listener_cookies(request: Request, response: Response) -> None:
+    """Drop both listener cookies. They are HttpOnly, so only we can."""
+    kwargs = _listener_cookie_kwargs(request)
+    for name in (LISTENER_COOKIE, f"{LISTENER_COOKIE}_pending"):
+        response.delete_cookie(name, path=kwargs["path"],
+                               samesite=kwargs["samesite"],
+                               secure=kwargs["secure"], httponly=True)
+
+
 @api.get("/listen/me")
-def listener_admission_state(request: Request, response: Response):
-    """A listener's own state, and nothing about anybody else.
+def listener_admission_state(request: Request, response: Response,
+                             public_code: str | None = None):
+    """A listener's own state IN ONE ROOM, and nothing about anybody else.
 
     Serves two callers: an admitted listener holding a session cookie, and a
     waiting one holding a pending claim. The second is how Approve reaches a
     browser without a page refresh.
+
+    ``public_code`` names the Broadcast the browser is actually looking at, and
+    state belonging to any OTHER Broadcast answers exactly as if there were no
+    session at all.
+
+    Without that this endpoint answered "whatever room this browser last
+    touched", which is how a Kick became global: a kicked listener's pending
+    claim still resolved, so opening a completely different Broadcast's link
+    returned the OLD room's KICKED row and the page said "You were removed from
+    this Broadcast" about a Broadcast they had never joined. A Kick removes a
+    participant from one room; it is not a ban, and it must not answer for a
+    room it was never about.
     """
+    def belongs_here(room) -> bool:
+        return public_code is None or room.public_code == public_code
+
     token = request.cookies.get(LISTENER_COOKIE)
     resolved = web_rooms.authenticate_listener(engine, token=token) if token else None
-    if resolved is not None:
+    if resolved is not None and belongs_here(resolved[0]):
         room, participant = resolved
         return _listener_view(room, participant,
                               live=_session_is_live(room.session_id))
@@ -5807,15 +5832,36 @@ def listener_admission_state(request: Request, response: Response):
     if participant is None:
         raise HTTPException(status_code=401, detail="Not admitted to a Broadcast.")
     room = web_rooms.get_room_by_id(engine, room_id=participant.room_id)
-    if room is None:
+    if room is None or not belongs_here(room):
         raise HTTPException(status_code=401, detail="Not admitted to a Broadcast.")
 
-    # Approved while waiting: hand over the listener session now, once.
+    # Approved while waiting: hand over the listener session now, once. The
+    # claim has done its job and is cleared, so it cannot later answer for a
+    # room the browser has moved on from.
     if participant.is_admitted:
         pending = _PENDING_LISTENER_TOKENS.pop(participant.id, None)
         if pending is not None:
-            response.set_cookie(LISTENER_COOKIE, pending, **_listener_cookie_kwargs(request))
+            response.set_cookie(LISTENER_COOKIE, pending,
+                                **_listener_cookie_kwargs(request))
+            response.delete_cookie(
+                f"{LISTENER_COOKIE}_pending",
+                path=_listener_cookie_kwargs(request)["path"],
+                samesite="lax", secure=_request_is_https(request), httponly=True)
     return _listener_view(room, participant, live=_session_is_live(room.session_id))
+
+
+@api.post("/listen/forget")
+def listener_forget(request: Request, response: Response):
+    """Discard this browser's listener session so it can start over.
+
+    This is what "Join Again" after a Kick calls. It grants nothing: it only
+    throws away cookies the browser cannot reach itself, returning the page to
+    the ordinary join form. Rejoining still requires the current password or a
+    fresh Request Access, and the broadcaster still decides - which is why Kick
+    stays meaningful rather than becoming a button that undoes itself.
+    """
+    _forget_listener_cookies(request, response)
+    return {"forgotten": True}
 
 
 # ================ LISTENER AUDIO SOCKET ================

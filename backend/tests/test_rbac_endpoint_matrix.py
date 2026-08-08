@@ -263,6 +263,10 @@ DELIBERATELY_UNAUTHENTICATED = {
     "public_room_join",           # the join password is the authorisation
     "public_room_request_access", # asking the broadcaster to be let in
     "listener_admission_state",   # a listener's own state, via its own cookie
+    # Discards this browser's own listener cookies so it can start over after
+    # being removed. It grants nothing and reads nothing: requiring an account
+    # to throw away your own session would be requiring an account to leave.
+    "listener_forget",
 }
 
 #: WebSocket routes. They authenticate, just not through ``get_current_user``,
