@@ -90,7 +90,15 @@ from tools.receiver_credential_store import (  # noqa: E402
 )
 
 
-AGENT_VERSION = "1.0.0"
+#: What this Receiver reports to HQ and prints for --version.
+#:
+#: The packaging script takes a -Version and names the package directory with
+#: it, but nothing ever wrote it here - so every Receiver ever built announced
+#: 1.0.0 whatever its package said, and HQ recorded that as each device's
+#: software version. An operator reading the fleet could not tell 1.4.0 from
+#: the first build. Kept in step with the packaged version by hand, which is at
+#: least a step that exists.
+AGENT_VERSION = "1.5.0"
 ENROLMENT_PATH = "/api/receiver-devices/enroll"
 RECEIVER_WEBSOCKET_PATH = "/api/ws/receiver"
 
