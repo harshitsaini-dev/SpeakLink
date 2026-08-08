@@ -726,14 +726,26 @@ class AudioReceiverPilot:
         # Receiver waiting for an operator-driven browser broadcast is closed
         # by the backend after OFFLINE_AFTER_SECONDS and simply disappears.
         heartbeat = asyncio.create_task(self._heartbeat_loop(connection))
+        # Report changes made at the till back to HQ.
+        #
+        # Everything this needs was already here - the Core Audio observer, the
+        # coalescing, the sequence counter, the endpoint_state message, the
+        # backend handler and the Console's display of it - and none of it ran,
+        # because nothing ever started this loop. A Store employee turning the
+        # volume down was observed, coalesced, and then sat in the observer's
+        # single slot until it was overwritten by the next change. HQ went on
+        # showing its own last command, which is exactly what the operator saw.
+        endpoint_state = asyncio.create_task(self._endpoint_state_loop(connection))
         try:
             await self._session_loop(connection)
         finally:
-            heartbeat.cancel()
-            try:
-                await heartbeat
-            except asyncio.CancelledError:
-                pass
+            for task in (heartbeat, endpoint_state):
+                task.cancel()
+            for task in (heartbeat, endpoint_state):
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
             await self._shutdown(connection)
 
         self.report["ended_at_utc"] = _utc_now()
@@ -1059,7 +1071,14 @@ class AudioReceiverPilot:
         while True:
             observer = self._endpoint_observer
             if observer is None or not observer.started:
-                return
+                # Not observing YET, which is the normal state between
+                # connecting and PREPARE - the observer is started when a
+                # broadcast is prepared and stopped again at restoration. This
+                # waits for that rather than returning, because returning would
+                # end the only task that can ever report a change and there is
+                # nothing to start it a second time.
+                await asyncio.sleep(windows_endpoint_observer.COALESCE_SECONDS)
+                continue
             # Waking on the event rather than polling: the wait returns
             # immediately when something changed and otherwise costs nothing.
             await asyncio.to_thread(
