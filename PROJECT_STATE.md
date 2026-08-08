@@ -7745,3 +7745,102 @@ unchanged. Dynamic Store targeting - Add, Pause, Resume, Remove, Zone bulk
 actions - remains the next milestone. **No software state equals
 SPEAKER_VERIFIED**: an endpoint level is control truth, not proof anybody heard
 anything.
+
+## Two-way Store volume: PHYSICALLY ACCEPTED on BP
+
+The operator physically tested the whole loop on BP and it passed: HQ to BP
+Windows master, BP local change back to HQ, no force-back, mute and unmute both
+ways, HQ able to take control again after a local change, and Stop restoring
+the exact pre-Broadcast state.
+
+Baseline is now **Receiver 1.5.0 / Store Kit 1.8.0**.
+
+## Dynamic single-Store targeting: audited, and BLOCKED on two design conflicts
+
+Branch `feature/dynamic-store-targeting`. Phase 1 (audit) is complete; no
+mutation code was written, because the audit found two guarantees in the
+requested contract that the current architecture cannot express without a
+Receiver change - and the instruction was to surface exactly that before
+weakening anything.
+
+### What exists
+
+| | |
+|---|---|
+| Target model | `broadcast_targets`, one row per (session, store), `backend/models.py:181` |
+| Lease | `broadcast_store_leases` + partial unique index on `(store_id) WHERE released_at IS NULL`, atomic all-or-nothing acquire, `backend/broadcast_reservation.py:162` |
+| Per-Store queue | `StoreAudioQueue`, bounded at 24 chunks (~6 s), drop-oldest with counters, `backend/audio_streaming.py:56` |
+| Fanout | `AudioFanout.start_store` / `stop_store` already exist, `backend/audio_streaming.py:200` |
+| Receiver protocol | `prepare`, `play`, `stop`, `set_audio_control`; acks carry `session_id` and are validated against the active session |
+| Late-join | Exists for the WEB path only: `WebmStreamFramer` + `WebAudienceRelay` cached init segment and Cluster ring |
+| RBAC | `broadcast.store_delivery` + Store Scope, single choke point `_require_physical_delivery` |
+
+### What does not exist
+
+No per-target generation. No per-Store lease release. No per-Store
+enable/disable in fanout (`target_store_ids` is a frozenset fixed at start). No
+add/pause/resume/remove operation of any kind - `backend/server.py:2850` states
+the set is frozen for the life of the broadcast by design.
+
+### BLOCKER 1 - the Receiver cannot be paused and resumed
+
+`tools/audio_receiver_pilot.py:808` - `stop` is **terminal**:
+
+```
+elif kind == "stop":
+    await self._on_stop(connection, payload)
+    return          # leaves _session_loop; run() then closes the socket
+```
+
+`_on_stop` closes the decoder, the PCM sink and the queue and restores the
+Windows endpoint. There is no primitive that stands a Receiver down for one
+participation segment and brings it back inside the same live session.
+
+Pause as specified needs exactly that: stop this Store's playback, restore its
+Windows state, leave its mixer alone, and later rejoin at the live edge. Simply
+not sending audio from HQ does not satisfy it - the decoder stays open, the
+endpoint stays under SpeakLink control, and the mixer is not left alone.
+
+**A new Receiver primitive is genuinely required**, and with it Receiver 1.6.0
+and Store Kit 1.9.0 - which this milestone's instruction pre-emptively
+discouraged. That is the decision to take.
+
+### BLOCKER 2 - per-participation-segment restoration cannot be expressed
+
+The endpoint snapshot is captured once, in `_on_prepare`, keyed by session id,
+into a **single-slot record file per install**
+(`tools/audio_receiver_pilot.py:916`, `tools/windows_endpoint_restore.py:68`).
+
+The requested contract needs a NEW baseline captured on every Resume, so that a
+change the Store made while paused is not overwritten hours later by a value
+from before the Broadcast began. That is a second snapshot lifecycle in the
+Receiver, not a backend change.
+
+### NOT a blocker, but real work
+
+**Store late-join.** Stores receive raw broadcaster bytes with no framing -
+`backend/server.py:5287` fans out the untouched socket bytes, and the framer
+runs only on the web path afterwards. Correctness today rests entirely on every
+Store being prepared before the first byte. A Store added mid-Broadcast would
+receive a headerless mid-stream run and its FFmpeg would have nothing to
+decode. This is fixable **HQ-side** by reusing `WebmStreamFramer` and the
+cached init segment for Store queues, with no Receiver change.
+
+**Per-Store lease release** is safe to add as a `(session_id, store_id)`
+release. The existing docstring warns against a `store_id`-only release, which
+is a different and genuinely dangerous thing.
+
+### Pre-existing defect found during the audit
+
+`backend/broadcast_runtime.py:248` plus `backend/audio_streaming.py:230`:
+`_started_stores` is add-only and a Store's pump exits permanently on its first
+send failure. A Receiver that drops and reconnects mid-Broadcast is back in the
+target set but never gets a new pump - its queue keeps accepting and
+drop-oldest-ing with no consumer, and HQ still sends it a `play`. Any Add or
+Resume lands directly on this code path and should fix it.
+
+### Consequence
+
+**Add alone can be built with no Receiver change** (late-join framing, lease,
+generation, fanout mutation). **Pause, Resume and Remove-with-restoration
+cannot.** Zone bulk actions remain out of scope and untouched.
