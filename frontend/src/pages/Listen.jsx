@@ -120,7 +120,13 @@ export default function Listen() {
     let cancelled = false;
     (async () => {
       try {
-        const { data } = await api.get("/listen/me");
+        // Scoped to the Broadcast in the URL. Asking "what is my state" without
+        // saying which room answered for whatever room this browser last
+        // touched, so a listener kicked from one Broadcast opened a completely
+        // different one and was told they had been removed from it.
+        const { data } = await api.get("/listen/me", {
+          params: publicCode ? { public_code: publicCode } : undefined,
+        });
         if (cancelled) return;
         setBroadcastLive(!!data.broadcast_live);
         if (data.display_name) setName(data.display_name);
@@ -306,6 +312,35 @@ export default function Listen() {
     }
   }, [code, name, password, connect]);
 
+  // ---- starting over after a removal -------------------------------------
+  // Discards the spent session and returns to the join form. It admits nobody:
+  // the listener still has to supply the current password or ask again, and
+  // the broadcaster still decides. Without an explicit action here a Kick
+  // would either be permanent or undo itself, and neither is what it means.
+  const joinAgain = React.useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post("/listen/forget");
+    } catch (ignored) {
+      // The cookies are being discarded either way; a failure here only means
+      // the server did not get to clear them, and the form still works.
+    } finally {
+      teardown();
+      // The Kick set the permanent stop flag, which is what stops the page
+      // reconnecting on its own. Choosing to come back has to clear it, or
+      // connect() returns immediately and the page shows a stale Listening
+      // over a socket it never opened. The playback state is reset for the
+      // same reason: it is the LAST session's, and this is a new one.
+      stoppedRef.current = false;
+      setPlayback(ListenerPlaybackState.CONNECTING);
+      setNeedsTap(false);
+      setPassword("");
+      setPhase(Phase.FORM);
+      setBusy(false);
+    }
+  }, [teardown]);
+
   // While waiting, the browser asks about ITSELF - never about the room's
   // participants - so an Approve reaches it without anybody refreshing.
   const pollAdmission = React.useCallback(() => {
@@ -462,6 +497,22 @@ export default function Listen() {
         {phase === Phase.KICKED && (
           <Panel testId="listen-kicked">
             <p className="font-semibold">You were removed from this Broadcast.</p>
+            <p className="mt-1 text-sm text-slate-400">
+              You can ask to join again. The broadcaster decides.
+            </p>
+            {/* Deliberately a button and not an automatic retry. Kick has to
+                terminate the current admission, so returning has to be
+                something the listener chooses - and it returns them to the
+                join form, not to the Broadcast. */}
+            <button
+              type="button"
+              data-testid="listen-join-again"
+              onClick={joinAgain}
+              disabled={busy}
+              className="mt-4 rounded-lg bg-white px-4 py-2 text-sm font-semibold
+                         text-slate-900 disabled:opacity-60">
+              Join again
+            </button>
           </Panel>
         )}
 
