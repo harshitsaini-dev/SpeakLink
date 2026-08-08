@@ -550,7 +550,7 @@ class EnrolmentScreen(ttk.Frame):
 
     def _set_settings_password(self) -> None:
         """Create it here, with the same function every other screen uses."""
-        if not establish_settings_password(self, self.app):
+        if not set_settings_password(self, self.app):
             return
         self._password_notice.pack_forget()
         self.status_var.set(
