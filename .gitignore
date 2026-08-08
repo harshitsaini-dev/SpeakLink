@@ -333,3 +333,6 @@ build/pyi-work-*/
 /backend/tests/fixtures/mediarecorder-live.webm
 /backend/tests/fixtures/mediarecorder-live.chunks.json
 /frontend/build-e2e/
+
+# Isolated verification builds. Never the live HQ frontend.
+frontend/build-dev/
