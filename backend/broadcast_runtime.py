@@ -43,6 +43,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from audio_streaming import DEFAULT_STORE_QUEUE_CAPACITY, AudioFanout
+from store_late_join import (
+    DELIVERY_INITIAL_RAW,
+    DELIVERY_LATE_JOIN_FRAMED,
+    StoreLateJoinSource,
+)
 from web_audience import WebAudienceRelay
 
 logger = logging.getLogger("speaklink.broadcast")
@@ -68,6 +73,25 @@ class LiveBroadcast:
     #: Clusters can never reach another's listener. Web delivery is a sibling of
     #: Store fanout and recording: none of the three can delay the others.
     web_relay: WebAudienceRelay | None = None
+    #: Enough of this Broadcast's own stream for a Store to start mid-way: the
+    #: initialization segment, and whole Clusters as they complete. Separate
+    #: from the web relay on purpose - a physical Store must not fail to join
+    #: because the web audience is disabled or degraded for its own reasons.
+    late_join: "StoreLateJoinSource | None" = None
+    #: store_id -> INITIAL_RAW or LATE_JOIN_FRAMED. Explicit, never inferred
+    #: from what happens to be in a queue: a Store that joined late stays on
+    #: framed delivery for its whole participation, because the moment it went
+    #: back to raw chunks would be the middle of a Cluster.
+    delivery_modes: dict = field(default_factory=dict)
+    #: Stores added AFTER this Broadcast went live. Kept beside the frozen
+    #: initial set rather than replacing it, so "who was targeted at start"
+    #: stays answerable and a dynamic Add cannot quietly rewrite history.
+    #: Mutated only under the runtime lock.
+    dynamic_store_ids: set = field(default_factory=set)
+
+    @property
+    def all_target_store_ids(self) -> frozenset:
+        return frozenset(self.target_store_ids) | frozenset(self.dynamic_store_ids)
     #: Which Stores have a pump is asked of the fanout, which knows whether the
     #: task is still alive. This used to be a set here that was only ever added
     #: to, so a Store whose pump had died stayed "started" and never got
@@ -102,7 +126,11 @@ class BroadcastRuntime:
                 fanout=AudioFanout(capacity=self._capacity),
                 started_at=datetime.now(timezone.utc),
                 web_relay=WebAudienceRelay(session_id=session_id),
+                late_join=StoreLateJoinSource(session_id=session_id),
             )
+            # Everything targeted at start is on the raw path, unchanged.
+            for store_id in live.target_store_ids:
+                live.delivery_modes[store_id] = DELIVERY_INITIAL_RAW
             self._sessions[session_id] = live
             return live
 
@@ -244,7 +272,7 @@ class BroadcastRuntime:
         live = self._sessions.get(session_id)
         if live is None:
             return 0
-        targets = set(live.target_store_ids) & set(connected_store_ids)
+        targets = set(live.all_target_store_ids) & set(connected_store_ids)
         if not targets:
             return 0
 
@@ -263,7 +291,77 @@ class BroadcastRuntime:
                 await live.fanout.start_store(store_id,
                                               self._sender_factory(store_id))
 
-        return live.fanout.broadcast(targets, data)
+        # Frame the stream for whoever may join later. Done for every chunk so
+        # the initialization segment is already in hand when an operator adds a
+        # Store, rather than making them wait for the next header - which, in a
+        # single continuous MediaRecorder stream, never comes.
+        clusters = []
+        if live.late_join is not None:
+            clusters = live.late_join.offer(data)
+
+        raw_targets = {s for s in targets
+                       if live.delivery_modes.get(s, DELIVERY_INITIAL_RAW)
+                       != DELIVERY_LATE_JOIN_FRAMED}
+        framed_targets = targets - raw_targets
+
+        # Stores present from the start receive the broadcaster's chunks
+        # untouched. That path is physically accepted and is not being changed.
+        accepted = live.fanout.broadcast(raw_targets, data)
+
+        # Late joiners receive WHOLE Clusters and nothing else, for the whole
+        # of their participation. A chunk that completes no Cluster sends them
+        # nothing, which is correct: a partial Cluster is not deliverable.
+        if framed_targets and clusters:
+            for frame in clusters:
+                accepted += live.fanout.broadcast(framed_targets, frame.data)
+        return accepted
+
+    async def join_store_at_live_edge(self, session_id: int, store_id: int):
+        """Start delivering to a Store that was not there at the beginning.
+
+        Sends the initialization segment, then leaves the Store on framed
+        delivery so everything after it arrives as whole Clusters. Returns a
+        small, secret-free summary, or None if this session is not live.
+
+        Refuses rather than improvises when the stream cannot be framed yet:
+        sending a joining Store the middle of a Cluster would leave its decoder
+        with nothing to open, and a Store that fails to join is a far better
+        outcome than a Store that appears to have joined and is silent.
+        """
+        async with self._lock:
+            live = self._sessions.get(session_id)
+            if live is None or live.late_join is None:
+                return None
+            bootstrap = live.late_join.bootstrap()
+            if bootstrap is None:
+                return {"joined": False,
+                        "reason": live.late_join.framing_error
+                        or "no initialization segment yet"}
+
+            # The mode is set BEFORE the queue exists, so the very first chunk
+            # this Store could be offered is already routed as framed.
+            live.delivery_modes[store_id] = DELIVERY_LATE_JOIN_FRAMED
+            live.dynamic_store_ids.add(store_id)
+            await live.fanout.start_store(store_id,
+                                          self._sender_factory(store_id))
+            for payload in bootstrap.payloads:
+                live.fanout.broadcast({store_id}, payload)
+        return {
+            "joined": True,
+            "init_bytes": len(bootstrap.init_segment),
+            "bootstrap_clusters": len(bootstrap.clusters),
+            "next_cluster_index": bootstrap.next_cluster_index,
+        }
+
+    def delivery_mode(self, session_id: int, store_id: int) -> str | None:
+        live = self._sessions.get(session_id)
+        return None if live is None else live.delivery_modes.get(store_id)
+
+    def late_join_metrics(self, session_id: int) -> dict | None:
+        live = self._sessions.get(session_id)
+        if live is None or live.late_join is None:
+            return None
+        return live.late_join.metrics()
 
     def metrics(self) -> dict:
         """Per-session, per-Store queue counters. Never an audio payload."""
