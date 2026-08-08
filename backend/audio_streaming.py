@@ -215,13 +215,41 @@ class AudioFanout:
         return {store_id: queue.metrics() for store_id, queue in sorted(self._queues.items())}
 
     async def start_store(self, store_id: int, sender: SenderCallable) -> None:
-        """Begin buffering and forwarding audio for one Store."""
+        """Begin buffering and forwarding audio for one Store.
+
+        Always a FRESH queue. A Store whose Receiver has been away must not
+        inherit what it missed - that audio is minutes old by the time anyone
+        reconnects, and playing it would put an announcement on air behind the
+        one that is actually live.
+        """
         await self.stop_store(store_id)
         queue = StoreAudioQueue(store_id=store_id, capacity=self._capacity)
         self._queues[store_id] = queue
-        self._tasks[store_id] = asyncio.create_task(
+        task = asyncio.create_task(
             self._pump(queue, sender), name=f"echocast-audio-store-{store_id}"
         )
+        self._tasks[store_id] = task
+        # Identity-guarded cleanup: a pump that ends late must remove its OWN
+        # slot and never the slot of the pump that replaced it. Without this a
+        # dying task can silently unbind a healthy reconnection.
+        task.add_done_callback(
+            lambda finished, sid=store_id: self._forget_pump(sid, finished))
+
+    def _forget_pump(self, store_id: int, task: asyncio.Task) -> None:
+        if self._tasks.get(store_id) is task:
+            self._tasks.pop(store_id, None)
+
+    def is_pumping(self, store_id: int) -> bool:
+        """Whether this Store has a live sender task right now.
+
+        The caller uses this to decide whether a Store needs a pump, rather
+        than remembering that it once had one. Remembering was the defect: a
+        Store whose pump had died stayed marked as started for ever, so a
+        reconnecting Receiver never got another and its queue filled and
+        dropped with nothing draining it.
+        """
+        task = self._tasks.get(store_id)
+        return task is not None and not task.done()
 
     async def _pump(self, queue: StoreAudioQueue, sender: SenderCallable) -> None:
         while True:
@@ -237,6 +265,11 @@ class AudioFanout:
                 raise
             except Exception as error:
                 # Never log the audio payload itself.
+                #
+                # Ending this task is right - the socket is gone and there is
+                # nothing to send to. It is NOT a verdict on the Store: the
+                # runtime sees the pump is no longer alive and starts a new one
+                # against whatever connection exists by then.
                 logger.warning(
                     "audio send failed for store=%s after %s",
                     queue.store_id,
