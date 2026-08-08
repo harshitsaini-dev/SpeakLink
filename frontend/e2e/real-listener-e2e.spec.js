@@ -1120,6 +1120,190 @@ test.describe('the public listener against a real backend', () => {
     }
   });
 
+  // ======================================================================
+  // A Deny refuses one admission attempt in one Broadcast
+  // ======================================================================
+  // Reported with the same shape as the Kick defect: denied in Broadcast A,
+  // then Broadcast B claimed to have denied them too.
+
+  async function requestAndBeDenied(page, headers, live, name = 'Harshit') {
+    await page.goto(`${base}/listen/${live.room.public_code}`);
+    await page.getByTestId('listen-name').fill(name);
+    await page.getByTestId('listen-request').click();
+    await expect(page.getByTestId('listen-waiting')).toBeVisible({ timeout: 20_000 });
+
+    await expect.poll(async () =>
+      (await roomState(headers, live.sid)).counts.waiting,
+      { timeout: 20_000 }).toBe(1);
+    const pid = (await roomState(headers, live.sid)).waiting[0].id;
+    expect((await api('POST',
+      `/broadcast/sessions/${live.sid}/web-participants/${pid}/deny`,
+      headers)).status).toBe(200);
+
+    await expect(page.getByTestId('listen-denied'))
+      .toContainText(/did not admit you/i, { timeout: 20_000 });
+    return pid;
+  }
+
+  test('AH: a denial ends the attempt and offers a way to try again',
+       async ({ page }) => {
+    test.setTimeout(150_000);
+    const headers = await signIn();
+    const live = await startLiveBroadcast(headers);
+
+    try {
+      await requestAndBeDenied(page, headers, live);
+      const after = await roomState(headers, live.sid);
+      expect(after.counts.waiting).toBe(0);
+      expect(after.counts.connected).toBe(0);
+      expect(after.counts.listening).toBe(0);
+
+      // Nothing is resent on its own, and the listener is not stranded.
+      await expect(page.getByTestId('listen-request-again')).toBeVisible();
+      await page.waitForTimeout(6_000);
+      expect((await roomState(headers, live.sid)).counts.waiting).toBe(0);
+
+      // A refresh reports the same denial, still with a way forward.
+      await page.reload();
+      await expect(page.getByTestId('listen-denied'))
+        .toBeVisible({ timeout: 20_000 });
+      await expect(page.getByTestId('listen-request-again')).toBeVisible();
+      expect((await roomState(headers, live.sid)).counts.waiting).toBe(0);
+    } finally {
+      stopBroadcastPump(live);
+    }
+  });
+
+  test('AI: Request Again makes a NEW attempt the broadcaster decides on',
+       async ({ page }) => {
+    test.setTimeout(150_000);
+    const headers = await signIn();
+    const live = await startLiveBroadcast(headers);
+
+    try {
+      const first = await requestAndBeDenied(page, headers, live);
+
+      await page.getByTestId('listen-request-again').click();
+      await expect(page.getByTestId('listen-name')).toBeVisible();
+      await expect(page.getByTestId('listen-denied')).toHaveCount(0);
+      expect((await roomState(headers, live.sid)).counts.waiting)
+        .toBe(0);  // the button asks for nothing by itself
+
+      await page.getByTestId('listen-name').fill('Harshit');
+      await page.getByTestId('listen-request').click();
+      await expect.poll(async () =>
+        (await roomState(headers, live.sid)).counts.waiting,
+        { timeout: 20_000 }).toBe(1);
+
+      const second = (await roomState(headers, live.sid)).waiting[0];
+      expect(second.id, 'a denial is never mutated back into a request')
+        .not.toBe(first);
+      expect((await api('POST',
+        `/broadcast/sessions/${live.sid}/web-participants/${second.id}/approve`,
+        headers)).status).toBe(200);
+      await expect(page.getByTestId('listen-status'))
+        .toHaveText('Listening', { timeout: 30_000 });
+      expect((await playbackTruth(page)).advanced).toBe(true);
+    } finally {
+      stopBroadcastPump(live);
+    }
+  });
+
+  test('AJ: the current password admits after a denial, in the same Broadcast',
+       async ({ page }) => {
+    test.setTimeout(150_000);
+    const headers = await signIn();
+    const live = await startLiveBroadcast(headers);
+
+    try {
+      const first = await requestAndBeDenied(page, headers, live);
+      await page.getByTestId('listen-request-again').click();
+      await page.getByTestId('listen-name').fill('Harshit');
+      await page.getByTestId('listen-password').fill(live.room.password);
+      await page.getByTestId('listen-join').click();
+
+      await expect(page.getByTestId('listen-status'))
+        .toHaveText('Listening', { timeout: 25_000 });
+      expect((await playbackTruth(page)).advanced).toBe(true);
+      const after = await roomState(headers, live.sid);
+      expect(after.counts.admitted).toBe(1);
+      expect(after.listeners[0].id).not.toBe(first);
+    } finally {
+      stopBroadcastPump(live);
+    }
+  });
+
+  test('AK: a denial in one Broadcast does not follow the browser to another',
+       async ({ page }) => {
+    test.setTimeout(180_000);
+    const headers = await signIn();
+    const first = await startLiveBroadcast(headers);
+    let second;
+
+    try {
+      await requestAndBeDenied(page, headers, first);
+
+      // Straight to the other link. No Request Again, no cookie clearing.
+      second = await startLiveBroadcast(headers);
+      await page.goto(`${base}/listen/${second.room.public_code}`);
+
+      await expect(page.getByTestId('listen-denied')).toHaveCount(0);
+      await expect(page.getByTestId('listen-kicked')).toHaveCount(0);
+      await expect(page.getByTestId('listen-waiting')).toHaveCount(0);
+      await expect(page.getByTestId('listen-password'))
+        .toBeVisible({ timeout: 20_000 });
+      const shown = await page.getByTestId('listen-code').inputValue();
+      expect(shown.toUpperCase()).toBe(second.room.public_code.toUpperCase());
+
+      await page.getByTestId('listen-name').fill('Harshit');
+      await page.getByTestId('listen-password').fill(second.room.password);
+      await page.getByTestId('listen-join').click();
+      await expect(page.getByTestId('listen-status'))
+        .toHaveText('Listening', { timeout: 25_000 });
+      expect((await playbackTruth(page)).advanced).toBe(true);
+
+      expect((await roomState(headers, second.sid)).counts.admitted).toBe(1);
+      expect((await roomState(headers, first.sid)).counts.waiting).toBe(0);
+    } finally {
+      stopBroadcastPump(first);
+      if (second) stopBroadcastPump(second);
+    }
+  });
+
+  test('AL: Request Access on another Broadcast still reaches its broadcaster',
+       async ({ page }) => {
+    test.setTimeout(180_000);
+    const headers = await signIn();
+    const first = await startLiveBroadcast(headers);
+    let second;
+
+    try {
+      await requestAndBeDenied(page, headers, first);
+
+      second = await startLiveBroadcast(headers);
+      await page.goto(`${base}/listen/${second.room.public_code}`);
+      await expect(page.getByTestId('listen-name')).toBeVisible({ timeout: 20_000 });
+      await page.getByTestId('listen-name').fill('Harshit');
+      await page.getByTestId('listen-request').click();
+      await expect(page.getByTestId('listen-waiting')).toBeVisible({ timeout: 20_000 });
+
+      await expect.poll(async () =>
+        (await roomState(headers, second.sid)).counts.waiting,
+        { timeout: 20_000 }).toBe(1);
+      const waiting = (await roomState(headers, second.sid)).waiting[0];
+      expect((await api('POST',
+        `/broadcast/sessions/${second.sid}/web-participants/${waiting.id}/approve`,
+        headers)).status).toBe(200);
+
+      await expect(page.getByTestId('listen-status'))
+        .toHaveText('Listening', { timeout: 30_000 });
+      expect((await playbackTruth(page)).advanced).toBe(true);
+    } finally {
+      stopBroadcastPump(first);
+      if (second) stopBroadcastPump(second);
+    }
+  });
+
   test('P: a refresh after a real Stop shows Ended, not a join form',
        async ({ page }) => {
     test.setTimeout(150_000);
