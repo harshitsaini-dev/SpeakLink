@@ -104,6 +104,68 @@ def test_a_new_computer_is_asked_for_a_password_before_it_can_enroll(app):
     assert "Settings Password" in screen.status_var.get()
 
 
+def test_pressing_the_button_really_runs_and_sets_the_password(app, monkeypatch):
+    """The button's OWN handler, invoked the way the operator invokes it.
+
+    This is the test that was missing. The first version of this file set the
+    password directly and then checked the gate, so it never executed the
+    handler - which called a function that did not exist. The button raised
+    NameError into a frozen GUI with no console, so it looked like a button
+    that did nothing at all, and the tests were green throughout.
+    """
+    from tools import store_kit_settings_password as settings_password
+    from tools import store_setup_gui as gui
+
+    # The handler imports simpledialog inside itself, so the patch has to
+    # land on tkinter's own module rather than on the GUI module.
+    import tkinter.simpledialog as simpledialog
+
+    typed = iter([PASSWORD, PASSWORD])
+    monkeypatch.setattr(simpledialog, "askstring", lambda *a, **k: next(typed))
+    monkeypatch.setattr(gui.messagebox, "showinfo", lambda *a, **k: None)
+
+    screen = enrolment_screen(app)
+    assert str(screen.enroll_button["state"]) == "disabled"
+
+    # Exactly what Tk calls when the operator clicks it.
+    screen._password_button.invoke()
+    app.update()
+
+    assert settings_password.is_configured(app.settings_password_path), (
+        "pressing the button did not set a password")
+    assert str(screen.enroll_button["state"]) == "normal"
+    assert str(screen.code_entry["state"]) == "normal"
+    assert str(screen.device_entry["state"]) == "normal"
+
+
+def test_every_command_on_the_screen_is_actually_callable(app):
+    """No button may be wired to a name that does not exist.
+
+    A missing name inside a Tk callback surfaces as a silent dead button in a
+    windowless build, so the wiring is checked rather than trusted.
+    """
+    screen = enrolment_screen(app)
+    for widget in (screen._password_button, screen.enroll_button,
+                   screen.next_button):
+        if widget is None:
+            continue
+        command = str(widget.cget("command"))
+        assert command, f"{widget} has no command bound"
+
+    # And every global name the handler reaches for really resolves - the
+    # exact failure that shipped, where it called a function nobody had
+    # defined and the click died silently.
+    import builtins
+
+    handler = screen._set_settings_password
+    for name in handler.__code__.co_names:
+        if hasattr(builtins, name) or hasattr(screen, name):
+            continue
+        assert name in handler.__globals__, (
+            f"_set_settings_password refers to '{name}', which exists nowhere "
+            "- in a windowless build that is a button that does nothing")
+
+
 def test_setting_the_password_opens_the_enrolment_form(app):
     screen = enrolment_screen(app)
 
