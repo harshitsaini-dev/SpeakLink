@@ -7593,3 +7593,64 @@ Chromium tests AH-AL. Kick Q-X re-run green alongside them.
 
 The heartbeat / Listening-count defect recorded above is untouched and remains
 the next milestone.
+
+## Live HQ deployment - 2026-08-08 13:33 - room-scoped listener fixes
+
+Deployed `feature/live-web-audience-dynamic-targets` at **39df157** to port
+8000. Authorised deployment; nothing was added or changed for it.
+
+**Why it was needed.** The Kick and Deny fixes had been on disk and pushed for
+some time, but port 8000 serves `frontend/build` from disk and that directory
+still held a bundle predating both. A string search settled it rather than a
+filename comparison: the served bundle contained neither `listen-request-again`
+nor `listen-join-again`. The operator's manual failures were against code that
+did not contain the fix.
+
+**Gate before stopping.** 0 live sessions, 0 starting, 0 unreleased Store
+leases, 0 targets playing. The single non-`ended` session is
+`emergency_stopped`, which is terminal. Four web rooms are still OPEN, all
+belonging to sessions that FAILED on 2026-08-07 - stale rows from a failed
+lifecycle, deliberately left alone: a deployment is not the place for a data
+change.
+
+**Backup.** `_live-hq-deployment-backups/echocast-20260808-132655-pre-deploy-39df157.db`,
+724992 bytes, sha256 `6c05d944289c03004bf303076ba10b48bb21953e28ec6a5d52f64340db5ed084`,
+`integrity_check ok`, `foreign_key_check` 0 rows, 31 tables, 53 sessions, 44
+stores, 15 receiver devices. Taken with the SQLite online backup API rather
+than a file copy: the live database had 4MB of committed pages in its WAL, and
+copying the main file alone would have produced a backup missing all of them.
+
+The previous frontend is kept whole at
+`_live-hq-deployment-backups/frontend-build-20260808-132655-pre-deploy` (14
+files, verified byte-identical) and at `frontend/build-retired-20260808-132655`.
+
+| | before | after |
+|---|---|---|
+| index.html | `22c601c3…` | `716816ea…` |
+| main bundle | `main.a6ab3e77.js` | `main.0ff18242.js` |
+| bundle sha256 | `0e0afebf…` | `6ba8a2f4…` |
+
+Deployed by two directory renames rather than a file-by-file copy: an index
+names hashed assets from its own build, so a half-replaced directory would have
+served an index pointing at a bundle that was not there yet.
+
+**Restart.** Repo-native `tools/echocast_server.py stop` then `start`. Old pids
+22676 and 6808 both confirmed exited; new pid 13612 with socket owner 19336,
+`--workers 1`, the same two-process shape as before. `/`, `/console`,
+`/history`, `/api/` and a listener SPA route all 200.
+
+**Proof the fix is live.** The served bundle is byte-identical to
+`frontend/build` and contains `listen-request-again`, `listen-join-again`,
+`listen/forget` and `public_code`. The running process's own OpenAPI declares
+`/api/listen/forget` and `/api/listen/me` **with a `public_code` query
+parameter** - the room scoping is in the process, not merely on disk.
+
+**Data and Receivers.** `integrity_check ok`, `foreign_key_check` 0 rows, 31
+tables before and after, 53 sessions / 44 stores / 15 devices unchanged. No
+migration ran. Receiver HMAC key sha256 `748a99f2…` unchanged. No device was
+deleted, re-enrolled or issued a credential. BP untouched, no Store Kit build,
+no Broadcast started.
+
+**Still pending:** operator manual acceptance of Deny and Kick on port 8000;
+the heartbeat / LISTENING runtime-truth defect; Store to HQ volume telemetry;
+dynamic Store targeting.
