@@ -238,9 +238,20 @@ def test_diagnose_reports_the_configured_audio_selector(tmp_path):
 
 
 def test_diagnose_names_the_version(tmp_path):
+    """Whatever version this build IS, diagnose has to say it.
+
+    This pinned the literal "1.0.0", which passed for every build ever made
+    precisely because AGENT_VERSION was never updated - the test agreed with
+    the defect instead of catching it. Asserting against the constant means it
+    keeps checking that the report names the version, and stops needing an edit
+    every time the version legitimately changes.
+    """
+    from tools.receiver_agent import AGENT_VERSION
+
     report = diagnose_report(config_path=tmp_path / "absent.json",
                             credential_path=tmp_path / "absent.bin")
-    assert "1.0.0" in report
+    assert AGENT_VERSION in report
+    assert "agent version" in report
 
 
 def test_diagnose_is_a_command(capsys, tmp_path):
