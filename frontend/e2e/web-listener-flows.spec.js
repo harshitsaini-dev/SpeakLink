@@ -180,7 +180,10 @@ test.describe('the public EchoCast listener', () => {
     // now asks /listen/me on load, so a mock that claimed a session regardless
     // of cookie would put a first-time visitor straight into "waiting".
     let hasRequested = false;
-    await page.route('**/api/listen/me', (route) => {
+    // The trailing wildcard matters: the page now asks about ONE Broadcast,
+    // so this URL carries ?public_code=..., and a pattern without it stops
+    // matching the moment the question becomes room-scoped.
+    await page.route('**/api/listen/me*', (route) => {
       if (!hasRequested) {
         return route.fulfill({ status: 401, contentType: 'application/json',
                                body: JSON.stringify({ detail: 'Not admitted.' }) });
