@@ -7844,3 +7844,76 @@ Resume lands directly on this code path and should fix it.
 **Add alone can be built with no Receiver change** (late-join framing, lease,
 generation, fanout mutation). **Pause, Resume and Remove-with-restoration
 cannot.** Zone bulk actions remain out of scope and untouched.
+
+## Dynamic targeting: Slices 1 and 2 done, Slice 3 NOT started
+
+Design `cd97d4d` accepted. Decision A accepted: **late-join framing is for
+dynamically added Stores only**; Stores present at Broadcast start keep the
+raw-from-byte-zero path that BP physically accepted. Decision B accepted: no
+second physical Store is required for development, and physical Add acceptance
+stays pending.
+
+### Slice 1 - reconnect pump repair (done)
+
+A Store that lost its Receiver mid-Broadcast never received audio again.
+`_audio_sender` raises on any failed delivery, which ends that Store's pump,
+and `_started_stores` was only ever added to - so the Store stayed marked as
+started, its queue went on accepting and drop-oldest-ing with nothing draining
+it, and HQ kept sending the reconnecting Receiver a `play`.
+
+The runtime now asks the fanout whether a Store has a **live** pump instead of
+remembering that it once started one, and a reconnection gets a **fresh empty
+queue** rather than inheriting minutes-old audio. Pump cleanup is
+identity-guarded, so a task ending late cannot unbind the pump that replaced
+it. Two of the seven tests fail at `cd97d4d`.
+
+### Slice 2 - late-join framing (done)
+
+`StoreLateJoinSource` keeps the initialization segment and **zero** historical
+Clusters. A decoder needs the header to open a stream; it does not need audio
+that has already been broadcast, and a shop playing four seconds of stale
+announcement is worse than one starting a quarter-second late. The web relay's
+several-second ring is deliberately not copied.
+
+Delivery mode is **explicit per Store**, never inferred: `INITIAL_RAW` for the
+untouched accepted path, `LATE_JOIN_FRAMED` for the whole of a late joiner's
+participation - the moment it went back to raw chunks would be the middle of a
+Cluster. The parser is the tested `WebmStreamFramer`; the state is this
+Broadcast's own, so a physical Store cannot fail to join because the web
+audience is degraded for its own reasons.
+
+**Real FFmpeg gate, and what it actually showed.** This capture's 250 ms
+timeslices happen to fall on Cluster boundaries, so header-plus-raw-chunks
+decodes perfectly - accidental correctness, not a property of WebM. Re-cut at
+boundaries that do not align, FFmpeg reports unknown elements, resynchronises,
+and still produces the same number of PCM bytes, so a byte-count assertion
+would call a corrupt stream healthy. The gate therefore asserts that the framed
+path produces **no decoder complaint at all** while the naive one does.
+
+Measured: 21 payloads, 146 bootstrap bytes, 0 historical Clusters, 576000 PCM
+bytes decoded clean. Initial-Store byte equivalence proved chunk-for-chunk.
+
+### Slice 3 - Add - NOT IMPLEMENTED
+
+No endpoint, no migration, no lease change, no UI. Nothing was faked and
+nothing half-built was left in the tree. What it still needs is unchanged from
+the design: `release_store_lease(session_id, store_id)`, the two additive
+`broadcast_targets` columns, the Add route with RBAC, Store Scope and
+Link-only rejection, failure cleanup that restores a Store endpoint a failed
+prepare may already have moved, the Console Add control, and the race, restart
+and 5/10/20/40 load work.
+
+`join_store_at_live_edge` exists in the runtime and is proven by test, so Slice
+3 is wiring an authorised, leased, prepared Store to a call that already works.
+
+### Also fixed
+
+A test pinned the literal Receiver version `1.0.0`, which passed for every
+build ever made precisely because `AGENT_VERSION` was never updated - it agreed
+with the defect rather than catching it, and only turned red once the constant
+was corrected. It now asserts against the constant. Found by running the full
+backend suite after the bump; the previous milestone ran it before that commit
+and not after.
+
+Receiver source unchanged. **Kit remains 1.8.0.** Live HQ untouched. Pause,
+Resume, Remove and Zone bulk actions remain unimplemented.
