@@ -293,7 +293,13 @@ test.describe('the public EchoCast listener', () => {
     await join(page);
 
     // No token, jwt or password anywhere in the socket URL.
-    const url = await page.evaluate(() => window.__sockets[0].url);
+    //
+    // Waits for the socket rather than indexing the list, which is empty for a
+    // moment: join() returns on the click, and the page opens its socket only
+    // after the session bootstrap round trip. Every other flow already goes
+    // through this helper; this one call site read __sockets[0] directly and
+    // raced it.
+    const url = await page.evaluate(async () => (await window.__socket()).url);
     expect(url).not.toMatch(/token|jwt|password|listener=/i);
     expect(page.url()).not.toMatch(/token|jwt|password/i);
 
