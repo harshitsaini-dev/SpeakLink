@@ -83,6 +83,17 @@ def make_link_only_session(client, headers, campaign="Link only"):
     return response.json()["id"]
 
 
+def another_browser(client):
+    """A second listener with its own cookie jar, against the same server.
+
+    A listener is a SESSION, so two people are two cookie jars. Posting twice
+    from one client is one person refreshing, and the routes now resume that
+    rather than admitting a duplicate.
+    """
+    from fastapi.testclient import TestClient
+    return TestClient(client.server_module.app)
+
+
 def room_of(client, headers, sid):
     response = client.get(f"/api/broadcast/sessions/{sid}/web-room", headers=headers)
     assert response.status_code == 200, response.text
@@ -207,10 +218,13 @@ def test_an_unusable_name_is_refused(client, owner, name):
 def test_two_listeners_may_share_a_name(client, owner):
     sid = make_link_only_session(client, owner)
     room = room_of(client, owner, sid)
-    for _ in range(2):
-        joined = client.post(f"/api/listen/rooms/{room['public_code']}/join",
-                             json={"display_name": "Harshit",
-                                   "password": room["password"]})
+    # Two BROWSERS, because identity is the session. One browser joining twice
+    # is one listener refreshing, and is resumed rather than duplicated - which
+    # is why this uses separate cookie jars rather than posting twice.
+    for browser in (another_browser(client), another_browser(client)):
+        joined = browser.post(f"/api/listen/rooms/{room['public_code']}/join",
+                              json={"display_name": "Harshit",
+                                    "password": room["password"]})
         assert joined.status_code == 200
 
     state = room_of(client, owner, sid)
@@ -368,11 +382,14 @@ def test_rotation_replaces_the_password_without_ejecting_the_audience(client, ow
     # The audience is not ejected by a rotation.
     assert rotated.json()["counts"]["admitted"] == 1
 
-    stale = client.post(f"/api/listen/rooms/{room['public_code']}/join",
-                        json={"display_name": "Late", "password": original})
+    # A LATE arrival, so a browser that has not already been admitted: one that
+    # has is resumed without being asked for a password at all.
+    latecomer = another_browser(client)
+    stale = latecomer.post(f"/api/listen/rooms/{room['public_code']}/join",
+                           json={"display_name": "Late", "password": original})
     assert stale.status_code == 401, "the old password stopped working"
-    good = client.post(f"/api/listen/rooms/{room['public_code']}/join",
-                       json={"display_name": "Late", "password": fresh})
+    good = latecomer.post(f"/api/listen/rooms/{room['public_code']}/join",
+                          json={"display_name": "Late", "password": fresh})
     assert good.status_code == 200
 
 

@@ -102,16 +102,32 @@ def room_of(client, headers, sid):
                       headers=headers).json()
 
 
+def another_browser(client):
+    """A distinct listener: its own cookie jar, the same server.
+
+    A listener is a session, so each of these helpers gets its own browser. One
+    client doing both would be one person, and the second call is resumed as
+    the admission they already hold rather than creating a second one - which
+    is right for a refresh and useless for modelling an audience.
+    """
+    from fastapi.testclient import TestClient
+    return TestClient(client.server_module.app)
+
+
 def join(client, room, name="Harshit"):
-    joined = client.post(f"/api/listen/rooms/{room['public_code']}/join",
-                         json={"display_name": name, "password": room["password"]})
+    browser = another_browser(client)
+    joined = browser.post(f"/api/listen/rooms/{room['public_code']}/join",
+                          json={"display_name": name, "password": room["password"]})
     assert joined.status_code == 200, joined.text
+    return browser
 
 
 def request_access(client, room, name="Aman"):
-    asked = client.post(f"/api/listen/rooms/{room['public_code']}/request-access",
-                        json={"display_name": name})
+    browser = another_browser(client)
+    asked = browser.post(f"/api/listen/rooms/{room['public_code']}/request-access",
+                         json={"display_name": name})
     assert asked.status_code == 200, asked.text
+    return browser
 
 
 def active_list(client, headers):
