@@ -481,6 +481,27 @@ class EnrolmentScreen(ttk.Frame):
         self.app = app
 
         ttk.Label(self, text="Enroll this computer", font=("Segoe UI", 14, "bold")).pack(pady=12)
+
+        # A brand-new Store PC has no Settings Password, and enrolment needs
+        # one. This step used to be missing entirely: the wizard walked
+        # straight to this form, the operator filled it in, pressed Enroll and
+        # only then met "Settings Password required" with no way forward from
+        # here. So it is asked for FIRST, and the form below stays disabled
+        # until it exists.
+        self._password_notice = ttk.Frame(self)
+        self._password_button = None
+        if not settings_password.is_configured(app.settings_password_path):
+            self._password_notice.pack(fill="x", padx=24, pady=(0, 10))
+            ttk.Label(self._password_notice, text=(
+                "Step 1 of 2: set a Settings Password for this computer.\n\n"
+                "It protects configuration changes on this PC and is needed to "
+                "enroll. Choose one now - you will be asked for it in a moment."
+            ), wraplength=470, justify="left", foreground="#a00").pack(anchor="w")
+            self._password_button = ttk.Button(
+                self._password_notice, text="Set Settings Password",
+                command=self._set_settings_password)
+            self._password_button.pack(anchor="w", pady=(8, 0))
+
         ttk.Label(self, text="Enrollment code").pack(anchor="w", padx=24)
 
         code_row = ttk.Frame(self)
@@ -494,7 +515,9 @@ class EnrolmentScreen(ttk.Frame):
 
         ttk.Label(self, text="Device name").pack(anchor="w", padx=24, pady=(8, 0))
         self.device_name_var = tk.StringVar(master=self, value=app.state_data["device_name"])
-        ttk.Entry(self, textvariable=self.device_name_var, width=32).pack(padx=24, pady=4)
+        self.device_entry = ttk.Entry(self, textvariable=self.device_name_var,
+                                      width=32)
+        self.device_entry.pack(padx=24, pady=4)
 
         self.status_var = tk.StringVar(master=self, value="")
         ttk.Label(self, textvariable=self.status_var, wraplength=480).pack(pady=8, padx=24)
@@ -506,6 +529,35 @@ class EnrolmentScreen(ttk.Frame):
         self.next_button = ttk.Button(button_row, text="Next", state="disabled",
                                       command=lambda: app.go_to_audio())
         self.next_button.pack(side="left", padx=6)
+
+        # Applied last, once every widget it governs exists.
+        self._apply_password_gate()
+
+    def _apply_password_gate(self) -> None:
+        """Enrolment is available only once a Settings Password exists.
+
+        The GUI is not the security boundary - core refuses an unauthorized
+        enrolment regardless - but a form that cannot possibly succeed should
+        not invite somebody to type an enrollment code into it.
+        """
+        ready = settings_password.is_configured(self.app.settings_password_path)
+        state = "normal" if ready else "disabled"
+        for widget in (self.code_entry, self.device_entry, self.enroll_button):
+            widget.config(state=state)
+        if not ready:
+            self.status_var.set(
+                "Set the Settings Password first. Enrollment needs it.")
+
+    def _set_settings_password(self) -> None:
+        """Create it here, with the same function every other screen uses."""
+        if not establish_settings_password(self, self.app):
+            return
+        self._password_notice.pack_forget()
+        self.status_var.set(
+            "Settings Password set. Step 2 of 2: enter the enrollment code and "
+            "device name, then press Enroll.")
+        self._apply_password_gate()
+        self.code_entry.focus_set()
 
     def _toggle_show(self) -> None:
         self.code_entry.config(show="" if self.show_var.get() else "*")
