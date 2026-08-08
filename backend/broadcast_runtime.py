@@ -68,7 +68,10 @@ class LiveBroadcast:
     #: Clusters can never reach another's listener. Web delivery is a sibling of
     #: Store fanout and recording: none of the three can delay the others.
     web_relay: WebAudienceRelay | None = None
-    _started_stores: set = field(default_factory=set)
+    #: Which Stores have a pump is asked of the fanout, which knows whether the
+    #: task is still alive. This used to be a set here that was only ever added
+    #: to, so a Store whose pump had died stayed "started" and never got
+    #: another - the whole reason a reconnecting Receiver went silent.
 
 
 class BroadcastRuntime:
@@ -245,10 +248,20 @@ class BroadcastRuntime:
         if not targets:
             return 0
 
-        for store_id in targets - live._started_stores:
-            await live.fanout.start_store(store_id,
-                                          self._sender_factory(store_id))
-            live._started_stores.add(store_id)
+        # Ask the fanout whether each Store has a LIVE pump, rather than
+        # remembering that it once started one.
+        #
+        # A pump ends the first time a send raises, which is what a dropped
+        # Receiver socket produces. The old add-only set meant that Store was
+        # marked started for the rest of the Broadcast, so when its Receiver
+        # came back it got a `play` and no audio - its queue accepted chunks
+        # and dropped the oldest with nothing draining it. Asking about the
+        # present state instead means a reconnection simply gets a new pump and
+        # a new empty queue on the next chunk.
+        for store_id in targets:
+            if not live.fanout.is_pumping(store_id):
+                await live.fanout.start_store(store_id,
+                                              self._sender_factory(store_id))
 
         return live.fanout.broadcast(targets, data)
 
