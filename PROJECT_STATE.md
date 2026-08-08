@@ -7654,3 +7654,94 @@ no Broadcast started.
 **Still pending:** operator manual acceptance of Deny and Kick on port 8000;
 the heartbeat / LISTENING runtime-truth defect; Store to HQ volume telemetry;
 dynamic Store targeting.
+
+## Store to HQ volume telemetry - the wiring, not the feature
+
+Web Audience runtime truth is **manually accepted on the real HQ**: Connected,
+Listening, Disconnected, Deny/Retry, Kick/Rejoin and cross-Broadcast listener
+isolation all confirmed by the operator. That milestone is closed.
+
+### Root cause
+
+HQ could set a Store's master volume and never see a change made at the till.
+The first broken hop was the **last** one on the Receiver:
+
+    Core Audio endpoint          EXISTS
+    endpoint volume/mute callback EXISTS  (tools/windows_endpoint_observer.py)
+    coalescing to one slot        EXISTS
+    sequence counter              EXISTS
+    endpoint_state message        EXISTS
+    the loop that SENDS it        EXISTS - and was never started
+    backend validation + runtime  EXISTS  (observe_endpoint_state)
+    Console polling and slider    EXISTS  (follows actual_*)
+
+`_endpoint_state_loop` was written, correct, and scheduled by nothing. Each
+reading was observed, coalesced into the observer's single slot, and
+overwritten by the next one. Every existing test passed throughout, because
+they tested the parts and never the wiring.
+
+`create_task` alongside the heartbeat fixes it. The loop also had to stop
+returning when the observer is not running: connecting happens before PREPARE,
+so that was the state it found on its first pass - it would have ended
+immediately and nothing would have started another.
+
+**No backend or frontend change was needed.** Both were already right.
+
+### Contract, unchanged and now actually exercised
+
+- **requested_** = what HQ last asked for. **actual_** = what the endpoint
+  reports. The slider follows ACTUAL, falling back to requested only until the
+  first reading arrives and while a command is in flight.
+- Telemetry updates the ACTUAL fields only and allocates **no command id**, so
+  observing 25 after a request of 80 cannot send 80 back. That feedback loop is
+  the removed Master Target enforcement and must never return.
+- Session-scoped, Store-scoped, sequence-ordered; older, duplicate, wrong-
+  session and wrong-Store readings are discarded.
+- Runtime state is in memory. **No database write per event** - proved with 500
+  readings against the file's mtime.
+- The pre-Broadcast restoration snapshot is a separate authority and telemetry
+  never touches it. Stop restores the ORIGINAL, never the last observed value.
+
+### Bounds, measured
+
+One gesture is 60 notifications per Store.
+
+| Stores | notifications | messages | coalescing | time | queue depth |
+|---|---|---|---|---|---|
+| 5 | 300 | 5 | 60x | 0.7 ms | 1 per Store |
+| 10 | 600 | 10 | 60x | 1.4 ms | 1 per Store |
+| 20 | 1200 | 20 | 60x | 2.7 ms | 1 per Store |
+| 40 | 2400 | 40 | 60x | 5.6 ms | 1 per Store |
+
+Linear, and the bound is structural: the observer holds a slot, not a queue.
+Where the gesture stopped is always what gets reported - coalescing drops the
+journey, never the destination.
+
+### Receiver and Store Kit
+
+Receiver source changed, so: **Receiver 1.5.0, Store Kit 1.8.0**.
+
+| | |
+|---|---|
+| ZIP | `artifacts/SpeakLink-Store-Kit-1.8.0-81aa464-20260808-083245.zip` |
+| SHA-256 | `8af59d31eeb2694b3677eae437ae4c33602838737a6cf072d26e2317499168a9` |
+| Size | 124.0 MB, 1065 files |
+
+Frozen executable verified: starts with no traceback, `core audio: reachable
+(3 active endpoints)`, `change reports: yes`, and now `agent version: 1.5.0`.
+
+`AGENT_VERSION` was a separate defect found on the way: the packaging script
+took a `-Version` and named the package with it, but nothing wrote it into the
+agent, so every Receiver ever built announced **1.0.0** to HQ whatever its
+package said. HQ stored that as each device's software version, making 1.4.0
+and the first build indistinguishable in the fleet list.
+
+**Not installed anywhere.** No Store touched, BP included.
+
+### Still true
+
+No live HQ deployment in this milestone; port 8000 untouched and its bundle
+unchanged. Dynamic Store targeting - Add, Pause, Resume, Remove, Zone bulk
+actions - remains the next milestone. **No software state equals
+SPEAKER_VERIFIED**: an endpoint level is control truth, not proof anybody heard
+anything.
