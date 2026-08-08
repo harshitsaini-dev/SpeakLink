@@ -148,7 +148,57 @@ if ($running.Count -gt 0) { Start-Sleep -Seconds 2 }
 
 if (Test-Path $InstallRoot) { Remove-Item $InstallRoot -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $InstallRoot, $stateRoot, $logDirectory | Out-Null
-Copy-Item (Join-Path $PackagePath '*') $InstallRoot -Recurse -Force
+
+# Copied file by file, with a short retry on the transient locks that real
+# Store PCs produce.
+#
+# A single Copy-Item -Recurse is all or nothing, and on a machine with
+# real-time antivirus a freshly written .exe, .dll or .pyd is read by the
+# scanner the instant it lands. If that read is still open when the next write
+# arrives, Windows raises a sharing violation - and one such moment killed the
+# whole installation, leaving an install root holding most of a Receiver.
+#
+# It happened on a real first install: 41 of the 44 files arrived and the three
+# that did not were EchoCastReceiverBackground.exe, python3.dll and
+# _psutil_windows.pyd - every one of them a binary the scanner opens, none of
+# them next to each other. Nothing was wrong with the package; all three copy
+# perfectly on the next attempt, which is exactly what a transient lock looks
+# like.
+#
+# So each file gets a few attempts a moment apart. It is NOT weakened
+# verification: SHA256SUMS.txt is still checked against every installed file
+# below, so a copy that lies about succeeding is still caught.
+$sourceRoot = (Resolve-Path $PackagePath).Path
+$copyFailures = @()
+foreach ($item in Get-ChildItem $sourceRoot -Recurse -File) {
+    $relative = $item.FullName.Substring($sourceRoot.Length).TrimStart('\')
+    $target = Join-Path $InstallRoot $relative
+    $targetDirectory = Split-Path $target -Parent
+    if (-not (Test-Path $targetDirectory)) {
+        New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
+    }
+    $copied = $false
+    $lastError = $null
+    foreach ($attempt in 1..5) {
+        try {
+            Copy-Item $item.FullName $target -Force -ErrorAction Stop
+            $copied = $true
+            break
+        } catch {
+            $lastError = $_.Exception.Message
+            Start-Sleep -Milliseconds (200 * $attempt)
+        }
+    }
+    if (-not $copied) { $copyFailures += "$relative - $lastError" }
+}
+if ($copyFailures.Count -gt 0) {
+    # Named in full. The operator previously saw a truncated PowerShell stack
+    # with no file in it, which is not something anybody can act on.
+    throw ("These files could not be installed after several attempts:`n  " +
+           ($copyFailures -join "`n  ") +
+           "`n`nThis is usually antivirus holding a file open. Try again, and " +
+           "if it repeats, allow $InstallRoot in the antivirus and re-run.")
+}
 
 # Copying is where files get truncated or silently skipped, and a Receiver that
 # is 99% copied fails weeks later with a DLL error nobody connects to install.
