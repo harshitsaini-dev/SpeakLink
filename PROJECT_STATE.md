@@ -7555,3 +7555,41 @@ join, though the browser really is playing. Real-backend test I fails this way
 and did so before this work; it is a heartbeat-reporting defect, not a kick
 one, and is deliberately left for the listener-lifecycle milestone rather than
 asserted in the kick tests.
+
+## A Deny refuses ONE admission attempt in ONE Broadcast
+
+Reported with the same shape as the Kick defect: denied in Broadcast A, then
+Broadcast B claimed to have denied them too.
+
+**Cause, and it was only half where the Kick's was.** The server was already
+right: `/listen/me` had been made room-scoped for the Kick, and twelve new
+route-level tests confirmed a denial in A already answered 401 for B. The leak
+that remained was in the page. `Listen.jsx` scoped its BOOTSTRAP call but its
+admission POLL still asked `/listen/me` with no room attached, and took
+whatever came back - so a leftover session or claim from another Broadcast
+could answer, and the page would show that room's denial, removal or admission
+as if it were this one's. Both calls are scoped now.
+
+**Contract:**
+
+- Deny is scoped to one room and one admission attempt. It is not a ban - not
+  by browser, cookie, display name, IP or device.
+- A DENIED row stays DENIED as audit truth and is never mutated back into a
+  request. Nothing is deleted.
+- Refreshing the denied Broadcast reports the denial again and never resubmits.
+- **Request again** calls `POST /api/listen/forget`, which only discards this
+  browser's own cookies. It requests nothing and admits nobody: the listener
+  then chooses password join or Request Access, and the broadcaster decides
+  again. Retry after a denial and Join Again after a removal are the same
+  action - one attempt is over, and another may be made.
+- A retry is a NEW participant. A denial in A has zero effect in B, in either
+  direction: an A session neither authorises nor denies B, and asking about B
+  creates nothing in B and reveals nothing about A.
+- Counts: a DENIED row counts as neither waiting, connected, listening nor
+  buffering. Room A's counts never move because something happened in B.
+
+Covered by `backend/tests/test_deny_is_room_scoped.py` (Y, Z, AA-AG) and real
+Chromium tests AH-AL. Kick Q-X re-run green alongside them.
+
+The heartbeat / Listening-count defect recorded above is untouched and remains
+the next milestone.
