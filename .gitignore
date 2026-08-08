@@ -336,3 +336,8 @@ build/pyi-work-*/
 
 # Isolated verification builds. Never the live HQ frontend.
 frontend/build-dev/
+
+# Live HQ deployment rollback artifacts. Never committed.
+_live-hq-deployment-backups/
+frontend/build-retired-*/
+frontend/build-deploy/
