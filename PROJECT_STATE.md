@@ -7479,3 +7479,79 @@ confirmation modal, the recording player, and a phone.
 
 Component-local scrollers (the Web Audience lists, the sidebar nav on a short
 viewport) are bounded areas and are deliberately not counted as page scrollers.
+
+## Development builds no longer touch the live HQ frontend
+
+Port 8000 serves `frontend/build` **straight from disk**, so an ordinary
+`craco build` - run only to check that the code still compiles - replaced the
+bundle the live HQ was serving. No restart, no deploy step, nothing to notice.
+That happened repeatedly during this branch's work before it was spotted.
+
+Verification now uses:
+
+```
+cd frontend && npm run build:isolated      # writes frontend/build-dev
+```
+
+It is a Node wrapper (`frontend/scripts/build-isolated.js`) rather than an
+inline `BUILD_PATH=...` prefix, because npm runs scripts through cmd.exe on
+Windows where that syntax is a missing command and not a variable assignment.
+Building into `frontend/build` is refused outright.
+
+Proved by hashing `build/index.html`, its main bundle and the bytes port 8000
+actually serves, before and after: all five unchanged, live mtime untouched, a
+fresh artifact in `build-dev`.
+
+## A Kick removes a participant from ONE Broadcast
+
+Manual testing found that after being kicked from Broadcast A a listener could
+not ask to join A again, and could not join a completely different Broadcast B
+either. The removal had become a property of the browser.
+
+**Cause:** `/listen/me` had no idea which room the browser was looking at. A
+kicked listener's pending-claim cookie still resolved - and that cookie was
+never cleared when the claim was spent - so the endpoint answered for whatever
+room this browser had last touched. Opening B returned A's KICKED row, and the
+page said "You were removed from this Broadcast" about a Broadcast the listener
+had never joined. The client compounded it by never comparing the answer's
+`public_code` with the one in the URL.
+
+**No schema change.** The participant model was already right: a kick clears
+the session token, both join paths always insert a new participant, and
+`_participant_in_room` already refuses across rooms. The defect was entirely in
+session-to-room resolution.
+
+**Contract now:**
+
+- Kick is scoped to one room and one participant. It is not a ban - not by
+  browser, cookie, display name, IP or device. There is no global Web Audience
+  ban feature.
+- `/listen/me?public_code=...` answers only for THAT Broadcast. State belonging
+  to another room answers exactly as if there were no session at all, and never
+  names the other room.
+- A kick terminates the current admission immediately: socket closed, audio
+  stopped, runtime removed, participant KICKED, session invalid, and no
+  automatic reconnect.
+- Returning requires explicit user action. **Join Again** calls
+  `POST /api/listen/forget`, which only discards this browser's own listener
+  cookies - it admits nobody. The listener still needs the current password or
+  a fresh Request Access, and the broadcaster still decides.
+- A rejoin is a NEW participant. The KICKED row stays KICKED as audit truth and
+  is never mutated back into an admission. Nothing is deleted.
+- Counts: a KICKED row counts as neither connected, listening nor waiting. A
+  fresh request raises waiting; a fresh admission's connected state follows the
+  new runtime connection only.
+- A late teardown from the kicked socket cannot disturb its replacement: the
+  registry is keyed by participant, the rejoin is a different participant, and
+  `detach` is additionally guarded by socket identity.
+
+Covered by `backend/tests/test_kick_is_room_scoped.py` and real-Chromium tests
+Q-X in `frontend/e2e/real-listener-e2e.spec.js`.
+
+### Known separate defect: the Listening count
+
+The Web Audience `listening` count does not reach 1 even for an ordinary first
+join, though the browser really is playing. Real-backend test I fails this way
+and did so before this work; it is a heartbeat-reporting defect, not a kick
+one, and is deliberately left for the listener-lifecycle milestone rather than
+asserted in the kick tests.
