@@ -243,6 +243,7 @@ import secrets
 import broadcast_recording
 import web_rooms
 import web_chat
+import store_kits
 import chat_attachments
 from web_participant_runtime import (
     HEARTBEAT_INTERVAL_SECONDS,
@@ -4847,6 +4848,119 @@ def read_broadcast_history_chat(
     return {"session_id": sid, "campaign_name": session.campaign_name,
             **settings, "may_see_removed": reveal,
             "messages": [m.public_dict(reveal_removed=reveal) for m in messages]}
+
+
+@api.post("/store-kits")
+async def upload_store_kit(
+    file: UploadFile = File(...),
+    user: HQUser = Depends(require("store_kit.manage")),
+):
+    """Put a new installer on HQ, from the Console.
+
+    A build happens on somebody's machine, and getting it onto HQ used to mean
+    a file copy that nobody could audit. This is the same act with a name
+    against it: the upload is logged, the checksum is computed here rather than
+    taken from the uploader, and the stored filename is built by HQ rather than
+    accepted from the request.
+
+    HQ does not validate that the file IS the SpeakLink installer, and does not
+    pretend to - it checks the extension, the size and the magic bytes, which
+    catches the ordinary mistakes. Trusting a build is a human act; the account
+    that uploaded it is recorded so that trust has somewhere to point.
+    """
+    raw = await file.read()
+    try:
+        kit = store_kits.store_uploaded_kit(raw, filename=file.filename or "")
+    except store_kits.KitRefused as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+    with SessionLocal() as db:
+        _write_log(db, "warn",
+                   f"STORE_KIT_UPLOADED name={kit.name} "
+                   f"bytes={kit.size_bytes} sha256={kit.sha256} "
+                   f"by={user.username}")
+    return kit.public_dict()
+
+
+@api.delete("/store-kits/{name}")
+def delete_store_kit(
+    name: str, user: HQUser = Depends(require("store_kit.manage")),
+):
+    """Remove a kit HQ is offering.
+
+    Deliberately not gated on it being an old one: an installer uploaded by
+    mistake is exactly the one that needs removing quickly, and it will be the
+    newest.
+    """
+    if not store_kits.delete_kit(name):
+        raise HTTPException(status_code=404, detail="No such Store Kit.")
+    with SessionLocal() as db:
+        _write_log(db, "warn", f"STORE_KIT_DELETED name={name} by={user.username}")
+    return {"deleted": name}
+
+
+@api.get("/store-kits")
+def list_store_kits(user: HQUser = Depends(require("store_kit.download"))):
+    """Which Store Kits this HQ can hand out.
+
+    Newest first, by the file's own modification time rather than by version
+    string - 1.10.0 sorts before 1.9.0, and a name is a claim while a timestamp
+    is something the machine observed.
+    """
+    kits = store_kits.list_kits()
+    return {
+        "kits": [kit.public_dict() for kit in kits],
+        "latest": kits[0].public_dict() if kits else None,
+        # Said explicitly, because "no kits" and "the feature is broken" look
+        # identical otherwise, and the fix for the first one is a build.
+        "directory_exists": store_kits.kits_directory().exists(),
+    }
+
+
+@api.get("/store-kits/latest/download")
+def download_latest_store_kit(
+    user: HQUser = Depends(require("store_kit.download")),
+):
+    """The newest kit, as a file.
+
+    A convenience over naming it: the machine at the till wants "the current
+    one", and a person reading a version number off a screen and typing it into
+    another machine is a step that can go wrong.
+    """
+    kit = store_kits.latest_kit()
+    if kit is None:
+        raise HTTPException(
+            status_code=404,
+            detail=("This HQ has no Store Kit to hand out yet. Build one and "
+                    "put it in the store-kits folder."))
+    return _kit_file_response(kit)
+
+
+@api.get("/store-kits/{name}/download")
+def download_store_kit(
+    name: str, user: HQUser = Depends(require("store_kit.download")),
+):
+    """A named kit - for installing a shop deliberately on an older build."""
+    path = store_kits.resolve_kit_path(name)
+    if path is None:
+        # The name is matched against the listing rather than joined onto a
+        # path, so an attempt at traversal is simply a name that is not there.
+        raise HTTPException(status_code=404, detail="No such Store Kit.")
+    kit = next(k for k in store_kits.list_kits() if k.name == name)
+    return _kit_file_response(kit)
+
+
+def _kit_file_response(kit):
+    path = store_kits.kits_directory() / kit.name
+    with SessionLocal() as db:
+        _write_log(db, "info", f"STORE_KIT_DOWNLOADED name={kit.name}")
+    return FileResponse(
+        path=str(path), filename=kit.name, media_type="application/zip",
+        headers={
+            # The checksum travels with the file, so a Store can check what it
+            # received against what HQ holds without a second request.
+            "X-SpeakLink-Kit-SHA256": kit.sha256,
+            "Cache-Control": "no-store",
+        })
 
 
 @api.post("/broadcast/history/delete-permanently")

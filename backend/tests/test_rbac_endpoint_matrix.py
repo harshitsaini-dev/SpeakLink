@@ -209,6 +209,15 @@ EXPECTED: dict[str, object] = {
     "delete_broadcast_chat_message": "broadcast.start",
     "set_web_participant_chat_mute": "broadcast.start",
     "read_broadcast_history_chat": "menu.history.view",
+    # The Store Kit. Whoever can fetch it can install SpeakLink on any machine
+    # they like, so it is its own right rather than riding on a page.
+    "list_store_kits": "store_kit.download",
+    # Much stronger than downloading: whoever can upload decides what software
+    # every Store installs next.
+    "upload_store_kit": "store_kit.manage",
+    "delete_store_kit": "store_kit.manage",
+    "download_latest_store_kit": "store_kit.download",
+    "download_store_kit": "store_kit.download",
     "post_broadcast_chat_image": "broadcast.start",
     "read_broadcast_chat_image": "broadcast.start",
     "read_history_chat_image": "menu.history.view",

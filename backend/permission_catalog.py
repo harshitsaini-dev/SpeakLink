@@ -144,6 +144,24 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
     PermissionDefinition("chat.view_deleted", "Broadcast",
                         "See Deleted Chat Messages"),
 
+    #: Downloading the Store Kit from HQ.
+    #:
+    #: The kit is the software a shop runs, so this is closer to a device
+    #: right than a reporting one: whoever can fetch it can install SpeakLink
+    #: on any machine they like. It carries no credential and enrols nothing -
+    #: a kit without an enrolment code is inert - but it is still the estate's
+    #: software and is not something a VIEWER should be handing out.
+    PermissionDefinition("store_kit.download", "Receivers",
+                        "Download the Store Kit"),
+    #: Putting a NEW installer on HQ, and removing one.
+    #:
+    #: Separate from downloading, and much stronger: whoever can upload decides
+    #: what software every Store installs next. It is the one permission here
+    #: that can change what runs on machines nobody at HQ can see, so it is
+    #: held by OWNER and ADMIN and by nobody else by default.
+    PermissionDefinition("store_kit.manage", "Receivers",
+                        "Upload and Remove Store Kits"),
+
     PermissionDefinition("menu.logs.view", "Logs", "View System Logs"),
     PermissionDefinition("system_logs.archive", "Logs", "Archive System Logs"),
     PermissionDefinition("system_logs.delete_permanently", "Logs",

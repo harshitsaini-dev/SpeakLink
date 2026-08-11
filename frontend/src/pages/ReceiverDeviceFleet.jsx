@@ -21,6 +21,7 @@ import { useAdminList } from "@/lib/adminList";
 import {
   FilterBar, SearchInput, FilterSelect, ListState, Pager, DestructiveModal,
 } from "@/components/AdminFilters";
+import StoreKitDownload from "@/components/StoreKitDownload";
 
 const LIFECYCLE_STYLE = {
   active: "bg-emerald-100 text-emerald-800 border-emerald-200",
@@ -71,6 +72,11 @@ export default function ReceiverDeviceFleet() {
           <RefreshCw size={14} /> Refresh
         </button>
       </div>
+
+      {/* The kit lives on this page because this is where somebody stands when
+          they are dealing with a Store's software - enrolling one, repairing
+          one, or looking at why one is offline. */}
+      <StoreKitDownload />
 
       <FilterBar onClear={list.clearFilters} activeCount={list.activeCount}
                  total={list.total} loading={list.loading}>
