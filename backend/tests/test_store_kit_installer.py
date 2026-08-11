@@ -391,7 +391,8 @@ def test_a_refused_prompt_still_leaves_a_working_store(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
     monkeypatch.setattr(module, "ALREADY_ELEVATED", False)
     monkeypatch.setattr(module, "stop_runtime", lambda report: None)
-    monkeypatch.setattr(module, "unpack_payload", lambda report, root: None)
+    monkeypatch.setattr(module, "unpack_payload",
+                        lambda report, root, on_progress=None: None)
     monkeypatch.setattr(module, "adopt_legacy_installation", lambda report: None)
     monkeypatch.setattr(module, "start_runtime", lambda report: None)
 
@@ -448,3 +449,112 @@ def test_uninstall_removes_the_startup_fallback_too(tmp_path, monkeypatch):
 
     module.do_uninstall(lambda _: None)
     assert not launcher.exists()
+
+
+# ===========================================================================
+# What the person at the till sees and gets
+# ===========================================================================
+
+def test_unpacking_reports_progress_as_it_goes(tmp_path, monkeypatch):
+    """A window with nothing moving reads as a hung installer, and the next
+    move is to close it halfway through writing a runtime."""
+    import zipfile
+    module = installer_module()
+    archive = tmp_path / "payload.zip"
+    with zipfile.ZipFile(archive, "w") as zipped:
+        for index in range(120):
+            zipped.writestr(f"file-{index}.bin", b"x" * 16)
+    monkeypatch.setattr(module, "payload_path", lambda: archive)
+
+    seen = []
+    module.unpack_payload(lambda _: None, tmp_path / "app",
+                          lambda done, total: seen.append((done, total)))
+
+    assert seen, "the installer unpacked a thousand files in silence"
+    assert seen[-1] == (120, 120), "progress never reached the end"
+    assert all(done <= total for done, total in seen)
+
+
+def test_the_desktop_shortcut_points_at_enrolment_not_at_the_installer(
+        tmp_path, monkeypatch):
+    """A desktop icon that reinstalls software is an invitation to do it by
+    accident. Enrolment is the step that actually happens later."""
+    module = installer_module()
+    monkeypatch.setenv("SPEAKLINK_INSTALL_ROOT", str(tmp_path / "app"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "user"))
+    (tmp_path / "app").mkdir(parents=True)
+    (tmp_path / "app" / module.SETUP_WIZARD).write_bytes(b"MZ wizard")
+
+    commands = []
+    def record(args, **kwargs):
+        commands.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(module.subprocess, "run", record)
+
+    assert module.create_desktop_shortcut(lambda _: None) is True
+    script = " ".join(commands[0])
+    assert module.SETUP_WIZARD in script
+    assert "SpeakLinkStoreInstaller" not in script
+
+
+def test_no_wizard_means_no_shortcut_rather_than_a_broken_one(tmp_path, monkeypatch):
+    module = installer_module()
+    monkeypatch.setenv("SPEAKLINK_INSTALL_ROOT", str(tmp_path / "app"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "user"))
+    said = []
+    assert module.create_desktop_shortcut(said.append) is False
+    assert any("not in this payload" in line for line in said)
+
+
+def test_uninstall_takes_the_desktop_shortcut_with_it(tmp_path, monkeypatch):
+    module = installer_module()
+    monkeypatch.setenv("SPEAKLINK_INSTALL_ROOT", str(tmp_path / "app"))
+    monkeypatch.setenv("SPEAKLINK_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "user"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    monkeypatch.setattr(module.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    desktop = tmp_path / "user" / "Desktop"
+    desktop.mkdir(parents=True)
+    link = desktop / "SpeakLink Store Setup.lnk"
+    link.write_bytes(b"shortcut")
+
+    module.do_uninstall(lambda _: None)
+    assert not link.exists(), "a shortcut to software that is gone was left behind"
+
+
+def test_the_chosen_install_path_travels_to_the_elevated_copy(tmp_path, monkeypatch):
+    """Without this the elevated copy uses the defaults and installs a second
+    copy somewhere else - which looks like it worked, and leaves the logon task
+    pointing at a runtime nobody chose."""
+    module = installer_module()
+    monkeypatch.setenv("SPEAKLINK_INSTALL_ROOT", str(tmp_path / "chosen"))
+    monkeypatch.setenv("SPEAKLINK_STATE_ROOT", str(tmp_path / "state"))
+
+    captured = {}
+    class FakeShell:
+        def ShellExecuteW(self, _hwnd, _verb, _file, parameters, _dir, _show):
+            captured["parameters"] = parameters
+            return 42
+    class FakeWindll:
+        shell32 = FakeShell()
+    monkeypatch.setattr(module, "sys", module.sys)
+    import ctypes
+    monkeypatch.setattr(ctypes, "windll", FakeWindll(), raising=False)
+
+    assert module.relaunch_elevated("install", backend_url="http://hq:8000") == 0
+    assert str(tmp_path / "chosen") in captured["parameters"]
+    assert "--already-elevated" in captured["parameters"]
+
+
+def test_the_cli_accepts_the_paths_it_is_relaunched_with(tmp_path, monkeypatch):
+    module = installer_module()
+    monkeypatch.setattr(module, "read_state", lambda: module.MachineState(
+        has_program=False, has_task=False, has_credential=False, version=None))
+
+    code = module.run_cli(["check",
+                           "--install-root", str(tmp_path / "app"),
+                           "--state-root", str(tmp_path / "state")])
+    assert code == 0
+    assert os.environ["SPEAKLINK_INSTALL_ROOT"] == str(tmp_path / "app")
+    assert os.environ["SPEAKLINK_STATE_ROOT"] == str(tmp_path / "state")

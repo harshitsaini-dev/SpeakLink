@@ -257,6 +257,12 @@ def relaunch_elevated(action: str, *, backend_url: str | None = None,
     arguments = [action]
     if backend_url:
         arguments += ["--backend-url", backend_url]
+    # The chosen paths travel with the relaunch. Without this the elevated copy
+    # would use the defaults and install a second copy somewhere else, which
+    # looks like the install worked and leaves the task pointing at a runtime
+    # nobody chose.
+    arguments += ["--install-root", str(install_root()),
+                  "--state-root", str(state_root())]
     if remove_credential:
         arguments.append("--remove-credential")
     # The elevated copy is told not to ask again: if IT cannot register the
@@ -323,7 +329,7 @@ def stop_runtime(report) -> None:
     time.sleep(0.8)
 
 
-def unpack_payload(report, destination: Path) -> None:
+def unpack_payload(report, destination: Path, on_progress=None) -> None:
     """Extract the embedded kit over the install root.
 
     Each file is retried, because antivirus scanning a freshly written
@@ -343,7 +349,13 @@ def unpack_payload(report, destination: Path) -> None:
     with zipfile.ZipFile(archive_path) as archive:
         members = [m for m in archive.infolist() if not m.is_dir()]
         report(f"Unpacking {len(members)} files…")
-        for member in members:
+        for index, member in enumerate(members, start=1):
+            # Reported as it goes rather than at the end. Unpacking a thousand
+            # files takes long enough that a window with nothing moving reads
+            # as a hung installer, and the person's next move is to close it
+            # halfway through writing a runtime.
+            if on_progress is not None and (index % 25 == 0 or index == len(members)):
+                on_progress(index, len(members))
             target = destination / member.filename
             target.parent.mkdir(parents=True, exist_ok=True)
             written = False
@@ -399,6 +411,77 @@ def remove_startup_shortcut() -> None:
         launcher.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def setup_wizard_path() -> Path:
+    return install_root() / SETUP_WIZARD
+
+
+def create_desktop_shortcut(report) -> bool:
+    """A shortcut to the enrolment wizard, on the desktop.
+
+    Enrolment is the step that happens LATER - a code is read out over the
+    phone, sometimes the next morning - and asking somebody to find an
+    executable inside AppData at that moment is asking them to fail. The
+    shortcut points at the wizard, not at this installer: installing again is
+    not what a Store needs, and a desktop icon that reinstalls software is an
+    invitation to do it by accident.
+
+    Written through PowerShell's WScript.Shell because a real .lnk needs COM,
+    and a .lnk is what carries the icon. A failure here is reported and
+    otherwise ignored: no shortcut is a smaller problem than no Receiver.
+    """
+    target = setup_wizard_path()
+    if not target.exists():
+        report("The enrolment wizard is not in this payload, so no shortcut "
+               "was created.")
+        return False
+    try:
+        desktop = Path(os.environ["USERPROFILE"]) / "Desktop"
+        link = desktop / "SpeakLink Store Setup.lnk"
+        script = (
+            "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('"
+            + str(link).replace("'", "''") + "');"
+            "$s.TargetPath = '" + str(target).replace("'", "''") + "';"
+            "$s.WorkingDirectory = '" + str(target.parent).replace("'", "''") + "';"
+            "$s.IconLocation = '" + str(target).replace("'", "''") + ",0';"
+            "$s.Description = 'Enrol this Store with SpeakLink HQ';"
+            "$s.Save()")
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-Command", script],
+            capture_output=True, text=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if result.returncode != 0:
+            report("The desktop shortcut could not be created: "
+                   + (result.stderr or result.stdout).strip())
+            return False
+        report(f"Desktop shortcut created: {link.name}")
+        return True
+    except (OSError, KeyError, subprocess.SubprocessError) as failure:
+        report(f"The desktop shortcut could not be created: {failure}")
+        return False
+
+
+def remove_desktop_shortcut() -> None:
+    try:
+        link = (Path(os.environ["USERPROFILE"]) / "Desktop"
+                / "SpeakLink Store Setup.lnk")
+        link.unlink(missing_ok=True)
+    except (OSError, KeyError):
+        pass
+
+
+def launch_setup_wizard() -> bool:
+    """Open the enrolment wizard. Returns whether it started."""
+    target = setup_wizard_path()
+    if not target.exists():
+        return False
+    try:
+        subprocess.Popen([str(target)], cwd=str(target.parent))
+        return True
+    except OSError:
+        return False
 
 
 def register_task(report) -> None:
@@ -503,7 +586,8 @@ def _register_task_or_fall_back(report) -> str | None:
         return "ELEVATE"
 
 
-def do_install_or_upgrade(report, *, backend_url: str | None = None) -> str:
+def do_install_or_upgrade(report, *, backend_url: str | None = None,
+                          on_progress=None) -> str:
     state = read_state()
     verb = state.suggested_action()
     report(f"This machine: {state.summary()}")
@@ -514,8 +598,9 @@ def do_install_or_upgrade(report, *, backend_url: str | None = None) -> str:
     # the machine ends up with one Receiver rather than two fighting over the
     # same Device and the same audio endpoint.
     adopt_legacy_installation(report)
-    unpack_payload(report, install_root())
+    unpack_payload(report, install_root(), on_progress)
     write_settings(report, backend_url)
+    create_desktop_shortcut(report)
 
     note = _register_task_or_fall_back(report)
     if note == "ELEVATE":
@@ -551,13 +636,14 @@ def do_install_or_upgrade(report, *, backend_url: str | None = None) -> str:
             f"{install_root()} and enter the one-time code from HQ." + suffix)
 
 
-def do_repair(report) -> str:
+def do_repair(report, *, on_progress=None) -> str:
     state = read_state()
     report(f"This machine: {state.summary()}")
     report("Repairing: the program files and the logon task are rebuilt. The "
            "Device credential and settings are kept.")
     stop_runtime(report)
-    unpack_payload(report, install_root())
+    unpack_payload(report, install_root(), on_progress)
+    create_desktop_shortcut(report)
     note = _register_task_or_fall_back(report)
     if note == "ELEVATE":
         code = relaunch_elevated("repair")
@@ -584,6 +670,7 @@ def do_uninstall(report, *, remove_credential: bool = False) -> str:
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
     remove_startup_shortcut()
+    remove_desktop_shortcut()
 
     if install_root().exists():
         report(f"Removing {install_root()}…")
@@ -605,11 +692,11 @@ def do_uninstall(report, *, remove_credential: bool = False) -> str:
 
 def run_gui() -> int:  # pragma: no cover - exercised by hand on a Store PC
     import tkinter as tk
-    from tkinter import messagebox, scrolledtext
+    from tkinter import filedialog, messagebox, scrolledtext, ttk
 
     window = tk.Tk()
     window.title(f"{APP_NAME} - Installer")
-    window.geometry("620x470")
+    window.geometry("660x600")
     window.resizable(False, False)
     try:
         window.iconbitmap(str(icon_path()))
@@ -620,16 +707,18 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand on a Store PC
 
     state = read_state()
 
-    header = tk.Label(window, text="SpeakLink Store Receiver",
-                      font=("Segoe UI", 15, "bold"))
-    header.pack(pady=(14, 2))
-    tk.Label(window, text=state.summary(), fg="#475569",
-             font=("Segoe UI", 9)).pack()
+    tk.Label(window, text="SpeakLink Store Receiver",
+             font=("Segoe UI", 15, "bold")).pack(pady=(14, 2))
+    machine_label = tk.Label(window, text=state.summary(), fg="#475569",
+                             font=("Segoe UI", 9))
+    machine_label.pack()
 
     form = tk.Frame(window)
-    form.pack(pady=8)
-    tk.Label(form, text="HQ address", font=("Segoe UI", 9)).grid(row=0, column=0, padx=4)
-    backend = tk.Entry(form, width=38)
+    form.pack(pady=8, padx=16, fill="x")
+
+    tk.Label(form, text="HQ address", font=("Segoe UI", 9)).grid(
+        row=0, column=0, sticky="e", padx=4, pady=3)
+    backend = tk.Entry(form, width=52)
     existing_url = ""
     config = state_root() / "config.json"
     if config.exists():
@@ -638,36 +727,120 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand on a Store PC
         except (OSError, ValueError):
             existing_url = ""
     backend.insert(0, existing_url or "http://192.168.4.134:8000")
-    backend.grid(row=0, column=1, padx=4)
+    backend.grid(row=0, column=1, columnspan=2, sticky="we", padx=4, pady=3)
 
-    log = scrolledtext.ScrolledText(window, height=12, width=74,
+    # WHERE IT GOES, and why it is asked rather than assumed. The default is
+    # inside the Store user's profile, which needs no rights and survives
+    # Windows updates - but a shop with a small system drive, or an operator
+    # who keeps applications on D:, has a real reason to put it elsewhere, and
+    # discovering afterwards that 250MB went somewhere unexpected is worse
+    # than one more field.
+    tk.Label(form, text="Install to", font=("Segoe UI", 9)).grid(
+        row=1, column=0, sticky="e", padx=4, pady=3)
+    location = tk.Entry(form, width=44)
+    location.insert(0, str(install_root()))
+    location.grid(row=1, column=1, sticky="we", padx=4, pady=3)
+
+    def browse():
+        chosen = filedialog.askdirectory(
+            title="Where should the Receiver be installed?",
+            initialdir=str(Path(location.get()).parent
+                           if location.get() else Path.home()))
+        if chosen:
+            location.delete(0, "end")
+            location.insert(0, str(Path(chosen) / "SpeakLink" / "receiver-app")
+                            if not chosen.rstrip("\\/").endswith("receiver-app")
+                            else chosen)
+    tk.Button(form, text="Browse…", command=browse).grid(
+        row=1, column=2, padx=4, pady=3)
+    form.grid_columnconfigure(1, weight=1)
+
+    progress = ttk.Progressbar(window, mode="determinate", maximum=100, length=620)
+    progress.pack(padx=16, pady=(6, 0))
+    step_label = tk.Label(window, text="", fg="#475569", font=("Segoe UI", 9))
+    step_label.pack()
+
+    log = scrolledtext.ScrolledText(window, height=14, width=78,
                                     font=("Consolas", 9), state="disabled")
-    log.pack(padx=12, pady=8)
+    log.pack(padx=16, pady=8)
 
     def report(message: str) -> None:
         log.configure(state="normal")
         log.insert("end", message + "\n")
         log.see("end")
         log.configure(state="disabled")
+        step_label.configure(text=message[:90])
         window.update_idletasks()
 
-    def run(action):
+    def show_progress(done: int, total: int) -> None:
+        progress.configure(value=(done / total) * 100 if total else 0)
+        step_label.configure(text=f"Unpacking {done} of {total} files…")
+        window.update_idletasks()
+
+    def apply_paths() -> None:
+        """Whatever the person typed is what gets used, here and in the
+        elevated copy - which is why it goes into the environment rather than
+        being passed to one function."""
+        chosen = location.get().strip()
+        if chosen:
+            os.environ["SPEAKLINK_INSTALL_ROOT"] = chosen
+
+    def offer_enrolment() -> None:
+        """Ask, rather than opening the wizard uninvited.
+
+        Enrolment needs a one-time code from HQ, and an installer that opened a
+        code prompt at somebody who does not have one yet teaches them to close
+        it - which is the window they will need to find again later.
+        """
+        if not setup_wizard_path().exists():
+            return
+        if messagebox.askyesno(
+                APP_NAME,
+                "Open Store Setup now to enrol this Store?\n\n"
+                "You will need the one-time code from HQ. If you do not have "
+                "it yet, use the SpeakLink Store Setup shortcut on the desktop "
+                "when you do."):
+            if not launch_setup_wizard():
+                messagebox.showwarning(
+                    APP_NAME,
+                    "Store Setup could not be started. Use the desktop "
+                    "shortcut instead.")
+
+    def run(action, *, enrol_after=False):
         for button in buttons:
             button.configure(state="disabled")
+        progress.configure(value=0)
         try:
             outcome = action()
+            progress.configure(value=100)
             report("")
             report(outcome)
             messagebox.showinfo(APP_NAME, outcome)
+            machine_label.configure(text=read_state().summary())
+            if enrol_after and not read_state().has_credential:
+                offer_enrolment()
         except Exception as failure:
             report("")
             report(f"FAILED: {failure}")
+            step_label.configure(text="Failed.")
             messagebox.showerror(APP_NAME, str(failure))
         finally:
             for button in buttons:
                 button.configure(state="normal")
 
+    def install():
+        apply_paths()
+        run(lambda: do_install_or_upgrade(report,
+                                          backend_url=backend.get().strip(),
+                                          on_progress=show_progress),
+            enrol_after=True)
+
+    def repair():
+        apply_paths()
+        run(lambda: do_repair(report, on_progress=show_progress))
+
     def forget():
+        apply_paths()
         if not messagebox.askyesno(
                 APP_NAME,
                 "This removes the Device credential as well as the software.\n\n"
@@ -679,15 +852,12 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand on a Store PC
     row = tk.Frame(window)
     row.pack(pady=4)
     buttons = [
-        tk.Button(row, text="Install / Upgrade", width=18, height=2,
-                  command=lambda: run(lambda: do_install_or_upgrade(
-                      report, backend_url=backend.get().strip()))),
-        tk.Button(row, text="Repair", width=12, height=2,
-                  command=lambda: run(lambda: do_repair(report))),
+        tk.Button(row, text="Install / Upgrade", width=18, height=2, command=install),
+        tk.Button(row, text="Repair", width=12, height=2, command=repair),
         tk.Button(row, text="Uninstall", width=12, height=2,
-                  command=lambda: run(lambda: do_uninstall(report))),
-        tk.Button(row, text="Uninstall + forget", width=16, height=2,
-                  command=forget),
+                  command=lambda: (apply_paths(),
+                                   run(lambda: do_uninstall(report)))),
+        tk.Button(row, text="Uninstall + forget", width=16, height=2, command=forget),
     ]
     for index, button in enumerate(buttons):
         button.grid(row=0, column=index, padx=4)
@@ -708,7 +878,17 @@ def run_cli(argv: list[str]) -> int:
     parser.add_argument("--remove-credential", action="store_true")
     parser.add_argument("--already-elevated", action="store_true",
                         help=argparse.SUPPRESS)
+    parser.add_argument("--install-root", help="where the Receiver is installed")
+    parser.add_argument("--state-root", help="where the credential and settings live")
     arguments = parser.parse_args(argv)
+
+    # Set as environment rather than passed down: install_root() and
+    # state_root() are read from a dozen places, and threading two paths
+    # through all of them is how one of them ends up reading the default.
+    if arguments.install_root:
+        os.environ["SPEAKLINK_INSTALL_ROOT"] = arguments.install_root
+    if arguments.state_root:
+        os.environ["SPEAKLINK_STATE_ROOT"] = arguments.state_root
 
     global ALREADY_ELEVATED
     ALREADY_ELEVATED = arguments.already_elevated or is_elevated()
