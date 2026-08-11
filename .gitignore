@@ -341,3 +341,6 @@ frontend/build-dev/
 _live-hq-deployment-backups/
 frontend/build-retired-*/
 frontend/build-deploy/
+
+# Branch backup bundles. Never committed.
+_branch-backup/
