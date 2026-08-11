@@ -46,6 +46,12 @@ const ALL_TARGET_MODES = [...PHYSICAL_TARGET_MODES, LINK_ONLY_MODE];
 // playback_error, device_error, stopped. There is no "playing" and no "failed",
 // so the summary must not invent one - a Store is never shown as playing just
 // because a command was sent to it.
+//: lifecycle_state values that mean "this Store is in the broadcast". Kept
+//: separate from play_status on purpose: this is the operator's intent and
+//: HQ's delivery, while play_status is what the Receiver reported about sound.
+//: A Store can be ACTIVE here and silent there.
+const PARTICIPATING_STATES = ["ADDING", "PREPARING", "ACTIVE", "PAUSING", "PAUSED"];
+
 const RECEIVING_STATUSES = ["audio_receiving"];
 const CONFIRMED_STATUSES = ["playback_confirmed"];
 const ERROR_STATUSES = ["playback_error", "device_error"];
@@ -284,8 +290,15 @@ export default function BroadcastConsole() {
   // the session at all, so after a remount they would resolve to an empty set
   // and the Console would show a live broadcast reaching nothing. It is also
   // simply more honest - these are the Stores the backend is streaming to.
+  //
+  // A target that was REMOVED mid-broadcast is not a target any more. It stays
+  // in the response because the row is the record of what happened, so it is
+  // filtered here rather than deleted there - otherwise a Store taken out of a
+  // live broadcast would keep being counted as one it reaches.
   const liveTargetIds = current?.live
     ? (current.targets || [])
+        .filter((target) => PARTICIPATING_STATES.includes(
+          target.lifecycle_state || "ACTIVE"))
         .map((target) => target.store_id)
         .filter((storeId) => storeId !== null && storeId !== undefined)
     : null;
@@ -351,6 +364,47 @@ export default function BroadcastConsole() {
     } catch (e) {
       setError(e?.response?.data?.detail || e.message || "Failed to start broadcast");
     } finally { setBusy(false); setConfirmOpen(false); }
+  };
+
+  // ---- Adding and removing ONE Store while the broadcast is on air.
+  //
+  // Both are slow enough to be worth showing: an add waits for the Store's
+  // Receiver to report ready before it can join at the live edge, which can
+  // take seconds. So the row is marked busy for the duration and the failure
+  // is reported ON THE ROW, not in the page-wide error bar - an operator
+  // adding one shop out of forty needs to know WHICH one refused.
+  const [rowBusyStoreId, setRowBusyStoreId] = React.useState(null);
+  const [rowErrors, setRowErrors] = React.useState({});
+  const sessionId = current?.session?.id;
+
+  const setRowError = (storeId, message) =>
+    setRowErrors((previous) => ({ ...previous, [storeId]: message }));
+
+  const addStoreLive = async (store) => {
+    if (!sessionId) return;
+    setRowBusyStoreId(store.id);
+    setRowError(store.id, "");
+    try {
+      await api.post(`/broadcast/sessions/${sessionId}/targets`,
+                     { store_id: store.id });
+      await loadBroadcast();
+    } catch (e) {
+      setRowError(store.id, e?.response?.data?.detail || e.message
+                  || "Could not add this Store.");
+    } finally { setRowBusyStoreId(null); }
+  };
+
+  const removeStoreLive = async (store) => {
+    if (!sessionId) return;
+    setRowBusyStoreId(store.id);
+    setRowError(store.id, "");
+    try {
+      await api.delete(`/broadcast/sessions/${sessionId}/targets/${store.id}`);
+      await loadBroadcast();
+    } catch (e) {
+      setRowError(store.id, e?.response?.data?.detail || e.message
+                  || "Could not remove this Store.");
+    } finally { setRowBusyStoreId(null); }
   };
 
   const stopBroadcast = async () => {
@@ -884,6 +938,11 @@ export default function BroadcastConsole() {
                 <th className="px-3 py-2">City / Zone</th>
                 <th className="px-3 py-2">Status</th>
                 <th className="px-3 py-2">Play Status</th>
+                {isLive && (
+                  <th className="px-3 py-2" title="Add or remove this Store without interrupting the rest of the broadcast.">
+                    In Broadcast
+                  </th>
+                )}
                 {isLive && mayControlAudio && (
                   <th className="px-3 py-2" title="Controls the SpeakLink audio output on the Store PC. The amplifier's physical volume control is separate.">
                     Store Output
@@ -935,6 +994,28 @@ export default function BroadcastConsole() {
                       {playStatus === "—" ? <span className="text-slate-400 text-xs">—</span> :
                         <StatusBadge status={playStatus} testid={`play-status-${s.store_code}`} />}
                     </td>
+                    {isLive && (
+                      // Add / Remove for ONE Store, mid-broadcast. The state
+                      // shown is lifecycle_state - whether the Store is IN the
+                      // broadcast - never play_status, which is about sound.
+                      <td className="px-3 py-2 align-top">
+                        <LiveTargetAction
+                          store={s}
+                          inBroadcast={isTarget}
+                          state={t?.lifecycle_state}
+                          busy={rowBusyStoreId === s.id}
+                          // One at a time. Two adds in flight would each wait
+                          // on a different Receiver while the operator has no
+                          // way to tell which row the next answer belongs to.
+                          disabled={busy || rowBusyStoreId !== null}
+                          busyElsewhere={busyElsewhere}
+                          online={isReceiverOnline(s)}
+                          error={rowErrors[s.id]}
+                          onAdd={() => addStoreLive(s)}
+                          onRemove={() => removeStoreLive(s)}
+                        />
+                      </td>
+                    )}
                     {isLive && mayControlAudio && (
                       <td className="px-3 py-2">
                         {/* Only a Store this broadcast is actually targeting.
@@ -961,7 +1042,8 @@ export default function BroadcastConsole() {
                 );
               })}
               {filteredStores.length === 0 && (
-                <tr><td colSpan={isLive && mayControlAudio ? 7 : 6} className="px-3 py-6 text-center text-slate-500">No stores found.</td></tr>
+                <tr><td colSpan={6 + (isLive ? 1 : 0) + (isLive && mayControlAudio ? 1 : 0)}
+                        className="px-3 py-6 text-center text-slate-500">No stores found.</td></tr>
               )}
             </tbody>
           </table>
@@ -1063,6 +1145,77 @@ export default function BroadcastConsole() {
             </div>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Add or remove ONE Store while the broadcast is on air.
+ *
+ * Three honest states, and the middle one is the reason this is a component
+ * rather than a button:
+ *
+ *   in the broadcast      - Remove, and the lifecycle state in words
+ *   not in it, reachable  - Add
+ *   not in it, unreachable- no action, and WHY not
+ *
+ * A Store whose Receiver is offline, or which another broadcast is holding,
+ * gets no Add button at all rather than one that fails when pressed. The
+ * backend refuses both cases anyway; offering the control would be a promise
+ * the page already knows it cannot keep.
+ *
+ * PREPARING is shown while an add is in flight because it can take seconds -
+ * the Receiver has to acknowledge before the Store can join at the live edge.
+ * Silence for that long reads as a dead button.
+ */
+function LiveTargetAction({
+  store, inBroadcast, state, busy, disabled, busyElsewhere, online, error,
+  onAdd, onRemove,
+}) {
+  const code = store.store_code;
+  const settling = state === "ADDING" || state === "PREPARING" || state === "REMOVING";
+  return (
+    <div className="space-y-1">
+      {inBroadcast ? (
+        <div className="flex items-center gap-2">
+          <button type="button" data-testid={`remove-store-${code}`}
+                  onClick={onRemove} disabled={disabled || busy}
+                  title={`Take ${code} out of this broadcast. The other Stores keep playing.`}
+                  className="rounded border border-red-300 bg-white px-2 py-1 text-xs font-semibold text-red-800 hover:bg-red-50 disabled:opacity-40">
+            {busy ? "Removing…" : "Remove"}
+          </button>
+          {settling && (
+            <span data-testid={`target-state-${code}`}
+                  className="text-[10px] uppercase tracking-wider text-amber-700">
+              {state}
+            </span>
+          )}
+        </div>
+      ) : busyElsewhere ? (
+        // Says WHAT, never WHO - the same rule the In-use badge follows.
+        <span data-testid={`add-blocked-${code}`} className="text-xs text-amber-800">
+          In another broadcast
+        </span>
+      ) : !online ? (
+        <span data-testid={`add-blocked-${code}`} className="text-xs text-slate-500">
+          Receiver offline
+        </span>
+      ) : (
+        <button type="button" data-testid={`add-store-${code}`}
+                onClick={onAdd} disabled={disabled || busy}
+                title={`Add ${code} to this broadcast. It joins at the live edge, not from the beginning.`}
+                className="rounded border border-blue-300 bg-white px-2 py-1 text-xs font-semibold text-blue-800 hover:bg-blue-50 disabled:opacity-40">
+          {busy ? "Adding…" : "Add"}
+        </button>
+      )}
+      {error && (
+        // On the row, because an operator adding one shop out of forty needs
+        // to know which one refused and why.
+        <p role="alert" data-testid={`target-error-${code}`}
+           className="max-w-[16rem] text-[11px] leading-snug text-red-700">
+          {error}
+        </p>
       )}
     </div>
   );

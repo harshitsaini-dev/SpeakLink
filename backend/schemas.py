@@ -426,6 +426,13 @@ class TargetOut(BaseModel):
     store_code: Optional[str] = None
     store_name: Optional[str] = None
     store_deleted: bool = False
+    #: Whether the Store is IN the broadcast, as distinct from play_status,
+    #: which is what its Receiver last reported about sound. A Store can be
+    #: REMOVED here and still show a stale "playing" there; conflating the two
+    #: is how a console claims a shop is receiving an announcement it was taken
+    #: out of. Defaults for rows written before dynamic targeting existed.
+    lifecycle_state: str = "ACTIVE"
+    current_generation: int = 1
 
     @field_serializer("command_sent_at", "started_playing_at", "stopped_at", when_used="json")
     def _serialize_utc(self, value: Optional[datetime]) -> Optional[str]:
