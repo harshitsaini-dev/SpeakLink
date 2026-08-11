@@ -7917,3 +7917,35 @@ and not after.
 
 Receiver source unchanged. **Kit remains 1.8.0.** Live HQ untouched. Pause,
 Resume, Remove and Zone bulk actions remain unimplemented.
+
+## Bringing the work onto main
+
+`main` still held nothing but the baseline import from 23 July. Everything
+built since - 378 commits - lived in feature branches, so the default branch
+did not describe the product at all.
+
+`feature/dynamic-store-targeting` already contained 58 of the 60 branches, and
+is 378 ahead of `main` and 0 behind, so the merge carries no conflicts. The two
+left out are `feature/self-contained-hq-installer` and its
+`wip/self-contained-hq-installer-paused` checkpoint (2-3 August); the paused
+name is accurate and they stay on GitHub for a separate pull request.
+
+Verified before opening it:
+
+| | |
+|---|---|
+| Backend | 3699 passed, 90 skipped, 0 failed |
+| Frontend Jest | 388 passed |
+| Mocked Playwright | 434 passed, 2 skipped |
+| Real-backend listener suite | 28 passed |
+
+The first backend run reported one failure,
+`test_no_guarded_runtime_file_changed_during_this_test_run`. That was the guard
+working: the AYUSHK rename edited `server.py` while the suite was already
+running. Re-run against stable files, it passes.
+
+The AYUSHK test Store and the AYUSH device were renamed to TESTSTORE and
+TESTPC. They were a real Store code and device name from permanent-delete
+testing that had reached production docstrings, documentation and fixtures. So
+the passages describing that deletion no longer match the database of the day -
+recorded here rather than left to be discovered.
