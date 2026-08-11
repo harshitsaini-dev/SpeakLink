@@ -595,6 +595,28 @@ export default function Listen() {
                 box for somebody who is not in the room yet. */}
             <ListenerChat />
 
+            {/* LEAVING, as a deliberate act.
+                Closing the tab stops the audio but leaves this browser holding
+                an admitted session, so the operator's audience list keeps a
+                listener who has gone home. This says so, discards the session,
+                and returns to the join form - it is the same path "Join again"
+                takes after a Kick, because leaving and being removed end in
+                the same place: not in the room, able to ask to come back. */}
+            <button
+              type="button"
+              data-testid="listen-leave"
+              onClick={startOver}
+              disabled={busy}
+              className="mt-5 w-full rounded-lg border border-slate-700 px-4 py-2
+                         text-sm font-semibold text-slate-300 hover:bg-slate-900
+                         disabled:opacity-60">
+              Leave Broadcast
+            </button>
+            <p className="mt-1 text-[11px] text-slate-500">
+              You will stop hearing this Broadcast. You can join again with the
+              Broadcast ID.
+            </p>
+
             {!broadcastLive && (
               <p className="mt-3 text-sm text-slate-400" data-testid="listen-not-started">
                 The Broadcast hasn&rsquo;t started yet.

@@ -89,7 +89,24 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
     }
   }, []);
 
-  if (!sessionId || !room) return null;
+  // No Broadcast, no panel. But a Broadcast whose room has not arrived yet is
+  // a DIFFERENT state, and rendering nothing for it left an empty box in the
+  // console with no explanation - indistinguishable, to the operator, from a
+  // web audience feature that had broken. It says which it is now.
+  if (!sessionId) return null;
+  if (!room) {
+    return (
+      <div data-testid="web-audience-loading"
+           className="h-full border border-slate-200 bg-white rounded-md shadow-sm p-4">
+        <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
+          Web Audience
+        </div>
+        <p className="mt-2 text-sm text-slate-500">
+          {error || "Reading the listener link…"}
+        </p>
+      </div>
+    );
+  }
 
   const counts = room.counts || {};
 

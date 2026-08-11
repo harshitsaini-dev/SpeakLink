@@ -188,6 +188,11 @@ async function mockBackend(page, options = {}) {
     sessionId: 8,
     startCalls: [],
     addTargetCalls: [],
+    // The chat room, shaped like the real one: settings live on the room and
+    // visibility lives on the message, so a spec can prove that flipping the
+    // mode does not rewrite what was already said.
+    chat: options.chat || { chat_enabled: true, chat_mode: 'PUBLIC', messages: [] },
+    chatMessageId: 100,
     removeTargetCalls: [],
     addTargetRefusal: options.addTargetRefusal || null,
     stopCalls: [],
@@ -1309,6 +1314,46 @@ async function mockBackend(page, options = {}) {
         lifecycle_state: 'REMOVED', generation: 1,
         stop_delivered: true, stores_remaining: remaining,
       }));
+    }
+
+    // ---- CHAT -------------------------------------------------------------
+    // The host half. Mirrors backend/server.py: the settings and the whole
+    // transcript come back on every write, so the panel never has to guess
+    // what the server decided.
+    if (path === `/broadcast/sessions/${state.sessionId}/chat` && method === 'GET') {
+      return route.fulfill(json({ session_id: state.sessionId, ...state.chat }));
+    }
+    if (path === `/broadcast/sessions/${state.sessionId}/chat` && method === 'POST') {
+      const body = JSON.parse(request.postData() || '{}');
+      state.chat.messages.push({
+        id: ++state.chatMessageId, participant_id: null, author_kind: 'HOST',
+        author_name: state.operator.username, body: body.body, deleted: false,
+        visibility: 'PUBLIC', created_at: new Date(0).toISOString(),
+        has_image: false,
+      });
+      return route.fulfill(json(state.chat.messages[state.chat.messages.length - 1]));
+    }
+    if (path === `/broadcast/sessions/${state.sessionId}/chat/settings` && method === 'PUT') {
+      const body = JSON.parse(request.postData() || '{}');
+      if (body.chat_enabled !== undefined && body.chat_enabled !== null) {
+        state.chat.chat_enabled = body.chat_enabled;
+      }
+      if (body.chat_mode) state.chat.chat_mode = body.chat_mode;
+      // Deliberately does NOT rewrite existing messages: a message sent while
+      // the room was private was sent in confidence.
+      return route.fulfill(json({ session_id: state.sessionId, ...state.chat }));
+    }
+    const chatDelete = path.match(
+      /^\/broadcast\/sessions\/\d+\/chat\/messages\/(\d+)\/delete$/);
+    if (chatDelete && method === 'POST') {
+      const target = state.chat.messages.find((m) => m.id === Number(chatDelete[1]));
+      if (target) {
+        // A tombstone: the row and the author stay, the words go.
+        target.deleted = true;
+        target.body = null;
+        target.has_image = false;
+      }
+      return route.fulfill(json({ session_id: state.sessionId, ...state.chat }));
     }
 
     if (method === 'POST' && /^\/broadcast\/sessions\/\d+\/stop$/.test(path)) {
