@@ -223,6 +223,8 @@ from receiver_enrollment_codes import (
 from audio_protocol import (
     build_prepare_message,
     build_stop_message,
+    build_stand_down_message,
+    build_resume_message,
     build_set_audio_control_message,
 )
 from auth import verify_password, hash_password, create_access_token, get_current_user
@@ -3807,6 +3809,178 @@ async def add_store_to_live_broadcast(
         {"type": "target_added", "session_id": sid, "store_id": store.id})
     return {"session_id": sid, "store_id": store.id,
             "store_code": store.store_code,
+            "lifecycle_state": target.lifecycle_state,
+            "generation": generation,
+            "bootstrap": joined}
+
+
+@api.post("/broadcast/sessions/{sid}/targets/{store_id}/pause")
+async def pause_store_in_live_broadcast(
+    sid: int, store_id: int, db: Session = Depends(get_db),
+    user: HQUser = Depends(require("broadcast.store_delivery")),
+):
+    """Silence ONE Store without taking it out of the Broadcast.
+
+    PAUSE IS NOT REMOVE, and the difference is the lease. A removed Store is
+    released, so another Broadcast may claim it; a paused Store is still this
+    Broadcast's, waiting to come back. Releasing the lease here would let a
+    colleague's announcement take the shop over during a pause the operator
+    intends to end in thirty seconds.
+
+    The Receiver is told to STAND DOWN rather than to stop: it closes its
+    decoder and output device and hands the shop's own volume back, but keeps
+    the session, so Resume costs a device open instead of a whole
+    re-negotiation of readiness.
+    """
+    _require_audio_control_owner(sid, user)
+    _require_physical_delivery(user)
+
+    session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
+    if session is None or session.status != "live":
+        raise HTTPException(status_code=409,
+                            detail="This broadcast is no longer live.")
+
+    scope = resolve_store_scope(engine, user)
+    if scope is not None and store_id not in scope:
+        raise HTTPException(status_code=404,
+                            detail="That Store is not in this broadcast.")
+
+    target = db.query(BroadcastTarget).filter(
+        BroadcastTarget.session_id == sid,
+        BroadcastTarget.store_id == store_id).first()
+    if target is None:
+        raise HTTPException(status_code=404,
+                            detail="That Store is not in this broadcast.")
+    if target.lifecycle_state in (lifecycle.PAUSED, lifecycle.PAUSING):
+        # Idempotent: a second click is the same intent, already true.
+        return {"session_id": sid, "store_id": store_id,
+                "lifecycle_state": target.lifecycle_state,
+                "generation": target.current_generation,
+                "already_paused": True}
+    if target.lifecycle_state != lifecycle.ACTIVE:
+        raise HTTPException(
+            status_code=409,
+            detail="Only a Store that is currently receiving can be paused.")
+
+    target.lifecycle_state = lifecycle.PAUSING
+    db.commit()
+
+    # Delivery stops FIRST. Telling a Receiver to stand down while still
+    # pushing audio at it would queue chunks for a decoder that is closing.
+    store_audio_registry.drop_store(session_id=sid, store_id=store_id)
+    await manager.broadcasts.drop_store(sid, store_id)
+
+    delivered = await manager.send_to_receiver(
+        store_id, build_stand_down_message(session_id=sid))
+
+    # The lease is deliberately NOT released. See the docstring.
+    target.lifecycle_state = lifecycle.PAUSED
+    db.commit()
+
+    _write_log(db, "info",
+               f"STORE_PAUSED session_id={sid} store_id={store_id} "
+               f"generation={target.current_generation} "
+               f"stand_down_delivered={bool(delivered)} actor_user_id={user.id}")
+    await manager.notify_dashboards(
+        {"type": "target_paused", "session_id": sid, "store_id": store_id})
+    return {"session_id": sid, "store_id": store_id,
+            "lifecycle_state": target.lifecycle_state,
+            "generation": target.current_generation,
+            "stand_down_delivered": bool(delivered)}
+
+
+@api.post("/broadcast/sessions/{sid}/targets/{store_id}/resume")
+async def resume_store_in_live_broadcast(
+    sid: int, store_id: int, db: Session = Depends(get_db),
+    user: HQUser = Depends(require("broadcast.store_delivery")),
+):
+    """Bring a paused Store back into the Broadcast it never left.
+
+    A NEW GENERATION, not a continuation. The Receiver re-opens its output and
+    takes the Windows endpoint over again from the shop's own level, so the
+    volume baseline belongs to this participation rather than to the one before
+    the pause - a shop coming back at the previous announcement's level is
+    exactly the surprise this avoids. The generation is what lets a late
+    acknowledgement from before the pause be recognised and dropped.
+
+    It rejoins at the LIVE EDGE, like any other late join: a shop replaying the
+    part of the announcement it missed, out of step with every other shop, is
+    worse than a shop that missed it.
+    """
+    _require_audio_control_owner(sid, user)
+    _require_physical_delivery(user)
+
+    session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
+    if session is None or session.status != "live":
+        raise HTTPException(status_code=409,
+                            detail="This broadcast is no longer live.")
+
+    scope = resolve_store_scope(engine, user)
+    if scope is not None and store_id not in scope:
+        raise HTTPException(status_code=404,
+                            detail="That Store is not in this broadcast.")
+
+    target = db.query(BroadcastTarget).filter(
+        BroadcastTarget.session_id == sid,
+        BroadcastTarget.store_id == store_id).first()
+    if target is None:
+        raise HTTPException(status_code=404,
+                            detail="That Store is not in this broadcast.")
+    if target.lifecycle_state == lifecycle.ACTIVE:
+        return {"session_id": sid, "store_id": store_id,
+                "lifecycle_state": target.lifecycle_state,
+                "generation": target.current_generation,
+                "already_active": True}
+    if target.lifecycle_state != lifecycle.PAUSED:
+        raise HTTPException(status_code=409,
+                            detail="Only a paused Store can be resumed.")
+
+    store = db.query(Store).filter(Store.id == store_id).first()
+    code = store.store_code if store else str(store_id)
+
+    if store_id not in manager.online_store_ids():
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{code} has no Receiver connected, so it cannot be "
+                    "resumed. It is still paused."))
+
+    generation = (target.current_generation or 1) + 1
+    target.current_generation = generation
+    db.commit()
+
+    async def fail(detail: str):
+        """Leave the Store PAUSED rather than in a state nobody can act on."""
+        target.lifecycle_state = lifecycle.PAUSED
+        target.error_message = detail[:500]
+        db.commit()
+        raise HTTPException(status_code=409, detail=detail)
+
+    store_audio_registry.add_store(session_id=sid, store_id=store_id)
+    await manager.send_to_receiver(store_id, build_resume_message(
+        session_id=sid, store_id=store_id, generation=generation))
+
+    ready = await manager.wait_for_store_ready(
+        store_id, timeout=ADD_STORE_READY_TIMEOUT_SECONDS)
+    if not ready:
+        await fail(f"{code} did not report ready after resuming. It is still "
+                   "paused and nothing else changed.")
+
+    joined = await manager.broadcasts.join_store_at_live_edge(sid, store_id)
+    if joined is None or not joined.get("joined"):
+        await fail(f"{code} could not be started at the live edge: "
+                   f"{(joined or {}).get('reason', 'no audio to join yet')}.")
+
+    target.lifecycle_state = lifecycle.ACTIVE
+    target.error_message = None
+    target.command_sent_at = datetime.utcnow()
+    db.commit()
+
+    _write_log(db, "info",
+               f"STORE_RESUMED session_id={sid} store_id={store_id} "
+               f"generation={generation} actor_user_id={user.id}")
+    await manager.notify_dashboards(
+        {"type": "target_resumed", "session_id": sid, "store_id": store_id})
+    return {"session_id": sid, "store_id": store_id,
             "lifecycle_state": target.lifecycle_state,
             "generation": generation,
             "bootstrap": joined}

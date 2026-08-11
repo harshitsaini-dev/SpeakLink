@@ -242,3 +242,63 @@ test("a Store still settling says so instead of looking finished", async () => {
   await renderConsole();
   expect(screen.getByTestId("target-state-BBB").textContent).toContain("PREPARING");
 });
+
+// ===========================================================================
+// Pause and Resume
+// ===========================================================================
+
+test("a Store in the broadcast is offered Pause as well as Remove", async () => {
+  // Both, deliberately. With only Remove on the row, a thirty-second silence
+  // becomes a removal - which releases the Store and lets another broadcast
+  // take the shop.
+  goLive([target(101)]);
+  await renderConsole();
+  expect(screen.getByTestId("pause-store-AAA")).toBeTruthy();
+  expect(screen.getByTestId("remove-store-AAA")).toBeTruthy();
+});
+
+test("Pause posts to the pause route for exactly that Store", async () => {
+  goLive([target(101), target(102)]);
+  await renderConsole();
+
+  await act(async () => { fireEvent.click(screen.getByTestId("pause-store-BBB")); });
+
+  expect(api.post).toHaveBeenCalledWith(
+    "/broadcast/sessions/77/targets/102/pause");
+  expect(mockBroadcast.load).toHaveBeenCalled();
+});
+
+test("a paused Store offers Resume instead of Pause, and says it is paused", async () => {
+  goLive([target(101), target(102, { lifecycle_state: "PAUSED" })]);
+  await renderConsole();
+
+  expect(screen.getByTestId("resume-store-BBB")).toBeTruthy();
+  expect(screen.queryByTestId("pause-store-BBB")).toBeNull();
+  expect(screen.getByTestId("target-state-BBB").textContent).toContain("PAUSED");
+  // Still counted as a target: it has not left the broadcast.
+  expect(screen.getByTestId("stat-selected").textContent).toContain("2");
+});
+
+test("Resume posts to the resume route", async () => {
+  goLive([target(102, { lifecycle_state: "PAUSED" })]);
+  await renderConsole();
+
+  await act(async () => { fireEvent.click(screen.getByTestId("resume-store-BBB")); });
+
+  expect(api.post).toHaveBeenCalledWith(
+    "/broadcast/sessions/77/targets/102/resume");
+});
+
+test("a refusal to resume is reported on the row", async () => {
+  api.post.mockRejectedValueOnce({ response: { data: {
+    detail: "BBB has no Receiver connected, so it cannot be resumed. It is still paused." } } });
+  goLive([target(102, { lifecycle_state: "PAUSED" })]);
+  await renderConsole();
+
+  await act(async () => { fireEvent.click(screen.getByTestId("resume-store-BBB")); });
+
+  await waitFor(() => {
+    expect(screen.getByTestId("target-error-BBB").textContent)
+      .toMatch(/still paused/);
+  });
+});

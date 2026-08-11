@@ -215,6 +215,10 @@ EXPECTED: dict[str, object] = {
     # Removal is the mirror of the add, and carries the same permission and
     # the same in-handler gates: session ownership and Store Scope.
     "remove_store_from_live_broadcast": "broadcast.store_delivery",
+    # Pause and Resume are the same authority as Add and Remove: they change
+    # what one Store is doing inside a broadcast the caller owns.
+    "pause_store_in_live_broadcast": "broadcast.store_delivery",
+    "resume_store_in_live_broadcast": "broadcast.store_delivery",
     "broadcast_history": "menu.history.view",
     # A recording is the audio of a broadcast this account is already entitled
     # to read about, so it shares History's permission rather than inventing a

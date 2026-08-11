@@ -393,6 +393,32 @@ export default function BroadcastConsole() {
     } finally { setRowBusyStoreId(null); }
   };
 
+  const pauseStoreLive = async (store) => {
+    if (!sessionId) return;
+    setRowBusyStoreId(store.id);
+    setRowError(store.id, "");
+    try {
+      await api.post(`/broadcast/sessions/${sessionId}/targets/${store.id}/pause`);
+      await loadBroadcast();
+    } catch (e) {
+      setRowError(store.id, e?.response?.data?.detail || e.message
+                  || "Could not pause this Store.");
+    } finally { setRowBusyStoreId(null); }
+  };
+
+  const resumeStoreLive = async (store) => {
+    if (!sessionId) return;
+    setRowBusyStoreId(store.id);
+    setRowError(store.id, "");
+    try {
+      await api.post(`/broadcast/sessions/${sessionId}/targets/${store.id}/resume`);
+      await loadBroadcast();
+    } catch (e) {
+      setRowError(store.id, e?.response?.data?.detail || e.message
+                  || "Could not resume this Store.");
+    } finally { setRowBusyStoreId(null); }
+  };
+
   const removeStoreLive = async (store) => {
     if (!sessionId) return;
     setRowBusyStoreId(store.id);
@@ -979,6 +1005,8 @@ export default function BroadcastConsole() {
                           error={rowErrors[s.id]}
                           onAdd={() => addStoreLive(s)}
                           onRemove={() => removeStoreLive(s)}
+                          onPause={() => pauseStoreLive(s)}
+                          onResume={() => resumeStoreLive(s)}
                         />
                       </td>
                     )}
@@ -1105,23 +1133,46 @@ export default function BroadcastConsole() {
  */
 function LiveTargetAction({
   store, inBroadcast, state, busy, disabled, busyElsewhere, online, error,
-  onAdd, onRemove,
+  onAdd, onRemove, onPause, onResume,
 }) {
   const code = store.store_code;
-  const settling = state === "ADDING" || state === "PREPARING" || state === "REMOVING";
+  const settling = state === "ADDING" || state === "PREPARING"
+    || state === "REMOVING" || state === "PAUSING";
+  const paused = state === "PAUSED";
   return (
     <div className="space-y-1">
       {inBroadcast ? (
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* PAUSE IS NOT REMOVE, and the buttons say which is which. A paused
+              Store keeps its place in the broadcast and its lease, so nobody
+              else can take the shop while it is quiet; a removed one is let
+              go. Offering only one of them would push operators into using
+              Remove for a thirty-second silence. */}
+          {paused ? (
+            <button type="button" data-testid={`resume-store-${code}`}
+                    onClick={onResume} disabled={disabled || busy}
+                    title={`Bring ${code} back into this broadcast. It rejoins at the live edge.`}
+                    className="rounded border border-emerald-300 bg-white px-2 py-1 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-40">
+              {busy ? "Resuming…" : "Resume"}
+            </button>
+          ) : (
+            <button type="button" data-testid={`pause-store-${code}`}
+                    onClick={onPause} disabled={disabled || busy}
+                    title={`Silence ${code} without taking it out. Its place in this broadcast is kept.`}
+                    className="rounded border border-amber-300 bg-white px-2 py-1 text-xs font-semibold text-amber-800 hover:bg-amber-50 disabled:opacity-40">
+              {busy ? "Pausing…" : "Pause"}
+            </button>
+          )}
           <button type="button" data-testid={`remove-store-${code}`}
                   onClick={onRemove} disabled={disabled || busy}
                   title={`Take ${code} out of this broadcast. The other Stores keep playing.`}
                   className="rounded border border-red-300 bg-white px-2 py-1 text-xs font-semibold text-red-800 hover:bg-red-50 disabled:opacity-40">
             {busy ? "Removing…" : "Remove"}
           </button>
-          {settling && (
+          {(settling || paused) && (
             <span data-testid={`target-state-${code}`}
-                  className="text-[10px] uppercase tracking-wider text-amber-700">
+                  className={`text-[10px] uppercase tracking-wider ${
+                    paused ? "text-amber-800 font-bold" : "text-amber-700"}`}>
               {state}
             </span>
           )}
