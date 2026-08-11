@@ -459,6 +459,18 @@ class ConnectionScreen(ttk.Frame):
             self.status_var.set(f"{result.state.value}: {result.detail}")
             ok = result.state in (core.ConnectionState.CONNECTED_TO_HQ,
                                   core.ConnectionState.PRIVATE_LAN_WARNING)
+            # A plain-HTTP HQ on a private LAN is REACHABLE but will refuse to
+            # take a credential unless that is explicitly allowed. Stopping
+            # here - at the step where the option is - rather than letting the
+            # wizard walk on and fail at enrolment, which is what made a
+            # perfectly good code look wrong.
+            if (result.state is core.ConnectionState.PRIVATE_LAN_WARNING
+                    and not allow_lan):
+                ok = False
+                self.status_var.set(
+                    f"{result.detail}  ->  Tick “Allow plain HTTP on my "
+                    "private LAN” below to continue, or use HTTPS. "
+                    "Enrolment will refuse to send a code otherwise.")
             self.next_button.config(state="normal" if ok else "disabled")
             if ok:
                 self.app.state_data["backend_url"] = result.base_url

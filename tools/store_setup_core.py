@@ -287,10 +287,60 @@ def redeem_enrollment(
         )
     except AlreadyEnrolled as refusal:
         return EnrolmentUiResult(state=EnrolmentUiState.REFUSED, detail=str(refusal))
-    except (EnrolmentRefused, EnrolmentAmbiguous, EnrolmentUnavailable,
-            EnrolmentUnreachable, InsecureBackendError, AgentError):
+
+    # WHY THESE ARE SEPARATE, AND WHY ONLY ONE STAYS GENERIC
+    #
+    # They were one clause, and every one of them said "that enrolment code
+    # could not be used". A Store with the wrong HQ address, a Store whose HQ
+    # was down, and a Store refusing plain HTTP were all told to check a code
+    # that was perfectly fine - so the person read the code out again, twice,
+    # and asked HQ for another one that failed the same way.
+    #
+    # The generic wording exists for ONE case: a code the backend refused. The
+    # backend deliberately does not say whether it was wrong, expired, already
+    # used or revoked, so neither does this - a caller who could tell those
+    # apart could probe for valid codes.
+    #
+    # Nothing else here is about the code, and none of it is a secret from the
+    # machine that was configured with it: this computer already knows the
+    # address it was pointed at.
+    except EnrolmentUnreachable:
+        return EnrolmentUiResult(
+            state=EnrolmentUiState.REFUSED,
+            detail=(f"HQ at {backend_url} did not answer. The code was not "
+                    "used. Check the address and that HQ is running, then try "
+                    "again."))
+    except InsecureBackendError as refusal:
+        return EnrolmentUiResult(
+            state=EnrolmentUiState.REFUSED,
+            detail=(f"This computer refused to send an enrolment code to "
+                    f"{backend_url} because it is plain HTTP. The code was not "
+                    "used. Go back and tick the private-LAN option if this HQ "
+                    "is on your own network, or use HTTPS. "
+                    f"({refusal})"))
+    except EnrolmentUnavailable:
+        return EnrolmentUiResult(
+            state=EnrolmentUiState.REFUSED,
+            detail=("HQ answered with an error rather than enrolling this "
+                    "computer. The code was not used. Try again in a moment, "
+                    "and tell HQ if it keeps happening."))
+    except EnrolmentAmbiguous:
+        return EnrolmentUiResult(
+            state=EnrolmentUiState.REFUSED,
+            detail=("HQ's answer could not be understood, so nothing was "
+                    "stored. Check that this kit and HQ are the same version."))
+    except EnrolmentRefused:
+        # The one case the generic sentence is for.
         return EnrolmentUiResult(state=EnrolmentUiState.REFUSED,
                                  detail=GENERIC_ENROLMENT_FAILURE)
+    except AgentError as failure:
+        # LAST, because every class above inherits from it. Put anywhere
+        # earlier this clause swallows all of them - which is how a refused
+        # code came back as "could not store the Device credential".
+        return EnrolmentUiResult(
+            state=EnrolmentUiState.REFUSED,
+            detail=(f"This computer could not store the Device credential: "
+                    f"{failure}"))
     return EnrolmentUiResult(state=EnrolmentUiState.ENROLLED,
                              detail="this computer is now an enrolled Receiver Device",
                              outcome=outcome)
