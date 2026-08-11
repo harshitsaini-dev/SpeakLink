@@ -302,3 +302,71 @@ test("a refusal to resume is reported on the row", async () => {
       .toMatch(/still paused/);
   });
 });
+
+// ===========================================================================
+// Zone actions
+// ===========================================================================
+
+test("zone actions appear only while live", async () => {
+  await renderConsole();
+  expect(screen.queryByTestId("zone-actions")).toBeNull();
+
+  cleanup();
+  goLive([target(101)]);
+  await renderConsole();
+  expect(screen.getByTestId("zone-actions")).toBeTruthy();
+});
+
+test("no Zone and no City means no action, and says why", async () => {
+  // An empty selector would mean the whole estate. The backend refuses it;
+  // the page does not offer it in the first place.
+  goLive([target(101)]);
+  await renderConsole();
+
+  expect(screen.getByTestId("zone-pause").disabled).toBe(true);
+  expect(screen.getByTestId("zone-needs-scope")).toBeTruthy();
+});
+
+test("choosing a Zone enables the actions and sends the selector", async () => {
+  api.post.mockResolvedValueOnce({ data: {
+    action: "pause", requested: 2, succeeded: 2, results: [] } });
+  goLive([target(101), target(102)]);
+  await renderConsole();
+
+  await act(async () => {
+    fireEvent.change(screen.getByTestId("zone-action-region"),
+                     { target: { value: "NORTH" } });
+  });
+  await act(async () => { fireEvent.click(screen.getByTestId("zone-pause")); });
+
+  expect(api.post).toHaveBeenCalledWith(
+    "/broadcast/sessions/77/targets/bulk",
+    { action: "pause", region: "NORTH" });
+  expect(screen.getByTestId("zone-result-summary").textContent)
+    .toMatch(/2 of 2/);
+  expect(mockBroadcast.load).toHaveBeenCalled();
+});
+
+test("the refusals are listed by Store, and the successes are not", async () => {
+  // A wall of green ticks buries the rows that need attention.
+  api.post.mockResolvedValueOnce({ data: {
+    action: "pause", requested: 2, succeeded: 1,
+    results: [
+      { store_id: 101, ok: true, lifecycle_state: "PAUSED", detail: null },
+      { store_id: 102, ok: false, lifecycle_state: null,
+        detail: "Only a Store that is currently receiving can be paused." },
+    ] } });
+  goLive([target(101), target(102)]);
+  await renderConsole();
+
+  await act(async () => {
+    fireEvent.change(screen.getByTestId("zone-action-city"),
+                     { target: { value: "DELHI" } });
+  });
+  await act(async () => { fireEvent.click(screen.getByTestId("zone-pause")); });
+
+  expect(screen.getByTestId("zone-failed-102").textContent)
+    .toMatch(/BBB: Only a Store that is currently receiving/);
+  expect(screen.queryByTestId("zone-failed-101")).toBeNull();
+  expect(screen.getByTestId("zone-result-summary").textContent).toMatch(/1 of 2/);
+});

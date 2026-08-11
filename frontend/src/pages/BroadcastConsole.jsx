@@ -374,6 +374,12 @@ export default function BroadcastConsole() {
   // adding one shop out of forty needs to know WHICH one refused.
   const [rowBusyStoreId, setRowBusyStoreId] = React.useState(null);
   const [rowErrors, setRowErrors] = React.useState({});
+  //: A Zone action and its per-Store outcome. Kept as the whole response
+  //: rather than a count, because "12 of 17 succeeded" leaves an operator to
+  //: guess which five - and which five is the only part they can act on.
+  const [zoneBusy, setZoneBusy] = React.useState(false);
+  const [zoneResult, setZoneResult] = React.useState(null);
+  const [zoneScope, setZoneScope] = React.useState({ region: "", city: "" });
   const sessionId = current?.session?.id;
 
   const setRowError = (storeId, message) =>
@@ -417,6 +423,30 @@ export default function BroadcastConsole() {
       setRowError(store.id, e?.response?.data?.detail || e.message
                   || "Could not resume this Store.");
     } finally { setRowBusyStoreId(null); }
+  };
+
+  const runZoneAction = async (action) => {
+    if (!sessionId || zoneBusy) return;
+    setZoneBusy(true);
+    setZoneResult(null);
+    try {
+      const { data } = await api.post(
+        `/broadcast/sessions/${sessionId}/targets/bulk`,
+        {
+          action,
+          ...(zoneScope.region ? { region: zoneScope.region } : {}),
+          ...(zoneScope.city ? { city: zoneScope.city } : {}),
+        });
+      setZoneResult(data);
+      await loadBroadcast();
+    } catch (e) {
+      setZoneResult({
+        action,
+        error: e?.response?.data?.detail || e.message
+          || "That Zone action did not run.",
+        results: [],
+      });
+    } finally { setZoneBusy(false); }
   };
 
   const removeStoreLive = async (store) => {
@@ -828,6 +858,107 @@ export default function BroadcastConsole() {
           )}
         </div>
       </div>
+
+      {/* ZONE ACTIONS, live only.
+          One action across a whole Zone or City, for the moment something is
+          wrong in one part of the estate and clicking through forty rows is
+          not a plan. Add and Resume are the slow pair - each waits for a
+          Receiver to report ready - and the button says so rather than
+          looking hung.
+
+          Neither selector is required and they combine, so "the DELHI shops in
+          NORTH" is one action. Both empty is refused by the backend, because
+          an empty selector would mean the whole estate. */}
+      {isLive && mayDeliverToStores && targetMode !== ONLY_WITH_LINK && (
+        <div className="border border-slate-200 bg-white rounded-md shadow-sm p-4"
+             data-testid="zone-actions">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
+              Zone Actions
+            </div>
+            <label htmlFor="zone-action-region" className="sr-only">Zone</label>
+            <select id="zone-action-region" data-testid="zone-action-region"
+                    value={zoneScope.region} disabled={zoneBusy}
+                    onChange={(e) => setZoneScope((was) => ({ ...was, region: e.target.value }))}
+                    className="rounded border border-slate-300 bg-white px-2 py-1 text-sm">
+              <option value="">Any Zone</option>
+              {(meta.regions || []).map((zone) => (
+                <option key={zone} value={zone}>{zone}</option>
+              ))}
+            </select>
+            <label htmlFor="zone-action-city" className="sr-only">City</label>
+            <select id="zone-action-city" data-testid="zone-action-city"
+                    value={zoneScope.city} disabled={zoneBusy}
+                    onChange={(e) => setZoneScope((was) => ({ ...was, city: e.target.value }))}
+                    className="rounded border border-slate-300 bg-white px-2 py-1 text-sm">
+              <option value="">Any City</option>
+              {(meta.cities || []).map((city) => (
+                <option key={city} value={city}>{city}</option>
+              ))}
+            </select>
+
+            <div className="ml-auto flex flex-wrap gap-2">
+              {[
+                { action: "add", label: "Add all", slow: true,
+                  className: "border-blue-300 text-blue-800 hover:bg-blue-50" },
+                { action: "pause", label: "Pause all", slow: false,
+                  className: "border-amber-300 text-amber-800 hover:bg-amber-50" },
+                { action: "resume", label: "Resume all", slow: true,
+                  className: "border-emerald-300 text-emerald-800 hover:bg-emerald-50" },
+                { action: "remove", label: "Remove all", slow: false,
+                  className: "border-red-300 text-red-800 hover:bg-red-50" },
+              ].map((option) => (
+                <button key={option.action} type="button"
+                        data-testid={`zone-${option.action}`}
+                        disabled={zoneBusy || (!zoneScope.region && !zoneScope.city)}
+                        onClick={() => runZoneAction(option.action)}
+                        title={option.slow
+                          ? "Each Store waits for its Receiver to report ready, so this can take a few seconds per shop."
+                          : undefined}
+                        className={`rounded border bg-white px-2 py-1 text-xs font-semibold disabled:opacity-40 ${option.className}`}>
+                  {zoneBusy ? "Working…" : option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {!zoneScope.region && !zoneScope.city && (
+            <p className="mt-2 text-xs text-slate-500" data-testid="zone-needs-scope">
+              Choose a Zone or a City first. Without one this would mean every
+              Store in the estate.
+            </p>
+          )}
+
+          {zoneResult && (
+            <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-2"
+                 data-testid="zone-result">
+              {zoneResult.error ? (
+                <p role="alert" className="text-sm text-red-700">{zoneResult.error}</p>
+              ) : (
+                <>
+                  <p className="text-sm text-slate-800">
+                    <span className="font-semibold uppercase">{zoneResult.action}</span>
+                    {" — "}
+                    <span data-testid="zone-result-summary">
+                      {zoneResult.succeeded} of {zoneResult.requested} Store
+                      {zoneResult.requested === 1 ? "" : "s"}
+                    </span>
+                  </p>
+                  {/* Only the refusals are listed. A wall of green ticks buries
+                      the two rows that need an operator's attention. */}
+                  {(zoneResult.results || []).filter((row) => !row.ok).map((row) => (
+                    <p key={row.store_id} data-testid={`zone-failed-${row.store_id}`}
+                       className="mt-1 text-xs text-red-700">
+                      {(stores.find((s) => s.id === row.store_id) || {}).store_code
+                        || `Store ${row.store_id}`}: {row.detail}
+                    </p>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Store list. Omitted entirely without physical delivery: a disabled
           selector would still print the name of every Store the account may
