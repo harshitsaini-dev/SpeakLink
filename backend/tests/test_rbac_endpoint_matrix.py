@@ -200,6 +200,18 @@ EXPECTED: dict[str, object] = {
     # handler and cannot be expressed as one code: session ownership, and
     # Store Scope. Both have their own tests.
     "add_store_to_live_broadcast": "broadcast.store_delivery",
+    # The chat routes. The host half is gated on the broadcast permission and
+    # then narrowed to the session's own operator inside the handler; the
+    # transcript in History is readable by anyone who may read that history.
+    "read_broadcast_chat": "broadcast.start",
+    "post_broadcast_chat_message": "broadcast.start",
+    "update_broadcast_chat_settings": "broadcast.start",
+    "delete_broadcast_chat_message": "broadcast.start",
+    "set_web_participant_chat_mute": "broadcast.start",
+    "read_broadcast_history_chat": "menu.history.view",
+    "post_broadcast_chat_image": "broadcast.start",
+    "read_broadcast_chat_image": "broadcast.start",
+    "read_history_chat_image": "menu.history.view",
     # Removal is the mirror of the add, and carries the same permission and
     # the same in-handler gates: session ownership and Store Scope.
     "remove_store_from_live_broadcast": "broadcast.store_delivery",
@@ -277,6 +289,17 @@ DELIBERATELY_UNAUTHENTICATED = {
     # being removed. It grants nothing and reads nothing: requiring an account
     # to throw away your own session would be requiring an account to leave.
     "listener_forget",
+    # Chat, for somebody already admitted to a room. Both resolve the listener
+    # cookie through web_rooms.authenticate_listener and answer 401 to anything
+    # that is not a currently-admitted listener of a currently-open room - so
+    # they are authenticated, just not by an HQ account. The read is filtered
+    # to what THAT listener may see, in the query rather than afterwards.
+    "read_listener_chat",
+    "post_listener_chat",
+    # Images, same cookie and the same visibility rule applied to the bytes:
+    # a private photograph is not readable by guessing a message id.
+    "post_listener_chat_image",
+    "read_listener_chat_image",
 }
 
 #: WebSocket routes. They authenticate, just not through ``get_current_user``,

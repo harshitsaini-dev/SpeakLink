@@ -1,4 +1,5 @@
 import React from "react";
+import { createPortal } from "react-dom";
 import { AlertOctagon } from "lucide-react";
 import { useBroadcast } from "@/contexts/BroadcastContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -86,7 +87,13 @@ export default function EmergencyStopControl() {
         </div>
       )}
 
-      {open && (
+      {/* PORTALLED TO THE BODY, and it has to be.
+          The sidebar carries a translate for its slide-in, and an ancestor
+          with a transform becomes the containing block for position:fixed -
+          so a "full screen" overlay rendered here was clipped to a 16rem
+          column and the confirmation appeared squeezed inside the navigation.
+          The portal takes it out of that subtree entirely. */}
+      {open && createPortal((
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
              data-testid="emergency-confirm-modal">
           <div className="bg-white rounded-lg w-full max-w-md p-5 space-y-3">
@@ -116,7 +123,7 @@ export default function EmergencyStopControl() {
             </div>
           </div>
         </div>
-      )}
+      ), document.body)}
     </>
   );
 }

@@ -16,7 +16,9 @@ import json
 from datetime import datetime, timezone
 from typing import List, Optional, Set
 
-from fastapi import FastAPI, APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import (FastAPI, APIRouter, Depends, File, Form, HTTPException, Query,
+                     Request, Response, UploadFile, WebSocket, WebSocketDisconnect,
+                     status)
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -238,6 +240,7 @@ import secrets
 import broadcast_recording
 import web_rooms
 import web_chat
+import chat_attachments
 from web_participant_runtime import (
     HEARTBEAT_INTERVAL_SECONDS,
     PlaybackState,
@@ -4520,6 +4523,44 @@ def unarchive_broadcast_sessions(payload: BulkIdsRequest,
     return {**result.as_dict(), "matched": matched}
 
 
+@api.get("/broadcast/history/{sid}/chat")
+def read_broadcast_history_chat(
+    sid: int, db: Session = Depends(get_db),
+    user: HQUser = Depends(require("menu.history.view")),
+):
+    """The chat transcript of a finished Broadcast.
+
+    Readable by anyone who may read the history it belongs to, and for exactly
+    as long: the messages cascade from the room, which cascades from the
+    session, so deleting the broadcast from history takes this with it.
+
+    The HOST view, deliberately. Private messages were addressed to whoever
+    hosted the Broadcast, and this page is the record of what happened - a
+    transcript with the private half silently missing would be a transcript
+    that lies by omission to the very people entitled to audit it. Deleted
+    messages appear as tombstones for the same reason.
+
+    Store Scope is not consulted. A chat message belongs to a Broadcast and to
+    a person who typed it, not to a shop; there is nothing here to scope by,
+    and inventing one would only hide half a conversation at random.
+    """
+    session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
+    if session is None:
+        raise HTTPException(status_code=404, detail="No such broadcast.")
+    room = web_rooms.get_room_for_session(engine, session_id=sid)
+    if room is None:
+        # A Broadcast from before web rooms existed. Empty is the truth, and it
+        # is a different answer from "this broadcast does not exist".
+        return {"session_id": sid, "campaign_name": session.campaign_name,
+                "chat_enabled": False, "chat_mode": web_chat.PUBLIC,
+                "messages": []}
+    settings = web_chat.get_settings(engine, room_id=room.id)
+    messages = web_chat.history_for_host(engine, room_id=room.id, limit=1000)
+    return {"session_id": sid, "campaign_name": session.campaign_name,
+            **settings,
+            "messages": [m.public_dict() for m in messages]}
+
+
 @api.post("/broadcast/history/delete-permanently")
 def delete_broadcast_sessions(payload: BulkIdsRequest,
                               db: Session = Depends(get_db),
@@ -4553,6 +4594,17 @@ def delete_broadcast_sessions(payload: BulkIdsRequest,
                 recordings_directory, record.file_name)
         except Exception as failure:
             logger.warning("Recording file for session %s could not be removed: %s",
+                           session_id, failure)
+
+    # Chat images go with the audio, and for the same reason: a photograph
+    # somebody sent during an announcement must not outlive the record of the
+    # announcement. The message ROWS cascade from the room; these are files, so
+    # nothing cascades them and they are removed here explicitly.
+    for session_id in ids:
+        try:
+            chat_attachments.delete_session_images(session_id)
+        except Exception as failure:
+            logger.warning("Chat images for session %s could not be removed: %s",
                            session_id, failure)
 
     result = delete_sessions_permanently(
@@ -6243,10 +6295,17 @@ def delete_broadcast_chat_message(
     """
     _require_web_room_owner(sid, user)
     room = _chat_room_or_404(sid)
+    # Read the row BEFORE tombstoning it: the delete clears the attachment
+    # columns, so afterwards there is nothing left saying which file to remove.
+    doomed = web_chat.get_message(engine, message_id=mid, room_id=room.id)
     if not web_chat.delete_message(engine, message_id=mid, room_id=room.id,
                                    actor_user_id=user.id):
         raise HTTPException(status_code=404,
                             detail="No such message in this Broadcast's chat.")
+    if doomed is not None and doomed.attachment_name:
+        # The image is deleted for real. A tombstone that still served its
+        # picture would be a deletion that deleted nothing anybody could see.
+        chat_attachments.delete_image(sid, doomed.attachment_name)
     return _chat_state_for_host(sid, room)
 
 
@@ -6324,6 +6383,141 @@ def post_listener_chat(request: Request, payload: ChatMessageIn):
         status = 429 if "Too many messages" in str(refusal) else 403
         raise HTTPException(status_code=status, detail=str(refusal))
     return message.public_dict()
+
+
+def _image_response(message, session_id: int):
+    """Serve one stored image, or 404. Never a path from the request.
+
+    The filename comes from the database row, not from the URL, so there is no
+    caller-supplied path to traverse with. Cache-Control is private: this is a
+    photograph from somebody's shop, and a shared proxy has no business
+    keeping a copy.
+    """
+    if not message.attachment_name or message.deleted_at:
+        raise HTTPException(status_code=404, detail="No image on that message.")
+    payload = chat_attachments.read_image(session_id, message.attachment_name)
+    if payload is None:
+        # The row says there is an image and the disk disagrees. Honest 404
+        # rather than a broken stream - and the row is left alone, because a
+        # transcript recording that a picture WAS sent is still true.
+        raise HTTPException(status_code=404, detail="That image is no longer stored.")
+    return Response(
+        content=payload,
+        media_type=message.attachment_mime or "application/octet-stream",
+        headers={
+            "Cache-Control": "private, max-age=300",
+            # Rendered inline, never executed: a browser must treat this as
+            # the image its type says it is and nothing else.
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": "inline",
+        })
+
+
+@api.post("/broadcast/sessions/{sid}/chat/image")
+async def post_broadcast_chat_image(
+    sid: int, file: UploadFile = File(...), body: str = Form(""),
+    user: HQUser = Depends(require(Permission.START_BROADCAST)),
+):
+    """The host sending a picture - a photo of the right speaker setting, say.
+
+    The caption is optional: with an image, the picture IS the message.
+    """
+    _require_web_room_owner(sid, user)
+    room = _chat_room_or_404(sid)
+    raw = await file.read()
+    try:
+        attachment = chat_attachments.store_image(raw, session_id=sid)
+    except chat_attachments.AttachmentRefused as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+    try:
+        message = web_chat.post_host_message(
+            engine, room_id=room.id,
+            display_name=user.display_name or user.username,
+            body=body, attachment=attachment)
+    except web_chat.ChatRefused as refusal:
+        # The row was refused, so the file it would have belonged to must not
+        # be left on disk. An orphaned upload is a file nothing points at and
+        # nothing will ever clean up.
+        chat_attachments.delete_image(sid, attachment["attachment_name"])
+        raise HTTPException(status_code=400, detail=str(refusal))
+    return message.public_dict()
+
+
+@api.get("/broadcast/sessions/{sid}/chat/messages/{mid}/image")
+def read_broadcast_chat_image(
+    sid: int, mid: int, user: HQUser = Depends(require(Permission.START_BROADCAST)),
+):
+    """The host reading any image in their own room, private ones included."""
+    _require_web_room_owner(sid, user)
+    room = _chat_room_or_404(sid)
+    message = web_chat.get_message(engine, message_id=mid, room_id=room.id)
+    if message is None:
+        raise HTTPException(status_code=404, detail="No such message.")
+    return _image_response(message, sid)
+
+
+@api.get("/broadcast/history/{sid}/chat/messages/{mid}/image")
+def read_history_chat_image(
+    sid: int, mid: int, user: HQUser = Depends(require("menu.history.view")),
+):
+    """The same image, from the transcript of a finished Broadcast."""
+    room = web_rooms.get_room_for_session(engine, session_id=sid)
+    if room is None:
+        raise HTTPException(status_code=404, detail="No such message.")
+    message = web_chat.get_message(engine, message_id=mid, room_id=room.id)
+    if message is None:
+        raise HTTPException(status_code=404, detail="No such message.")
+    return _image_response(message, sid)
+
+
+@api.post("/listen/chat/image")
+async def post_listener_chat_image(request: Request,
+                                   file: UploadFile = File(...),
+                                   body: str = Form("")):
+    """A listener sending a picture - most usefully, a photo of what is wrong.
+
+    Every gate a text message passes applies here too: chat must be on, the
+    listener must not be muted, and the rate limit counts an image exactly as
+    it counts a sentence. An upload is a message.
+    """
+    room, participant = _listener_or_401(request)
+    raw = await file.read()
+    try:
+        attachment = chat_attachments.store_image(raw, session_id=room.session_id)
+    except chat_attachments.AttachmentRefused as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+    try:
+        message = web_chat.post_listener_message(
+            engine, room_id=room.id, participant_id=participant.id,
+            display_name=participant.display_name, body=body,
+            attachment=attachment)
+    except web_chat.ChatRefused as refusal:
+        chat_attachments.delete_image(room.session_id,
+                                      attachment["attachment_name"])
+        status = 429 if "Too many messages" in str(refusal) else 403
+        raise HTTPException(status_code=status, detail=str(refusal))
+    return message.public_dict()
+
+
+@api.get("/listen/chat/messages/{mid}/image")
+def read_listener_chat_image(mid: int, request: Request):
+    """An image THIS listener is entitled to see.
+
+    The same rule as the transcript, applied to the bytes: public messages, or
+    their own private one. Without this check a private photograph would be
+    readable by anybody in the room who could guess a message id - which is
+    exactly the kind of hole a URL that "nobody would find" leaves open.
+    """
+    room, participant = _listener_or_401(request)
+    message = web_chat.get_message(engine, message_id=mid, room_id=room.id)
+    if message is None:
+        raise HTTPException(status_code=404, detail="No such message.")
+    if message.visibility == web_chat.PRIVATE \
+            and message.participant_id != participant.id:
+        # 404, not 403: a listener is not entitled to learn that somebody
+        # else's private message exists.
+        raise HTTPException(status_code=404, detail="No such message.")
+    return _image_response(message, room.session_id)
 
 
 @api.post("/listen/forget")

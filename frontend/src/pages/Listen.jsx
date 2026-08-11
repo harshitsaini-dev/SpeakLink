@@ -2,6 +2,7 @@ import React from "react";
 import { useParams } from "react-router-dom";
 import { Loader2, Volume2, AlertCircle } from "lucide-react";
 import SpeakLinkMark from "@/components/SpeakLinkMark";
+import ListenerChat from "@/components/ListenerChat";
 import { api, wsUrl } from "@/lib/api";
 import {
   ListenerPlaybackState,
@@ -588,6 +589,11 @@ export default function Listen() {
               <Volume2 size={15} className="text-slate-400" />
               <span data-testid="listen-status" className="font-semibold">{statusLabel}</span>
             </div>
+
+            {/* Chat, under the thing it is about, and only once this browser
+                is admitted and live - a chat box on the join form would be a
+                box for somebody who is not in the room yet. */}
+            <ListenerChat />
 
             {!broadcastLive && (
               <p className="mt-3 text-sm text-slate-400" data-testid="listen-not-started">

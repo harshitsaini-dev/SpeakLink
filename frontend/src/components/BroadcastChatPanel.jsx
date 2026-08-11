@@ -1,6 +1,7 @@
 import React from "react";
-import { Send, MessageSquareOff, MessageSquare, Lock, Globe, Trash2 } from "lucide-react";
+import { Send, MessageSquareOff, MessageSquare, Lock, Globe, Trash2, ImagePlus } from "lucide-react";
 import { api } from "@/lib/api";
+import { formatIstTimeOfDay } from "@/lib/time";
 
 /**
  * The host's side of the web audience chat.
@@ -33,6 +34,7 @@ export default function BroadcastChatPanel({ sessionId }) {
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState("");
   const listRef = React.useRef(null);
+  const fileRef = React.useRef(null);
 
   const load = React.useCallback(async () => {
     if (!sessionId) return;
@@ -88,6 +90,27 @@ export default function BroadcastChatPanel({ sessionId }) {
     } finally { setBusy(false); }
   };
 
+  const sendImage = async (file) => {
+    if (!file || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("body", draft.trim());
+      await api.post(`/broadcast/sessions/${sessionId}/chat/image`, form);
+      setDraft("");
+      await load();
+    } catch (e) {
+      setError(e?.response?.data?.detail || e.message || "Image not sent.");
+    } finally {
+      setBusy(false);
+      // Cleared so the same file can be chosen again after a refusal - an
+      // unchanged input fires no change event, which reads as a dead button.
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
   const remove = async (messageId) => {
     setBusy(true);
     try {
@@ -104,7 +127,7 @@ export default function BroadcastChatPanel({ sessionId }) {
   const messages = state?.messages || [];
 
   return (
-    <div className="flex h-full min-h-[20rem] flex-col border border-slate-200 bg-white rounded-md shadow-sm"
+    <div className="flex h-full min-h-[22rem] max-h-[calc(100vh-9rem)] flex-col overflow-hidden border border-slate-200 bg-white rounded-md shadow-sm"
          data-testid="broadcast-chat-card">
       <div className="shrink-0 border-b border-slate-200 p-3">
         <div className="flex items-center gap-2">
@@ -150,7 +173,7 @@ export default function BroadcastChatPanel({ sessionId }) {
 
       {/* Only this scrolls. */}
       <div ref={listRef} data-testid="chat-messages"
-           className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+           className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain p-3">
         {messages.length === 0 && (
           <p className="text-sm text-slate-500" data-testid="chat-empty">
             Nothing yet. Messages from web listeners appear here.
@@ -172,6 +195,10 @@ export default function BroadcastChatPanel({ sessionId }) {
                   private
                 </span>
               )}
+              <span data-testid={`chat-time-${message.id}`}
+                    className="font-mono text-[10px] text-slate-400">
+                {formatIstTimeOfDay(message.created_at)}
+              </span>
               {!message.deleted && (
                 <button type="button" data-testid={`chat-delete-${message.id}`}
                         onClick={() => remove(message.id)} disabled={busy}
@@ -181,14 +208,19 @@ export default function BroadcastChatPanel({ sessionId }) {
                 </button>
               )}
             </div>
+            {message.has_image && (
+              <ChatImage
+                testId={`chat-image-${message.id}`}
+                path={`/broadcast/sessions/${sessionId}/chat/messages/${message.id}/image`} />
+            )}
             {message.deleted ? (
               <p data-testid={`chat-removed-${message.id}`}
                  className="italic text-slate-500">Removed by the host</p>
-            ) : (
+            ) : message.body ? (
               // Rendered as TEXT by React, never as markup. Escaping on the way
               // in would corrupt a message that legitimately contains < or &.
               <p className="whitespace-pre-wrap break-words text-slate-800">{message.body}</p>
-            )}
+            ) : null}
           </div>
         ))}
       </div>
@@ -203,6 +235,15 @@ export default function BroadcastChatPanel({ sessionId }) {
       <form onSubmit={send} className="shrink-0 border-t border-slate-200 p-2">
         <div className="flex gap-2">
           <label htmlFor="chat-compose" className="sr-only">Message the web audience</label>
+          <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp"
+                 data-testid="chat-image-input" className="hidden"
+                 onChange={(e) => sendImage(e.target.files?.[0])} />
+          <button type="button" data-testid="chat-attach" disabled={busy}
+                  onClick={() => fileRef.current?.click()}
+                  title="Send a picture (PNG, JPEG or WebP)"
+                  className="rounded border border-slate-300 px-2 text-slate-600 hover:bg-slate-50 disabled:opacity-40">
+            <ImagePlus size={16} />
+          </button>
           <input id="chat-compose" data-testid="chat-input" value={draft}
                  onChange={(e) => setDraft(e.target.value)} maxLength={500}
                  placeholder={enabled ? "Reply to the audience…"
@@ -215,5 +256,51 @@ export default function BroadcastChatPanel({ sessionId }) {
         </div>
       </form>
     </div>
+  );
+}
+
+/**
+ * One chat image, fetched through the API rather than linked to.
+ *
+ * The bytes are behind the same permission as the message, so a bare
+ * <img src> would arrive without the bearer token and 401. It is fetched as a
+ * blob and shown from an object URL, which is revoked on unmount - object URLs
+ * that are never revoked are a leak that only shows up after a long shift.
+ */
+function ChatImage({ path, testId }) {
+  const [url, setUrl] = React.useState(null);
+  const [failed, setFailed] = React.useState(false);
+
+  React.useEffect(() => {
+    let revoked = false;
+    let objectUrl = null;
+    api.get(path, { responseType: "blob" })
+      .then(({ data }) => {
+        if (revoked) return;
+        objectUrl = URL.createObjectURL(data);
+        setUrl(objectUrl);
+      })
+      .catch(() => setFailed(true));
+    return () => {
+      revoked = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [path]);
+
+  if (failed) {
+    return (
+      <p data-testid={`${testId}-missing`} className="text-xs text-slate-500">
+        This image is no longer stored.
+      </p>
+    );
+  }
+  if (!url) {
+    return <div data-testid={`${testId}-loading`} className="h-24 w-32 animate-pulse rounded bg-slate-100" />;
+  }
+  return (
+    <a href={url} target="_blank" rel="noreferrer">
+      <img data-testid={testId} src={url} alt="Sent in chat"
+           className="mt-1 max-h-48 rounded border border-slate-200 object-contain" />
+    </a>
   );
 }

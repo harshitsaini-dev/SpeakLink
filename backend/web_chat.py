@@ -41,6 +41,12 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+# Imported rather than repeated. The room tables are named broadcast_web_rooms
+# and broadcast_web_participants, not web_rooms - a second copy of those names
+# here is a second place to be wrong, and being wrong looks like "no such
+# table" at boot rather than at review.
+from web_rooms import PARTICIPANT_TABLE, ROOM_TABLE
+
 MESSAGE_TABLE = "web_chat_messages"
 
 #: Long enough for a real question, short enough that a paste of a novel is
@@ -82,6 +88,11 @@ class ChatMessage:
     visibility: str
     created_at: str
     deleted_at: str | None
+    attachment_name: str | None = None
+    attachment_mime: str | None = None
+    attachment_bytes: int | None = None
+    attachment_width: int | None = None
+    attachment_height: int | None = None
 
     def public_dict(self) -> dict[str, Any]:
         """What goes over the wire. Never a token, never a participant's id
@@ -97,6 +108,14 @@ class ChatMessage:
             "deleted": bool(self.deleted_at),
             "visibility": self.visibility,
             "created_at": self.created_at,
+            # The bytes are never in here. A client that may see this message
+            # fetches the image from its own endpoint, which applies the same
+            # visibility rule - so a private photograph is not readable by
+            # guessing a URL. A deleted message has no image left at all.
+            "has_image": bool(self.attachment_name) and not self.deleted_at,
+            "image_mime": None if self.deleted_at else self.attachment_mime,
+            "image_width": None if self.deleted_at else self.attachment_width,
+            "image_height": None if self.deleted_at else self.attachment_height,
         }
 
 
@@ -123,13 +142,22 @@ def ensure_chat_schema(engine: Engine) -> None:
                 body VARCHAR({MAX_BODY}),
                 visibility VARCHAR(16) NOT NULL DEFAULT 'PUBLIC',
                 created_at VARCHAR(40) NOT NULL,
+                -- An image sent with (or instead of) the text. Stored as the
+                -- file's random name plus what it is - never the caller's
+                -- filename, and never the bytes: the database is not a blob
+                -- store and a transcript query should not drag megabytes.
+                attachment_name VARCHAR(80),
+                attachment_mime VARCHAR(40),
+                attachment_bytes INTEGER,
+                attachment_width INTEGER,
+                attachment_height INTEGER,
                 deleted_at VARCHAR(40),
                 deleted_by_user_id INTEGER,
                 CONSTRAINT fk_chat_room
-                    FOREIGN KEY (room_id) REFERENCES web_rooms (id)
+                    FOREIGN KEY (room_id) REFERENCES {ROOM_TABLE} (id)
                     ON DELETE CASCADE,
                 CONSTRAINT fk_chat_participant
-                    FOREIGN KEY (participant_id) REFERENCES web_participants (id)
+                    FOREIGN KEY (participant_id) REFERENCES {PARTICIPANT_TABLE} (id)
                     ON DELETE CASCADE,
                 CONSTRAINT ck_chat_author CHECK (
                     author_kind IN ('HOST', 'LISTENER')),
@@ -143,27 +171,40 @@ def ensure_chat_schema(engine: Engine) -> None:
             f"ON {MESSAGE_TABLE} (room_id, id)"
         )
 
+        message_columns = {
+            row[1] for row in connection.exec_driver_sql(
+                f"PRAGMA table_info({MESSAGE_TABLE})")
+        } if engine.dialect.name == "sqlite" else _columns(connection, MESSAGE_TABLE)
+        for column, ddl in (("attachment_name", "VARCHAR(80)"),
+                            ("attachment_mime", "VARCHAR(40)"),
+                            ("attachment_bytes", "INTEGER"),
+                            ("attachment_width", "INTEGER"),
+                            ("attachment_height", "INTEGER")):
+            if column not in message_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {MESSAGE_TABLE} ADD COLUMN {column} {ddl}")
+
         existing = {
             row[1] for row in connection.exec_driver_sql(
-                "PRAGMA table_info(web_rooms)")
-        } if engine.dialect.name == "sqlite" else _columns(connection, "web_rooms")
+                f"PRAGMA table_info({ROOM_TABLE})")
+        } if engine.dialect.name == "sqlite" else _columns(connection, ROOM_TABLE)
         if "chat_enabled" not in existing:
             connection.exec_driver_sql(
-                "ALTER TABLE web_rooms ADD COLUMN chat_enabled INTEGER "
+                f"ALTER TABLE {ROOM_TABLE} ADD COLUMN chat_enabled INTEGER "
                 "NOT NULL DEFAULT 1")
         if "chat_mode" not in existing:
             connection.exec_driver_sql(
-                "ALTER TABLE web_rooms ADD COLUMN chat_mode VARCHAR(16) "
+                f"ALTER TABLE {ROOM_TABLE} ADD COLUMN chat_mode VARCHAR(16) "
                 "NOT NULL DEFAULT 'PUBLIC'")
 
         participant_columns = {
             row[1] for row in connection.exec_driver_sql(
-                "PRAGMA table_info(web_participants)")
+                f"PRAGMA table_info({PARTICIPANT_TABLE})")
         } if engine.dialect.name == "sqlite" else _columns(
-            connection, "web_participants")
+            connection, PARTICIPANT_TABLE)
         if "chat_muted_at" not in participant_columns:
             connection.exec_driver_sql(
-                "ALTER TABLE web_participants ADD COLUMN chat_muted_at "
+                f"ALTER TABLE {PARTICIPANT_TABLE} ADD COLUMN chat_muted_at "
                 "VARCHAR(40)")
 
 
@@ -181,7 +222,7 @@ def _columns(connection, table: str) -> set[str]:
 def get_settings(engine: Engine, *, room_id: int) -> dict[str, Any]:
     with engine.connect() as connection:
         row = connection.execute(text(
-            "SELECT chat_enabled, chat_mode FROM web_rooms WHERE id = :r"),
+            f"SELECT chat_enabled, chat_mode FROM {ROOM_TABLE} WHERE id = :r"),
             {"r": room_id}).first()
     if row is None:
         return {"chat_enabled": False, "chat_mode": PUBLIC}
@@ -191,7 +232,7 @@ def get_settings(engine: Engine, *, room_id: int) -> dict[str, Any]:
 def set_chat_enabled(engine: Engine, *, room_id: int, enabled: bool) -> dict:
     with engine.begin() as connection:
         connection.execute(text(
-            "UPDATE web_rooms SET chat_enabled = :v WHERE id = :r"),
+            f"UPDATE {ROOM_TABLE} SET chat_enabled = :v WHERE id = :r"),
             {"v": 1 if enabled else 0, "r": room_id})
     return get_settings(engine, room_id=room_id)
 
@@ -201,7 +242,7 @@ def set_chat_mode(engine: Engine, *, room_id: int, mode: str) -> dict:
         raise ChatRefused("Chat mode must be PUBLIC or PRIVATE.")
     with engine.begin() as connection:
         connection.execute(text(
-            "UPDATE web_rooms SET chat_mode = :m WHERE id = :r"),
+            f"UPDATE {ROOM_TABLE} SET chat_mode = :m WHERE id = :r"),
             {"m": mode, "r": room_id})
     # Deliberately does NOT rewrite existing messages. A message sent while the
     # room was private was sent in confidence, and flipping the room to public
@@ -214,7 +255,7 @@ def set_participant_muted(engine: Engine, *, participant_id: int,
                           muted: bool) -> bool:
     with engine.begin() as connection:
         result = connection.execute(text(
-            "UPDATE web_participants SET chat_muted_at = :v WHERE id = :p"),
+            f"UPDATE {PARTICIPANT_TABLE} SET chat_muted_at = :v WHERE id = :p"),
             {"v": _now() if muted else None, "p": participant_id})
     return bool(result.rowcount)
 
@@ -222,7 +263,7 @@ def set_participant_muted(engine: Engine, *, participant_id: int,
 def is_participant_muted(engine: Engine, *, participant_id: int) -> bool:
     with engine.connect() as connection:
         row = connection.execute(text(
-            "SELECT chat_muted_at FROM web_participants WHERE id = :p"),
+            f"SELECT chat_muted_at FROM {PARTICIPANT_TABLE} WHERE id = :p"),
             {"p": participant_id}).first()
     return bool(row and row[0])
 
@@ -230,6 +271,16 @@ def is_participant_muted(engine: Engine, *, participant_id: int) -> bool:
 # ---------------------------------------------------------------------------
 # Sending
 # ---------------------------------------------------------------------------
+
+def _attachment_params(attachment: dict | None) -> dict:
+    """The five attachment bind parameters, present whether or not there is one."""
+    attachment = attachment or {}
+    return {"aname": attachment.get("attachment_name"),
+            "amime": attachment.get("attachment_mime"),
+            "abytes": attachment.get("attachment_bytes"),
+            "awidth": attachment.get("attachment_width"),
+            "aheight": attachment.get("attachment_height")}
+
 
 def clean_body(raw: Any) -> str:
     """Normalise a message, or refuse it.
@@ -264,14 +315,17 @@ def _rate_limited(connection, *, participant_id: int) -> bool:
 
 
 def post_listener_message(engine: Engine, *, room_id: int, participant_id: int,
-                          display_name: str, body: Any) -> ChatMessage:
+                          display_name: str, body: Any,
+                          attachment: dict | None = None) -> ChatMessage:
     """Store one listener message, or refuse it with a reason.
 
     Every refusal here is also a refusal the client already knows about and
     should have prevented. It is repeated anyway, because a control that only
     exists in a browser is a suggestion.
     """
-    text_body = clean_body(body)
+    # With an image, a caption is optional - the picture IS the message.
+    # Without one, an empty message is still nothing to send.
+    text_body = clean_body(body) if (body or not attachment) else None
     settings = get_settings(engine, room_id=room_id)
     if not settings["chat_enabled"]:
         raise ChatRefused("The host has turned chat off.")
@@ -287,51 +341,80 @@ def post_listener_message(engine: Engine, *, room_id: int, participant_id: int,
         result = connection.execute(text(
             f"INSERT INTO {MESSAGE_TABLE} "
             "(room_id, participant_id, author_kind, author_name, body, "
-            " visibility, created_at) "
+            " visibility, created_at, attachment_name, attachment_mime, "
+            " attachment_bytes, attachment_width, attachment_height) "
             "VALUES (:room, :participant, 'LISTENER', :name, :body, "
-            "        :visibility, :created)"),
+            "        :visibility, :created, :aname, :amime, :abytes, "
+            "        :awidth, :aheight)"),
             {"room": room_id, "participant": participant_id,
              "name": display_name, "body": text_body,
-             "visibility": visibility, "created": created})
+             "visibility": visibility, "created": created,
+             **_attachment_params(attachment)})
         message_id = result.lastrowid
     return ChatMessage(
         id=message_id, room_id=room_id, participant_id=participant_id,
         author_kind=LISTENER, author_name=display_name, body=text_body,
-        visibility=visibility, created_at=created, deleted_at=None)
+        visibility=visibility, created_at=created, deleted_at=None,
+        **(attachment or {}))
 
 
 def post_host_message(engine: Engine, *, room_id: int, display_name: str,
-                      body: Any) -> ChatMessage:
+                      body: Any, attachment: dict | None = None) -> ChatMessage:
     """The host speaking to the room. Always public, never rate limited.
 
     Not subject to chat_enabled either: turning chat off stops the audience
     typing, and an operator may still need to answer the last question before
     the room goes quiet.
     """
-    text_body = clean_body(body)
+    text_body = clean_body(body) if (body or not attachment) else None
     created = _now()
     with engine.begin() as connection:
         result = connection.execute(text(
             f"INSERT INTO {MESSAGE_TABLE} "
             "(room_id, participant_id, author_kind, author_name, body, "
-            " visibility, created_at) "
-            "VALUES (:room, NULL, 'HOST', :name, :body, 'PUBLIC', :created)"),
+            " visibility, created_at, attachment_name, attachment_mime, "
+            " attachment_bytes, attachment_width, attachment_height) "
+            "VALUES (:room, NULL, 'HOST', :name, :body, 'PUBLIC', :created, "
+            "        :aname, :amime, :abytes, :awidth, :aheight)"),
             {"room": room_id, "name": display_name, "body": text_body,
-             "created": created})
+             "created": created, **_attachment_params(attachment)})
         message_id = result.lastrowid
     return ChatMessage(
         id=message_id, room_id=room_id, participant_id=None, author_kind=HOST,
         author_name=display_name, body=text_body, visibility=PUBLIC,
-        created_at=created, deleted_at=None)
+        created_at=created, deleted_at=None, **(attachment or {}))
+
+
+def get_message(engine: Engine, *, message_id: int,
+                room_id: int) -> ChatMessage | None:
+    """One message, by id, WITHIN one room.
+
+    Scoped to the room deliberately: the image endpoints resolve a message
+    this way, and a lookup by id alone would let somebody in one Broadcast
+    fetch an attachment from another by guessing a number.
+    """
+    with engine.connect() as connection:
+        row = connection.execute(text(
+            f"{_SELECT} WHERE id = :id AND room_id = :room"),
+            {"id": message_id, "room": room_id}).first()
+    return _row_to_message(row) if row is not None else None
 
 
 def delete_message(engine: Engine, *, message_id: int, room_id: int,
                    actor_user_id: int) -> bool:
-    """Tombstone one message. The row and the author stay; the words go."""
+    """Tombstone one message. The row and the author stay; the words go.
+
+    The IMAGE goes for real - the caller deletes the file and these columns
+    are cleared. A tombstone that still served its picture would be a deletion
+    that deleted nothing anybody could see.
+    """
     with engine.begin() as connection:
         result = connection.execute(text(
             f"UPDATE {MESSAGE_TABLE} SET deleted_at = :now, "
-            "deleted_by_user_id = :actor, body = NULL "
+            "deleted_by_user_id = :actor, body = NULL, "
+            "attachment_name = NULL, attachment_mime = NULL, "
+            "attachment_bytes = NULL, attachment_width = NULL, "
+            "attachment_height = NULL "
             "WHERE id = :id AND room_id = :room AND deleted_at IS NULL"),
             {"now": _now(), "actor": actor_user_id, "id": message_id,
              "room": room_id})
@@ -346,11 +429,15 @@ def _row_to_message(row) -> ChatMessage:
     return ChatMessage(
         id=row[0], room_id=row[1], participant_id=row[2], author_kind=row[3],
         author_name=row[4], body=row[5], visibility=row[6], created_at=row[7],
-        deleted_at=row[8])
+        deleted_at=row[8], attachment_name=row[9], attachment_mime=row[10],
+        attachment_bytes=row[11], attachment_width=row[12],
+        attachment_height=row[13])
 
 
 _SELECT = (f"SELECT id, room_id, participant_id, author_kind, author_name, "
-           f"body, visibility, created_at, deleted_at FROM {MESSAGE_TABLE}")
+           f"body, visibility, created_at, deleted_at, attachment_name, "
+           f"attachment_mime, attachment_bytes, attachment_width, "
+           f"attachment_height FROM {MESSAGE_TABLE}")
 
 
 def history_for_host(engine: Engine, *, room_id: int,

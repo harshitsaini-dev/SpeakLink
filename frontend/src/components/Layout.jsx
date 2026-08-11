@@ -7,6 +7,7 @@ import { MENU_PERMISSION_BY_PATH } from "@/lib/menuPermissions";
 import RecordingPlayer, { PLAYER_BAR_HEIGHT } from "@/components/RecordingPlayer";
 import EmergencyStopControl from "@/components/EmergencyStopControl";
 import { useRecordingPlayback } from "@/contexts/RecordingPlaybackContext";
+import { formatIstClock } from "@/lib/time";
 
 const NAV = [
   { to: "/console", label: "Broadcast Console", icon: LayoutDashboard, testid: "nav-console" },
@@ -36,6 +37,14 @@ export default function Layout() {
     useRecordingPlayback();
   const navigate = useNavigate();
   const [open, setOpen] = React.useState(false);
+  // The wall clock, in the estate's timezone rather than the viewer's. Ticks
+  // every second because an operator reads it while something is on air, and
+  // a clock that is a minute stale is worse than no clock.
+  const [clock, setClock] = React.useState(() => formatIstClock());
+  React.useEffect(() => {
+    const timer = setInterval(() => setClock(formatIstClock()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   const handleLogout = () => { logout(); navigate("/login"); };
   const visibleNav = NAV.filter((n) => {
@@ -125,6 +134,10 @@ export default function Layout() {
             {open ? <X size={20} /> : <Menu size={20} />}
           </button>
           <div className="text-xs uppercase tracking-[0.15em] text-slate-500">HQ Broadcast Console · v1.0</div>
+          <div data-testid="header-clock"
+               className="ml-auto font-mono text-xs text-slate-600 sm:text-sm">
+            {clock}
+          </div>
         </header>
         {/* Room reserved across EVERY page while the player is up, so no
             table, pagination control or form action ends up underneath it. */}

@@ -9,6 +9,7 @@ import StatusBadge from "@/components/StatusBadge";
 import StoreAudioControl from "@/components/StoreAudioControl";
 import { useStoreAudioControl } from "@/lib/audio/useStoreAudioControl";
 import WebAudiencePanel from "@/components/WebAudiencePanel";
+import BroadcastChatPanel from "@/components/BroadcastChatPanel";
 
 export const ONLY_WITH_LINK = "only_with_link";
 
@@ -467,7 +468,7 @@ export default function BroadcastConsole() {
                 <span className="text-sm font-semibold uppercase tracking-widest text-slate-500">Idle · Ready</span>
               )}
             </div>
-            <div className="shrink-0 font-mono text-3xl md:text-4xl tracking-tight text-slate-900" data-testid="live-timer">
+            <div className="shrink-0 font-mono text-4xl md:text-5xl tracking-tighter text-slate-900" data-testid="live-timer">
               {isLive ? fmtDur(elapsed) : "00:00:00"}
             </div>
           </div>
@@ -538,7 +539,11 @@ export default function BroadcastConsole() {
         </div>
 
 
-        <div className="lg:col-span-4 lg:h-full" data-testid="console-audience-card">
+        {/* A CEILING, and the list scrolls inside it. Uncapped, ten
+            listeners made this card taller than the viewport: the page
+            grew because the room did. */}
+        <div className="lg:col-start-1 lg:col-span-4 lg:row-start-2 lg:max-h-[32rem] lg:overflow-y-auto"
+             data-testid="console-audience-card">
           {liveSessionId ? (
             <WebAudiencePanel sessionId={liveSessionId} compact />
           ) : (
@@ -564,26 +569,31 @@ export default function BroadcastConsole() {
             The card is here and says so plainly while the backend half is
             being finished. An empty box implying a working feature would be
             worse than a sentence saying it is not one yet. */}
-        <div className="lg:col-span-4 lg:row-span-3 lg:h-full flex flex-col border border-slate-200 bg-white rounded-md shadow-sm p-4"
-             data-testid="chat-card">
-          <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
-            Web Chat
-          </div>
-          <div className="flex flex-1 flex-col items-center justify-center gap-1 py-8 text-center">
-            <span data-testid="chat-coming-soon"
-                  className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs font-bold uppercase tracking-widest text-slate-600">
-              Coming soon
-            </span>
-            <p className="mt-2 max-w-[16rem] text-sm text-slate-500">
-              Web listeners will be able to message you here, and you will be
-              able to turn chat off or make it private.
-            </p>
-          </div>
+        <div className="lg:col-start-9 lg:col-span-4 lg:row-start-1 lg:row-span-4 lg:h-full lg:sticky lg:top-0 lg:max-h-[calc(100vh-9rem)]">
+          {liveSessionId ? (
+            <BroadcastChatPanel sessionId={liveSessionId} />
+          ) : (
+            // No session, no room, nothing to say in it. An empty message list
+            // would imply a conversation that has not started rather than one
+            // that cannot exist yet.
+            <div className="flex h-full min-h-[22rem] flex-col border border-slate-200 bg-white rounded-md shadow-sm p-4"
+                 data-testid="chat-card">
+              <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
+                Web Chat
+              </div>
+              <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
+                <p className="max-w-[16rem] text-sm text-slate-500">
+                  Chat opens with the Broadcast. Listeners who join through the
+                  link can message you here.
+                </p>
+              </div>
+            </div>
+          )}
         </div>
 
       {active?.mine && (
         <div data-testid="my-active-broadcast"
-             className="lg:col-span-8 border border-blue-200 bg-blue-50/60 rounded-md shadow-sm p-4">
+             className="lg:col-start-1 lg:col-span-8 lg:row-start-3 border border-blue-200 bg-blue-50/60 rounded-md shadow-sm p-4">
           <div className="text-xs font-bold uppercase tracking-[0.15em] text-blue-900">
             Your Active Broadcast
           </div>
@@ -604,7 +614,7 @@ export default function BroadcastConsole() {
 
       {active?.may_manage_active && (
         <div data-testid="active-broadcasts-badge"
-             className="lg:col-span-8 border border-slate-200 bg-white rounded-md shadow-sm px-4 py-3 flex items-center justify-between gap-4">
+             className="lg:col-start-1 lg:col-span-8 lg:row-start-4 border border-slate-200 bg-white rounded-md shadow-sm px-4 py-3 flex items-center justify-between gap-4">
           <div className="text-sm text-slate-700">
             <span className="font-bold uppercase tracking-[0.15em] text-xs text-slate-500 mr-2">
               Active Broadcasts
@@ -620,7 +630,7 @@ export default function BroadcastConsole() {
         </div>
       )}
 
-        <div className="lg:col-span-4 lg:h-full overflow-y-auto border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-3"
+        <div className="lg:col-start-5 lg:col-span-4 lg:row-start-1 lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-3"
              data-testid="console-controls-card">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-slate-900">Broadcast Controls</h2>
@@ -745,7 +755,7 @@ export default function BroadcastConsole() {
           <div className="text-xs text-slate-500">Broadcaster: <span className="font-mono">{broadcasterStatus}</span></div>
         </div>
 
-        <div className="lg:col-span-4 lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-2.5" data-testid="target-summary">
+        <div className="lg:col-start-5 lg:col-span-4 lg:row-start-2 lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-2.5" data-testid="target-summary">
           <div className="flex items-center gap-2">
             <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Broadcast Targets</div>
             {targetMode === ONLY_WITH_LINK && (

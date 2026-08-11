@@ -56,3 +56,35 @@ export function elapsedSeconds(startIso, nowMs = Date.now()) {
   if (startMs === null) return 0;
   return Math.max(0, Math.floor((nowMs - startMs) / 1000));
 }
+
+/**
+ * The header clock: "11-August-2026 07:23:21 PM IST".
+ *
+ * Written out with the month in full and the zone named, because this is the
+ * timestamp an operator quotes when they report what a Broadcast did - and a
+ * bare "07:23" in a screenshot is unfalsifiable a week later. Always
+ * Asia/Kolkata regardless of what the viewing machine is set to, so two people
+ * comparing notes are comparing the same clock.
+ */
+export function formatIstClock(dateMs = Date.now()) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: IST_TIME_ZONE,
+    day: "2-digit", month: "long", year: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true,
+  }).formatToParts(new Date(dateMs)).reduce((all, part) => {
+    all[part.type] = part.value;
+    return all;
+  }, {});
+  const meridiem = (parts.dayPeriod || "").toUpperCase();
+  return `${parts.day}-${parts.month}-${parts.year} ${parts.hour}:${parts.minute}:${parts.second} ${meridiem} IST`;
+}
+
+/** Just the clock time of a backend timestamp: "07:23 PM", Asia/Kolkata. */
+export function formatIstTimeOfDay(iso) {
+  const ms = parseUtcMs(iso);
+  if (ms === null) return "";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: IST_TIME_ZONE,
+    hour: "2-digit", minute: "2-digit", hour12: true,
+  }).format(new Date(ms));
+}

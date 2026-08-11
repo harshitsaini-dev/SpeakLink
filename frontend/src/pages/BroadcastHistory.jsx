@@ -36,6 +36,10 @@ export default function BroadcastHistory() {
   });
 
   const [open, setOpen] = React.useState(null);
+  //: The chat transcript of the session being looked at. Loaded with the
+  //: detail rather than on a second click: the conversation IS part of what
+  //: happened, and a tab somebody has to find is a tab most people never do.
+  const [chat, setChat] = React.useState(null);
   const [confirming, setConfirming] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [actionError, setActionError] = React.useState("");
@@ -55,6 +59,17 @@ export default function BroadcastHistory() {
   const openDetail = async (id) => {
     const { data } = await api.get(`/broadcast/sessions/${id}`);
     setOpen(data);
+    setChat(null);
+    try {
+      const transcript = await api.get(`/broadcast/history/${id}/chat`);
+      setChat(transcript.data);
+    } catch {
+      // A broadcast from before chat existed, or an account that may read the
+      // history but not this. Either way the detail above is still worth
+      // showing, so the transcript simply stays absent rather than taking the
+      // whole dialog down with it.
+      setChat({ messages: [], unavailable: true });
+    }
   };
 
   const runBulk = async (path, extra = {}) => {
@@ -293,11 +308,117 @@ export default function BroadcastHistory() {
                   ))}
                 </tbody>
               </table>
+
+              {/* THE CHAT TRANSCRIPT.
+
+                  Shown in full, including messages the host removed - those
+                  appear as tombstones with their author intact. This is the
+                  record of what happened, and a record that quietly drops the
+                  removed half is a record that lies by omission to the people
+                  entitled to audit it.
+
+                  Private messages are here too: they were addressed to whoever
+                  hosted the Broadcast, and this page is read by accounts
+                  trusted with the history itself. */}
+              <div className="mt-6" data-testid="history-chat">
+                <div className="mb-2 text-xs uppercase text-slate-500">
+                  Chat ({chat?.messages?.length || 0})
+                </div>
+                {chat === null && (
+                  <p className="text-sm text-slate-500">Loading the transcript…</p>
+                )}
+                {chat?.unavailable && (
+                  <p className="text-sm text-slate-500" data-testid="history-chat-unavailable">
+                    The transcript for this Broadcast could not be read.
+                  </p>
+                )}
+                {chat && !chat.unavailable && chat.messages.length === 0 && (
+                  <p className="text-sm text-slate-500" data-testid="history-chat-empty">
+                    Nobody said anything during this Broadcast.
+                  </p>
+                )}
+                <div className="space-y-1.5">
+                  {(chat?.messages || []).map((message) => (
+                    <div key={message.id} data-testid={`history-chat-message-${message.id}`}
+                         className={`rounded border px-2 py-1.5 text-sm ${
+                           message.author_kind === "HOST"
+                             ? "border-blue-100 bg-blue-50"
+                             : "border-slate-100 bg-slate-50"}`}>
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-xs font-semibold text-slate-800">
+                          {message.author_kind === "HOST"
+                            ? `${message.author_name} (host)` : message.author_name}
+                        </span>
+                        {message.visibility === "PRIVATE" && (
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-amber-800">
+                            private
+                          </span>
+                        )}
+                        <span className="ml-auto font-mono text-[10px] text-slate-400">
+                          {fmt(message.created_at)}
+                        </span>
+                      </div>
+                      {message.has_image && (
+                        <HistoryChatImage
+                          sessionId={open.id} messageId={message.id} />
+                      )}
+                      {message.deleted ? (
+                        <p data-testid={`history-chat-removed-${message.id}`}
+                           className="italic text-slate-500">Removed by the host</p>
+                      ) : message.body ? (
+                        <p className="whitespace-pre-wrap break-words text-slate-800">
+                          {message.body}
+                        </p>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         </div>
       )}
 
     </div>
+  );
+}
+
+/**
+ * An image from a finished Broadcast's transcript.
+ *
+ * Fetched through the API for the same reason as in the live panel: the bytes
+ * are behind a permission, so a bare <img src> would arrive unauthenticated.
+ */
+function HistoryChatImage({ sessionId, messageId }) {
+  const [url, setUrl] = React.useState(null);
+  const [failed, setFailed] = React.useState(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    let objectUrl = null;
+    api.get(`/broadcast/history/${sessionId}/chat/messages/${messageId}/image`,
+            { responseType: "blob" })
+      .then(({ data }) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(data);
+        setUrl(objectUrl);
+      })
+      .catch(() => setFailed(true));
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [sessionId, messageId]);
+
+  if (failed) {
+    return <p className="text-xs text-slate-500">This image is no longer stored.</p>;
+  }
+  if (!url) return <div className="h-20 w-28 animate-pulse rounded bg-slate-100" />;
+  return (
+    <a href={url} target="_blank" rel="noreferrer">
+      <img data-testid={`history-chat-image-${messageId}`} src={url}
+           alt="Sent in chat"
+           className="mt-1 max-h-40 rounded border border-slate-200 object-contain" />
+    </a>
   );
 }
