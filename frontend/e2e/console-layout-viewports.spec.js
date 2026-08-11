@@ -190,3 +190,66 @@ test('a full Web Audience does not push the chat off the screen',
   const chat = await page.getByTestId('broadcast-chat-card').boundingBox();
   expect(chat.y).toBeLessThan(900);
 });
+
+
+test('nothing inside a card is drawn on top of anything else', async ({ page }) => {
+  // The bug this exists for: the Web Audience card put the Broadcast ID, two
+  // copy buttons and a "Generate New Password" button on one unwrappable row.
+  // In a third-width column flexbox shrank them until they OVERLAPPED - the
+  // page had no overflow, every card had a sensible box, and each child was
+  // still inside its card. Only the boxes overlapping each other showed it,
+  // which is why this measures siblings against siblings rather than against
+  // their container.
+  const SIZES = [
+    { width: 1366, height: 768 },
+    { width: 1600, height: 900 },
+    { width: 1920, height: 1080 },
+  ];
+
+  for (const size of SIZES) {
+    await page.setViewportSize(size);
+    await openConsole(page, { live: true });
+
+    const collisions = await page.evaluate(() => {
+      const problems = [];
+      const cards = ['console-audience-card', 'console-controls-card',
+                     'broadcast-status-card', 'target-summary',
+                     'broadcast-chat-card'];
+      const label = (node) => `<${node.tagName.toLowerCase()}>`
+        + `"${(node.textContent || '').trim().slice(0, 20)}"`;
+
+      for (const id of cards) {
+        const card = document.querySelector(`[data-testid="${id}"]`);
+        if (!card) continue;
+        // Leaf controls and their labels only. Containers legitimately contain
+        // one another, and an ancestor overlapping its descendant is not a bug.
+        const parts = Array.from(card.querySelectorAll('button, input, select'))
+          .concat(Array.from(card.querySelectorAll('span, p'))
+            .filter((node) => node.children.length === 0
+                              && (node.textContent || '').trim()));
+        const boxes = parts
+          .map((node) => ({ node, box: node.getBoundingClientRect() }))
+          .filter(({ box }) => box.width > 1 && box.height > 1);
+
+        for (let i = 0; i < boxes.length; i += 1) {
+          for (let j = i + 1; j < boxes.length; j += 1) {
+            const a = boxes[i];
+            const b = boxes[j];
+            if (a.node.contains(b.node) || b.node.contains(a.node)) continue;
+            // Two pixels of slack for borders and sub-pixel rounding.
+            const overlapX = Math.min(a.box.right, b.box.right)
+                           - Math.max(a.box.left, b.box.left);
+            const overlapY = Math.min(a.box.bottom, b.box.bottom)
+                           - Math.max(a.box.top, b.box.top);
+            if (overlapX > 2 && overlapY > 2) {
+              problems.push(`${id}: ${label(a.node)} overlaps ${label(b.node)}`);
+            }
+          }
+        }
+      }
+      return problems.slice(0, 6);
+    });
+
+    expect(collisions, `at ${size.width}x${size.height}`).toEqual([]);
+  }
+});

@@ -136,19 +136,19 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
             <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1">
               Broadcast ID
             </p>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span data-testid="web-room-code"
-                    className="font-mono text-lg font-bold text-slate-900">
+                    className="min-w-0 break-all font-mono text-lg font-bold text-slate-900">
                 {room.public_code}
               </span>
               <button data-testid="web-copy-id"
                       onClick={() => copy("id", room.public_code)}
-                      className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50">
+                      className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50">
                 <Copy size={14} /> {copied === "id" ? "Copied" : "Copy ID"}
               </button>
               <button data-testid="web-copy-link"
                       onClick={() => copy("link", listenerLink(room.public_code))}
-                      className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50">
+                      className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50">
                 <Copy size={14} /> {copied === "link" ? "Copied" : "Copy Link"}
               </button>
             </div>
@@ -158,19 +158,19 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
             <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1">
               Join Password
             </p>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {/* Shown only while this page still holds the generated value.
                   After a refresh only the hash exists, and a masked placeholder
                   would imply SpeakLink knows something it does not. */}
               {room.password ? (
                 <>
                   <span data-testid="web-room-password"
-                        className="font-mono text-lg font-bold text-slate-900">
+                        className="min-w-0 break-all font-mono text-lg font-bold text-slate-900">
                     {room.password}
                   </span>
                   <button data-testid="web-copy-password"
                           onClick={() => copy("password", room.password)}
-                          className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50">
+                          className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50">
                     <Copy size={14} /> {copied === "password" ? "Copied" : "Copy"}
                   </button>
                 </>
@@ -185,8 +185,8 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
                 disabled={busy}
                 onClick={() => act(() => api.post(
                   `/broadcast/sessions/${sessionId}/web-room/password/rotate`))}
-                className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50 disabled:opacity-60">
-                <RefreshCw size={14} /> Generate New Password
+                className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50 disabled:opacity-60">
+                <RefreshCw size={14} /> New Password
               </button>
             </div>
             {!room.password && (

@@ -188,6 +188,24 @@ async function mockBackend(page, options = {}) {
     sessionId: 8,
     startCalls: [],
     addTargetCalls: [],
+    // The web room, shaped like the real GET
+    // /broadcast/sessions/{id}/web-room. It carries a password because the
+    // password is only present on the page lifetime that generated it - and
+    // the row that shows it is the one that had a layout bug, so a mock
+    // without it hides exactly what needs testing.
+    webRoom: options.webRoom || {
+      public_code: 'SL-8NVSNC',
+      status: 'OPEN',
+      auto_approve: false,
+      password: 'FYCH-M5QH',
+      password_configured: true,
+      password_rotated_at: null,
+      delivery: null,
+      counts: { waiting: 0, admitted: 0, connected: 0, listening: 0,
+                buffering: 0, paused: 0 },
+      waiting: [],
+      listeners: [],
+    },
     // The chat room, shaped like the real one: settings live on the room and
     // visibility lives on the message, so a spec can prove that flipping the
     // mode does not rewrite what was already said.
@@ -1354,6 +1372,30 @@ async function mockBackend(page, options = {}) {
         target.has_image = false;
       }
       return route.fulfill(json({ session_id: state.sessionId, ...state.chat }));
+    }
+
+    // ---- the web room -----------------------------------------------------
+    if (/^\/broadcast\/sessions\/\d+\/web-room$/.test(path) && method === 'GET') {
+      const listeners = state.listeners || state.webRoom.listeners || [];
+      return route.fulfill(json({
+        ...state.webRoom,
+        listeners,
+        counts: {
+          ...state.webRoom.counts,
+          admitted: listeners.length,
+          connected: listeners.filter((l) => l.connected).length,
+          listening: listeners.filter((l) => l.playback_state === 'LISTENING').length,
+        },
+      }));
+    }
+    if (/^\/broadcast\/sessions\/\d+\/web-participants$/.test(path) && method === 'GET') {
+      return route.fulfill(json({ ...state.webRoom,
+                                  listeners: state.listeners || [] }));
+    }
+    if (/^\/broadcast\/sessions\/\d+\/web-room\/password\/rotate$/.test(path)
+        && method === 'POST') {
+      state.webRoom = { ...state.webRoom, password: 'NEWP-ASSWD' };
+      return route.fulfill(json(state.webRoom));
     }
 
     if (method === 'POST' && /^\/broadcast\/sessions\/\d+\/stop$/.test(path)) {
