@@ -37,10 +37,6 @@ const LIFECYCLE_LABEL = {
 const shortId = (id) =>
   typeof id === "string" && id.length > 8 ? `${id.slice(0, 8)}…` : id;
 
-/** The same prefix, without the ellipsis, so it can actually be typed. */
-const confirmId = (id) =>
-  typeof id === "string" ? id.slice(0, 8) : String(id ?? "");
-
 export default function ReceiverDeviceFleet() {
   const { can } = useAuth();
   const list = useAdminList("/receiver-devices/search", {
@@ -213,11 +209,11 @@ export default function ReceiverDeviceFleet() {
           testIdPrefix="fleet-purge"
           title={`Permanently delete ${purging.display_name}?`}
           count={1} countNoun="Device"
-          /* Short id, not the full UUID: the table shows the short form, and a
+          /* The same word Store, User, history and log deletion ask for. A
              36-character id is not extra safety - it is long enough that people
-             paste it, and a paste is not a decision. The device name in the
-             title, this id, and the acknowledgement are three steps already. */
-          confirmWord={confirmId(purging.public_id)}
+             paste it, and a paste is not a decision. The Device is named in the
+             title and the acknowledgement is still separate. */
+          confirmWord="DELETE"
           warning={`Its credentials are revoked immediately and it can never reconnect or be restored. If it is this Store's primary, ${purging.store_code} will have no primary until another Device is promoted. Its enrolment and broadcast history stay readable.`}
           busy={busy} error={purgeError}
           onCancel={() => { setPurging(null); setPurgeError(""); }}

@@ -24,10 +24,8 @@ function shortId(publicId) {
   return typeof publicId === "string" && publicId.length > 8 ? `${publicId.slice(0, 8)}…` : publicId;
 }
 
-/** The same prefix, without the ellipsis, so it can actually be typed. */
-function confirmId(publicId) {
-  return typeof publicId === "string" ? publicId.slice(0, 8) : String(publicId ?? "");
-}
+/** Must match device_deletion.DELETE_CONFIRMATION on the server. */
+const DELETE_CONFIRMATION = "DELETE";
 
 function RoleBadge({ role }) {
   const isPrimary = role === "PRIMARY";
@@ -675,10 +673,10 @@ function DeleteDeviceDialog({ device, onCancel, onConfirm }) {
     return () => { cancelled = true; };
   }, [device.public_id]);
 
-  // The short id, not the full 36-character one. A UUID that long is not extra
-  // safety: it is long enough that people paste it, and a paste is not a
-  // decision. The Device is named above, and the id still has to be typed.
-  const confirmWord = confirmId(device.public_id);
+  // The same word every other permanent delete asks for. A 36-character id is
+  // not extra safety: it is long enough that people paste it, and a paste is
+  // not a decision. The Device is named above the field.
+  const confirmWord = DELETE_CONFIRMATION;
   const matches = typed === confirmWord;
 
   return (
@@ -712,7 +710,7 @@ function DeleteDeviceDialog({ device, onCancel, onConfirm }) {
           {summary.deletable && (
             <>
               <p className="text-sm text-red-800">
-                This cannot be undone. Type the short Device id exactly to confirm:
+                This cannot be undone. Type DELETE exactly to confirm:
                 <br /><code className="text-xs">{confirmWord}</code>
               </p>
               <input

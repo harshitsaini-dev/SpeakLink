@@ -71,6 +71,14 @@ def ensure_device_deletion_schema(engine: Engine) -> None:
     postgres_schema.device_deletion_events.create(bind=engine, checkfirst=True)
 
 
+#: What an operator must type to confirm. The same word Store, User, history
+#: and log deletion ask for, deliberately: a 36-character id is not extra
+#: safety, it is long enough that people paste it, and a paste is not a
+#: decision. Friction that gets automated away protects nobody. The Device is
+#: named in the dialog and a separate acknowledgement is still required.
+DELETE_CONFIRMATION = "DELETE"
+
+
 def permanently_delete_device_with_history(
     engine: Engine, *, public_id: str, typed_confirmation: str,
     actor_user_id: int,
@@ -89,10 +97,10 @@ def permanently_delete_device_with_history(
             raise DeviceDeletionRefused("That Receiver Device no longer exists.")
         if row.deleted_at is not None:
             raise DeviceDeletionRefused("That Device was already permanently deleted.")
-        if typed_confirmation != row.public_id:
+        if typed_confirmation != DELETE_CONFIRMATION:
             raise DeviceDeletionRefused(
-                "The typed confirmation did not match. Type the Device id exactly: "
-                f"{row.public_id}"
+                "The typed confirmation did not match. Type "
+                f"{DELETE_CONFIRMATION} exactly."
             )
 
         was_primary = bool(connection.execute(

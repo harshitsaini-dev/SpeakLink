@@ -261,7 +261,7 @@ def test_device_search_never_returns_permanently_deleted(client):
     store = stores(client, owner)[0]
     _, public_id = add_device(client.server_module.engine, store["id"])
     client.post(f"/api/receiver-devices/{public_id}/delete-permanently", headers=owner,
-                json={"confirm": public_id, "acknowledged": True})
+                json={"confirm": "DELETE", "acknowledged": True})
 
     default = client.get("/api/receiver-devices/search", headers=owner,
                          params={"page_size": 200}).json()
@@ -286,7 +286,7 @@ def test_archived_and_permanently_deleted_are_distinct_states(client):
     _, deleted = add_device(client.server_module.engine, store["id"])
     client.post(f"/api/receiver-devices/{archived}/archive", headers=owner)
     client.post(f"/api/receiver-devices/{deleted}/delete-permanently", headers=owner,
-                json={"confirm": deleted, "acknowledged": True})
+                json={"confirm": "DELETE", "acknowledged": True})
 
     body = client.get("/api/receiver-devices/search", headers=owner,
                       params={"page_size": 200}).json()

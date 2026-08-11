@@ -105,7 +105,7 @@ def add_device(engine, store_id, *, status="active", name="Store PC"):
 def purge(client, headers, public_id):
     """Permanently delete through the real endpoint, not by writing SQL."""
     r = client.post(f"/api/receiver-devices/{public_id}/delete-permanently",
-                    headers=headers, json={"confirm": public_id,
+                    headers=headers, json={"confirm": "DELETE",
                                            "acknowledged": True})
     assert r.status_code == 200, r.text
     return r

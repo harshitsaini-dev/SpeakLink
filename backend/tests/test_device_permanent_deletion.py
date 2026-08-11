@@ -124,7 +124,7 @@ def test_a_device_with_credential_history_can_be_permanently_deleted(client):
     store = store_id_of(client, owner)
     _, public_id = enrolled_device(client.server_module.engine, store)
 
-    resp = delete_device(client, owner, public_id, confirm=public_id)
+    resp = delete_device(client, owner, public_id, confirm="DELETE")
     assert resp.status_code == 200, resp.text
     assert resp.json()["public_id"] == public_id
 
@@ -144,7 +144,7 @@ def test_credential_and_event_history_remain_readable(client):
     owner = sign_in(client)
     store = store_id_of(client, owner)
     device_id, public_id = enrolled_device(client.server_module.engine, store)
-    delete_device(client, owner, public_id, confirm=public_id)
+    delete_device(client, owner, public_id, confirm="DELETE")
 
     from sqlalchemy import text
     with client.server_module.engine.connect() as c:
@@ -165,7 +165,7 @@ def test_credentials_are_revoked_and_primary_is_cleared(client):
     owner = sign_in(client)
     store = store_id_of(client, owner)
     device_id, public_id = enrolled_device(client.server_module.engine, store)
-    resp = delete_device(client, owner, public_id, confirm=public_id)
+    resp = delete_device(client, owner, public_id, confirm="DELETE")
     assert resp.json()["credentials_revoked"] == 1
 
     from sqlalchemy import text
@@ -180,7 +180,7 @@ def test_the_device_becomes_permanently_non_operational(client):
     owner = sign_in(client)
     store = store_id_of(client, owner)
     device_id, public_id = enrolled_device(client.server_module.engine, store)
-    delete_device(client, owner, public_id, confirm=public_id)
+    delete_device(client, owner, public_id, confirm="DELETE")
 
     from sqlalchemy import text
     with client.server_module.engine.connect() as c:
@@ -199,7 +199,7 @@ def test_a_deleted_device_disappears_from_the_operational_device_list(client):
     before = client.get(f"/api/stores/{store}/receiver-devices", headers=owner).json()
     assert public_id in {d["public_id"] for d in before}
 
-    delete_device(client, owner, public_id, confirm=public_id)
+    delete_device(client, owner, public_id, confirm="DELETE")
 
     after = client.get(f"/api/stores/{store}/receiver-devices", headers=owner).json()
     assert public_id not in {d["public_id"] for d in after}
@@ -209,7 +209,7 @@ def test_a_deleted_device_cannot_be_restored_or_re_enabled(client):
     owner = sign_in(client)
     store = store_id_of(client, owner)
     _, public_id = enrolled_device(client.server_module.engine, store)
-    delete_device(client, owner, public_id, confirm=public_id)
+    delete_device(client, owner, public_id, confirm="DELETE")
 
     assert client.post(f"/api/receiver-devices/{public_id}/restore",
                        headers=owner).status_code == 409
@@ -220,7 +220,7 @@ def test_the_public_id_cannot_be_reused(client):
     owner = sign_in(client)
     store = store_id_of(client, owner)
     device_id, public_id = enrolled_device(client.server_module.engine, store)
-    delete_device(client, owner, public_id, confirm=public_id)
+    delete_device(client, owner, public_id, confirm="DELETE")
 
     from sqlalchemy import text
     from sqlalchemy.exc import IntegrityError
@@ -243,7 +243,7 @@ def test_typed_confirmation_and_acknowledgement_are_required(client):
     _, public_id = enrolled_device(client.server_module.engine, store)
 
     assert delete_device(client, owner, public_id, confirm="wrong").status_code == 409
-    assert delete_device(client, owner, public_id, confirm=public_id,
+    assert delete_device(client, owner, public_id, confirm="DELETE",
                          acknowledged=False).status_code == 400
     devices = client.get(f"/api/stores/{store}/receiver-devices", headers=owner).json()
     assert public_id in {d["public_id"] for d in devices}
@@ -257,14 +257,14 @@ def test_only_super_admin_may_permanently_delete_a_device(client, role):
     make_user(client, owner, f"actor{role.lower()}", role)
     headers = sign_in(client, f"actor{role.lower()}")
 
-    assert delete_device(client, headers, public_id, confirm=public_id).status_code == 403
+    assert delete_device(client, headers, public_id, confirm="DELETE").status_code == 403
 
 
 def test_the_deletion_is_audited_without_leaking_credentials(client):
     owner = sign_in(client)
     store = store_id_of(client, owner)
     _, public_id = enrolled_device(client.server_module.engine, store)
-    delete_device(client, owner, public_id, confirm=public_id)
+    delete_device(client, owner, public_id, confirm="DELETE")
 
     events = client.get(f"/api/receiver-devices/{public_id}/deletion-events", headers=owner)
     assert events.status_code == 200, events.text
