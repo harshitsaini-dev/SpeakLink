@@ -340,3 +340,16 @@ frontend/build-dev/
 frontend/build-retired-*/
 frontend/build-deploy/
 
+
+# Claude Code session history and memory, linked in as .claude-session.
+#
+# A junction to ~/.claude/projects/<path-hash>, so the transcripts live in one
+# place and are simply visible from here rather than copied. NEVER committed:
+# a transcript contains whatever was discussed - .env contents, database paths,
+# credential handling - and pushing it would be a secret leak wearing a
+# convenience's clothes.
+.claude-session/
+.claude-session
+
+# Claude Code runtime lock. Machine-local, not configuration.
+.claude/scheduled_tasks.lock
