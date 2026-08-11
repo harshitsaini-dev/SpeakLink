@@ -192,6 +192,45 @@ def build_stop_message(*, session_id: int, reason: str = "operator_stop") -> dic
     return {"type": "stop", "session_id": validated_session, "reason": reason}
 
 
+def build_stand_down_message(*, session_id: int,
+                             reason: str = "operator_pause") -> dict[str, Any]:
+    """Go quiet, keep the session.
+
+    NOT a stop. A Receiver that stands down closes its decoder and output
+    device and gives the shop's own volume back - exactly what stop does - but
+    remembers which Broadcast it belongs to and stays connected, so resume
+    costs a device open rather than a whole re-enrolment of readiness.
+
+    The distinction matters at the speaker: stop and a later prepare means the
+    shop leaves the Broadcast and rejoins it, which an operator watching the
+    console sees as a Store dropping out. Pause is not a dropout.
+    """
+    validated_session = _positive_int(session_id, "session_id")
+    if not isinstance(reason, str) or not reason or len(reason) > 128:
+        raise AudioProtocolError("reason must be short printable text")
+    if not reason.isprintable():
+        raise AudioProtocolError("reason must be printable")
+    return {"type": "stand_down", "session_id": validated_session,
+            "reason": reason}
+
+
+def build_resume_message(*, session_id: int, store_id: int,
+                         generation: int = 1) -> dict[str, Any]:
+    """Come back to the session you already have.
+
+    The generation is carried so a late acknowledgement from the participation
+    BEFORE the pause can be told apart from this one. Without it, a `stopped`
+    that was in flight when the pause began would land on the resumed
+    participation and mark a playing shop as stopped.
+    """
+    return {
+        "type": "resume",
+        "session_id": _positive_int(session_id, "session_id"),
+        "store_id": _positive_int(store_id, "store_id"),
+        "generation": _positive_int(generation, "generation"),
+    }
+
+
 #: Output volume is a whole percent of the decoded signal, 0-100.
 #:
 #: The ceiling is 100 on purpose and is enforced here rather than only in the

@@ -181,6 +181,28 @@ class StoppedAcknowledgement(SessionAcknowledgement):
         return _reject_control_characters(value) if value is not None else None
 
 
+class StoodDownAcknowledgement(SessionAcknowledgement):
+    """The Store has gone quiet and is still in the Broadcast.
+
+    Deliberately its own message rather than a `stopped` with a reason: HQ
+    treats stopped as terminal - it releases the lease and lets another
+    Broadcast claim the Store - and a paused shop must stay claimed by the
+    Broadcast that paused it.
+    """
+    type: Literal["stood_down"]
+    reason: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ResumedAcknowledgement(SessionAcknowledgement):
+    """The Store has re-opened its output for the same Broadcast.
+
+    Carries the generation it came back on, so an acknowledgement from the
+    participation before the pause cannot be mistaken for this one.
+    """
+    type: Literal["resumed"]
+    generation: int = Field(default=1, ge=1)
+
+
 class HeartbeatAcknowledgement(AcknowledgementBase):
     type: Literal["heartbeat"]
 
@@ -255,6 +277,8 @@ ReceiverAcknowledgement = Annotated[
         PlaybackErrorAcknowledgement,
         DeviceErrorAcknowledgement,
         StoppedAcknowledgement,
+        StoodDownAcknowledgement,
+        ResumedAcknowledgement,
         HeartbeatAcknowledgement,
         AudioControlAcknowledgement,
         EndpointStateAcknowledgement,
@@ -455,6 +479,24 @@ def apply_receiver_ack(
     elif isinstance(ack, StoppedAcknowledgement):
         _validate_active_session(result, ack.session_id)
         result = replace(result, playback=PlaybackState.STOPPED)
+    elif isinstance(ack, StoodDownAcknowledgement):
+        # Playback stops and READINESS IS SURRENDERED. The output device was
+        # closed, so the Store is no longer proven fit to broadcast to -
+        # claiming otherwise would let HQ resume into a device that has since
+        # been taken by something else. requires_ready is what makes resume
+        # re-prove it.
+        _validate_active_session(result, ack.session_id)
+        result = replace(result,
+                         readiness=ReadinessState.UNKNOWN,
+                         playback=PlaybackState.STOPPED,
+                         requires_ready=True)
+    elif isinstance(ack, ResumedAcknowledgement):
+        # Resumed says the device is open again. It does NOT say sound is
+        # audible - that is what the playback acknowledgements are for - so
+        # playback stays where it was until the Store reports receiving audio.
+        _validate_active_session(result, ack.session_id)
+        result = replace(result, readiness=ReadinessState.READY,
+                         requires_ready=False)
     elif isinstance(ack, EndpointStateAcknowledgement):
         # Changes NO status, exactly like audio_control. How loud a shop is has
         # nothing to do with whether it is connected, ready or playing - and a

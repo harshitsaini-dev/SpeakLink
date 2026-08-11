@@ -654,6 +654,12 @@ class AudioReceiverPilot:
         self._audio_backend = audio_backend
 
         self.session_id: int | None = None
+        #: Remembered from prepare so resume can rebuild the same
+        #: participation without HQ having to re-send a whole prepare.
+        self.store_id: int | None = None
+        #: True between a stand_down and the resume that answers it. The
+        #: session is still ours; the output device is not open.
+        self.stood_down = False
         self.decoder: FfmpegDecoder | None = None
         self.pcm_sink: WindowsPcmSink | None = None
         self.queue: StoreAudioQueue | None = None
@@ -674,6 +680,8 @@ class AudioReceiverPilot:
             "audio_receiving": False,
             "playback_confirmed": False,
             "stopped": False,
+            "stood_down": False,
+            "resumed": False,
             "playback_error": False,
             "speaker_verified": False,
             "total_chunks": 0,
@@ -808,6 +816,14 @@ class AudioReceiverPilot:
             elif kind == "stop":
                 await self._on_stop(connection, payload)
                 return
+            elif kind == "stand_down":
+                # NOT a return. Standing down goes quiet and stays in the
+                # session loop - that is the whole difference from stop, and
+                # returning here would close the socket and turn every Pause
+                # into a dropout.
+                await self._on_stand_down(connection, payload)
+            elif kind == "resume":
+                await self._on_resume(connection, payload)
             elif kind == "set_audio_control":
                 await self._on_set_audio_control(connection, payload)
             # Unknown control messages are ignored rather than acted upon.
@@ -861,6 +877,8 @@ class AudioReceiverPilot:
             self.report["output_stream_open"] = "ok"
 
         self.session_id = prepare.broadcast_session_id
+        self.store_id = prepare.target_store_id
+        self.stood_down = False
         self.queue = StoreAudioQueue(store_id=prepare.target_store_id,
                                      capacity=self.queue_capacity)
         self.pcm_sink = pcm_sink
@@ -1291,6 +1309,96 @@ class AudioReceiverPilot:
             })
             self.report["stopped"] = True
             self._record_state("STOPPED")
+
+    async def _on_stand_down(self, connection, payload: dict) -> None:
+        """Go quiet, give the shop its volume back, and stay in the Broadcast.
+
+        Everything stop tears down is torn down here - the decoder, the output
+        device, the queue, the Windows endpoint override - because a paused
+        shop must not be holding a device it is not using, and must not be
+        sitting at announcement volume while its own music plays.
+
+        What is NOT given up is the session. self.session_id stays, so resume
+        rebuilds the same participation rather than negotiating a new one.
+        """
+        session_id = payload.get("session_id") or self.session_id
+        self.restore_windows_endpoint()
+        if self.decoder is not None:
+            returncode = await asyncio.to_thread(self.decoder.close)
+            self.report["ffmpeg_returncode"] = returncode
+            self.decoder = None
+        if self.pcm_sink is not None:
+            self.pcm_sink.close()
+            self.pcm_sink = None
+        if self.queue is not None:
+            self.queue.close()
+            self.queue = None
+
+        self.stood_down = True
+        if isinstance(session_id, int) and session_id > 0:
+            await self._send(connection, {
+                **self._envelope("stood_down"),
+                "session_id": session_id,
+                "reason": str(payload.get("reason") or "operator_pause")[:128],
+            })
+            self.report["stood_down"] = True
+            self._record_state("STOOD_DOWN")
+
+    async def _on_resume(self, connection, payload: dict) -> None:
+        """Re-open the output for the session this Store never left.
+
+        The device is opened BEFORE `resumed` is sent, for the same reason
+        READY is only claimed after a successful open: a shop that cannot open
+        its output has not resumed, and saying so late is worse than saying no
+        now. A failure here reports device_error and leaves the Store stood
+        down rather than pretending.
+        """
+        session_id = payload.get("session_id") or self.session_id
+        if not isinstance(session_id, int) or session_id <= 0:
+            return
+        generation = payload.get("generation")
+        generation = generation if isinstance(generation, int) and generation > 0 else 1
+
+        pcm_sink = None
+        if self.sink.is_hardware:
+            try:
+                pcm_sink = WindowsPcmSink(self.sink, backend=self._audio_backend)
+                pcm_sink.open()
+            except SinkConfigurationError:
+                await self._send(connection, {
+                    **self._envelope("device_error"),
+                    "error_code": "OUTPUT_DEVICE_UNAVAILABLE",
+                    "details": "the output device could not be re-opened on resume",
+                    "recoverable": False,
+                })
+                self.report["output_stream_open"] = "failed"
+                self._record_state("DEVICE_ERROR")
+                return
+            self.report["output_stream_open"] = "ok"
+
+        store_id = payload.get("store_id") or self.store_id
+        self.session_id = session_id
+        self.queue = StoreAudioQueue(store_id=store_id or 0,
+                                     capacity=self.queue_capacity)
+        self.pcm_sink = pcm_sink
+        self.decoder = FfmpegDecoder(sink_mode=self.sink.sink_mode, pcm_sink=pcm_sink)
+        self.decoder.start()
+
+        # The Windows endpoint is taken over again from the shop's own level,
+        # not from whatever the last participation left behind: the volume
+        # baseline belongs to the generation, and a resumed Store starting at
+        # the previous announcement's level is exactly the surprise this
+        # avoids.
+        await self._prepare_windows_endpoint(connection)
+
+        self.stood_down = False
+        await self._send(connection, {
+            **self._envelope("resumed"),
+            "session_id": session_id,
+            "generation": generation,
+        })
+        self.report["resumed"] = True
+        self._record_state("RESUMED")
 
     async def _shutdown(self, connection) -> None:
         # Every other way a run can end: the broadcaster disconnecting, the
