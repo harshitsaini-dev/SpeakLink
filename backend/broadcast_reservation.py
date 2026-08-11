@@ -259,6 +259,52 @@ def release_session_leases_in(connection, *, session_id: int) -> int:
     return int(result.rowcount or 0)
 
 
+def reserve_one_store_for_session(engine: Engine, *, session_id: int,
+                                  store_id: int) -> None:
+    """Claim ONE more Store for a session that is already live.
+
+    Adding a Store mid-Broadcast needs the same exclusivity as starting one, so
+    it goes through the same partial unique index rather than a second rule
+    that could disagree with it. A Store another Broadcast holds raises
+    StoreBusyError and nothing is written - the caller must not create a target
+    that looks active while the lease belongs to somebody else.
+    """
+    try:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO broadcast_store_leases "
+                "(session_id, store_id, acquired_at) "
+                "VALUES (:session, :store, :now)"),
+                {"session": session_id, "store": store_id, "now": _now()})
+    except IntegrityError as clash:
+        raise StoreBusyError(
+            f"Store {store_id} is already live in another Broadcast."
+        ) from clash
+
+
+def release_store_lease(engine: Engine, *, session_id: int,
+                        store_id: int) -> bool:
+    """Release ONE Store from ONE session. Returns whether anything was held.
+
+    Scoped to BOTH ids, which is what makes it safe. The session-wide release
+    below warns against taking a store_id instead of a session_id, and it is
+    right: a release keyed on the Store alone could free a Store another
+    campaign is broadcasting to. Naming both means this can only ever free what
+    this session actually holds.
+
+    Idempotent, for the same reason as the session-wide one - removing a Store
+    twice is a cleanup path, and a cleanup path that raises on nothing to clean
+    is one people wrap in try/except until it stops protecting anything.
+    """
+    with engine.begin() as connection:
+        result = connection.execute(text(
+            "UPDATE broadcast_store_leases SET released_at = :now "
+            "WHERE session_id = :session AND store_id = :store "
+            "AND released_at IS NULL"),
+            {"now": _now(), "session": session_id, "store": store_id})
+    return bool(result.rowcount)
+
+
 def release_session_leases(engine: Engine, *, session_id: int) -> int:
     """Release everything this session holds. Returns how many were released.
 

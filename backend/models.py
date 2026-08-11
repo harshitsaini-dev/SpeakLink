@@ -198,6 +198,27 @@ class BroadcastTarget(Base):
     stopped_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
 
+    #: Where this Store is in its PARTICIPATION, which is a different question
+    #: from what its Receiver is doing.
+    #:
+    #: play_status above answers "is audio arriving and playing" - it is
+    #: Receiver truth. This answers "is this Store part of the Broadcast at
+    #: all", which an operator changes by adding, pausing or removing it. A
+    #: Store can be ACTIVE here and silent there; conflating the two is how a
+    #: console ends up claiming a shop is playing because a command was sent.
+    #:
+    #: Defaults to ACTIVE so every row written before dynamic targeting existed
+    #: reads as what it was: a Store targeted at start and never touched again.
+    lifecycle_state = Column(String(20), default="ACTIVE", nullable=False)
+
+    #: Which participation this row is on. One generation is one stretch of
+    #: being in the Broadcast, and one Windows volume baseline: adding gives 1,
+    #: a later resume gives 2, and a re-add after removal continues upward
+    #: rather than restarting - so a late acknowledgement from a participation
+    #: that has ended can be recognised and dropped instead of landing on the
+    #: one that replaced it.
+    current_generation = Column(Integer, default=1, nullable=False)
+
     session = relationship("BroadcastSession", back_populates="targets")
     store = relationship("Store")
 

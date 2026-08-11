@@ -209,6 +209,39 @@ class StoreAudioControlRegistry:
                 },
             )
 
+    def add_store(self, *, session_id: int, store_id: int) -> bool:
+        """Give a Store joining mid-broadcast its own control state.
+
+        Same product defaults as start_session, and for the same reason: a
+        Store added at 14:20 should behave like one targeted at 14:00, not
+        inherit whatever its Windows endpoint was left at.
+
+        Returns False if the session is not live - the caller has a Broadcast
+        that ended underneath it and must not go on to prepare a Receiver for
+        it. Re-adding a Store that already has state leaves that state alone
+        rather than resetting a level the operator has since chosen.
+        """
+        with self._lock:
+            control = self._sessions.get(session_id)
+            if control is None:
+                return False
+            control.stores.setdefault(int(store_id),
+                                      StoreAudioState(store_id=int(store_id)))
+            return True
+
+    def drop_store(self, *, session_id: int, store_id: int) -> bool:
+        """Forget one Store's control state. Idempotent.
+
+        A Store that has left the Broadcast must stop appearing in its volume
+        panel; leaving the row behind would offer a slider that controls a shop
+        nobody is broadcasting to.
+        """
+        with self._lock:
+            control = self._sessions.get(session_id)
+            if control is None:
+                return False
+            return control.stores.pop(int(store_id), None) is not None
+
     def end_session(self, session_id: int) -> None:
         """Forget a broadcast's control state. Idempotent."""
         with self._lock:

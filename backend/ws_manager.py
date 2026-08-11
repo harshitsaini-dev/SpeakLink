@@ -629,6 +629,32 @@ class WSManager:
             and snapshot.readiness is ReadinessState.READY
         }
 
+    async def wait_for_store_ready(self, store_id: int, *, timeout: float,
+                                   poll: float = 0.25) -> bool:
+        """Wait for ONE Store to acknowledge READY, or give up.
+
+        Bounded on purpose. A Store added mid-broadcast has a Receiver that may
+        be slow, wedged, or gone between the connectivity check and the prepare
+        - and the operator is standing at a console waiting for an answer. A
+        wait without a ceiling would leave the request hanging and the Store
+        holding a lease nobody released.
+
+        Polling rather than an event: readiness already lives on the connection
+        snapshot, and a second notification path would be a second thing that
+        can disagree with it.
+        """
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            if store_id in self.ready_store_ids():
+                return True
+            if store_id not in self.online_store_ids():
+                # The socket went away. Waiting for the rest of the timeout
+                # would tell the operator nothing they do not already know.
+                return False
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(poll)
+
     def online_store_ids(self) -> Set[int]:
         return {
             store_id

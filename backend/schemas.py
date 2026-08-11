@@ -541,3 +541,9 @@ class ListenerJoin(BaseModel):
 class ListenerRequestAccess(BaseModel):
     """A public listener asking the broadcaster to let them in."""
     display_name: str = Field(..., min_length=1, max_length=40)
+
+
+class LiveTargetAddIn(BaseModel):
+    """Add one Store to a Broadcast that is already on air."""
+
+    store_id: int = Field(gt=0)

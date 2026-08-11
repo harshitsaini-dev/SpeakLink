@@ -31,6 +31,7 @@ from models import (
     Base, HQUser, Store, BroadcastSession, BroadcastTarget, ReceiverEvent, SystemLog
 )
 from schemas import (
+    LiveTargetAddIn,
     ListenerJoin,
     ListenerRequestAccess,
     WebRoomAutoApproveUpdate,
@@ -93,11 +94,15 @@ from store_scope import (
     set_user_scope,
 )
 from broadcast_reconciliation import reconcile_orphaned_broadcasts
+import broadcast_target_lifecycle as lifecycle
+from broadcast_target_lifecycle import ensure_target_lifecycle_schema
 from broadcast_reservation import (
     StoreBusyError,
     StoreNotInScopeError,
     active_busy_store_ids,
     ensure_broadcast_lease_schema,
+    release_store_lease,
+    reserve_one_store_for_session,
     release_session_leases,
     reserve_stores_for_session,
 )
@@ -715,6 +720,9 @@ def startup_event():
     # missing table would mean the rule is enforced by nothing at all.
     try:
         ensure_broadcast_lease_schema(engine)
+        # Additive: two columns on broadcast_targets. Existing rows read
+        # as ACTIVE generation 1, which is what they were.
+        ensure_target_lifecycle_schema(engine)
     except Exception:
         logger.warning("Broadcast Store lease schema could not be prepared",
                        exc_info=False)
@@ -3632,6 +3640,170 @@ def active_management_stores(sid: int, db: Session = Depends(get_db),
     }
 
 
+@api.post("/broadcast/active-management/{sid}/targets")
+async def active_management_add_target(
+    sid: int, payload: LiveTargetAddIn, db: Session = Depends(get_db),
+    user: HQUser = Depends(require(abm.PAGE_CODE)),
+):
+    """Add ONE Store to a Broadcast that is already on air.
+
+    Every gate that guards starting a Broadcast guards this too, because this
+    IS starting one - on a single shop, while the rest keep playing. The gates
+    run before anything is written, so a refusal leaves the running Broadcast
+    exactly as it was.
+
+    WHAT MAKES THIS DIFFERENT FROM START
+
+    A Store joining now has missed the beginning of the stream, and a WebM
+    stream cannot be joined at an arbitrary byte: the decoder needs the header
+    and then whole Clusters. So this hands the Store the cached initialization
+    segment and starts it on a Cluster boundary, which is what
+    join_store_at_live_edge does. It joins the LIVE EDGE - no backlog, because
+    a shop playing an announcement that already finished is worse than a shop
+    that joined a moment late.
+
+    ACTIVE here means audio is being delivered. It is not a claim that anything
+    is audible; play_status carries what the Receiver reports, and neither is
+    acoustic verification.
+    """
+    visibility = abm.resolve_visibility(engine, user)
+    rows = _active_management_rows(db, user, visibility)
+    row = next((r for r in rows if r.session_id == sid), None)
+    if row is None:
+        # 404 for "not live" and "not visible to you" alike, so this cannot be
+        # used to probe which session ids exist.
+        raise HTTPException(status_code=404, detail="No such active broadcast")
+
+    # Authority over THIS Broadcast, on the same rule Stop already uses: your
+    # own needs no supervision right, somebody else's does.
+    if not row.is_mine and not visibility.may_stop_any:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to change another operator's broadcast.")
+
+    # Physical delivery, at the single choke point every physical target passes
+    # through. Deliberately separate from Store Scope: one says whether you may
+    # reach Stores at all, the other says which.
+    _require_physical_delivery(user)
+
+    session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
+    if session is None or session.status != "live":
+        raise HTTPException(status_code=409,
+                            detail="This broadcast is no longer live.")
+
+    # Only With Link means zero physical Stores, and it means it. Refused in
+    # the backend rather than by hiding a button, because a hidden button is a
+    # suggestion and this is a rule.
+    if session.target_mode == ONLY_WITH_LINK:
+        raise HTTPException(
+            status_code=409,
+            detail=("This is an Only With Link broadcast, which reaches web "
+                    "listeners only. Adding a Store would change what it is."))
+
+    store = db.query(Store).filter(Store.id == payload.store_id).first()
+    if store is None or not store.is_active:
+        raise HTTPException(status_code=404, detail="No such Store.")
+
+    scope = resolve_store_scope(engine, user)
+    if scope is not None and store.id not in scope:
+        # Same answer as a Store that does not exist. A caller outside scope is
+        # not entitled to learn that this one does.
+        raise HTTPException(status_code=404, detail="No such Store.")
+
+    existing = db.query(BroadcastTarget).filter(
+        BroadcastTarget.session_id == sid,
+        BroadcastTarget.store_id == store.id).first()
+    if existing is not None and existing.lifecycle_state in (
+            lifecycle.ADDING, lifecycle.PREPARING,
+            lifecycle.ACTIVE, lifecycle.PAUSED):
+        # Idempotent rather than an error: a double click should not be a
+        # second lease and a second queue.
+        return {"session_id": sid, "store_id": store.id,
+                "lifecycle_state": existing.lifecycle_state,
+                "generation": existing.current_generation,
+                "already_participating": True}
+
+    if store.id not in manager.online_store_ids():
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{store.store_code} has no Receiver connected, so it "
+                    "cannot join this broadcast."))
+
+    # ---- from here on something has been claimed, so every failure cleans up
+    try:
+        reserve_one_store_for_session(engine, session_id=sid, store_id=store.id)
+    except StoreBusyError:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{store.store_code} is already live in another broadcast. "
+                    "It was not added, and that broadcast was not disturbed."))
+
+    generation = (existing.current_generation + 1) if existing else 1
+    if existing is None:
+        target = BroadcastTarget(
+            session_id=sid, store_id=store.id,
+            store_code_snapshot=store.store_code,
+            store_name_snapshot=store.store_name,
+            play_status="pending",
+            lifecycle_state=lifecycle.PREPARING,
+            current_generation=generation)
+        db.add(target)
+    else:
+        target = existing
+        target.lifecycle_state = lifecycle.PREPARING
+        target.current_generation = generation
+        target.play_status = "pending"
+        target.error_message = None
+        target.stopped_at = None
+    db.commit()
+
+    async def fail(detail: str, status: int = 409):
+        """Undo everything this request claimed, then say why."""
+        release_store_lease(engine, session_id=sid, store_id=store.id)
+        target.lifecycle_state = lifecycle.FAILED
+        target.error_message = detail[:500]
+        db.commit()
+        # The Receiver may already have been prepared, which on this protocol
+        # means it has taken over the Windows output. Stop is terminal and puts
+        # it back - the only safe instruction available before the stand-down
+        # primitive exists.
+        await manager.send_to_receiver(store.id, build_stop_message(session_id=sid))
+        raise HTTPException(status_code=status, detail=detail)
+
+    store_audio_registry.add_store(session_id=sid, store_id=store.id)
+    await manager.send_to_receiver(
+        store.id, build_prepare_message(session_id=sid, store_id=store.id))
+
+    ready = await manager.wait_for_store_ready(
+        store.id, session_id=sid, timeout=ADD_STORE_READY_TIMEOUT_SECONDS)
+    if not ready:
+        await fail(f"{store.store_code} did not report ready in time. "
+                   "It was not added and nothing else changed.")
+
+    joined = await manager.broadcasts.join_store_at_live_edge(sid, store.id)
+    if joined is None or not joined.get("joined"):
+        await fail(f"{store.store_code} could not be started at the live edge: "
+                   f"{(joined or {}).get('reason', 'no audio to join yet')}.")
+
+    target.lifecycle_state = lifecycle.ACTIVE
+    target.command_sent_at = datetime.utcnow()
+    db.commit()
+
+    await manager.send_to_receiver(
+        store.id, {"type": "play", "session_id": sid,
+                   "campaign": session.campaign_name})
+    _write_log(db, "info",
+               f"STORE_ADD_ACTIVE session_id={sid} store_id={store.id} "
+               f"generation={generation} actor_user_id={user.id}")
+    await manager.notify_dashboards(
+        {"type": "target_added", "session_id": sid, "store_id": store.id})
+    return {"session_id": sid, "store_id": store.id,
+            "store_code": store.store_code,
+            "lifecycle_state": target.lifecycle_state,
+            "generation": generation,
+            "bootstrap": joined}
+
+
 @api.post("/broadcast/active-management/{sid}/stop")
 async def active_management_stop(sid: int, db: Session = Depends(get_db),
                                  user: HQUser = Depends(require(abm.PAGE_CODE))):
@@ -5527,6 +5699,14 @@ async def kick_web_participant(
 # Store, a Device, a User or another Broadcast. It travels in an HttpOnly
 # cookie, never in a URL: Uvicorn logs request lines in full, and a credential
 # in a query string is a credential in a log file and in browser history.
+
+#: How long an operator waits for a Store added mid-broadcast to report READY.
+#:
+#: Bounded because somebody is standing at a console. Long enough for a
+#: Receiver to run its real FFmpeg and output-device checks, short enough that
+#: a wedged Store is reported rather than left spinning - and on timeout the
+#: lease is released, so a slow Store never silently holds itself hostage.
+ADD_STORE_READY_TIMEOUT_SECONDS = 20.0
 
 #: A heartbeat is a few dozen bytes. Anything larger is not one.
 MAX_LISTENER_FRAME_BYTES = 1024
