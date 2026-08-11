@@ -344,3 +344,107 @@ def test_the_installer_is_not_tied_to_the_old_product_name():
     """It is its own thing now; nothing here should carry the old name."""
     source = (REPOSITORY_ROOT / "tools" / "store_installer.py").read_text(encoding="utf-8")
     assert "echocast" not in source.lower()
+
+
+# ===========================================================================
+# Administrator rights: asked for once, at the step that needs them
+# ===========================================================================
+
+def test_elevation_is_asked_for_only_when_the_task_is_refused(tmp_path, monkeypatch):
+    """An installer that demanded elevation to START would be one somebody
+    clicks through without reading, on every run, including the ones that only
+    check. The prompt belongs at the step that cannot proceed without it."""
+    module = installer_module()
+    monkeypatch.setenv("SPEAKLINK_INSTALL_ROOT", str(tmp_path / "app"))
+    monkeypatch.setenv("SPEAKLINK_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setattr(module, "ALREADY_ELEVATED", False)
+
+    asked = []
+    monkeypatch.setattr(module, "relaunch_elevated",
+                        lambda *a, **k: asked.append(a) or 0)
+
+    # A task that registers normally must not prompt.
+    monkeypatch.setattr(module, "register_task", lambda report: None)
+    assert module._register_task_or_fall_back(lambda _: None) is None
+    assert asked == []
+
+
+def test_access_denied_from_schtasks_is_named_for_what_it_is(tmp_path, monkeypatch):
+    """The raw "Access is denied" sends people looking at file permissions."""
+    module = installer_module()
+    monkeypatch.setenv("SPEAKLINK_INSTALL_ROOT", str(tmp_path / "app"))
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "ERROR: Access is denied."))
+
+    with pytest.raises(PermissionError) as refusal:
+        module.register_task(lambda _: None)
+    assert "administrator rights" in str(refusal.value)
+
+
+def test_a_refused_prompt_still_leaves_a_working_store(tmp_path, monkeypatch):
+    """A Store that installed and then starts nothing at sign-in is worse than
+    one running the weaker arrangement - and the operator is told which."""
+    module = installer_module()
+    monkeypatch.setenv("SPEAKLINK_INSTALL_ROOT", str(tmp_path / "app"))
+    monkeypatch.setenv("SPEAKLINK_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    monkeypatch.setattr(module, "ALREADY_ELEVATED", False)
+    monkeypatch.setattr(module, "stop_runtime", lambda report: None)
+    monkeypatch.setattr(module, "unpack_payload", lambda report, root: None)
+    monkeypatch.setattr(module, "adopt_legacy_installation", lambda report: None)
+    monkeypatch.setattr(module, "start_runtime", lambda report: None)
+
+    def refuse(report):
+        raise PermissionError("Creating the logon task on this machine needs "
+                              "administrator rights.")
+    monkeypatch.setattr(module, "register_task", refuse)
+    # The person says No to the UAC prompt.
+    monkeypatch.setattr(module, "relaunch_elevated", lambda *a, **k: -5)
+
+    said = []
+    outcome = module.do_install_or_upgrade(said.append,
+                                           backend_url="http://hq.invalid:8000")
+
+    launcher = (tmp_path / "roaming" / "Microsoft" / "Windows" / "Start Menu"
+                / "Programs" / "Startup" / "SpeakLink Store Receiver.cmd")
+    assert launcher.exists(), "nothing would start the Receiver at sign-in"
+    assert "Startup folder" in outcome
+    assert "will not restart it" in outcome, (
+        "the weaker arrangement was not described as weaker")
+
+
+def test_an_elevated_run_that_is_still_refused_does_not_prompt_again(tmp_path, monkeypatch):
+    """Elevated and still refused is policy, not privilege. Another prompt
+    would be a loop."""
+    module = installer_module()
+    monkeypatch.setenv("SPEAKLINK_INSTALL_ROOT", str(tmp_path / "app"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    monkeypatch.setattr(module, "ALREADY_ELEVATED", True)
+    monkeypatch.setattr(module, "register_task", lambda report: (_ for _ in ()).throw(
+        PermissionError("needs administrator rights")))
+    prompts = []
+    monkeypatch.setattr(module, "relaunch_elevated",
+                        lambda *a, **k: prompts.append(a) or 0)
+
+    note = module._register_task_or_fall_back(lambda _: None)
+    assert prompts == []
+    assert "Startup folder" in note
+
+
+def test_uninstall_removes_the_startup_fallback_too(tmp_path, monkeypatch):
+    """Otherwise a machine that fell back keeps launching a Receiver that is
+    no longer installed."""
+    module = installer_module()
+    monkeypatch.setenv("SPEAKLINK_INSTALL_ROOT", str(tmp_path / "app"))
+    monkeypatch.setenv("SPEAKLINK_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    monkeypatch.setattr(module.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    module.register_startup_shortcut(lambda _: None)
+    launcher = (tmp_path / "roaming" / "Microsoft" / "Windows" / "Start Menu"
+                / "Programs" / "Startup" / "SpeakLink Store Receiver.cmd")
+    assert launcher.exists()
+
+    module.do_uninstall(lambda _: None)
+    assert not launcher.exists()

@@ -39,7 +39,12 @@ analysis = Analysis(
     binaries=[],
     # Carried as data rather than compiled in: it is 120MB of executables and
     # a codec, and PyInstaller handles it as an opaque blob either way.
-    datas=[(str(PAYLOAD), ".")],
+    # The payload, and the icon - the icon TWICE over, in effect: icon= below
+    # sets what Explorer draws on the file, and this copy is what the window
+    # itself loads at runtime. They are different mechanisms and a build that
+    # sets only the first ships an installer whose window wears a stranger's
+    # face.
+    datas=[(str(PAYLOAD), "."), (str(ICON), ".")],
     hiddenimports=["tkinter", "tkinter.messagebox", "tkinter.scrolledtext"],
     hookspath=[],
     runtime_hooks=[],

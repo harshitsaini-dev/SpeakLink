@@ -61,6 +61,13 @@ SETUP_WIZARD = "SpeakLinkStoreSetup.exe"
 #: than silently installing nothing.
 PAYLOAD_NAME = "store-payload.zip"
 
+#: The window icon, which is NOT the same thing as the executable's icon.
+#: PyInstaller's icon= sets what Explorer draws on the file; a tkinter window
+#: keeps the default feather until it is told otherwise, so a Store PC showed
+#: the SpeakLink mark on the file and something else on the window that was
+#: actually asking to change the machine.
+ICON_NAME = "speaklink.ico"
+
 #: EARLIER SPEAKLINK INSTALLATIONS, under the names and folders older kits
 #: used. A machine set up by hand, or by a kit that predates this installer,
 #: has its files and its scheduled task somewhere else - and if they are left
@@ -102,10 +109,23 @@ def state_root() -> Path:
                 or (Path(os.environ["LOCALAPPDATA"]) / "SpeakLink" / "receiver"))
 
 
+def _bundled(name: str) -> Path:
+    """A file packaged beside this program, frozen or running from source."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+    return base / name
+
+
 def payload_path() -> Path:
     """Where the embedded kit is, running frozen or from source."""
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
-    return base / PAYLOAD_NAME
+    return _bundled(PAYLOAD_NAME)
+
+
+def icon_path() -> Path:
+    frozen = _bundled(ICON_NAME)
+    if frozen.exists():
+        return frozen
+    # Running from the repository, where the icon lives under assets/.
+    return Path(__file__).resolve().parents[1] / "assets" / ICON_NAME
 
 
 @dataclass(frozen=True)
@@ -206,6 +226,57 @@ def adopt_legacy_installation(report) -> None:
         shutil.rmtree(old_app, ignore_errors=True)
 
 
+def is_elevated() -> bool:
+    """Whether this process can create a scheduled task on this machine."""
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def relaunch_elevated(action: str, *, backend_url: str | None = None,
+                      remove_credential: bool = False) -> int:
+    """Ask Windows for administrator rights and do the work in a new process.
+
+    WHY ELEVATION IS ASKED FOR AT ALL, AND ONLY HERE
+
+    Registering a logon task is an administrator action on a managed machine -
+    the same call that works on a home PC answers "Access is denied" on a shop
+    till. Everything else this installer does is inside the Store user's own
+    profile and needs nothing, so the prompt appears when the task is about to
+    be written and at no other time. An installer that demanded elevation to
+    START would be one somebody clicks through without reading, on every run,
+    including the ones that only check.
+
+    Returns the elevated process's exit code, or a negative number if the
+    prompt was refused or could not be shown.
+    """
+    import ctypes
+
+    arguments = [action]
+    if backend_url:
+        arguments += ["--backend-url", backend_url]
+    if remove_credential:
+        arguments.append("--remove-credential")
+    # The elevated copy is told not to ask again: if IT cannot register the
+    # task, the answer is a real failure rather than a second prompt loop.
+    arguments.append("--already-elevated")
+
+    quoted = " ".join(f'"{part}"' if " " in part else part for part in arguments)
+    try:
+        # 42 is an arbitrary "show the window" value; SW_SHOWNORMAL is 1 and is
+        # what a person expects to see while a Store is being set up.
+        handle = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", sys.executable if not getattr(sys, "frozen", False)
+            else sys.argv[0], quoted, None, 1)
+        # ShellExecuteW returns > 32 on success. 5 is ERROR_ACCESS_DENIED,
+        # which here means the person said No to the prompt.
+        return 0 if int(handle) > 32 else -int(handle)
+    except Exception:
+        return -1
+
+
 def _task_exists(task_name: str = TASK_NAME) -> bool:
     try:
         result = subprocess.run(
@@ -294,6 +365,42 @@ def unpack_payload(report, destination: Path) -> None:
     report("Files unpacked.")
 
 
+def register_startup_shortcut(report) -> bool:
+    """The fallback when a logon task cannot be created.
+
+    A shortcut in the Startup folder needs no administrator rights, starts the
+    Receiver at sign-in, and is worse in one specific way: Windows will not
+    restart it if it dies, which the scheduled task does. So it is a fallback
+    and is described as one - a Store running this way works, and an operator
+    should know it is running the weaker arrangement.
+    """
+    try:
+        startup = (Path(os.environ["APPDATA"]) / "Microsoft" / "Windows"
+                   / "Start Menu" / "Programs" / "Startup")
+        startup.mkdir(parents=True, exist_ok=True)
+        target = install_root() / BACKGROUND_EXE
+        # A .cmd rather than a .lnk: writing a shortcut needs COM, and a
+        # one-line launcher does the same job with nothing to go wrong.
+        launcher = startup / "SpeakLink Store Receiver.cmd"
+        launcher.write_text(
+            "@echo off\r\n" + f'start "" "{target}"\r\n', encoding="utf-8")
+        report(f"Set the Receiver to start at sign-in via {launcher.name}.")
+        return True
+    except OSError as failure:
+        report(f"The startup shortcut could not be written either: {failure}")
+        return False
+
+
+def remove_startup_shortcut() -> None:
+    try:
+        launcher = (Path(os.environ["APPDATA"]) / "Microsoft" / "Windows"
+                    / "Start Menu" / "Programs" / "Startup"
+                    / "SpeakLink Store Receiver.cmd")
+        launcher.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def register_task(report) -> None:
     """A LOGON task in the Store user's own session, not a Windows service.
 
@@ -311,8 +418,16 @@ def register_task(report) -> None:
         capture_output=True, text=True,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if result.returncode != 0:
-        raise RuntimeError("The logon task could not be registered: "
-                           + (result.stderr or result.stdout).strip())
+        message = (result.stderr or result.stdout).strip()
+        # "Access is denied" from schtasks means this machine requires an
+        # administrator to create a logon task. Said in those words rather than
+        # passed through, because the raw message sends people looking at file
+        # permissions.
+        if "denied" in message.lower():
+            raise PermissionError(
+                "Creating the logon task on this machine needs administrator "
+                "rights.")
+        raise RuntimeError("The logon task could not be registered: " + message)
     report("Logon task registered.")
 
 
@@ -356,6 +471,38 @@ def write_settings(report, backend_url: str | None) -> None:
 # The verbs
 # ---------------------------------------------------------------------------
 
+#: Set by the CLI when this process is the elevated copy. It stops a refused
+#: prompt turning into an endless chain of prompts, and makes a failure in the
+#: elevated process a real failure rather than another question.
+ALREADY_ELEVATED = False
+
+
+def _register_task_or_fall_back(report) -> str | None:
+    """Create the logon task, elevating or falling back if it is refused.
+
+    Returns a sentence to append to the outcome when something other than the
+    ordinary path happened, or None when the task was created normally.
+    """
+    try:
+        register_task(report)
+        return None
+    except PermissionError:
+        if ALREADY_ELEVATED:
+            # Elevated and still refused: this is policy, not privilege, and
+            # another prompt would be a loop. Fall back and say so.
+            report("Even with administrator rights this machine refused to "
+                   "create a logon task.")
+            if register_startup_shortcut(report):
+                return ("The Receiver starts at sign-in through the Startup "
+                        "folder. Windows will not restart it automatically if "
+                        "it stops - tell HQ, the machine's policy blocks the "
+                        "usual arrangement.")
+            raise
+        report("This machine needs administrator rights to create the logon "
+               "task. Asking Windows for them…")
+        return "ELEVATE"
+
+
 def do_install_or_upgrade(report, *, backend_url: str | None = None) -> str:
     state = read_state()
     verb = state.suggested_action()
@@ -369,17 +516,39 @@ def do_install_or_upgrade(report, *, backend_url: str | None = None) -> str:
     adopt_legacy_installation(report)
     unpack_payload(report, install_root())
     write_settings(report, backend_url)
-    register_task(report)
+
+    note = _register_task_or_fall_back(report)
+    if note == "ELEVATE":
+        # The files are already in place, so the elevated copy only has to
+        # finish the part that needed the rights. It re-runs the whole verb,
+        # which is idempotent - unpacking the same payload twice costs seconds
+        # and keeps this from becoming two half-installers.
+        code = relaunch_elevated("install", backend_url=backend_url)
+        if code == 0:
+            return ("Windows is finishing the installation with administrator "
+                    "rights. Watch the second window for the result.")
+        report("Administrator rights were refused.")
+        if register_startup_shortcut(report):
+            note = ("The Receiver starts at sign-in through the Startup folder "
+                    "instead of a logon task. It works; Windows just will not "
+                    "restart it automatically if it stops.")
+        else:
+            raise RuntimeError(
+                "The Receiver was installed but nothing will start it at "
+                "sign-in. Run this installer again and allow the "
+                "administrator prompt.")
     start_runtime(report)
 
+    suffix = ("\n\n" + note) if note and note != "ELEVATE" else ""
     if verb == "upgrade":
         return ("Upgrade complete. This Store is still enrolled - the Device "
-                "credential was not touched.")
+                "credential was not touched." + suffix)
     if state.has_credential:
-        return "Install complete, and the existing Device credential was kept."
+        return ("Install complete, and the existing Device credential was kept."
+                + suffix)
     return ("Install complete. This Store is not enrolled yet: run "
             "SpeakLinkStoreSetup.exe from "
-            f"{install_root()} and enter the one-time code from HQ.")
+            f"{install_root()} and enter the one-time code from HQ." + suffix)
 
 
 def do_repair(report) -> str:
@@ -389,7 +558,14 @@ def do_repair(report) -> str:
            "Device credential and settings are kept.")
     stop_runtime(report)
     unpack_payload(report, install_root())
-    register_task(report)
+    note = _register_task_or_fall_back(report)
+    if note == "ELEVATE":
+        code = relaunch_elevated("repair")
+        if code == 0:
+            return ("Windows is finishing the repair with administrator "
+                    "rights. Watch the second window for the result.")
+        report("Administrator rights were refused.")
+        register_startup_shortcut(report)
     start_runtime(report)
     if not state.has_credential:
         return ("Repair complete, but this machine has no Device credential, so "
@@ -406,6 +582,8 @@ def do_uninstall(report, *, remove_credential: bool = False) -> str:
     subprocess.run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"],
                    capture_output=True, text=True,
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+    remove_startup_shortcut()
 
     if install_root().exists():
         report(f"Removing {install_root()}…")
@@ -433,6 +611,12 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand on a Store PC
     window.title(f"{APP_NAME} - Installer")
     window.geometry("620x470")
     window.resizable(False, False)
+    try:
+        window.iconbitmap(str(icon_path()))
+    except Exception:
+        # A missing or unreadable icon is not a reason to refuse to install
+        # anything. The window simply keeps the default one.
+        pass
 
     state = read_state()
 
@@ -522,7 +706,12 @@ def run_cli(argv: list[str]) -> int:
                                            "uninstall", "check"])
     parser.add_argument("--backend-url")
     parser.add_argument("--remove-credential", action="store_true")
+    parser.add_argument("--already-elevated", action="store_true",
+                        help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
+
+    global ALREADY_ELEVATED
+    ALREADY_ELEVATED = arguments.already_elevated or is_elevated()
 
     def report(message: str) -> None:
         print(message, flush=True)
