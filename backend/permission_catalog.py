@@ -131,6 +131,19 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
     PermissionDefinition("broadcast_history.delete_permanently", "History",
                         "Permanently Delete Broadcast Sessions"),
 
+    #: Reading what an operator REMOVED from a chat.
+    #:
+    #: Its own right, held by OWNER and ADMIN and by nobody else by default -
+    #: not even the operator running the Broadcast. Removing a message is a
+    #: moderation act, and the person who moderates is not automatically the
+    #: person entitled to keep reading what they took down; that separation is
+    #: the whole reason this is a permission rather than a role check.
+    #:
+    #: It never survives the Broadcast. Deleting the Broadcast from history
+    #: erases the messages and their images for everybody, this right included.
+    PermissionDefinition("chat.view_deleted", "Broadcast",
+                        "See Deleted Chat Messages"),
+
     PermissionDefinition("menu.logs.view", "Logs", "View System Logs"),
     PermissionDefinition("system_logs.archive", "Logs", "Archive System Logs"),
     PermissionDefinition("system_logs.delete_permanently", "Logs",

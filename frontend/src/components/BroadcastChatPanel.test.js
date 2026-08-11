@@ -88,14 +88,28 @@ test("a private message is badged from what the server stored", async () => {
   expect(screen.queryByTestId("chat-private-2")).toBeNull();
 });
 
-test("a deleted message keeps its author and loses its words", async () => {
+test("a removed message keeps its author and shows no words to most accounts", async () => {
+  // Without chat.view_deleted the server sends no body at all, so there is
+  // nothing here for a client-side toggle to reveal.
   await renderPanel({
+    may_see_removed: false,
     messages: [message(1, { deleted: true, body: null })],
   });
   expect(screen.getByTestId("chat-removed-1")).toBeTruthy();
+  expect(screen.queryByTestId("chat-removed-body-1")).toBeNull();
   expect(screen.getByTestId("chat-message-1").textContent).toContain("Harshit");
-  // And there is no Delete button for something already deleted.
+  // And there is no Delete button for something already removed.
   expect(screen.queryByTestId("chat-delete-1")).toBeNull();
+});
+
+test("an account that may see deleted chat reads the words, struck through", async () => {
+  await renderPanel({
+    may_see_removed: true,
+    messages: [message(1, { deleted: true, body: "something regrettable" })],
+  });
+  expect(screen.getByTestId("chat-removed-1")).toBeTruthy();
+  expect(screen.getByTestId("chat-removed-body-1").textContent)
+    .toContain("something regrettable");
 });
 
 test("sending a message posts it and re-reads the room", async () => {

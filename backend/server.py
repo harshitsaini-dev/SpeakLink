@@ -4841,9 +4841,12 @@ def read_broadcast_history_chat(
                 "messages": []}
     settings = web_chat.get_settings(engine, room_id=room.id)
     messages = web_chat.history_for_host(engine, room_id=room.id, limit=1000)
+    # The transcript is the record. Whether the removed half of it is readable
+    # is the same question here as in the live panel, and gets the same answer.
+    reveal = _may_see_removed_chat(user)
     return {"session_id": sid, "campaign_name": session.campaign_name,
-            **settings,
-            "messages": [m.public_dict() for m in messages]}
+            **settings, "may_see_removed": reveal,
+            "messages": [m.public_dict(reveal_removed=reveal) for m in messages]}
 
 
 @api.post("/broadcast/history/delete-permanently")
@@ -6501,11 +6504,25 @@ def _chat_room_or_404(sid: int):
     return room
 
 
-def _chat_state_for_host(sid: int, room) -> dict:
+def _may_see_removed_chat(user: HQUser) -> bool:
+    """Whether THIS account may read messages an operator removed.
+
+    Deliberately not "is this your Broadcast". Removing a message is a
+    moderation act, and the person who moderates is not automatically the
+    person entitled to keep reading what they took down - so the broadcaster
+    sees the same tombstone their audience sees, and an account holding
+    chat.view_deleted sees the words.
+    """
+    return has_permission_code(engine, user, "chat.view_deleted")
+
+
+def _chat_state_for_host(sid: int, room, *, reveal_removed: bool = False) -> dict:
     settings = web_chat.get_settings(engine, room_id=room.id)
     messages = web_chat.history_for_host(engine, room_id=room.id)
     return {"session_id": sid, **settings,
-            "messages": [m.public_dict() for m in messages]}
+            "may_see_removed": reveal_removed,
+            "messages": [m.public_dict(reveal_removed=reveal_removed)
+                         for m in messages]}
 
 
 @api.get("/broadcast/sessions/{sid}/chat")
@@ -6514,7 +6531,8 @@ def read_broadcast_chat(sid: int,
     """Everything said in this room. The host is the one person a private
     message was addressed TO, so private messages are theirs to read."""
     _require_web_room_owner(sid, user)
-    return _chat_state_for_host(sid, _chat_room_or_404(sid))
+    return _chat_state_for_host(sid, _chat_room_or_404(sid),
+                                reveal_removed=_may_see_removed_chat(user))
 
 
 @api.post("/broadcast/sessions/{sid}/chat")
@@ -6565,7 +6583,8 @@ def update_broadcast_chat_settings(
         _write_log(db, "info",
                    f"CHAT_SETTINGS session_id={sid} enabled={payload.chat_enabled} "
                    f"mode={payload.chat_mode} by={user.username}")
-    return _chat_state_for_host(sid, room)
+    return _chat_state_for_host(sid, room,
+                                reveal_removed=_may_see_removed_chat(user))
 
 
 @api.post("/broadcast/sessions/{sid}/chat/messages/{mid}/delete")
@@ -6580,18 +6599,16 @@ def delete_broadcast_chat_message(
     """
     _require_web_room_owner(sid, user)
     room = _chat_room_or_404(sid)
-    # Read the row BEFORE tombstoning it: the delete clears the attachment
-    # columns, so afterwards there is nothing left saying which file to remove.
-    doomed = web_chat.get_message(engine, message_id=mid, room_id=room.id)
     if not web_chat.delete_message(engine, message_id=mid, room_id=room.id,
                                    actor_user_id=user.id):
         raise HTTPException(status_code=404,
                             detail="No such message in this Broadcast's chat.")
-    if doomed is not None and doomed.attachment_name:
-        # The image is deleted for real. A tombstone that still served its
-        # picture would be a deletion that deleted nothing anybody could see.
-        chat_attachments.delete_image(sid, doomed.attachment_name)
-    return _chat_state_for_host(sid, room)
+    # The image FILE stays. Removal takes a message out of the room; it does
+    # not erase it, and the host has to be able to say what they removed. It
+    # goes when the Broadcast is deleted from history, like everything else
+    # here.
+    return _chat_state_for_host(sid, room,
+                                reveal_removed=_may_see_removed_chat(user))
 
 
 @api.post("/broadcast/sessions/{sid}/web-participants/{pid}/chat-mute")
@@ -6611,7 +6628,8 @@ def set_web_participant_chat_mute(
         raise HTTPException(status_code=404,
                             detail="That listener is not in this Broadcast.")
     web_chat.set_participant_muted(engine, participant_id=pid, muted=payload.muted)
-    return _chat_state_for_host(sid, room)
+    return _chat_state_for_host(sid, room,
+                                reveal_removed=_may_see_removed_chat(user))
 
 
 # ---- the listener half -----------------------------------------------------
@@ -6670,7 +6688,7 @@ def post_listener_chat(request: Request, payload: ChatMessageIn):
     return message.public_dict()
 
 
-def _image_response(message, session_id: int):
+def _image_response(message, session_id: int, *, reveal_removed: bool = False):
     """Serve one stored image, or 404. Never a path from the request.
 
     The filename comes from the database row, not from the URL, so there is no
@@ -6678,7 +6696,11 @@ def _image_response(message, session_id: int):
     photograph from somebody's shop, and a shared proxy has no business
     keeping a copy.
     """
-    if not message.attachment_name or message.deleted_at:
+    if not message.attachment_name or (message.deleted_at and not reveal_removed):
+        # A listener asking for a removed image gets the same answer as one
+        # asking for a message that never had a picture. The host gets the
+        # picture, because they are the person who has to account for removing
+        # it.
         raise HTTPException(status_code=404, detail="No image on that message.")
     payload = chat_attachments.read_image(session_id, message.attachment_name)
     if payload is None:
@@ -6738,7 +6760,8 @@ def read_broadcast_chat_image(
     message = web_chat.get_message(engine, message_id=mid, room_id=room.id)
     if message is None:
         raise HTTPException(status_code=404, detail="No such message.")
-    return _image_response(message, sid)
+    return _image_response(message, sid,
+                           reveal_removed=_may_see_removed_chat(user))
 
 
 @api.get("/broadcast/history/{sid}/chat/messages/{mid}/image")
@@ -6752,7 +6775,8 @@ def read_history_chat_image(
     message = web_chat.get_message(engine, message_id=mid, room_id=room.id)
     if message is None:
         raise HTTPException(status_code=404, detail="No such message.")
-    return _image_response(message, sid)
+    return _image_response(message, sid,
+                           reveal_removed=_may_see_removed_chat(user))
 
 
 @api.post("/listen/chat/image")

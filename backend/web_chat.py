@@ -26,10 +26,15 @@ FOUR DECISIONS WORTH READING BEFORE CHANGING ANYTHING HERE
    typing, not gagging themselves - they may still need to answer the last
    question before the room goes quiet.
 
-4. DELETION IS A TOMBSTONE, NOT A DELETE. A removed message keeps its row and
-   its author, and loses its body. Everyone saw it; pretending it never
-   existed would make the transcript a lie, and an operator who deletes
-   something should still be able to say what they deleted.
+4. DELETION REMOVES A MESSAGE FROM THE ROOM, IT DOES NOT ERASE IT. Listeners
+   see a tombstone with no words and no picture. The host - and anyone
+   entitled to read that Broadcast's history - still sees what was said,
+   marked as removed, because "somebody posted something and I deleted it" is
+   not an answer an operator can give a manager an hour later.
+
+   The cost is real and is stated rather than hidden: a removed message is
+   RETAINED until the Broadcast itself is deleted from history. Delete is not
+   a way to make something unrecoverable; deleting the Broadcast is.
 """
 
 from __future__ import annotations
@@ -94,28 +99,39 @@ class ChatMessage:
     attachment_width: int | None = None
     attachment_height: int | None = None
 
-    def public_dict(self) -> dict[str, Any]:
+    def public_dict(self, *, reveal_removed: bool = False) -> dict[str, Any]:
         """What goes over the wire. Never a token, never a participant's id
-        beyond the one the client already knows is its own."""
+        beyond the one the client already knows is its own.
+
+        ``reveal_removed`` is the difference between the two readers. A
+        listener is given a tombstone - the message is gone from the room, and
+        that is what removal means to them. The host is given the words,
+        marked as removed, because they are the person who has to account for
+        the removal afterwards.
+
+        The flag is passed by the ROUTE, from the permission it already
+        checked. It is deliberately not derived from anything in this object:
+        a message cannot decide who is allowed to read it.
+        """
+        removed = bool(self.deleted_at)
+        hidden = removed and not reveal_removed
         return {
             "id": self.id,
             "participant_id": self.participant_id,
             "author_kind": self.author_kind,
             "author_name": self.author_name,
-            # A deleted message keeps its place and its author and loses its
-            # words. The client renders "removed by the host".
-            "body": None if self.deleted_at else self.body,
-            "deleted": bool(self.deleted_at),
+            "body": None if hidden else self.body,
+            "deleted": removed,
             "visibility": self.visibility,
             "created_at": self.created_at,
             # The bytes are never in here. A client that may see this message
             # fetches the image from its own endpoint, which applies the same
             # visibility rule - so a private photograph is not readable by
             # guessing a URL. A deleted message has no image left at all.
-            "has_image": bool(self.attachment_name) and not self.deleted_at,
-            "image_mime": None if self.deleted_at else self.attachment_mime,
-            "image_width": None if self.deleted_at else self.attachment_width,
-            "image_height": None if self.deleted_at else self.attachment_height,
+            "has_image": bool(self.attachment_name) and not hidden,
+            "image_mime": None if hidden else self.attachment_mime,
+            "image_width": None if hidden else self.attachment_width,
+            "image_height": None if hidden else self.attachment_height,
         }
 
 
@@ -402,19 +418,17 @@ def get_message(engine: Engine, *, message_id: int,
 
 def delete_message(engine: Engine, *, message_id: int, room_id: int,
                    actor_user_id: int) -> bool:
-    """Tombstone one message. The row and the author stay; the words go.
+    """Remove one message from the room.
 
-    The IMAGE goes for real - the caller deletes the file and these columns
-    are cleared. A tombstone that still served its picture would be a deletion
-    that deleted nothing anybody could see.
+    Nothing is erased. The body and the image stay on the row, and who removed
+    it and when are recorded; what changes is who may read them - see
+    ``public_dict``. The alternative, clearing the columns, left an operator
+    unable to say what they had removed five minutes later.
     """
     with engine.begin() as connection:
         result = connection.execute(text(
             f"UPDATE {MESSAGE_TABLE} SET deleted_at = :now, "
-            "deleted_by_user_id = :actor, body = NULL, "
-            "attachment_name = NULL, attachment_mime = NULL, "
-            "attachment_bytes = NULL, attachment_width = NULL, "
-            "attachment_height = NULL "
+            "deleted_by_user_id = :actor "
             "WHERE id = :id AND room_id = :room AND deleted_at IS NULL"),
             {"now": _now(), "actor": actor_user_id, "id": message_id,
              "room": room_id})

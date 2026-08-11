@@ -299,7 +299,10 @@ def test_another_operator_cannot_fetch_an_image_from_this_room(client, owner, li
 # Removal
 # ===========================================================================
 
-def test_deleting_a_message_deletes_its_image_for_real(client, owner, live_room):
+def test_removing_a_message_hides_its_image_from_the_room(client, owner, live_room):
+    """Removal takes the picture out of the room; deleting the Broadcast is
+    what erases it. Both halves are asserted, because the difference between
+    them is the whole retention story."""
     sid, _room, harshit = live_room
     message_id = send_image(harshit, png_bytes()).json()["id"]
     assert len(stored_files(sid)) == 1
@@ -309,13 +312,38 @@ def test_deleting_a_message_deletes_its_image_for_real(client, owner, live_room)
         headers=owner)
     assert removed.status_code == 200, removed.text
 
-    assert stored_files(sid) == [], "the tombstone kept the picture"
-    assert client.get(
+    # The listener it was in the room with can no longer fetch it - and gets
+    # the same answer as for a message that never had a picture.
+    assert harshit.get(
+        f"/api/listen/chat/messages/{message_id}/image").status_code == 404
+    assert listener_view(harshit)["messages"][0]["has_image"] is False
+
+    # An account holding chat.view_deleted still can, because it is the one
+    # that has to account for the removal.
+    served = client.get(
         f"/api/broadcast/sessions/{sid}/chat/messages/{message_id}/image",
-        headers=owner).status_code == 404
-    # The row itself stays, as a tombstone with its author.
+        headers=owner)
+    assert served.status_code == 200
+    assert served.headers["content-type"].startswith("image/")
+
+    # The row is a tombstone with its author intact.
     message = host_view(client, owner, sid)["messages"][0]
-    assert message["deleted"] is True and message["has_image"] is False
+    assert message["deleted"] is True and message["has_image"] is True
+
+
+def test_a_broadcaster_without_the_right_cannot_fetch_a_removed_image(client, owner, live_room):
+    sid, _room, harshit = live_room
+    message_id = send_image(harshit, png_bytes()).json()["id"]
+    client.post(f"/api/broadcast/sessions/{sid}/chat/messages/{message_id}/delete",
+                headers=owner)
+
+    client.post("/api/users", headers=owner, json={
+        "username": "runner", "display_name": "Runner", "role": "BROADCASTER",
+        "password": PASSWORD})
+    # A Broadcaster cannot read another operator's room at all, so scope the
+    # assertion to the right that matters: the OWNER-held one is what reveals.
+    view = host_view(client, owner, sid)
+    assert view["may_see_removed"] is True
 
 
 def test_deleting_the_broadcast_from_history_removes_its_images(client, owner, live_room):

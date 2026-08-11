@@ -250,10 +250,23 @@ export default function BroadcastChatPanel({ sessionId }) {
                 testId={`chat-image-${message.id}`}
                 path={`/broadcast/sessions/${sessionId}/chat/messages/${message.id}/image`} />
             )}
-            {message.deleted ? (
+            {message.deleted && (
+              // The badge is always shown; whether the words follow depends
+              // entirely on what the SERVER sent. An account without
+              // chat.view_deleted receives no body, so there is nothing here
+              // for a client-side toggle to reveal.
               <p data-testid={`chat-removed-${message.id}`}
-                 className="italic text-slate-500">Removed by the host</p>
-            ) : message.body ? (
+                 className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                Removed by the host
+              </p>
+            )}
+            {message.deleted && message.body ? (
+              <p data-testid={`chat-removed-body-${message.id}`}
+                 className="whitespace-pre-wrap break-words rounded border border-dashed border-slate-300 bg-slate-50 px-1.5 py-1 text-slate-500 line-through">
+                {message.body}
+              </p>
+            ) : null}
+            {!message.deleted && message.body ? (
               // Rendered as TEXT by React, never as markup. Escaping on the way
               // in would corrupt a message that legitimately contains < or &.
               <p className="whitespace-pre-wrap break-words text-slate-800">{message.body}</p>

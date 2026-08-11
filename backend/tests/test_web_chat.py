@@ -305,7 +305,7 @@ def test_unmuting_gives_the_listener_their_voice_back(client, owner, live_room):
     assert say(harshit, "thank you").status_code == 200
 
 
-def test_a_deleted_message_keeps_its_place_and_loses_its_words(client, owner, live_room):
+def test_a_removed_message_is_a_tombstone_for_listeners(client, owner, live_room):
     sid, _room, harshit = live_room
     say(harshit, "something regrettable")
     message_id = host_view(client, owner, sid)["messages"][0]["id"]
@@ -315,12 +315,109 @@ def test_a_deleted_message_keeps_its_place_and_loses_its_words(client, owner, li
         headers=owner)
     assert removed.status_code == 200, removed.text
 
-    for view in (host_view(client, owner, sid), listener_view(harshit)):
-        assert len(view["messages"]) == 1, "the row is a tombstone, not a hole"
-        message = view["messages"][0]
-        assert message["deleted"] is True
-        assert message["body"] is None
-        assert message["author_name"] == "Harshit", "who said it is still recorded"
+    seen = listener_view(harshit)["messages"]
+    assert len(seen) == 1, "the row is a tombstone, not a hole"
+    assert seen[0]["deleted"] is True
+    assert seen[0]["body"] is None, "a listener could still read a removed message"
+    assert seen[0]["author_name"] == "Harshit", "who said it is still recorded"
+
+
+def test_an_account_with_see_deleted_chat_reads_what_was_removed(client, owner, live_room):
+    """Removal takes a message OUT OF THE ROOM; it does not erase it.
+
+    Who may still read it is a PERMISSION, not the ownership of the Broadcast:
+    removing a message is a moderation act, and the person who moderates is not
+    automatically the person entitled to keep reading what they took down.
+    OWNER holds chat.view_deleted by default.
+    """
+    sid, _room, harshit = live_room
+    say(harshit, "something regrettable")
+    message_id = host_view(client, owner, sid)["messages"][0]["id"]
+    client.post(f"/api/broadcast/sessions/{sid}/chat/messages/{message_id}/delete",
+                headers=owner)
+
+    view = host_view(client, owner, sid)
+    assert view["may_see_removed"] is True
+    message = view["messages"][0]
+    assert message["deleted"] is True
+    assert message["body"] == "something regrettable"
+
+
+def test_a_broadcaster_without_the_right_sees_only_the_tombstone(client, owner, live_room):
+    """The separation this permission exists for.
+
+    The operator running the Broadcast is not, by that fact alone, entitled to
+    keep reading messages they removed. They see what their audience sees.
+    """
+    sid, room, _harshit = live_room
+    made = client.post("/api/users", headers=owner, json={
+        "username": "runner", "display_name": "Runner", "role": "BROADCASTER",
+        "password": PASSWORD})
+    assert made.status_code == 201, made.text
+    runner = sign_in(client, "runner")
+
+    # Their own Broadcast, so ownership is not what refuses them.
+    their_sid = make_session(client, runner, "Theirs")
+    their_room = room_of(client, runner, their_sid)
+    guest = listener(client, their_room, "Guest")
+    say(guest, "something regrettable")
+    message_id = host_view(client, runner, their_sid)["messages"][0]["id"]
+    client.post(
+        f"/api/broadcast/sessions/{their_sid}/chat/messages/{message_id}/delete",
+        headers=runner)
+
+    view = host_view(client, runner, their_sid)
+    assert view["may_see_removed"] is False
+    assert view["messages"][0]["deleted"] is True
+    assert view["messages"][0]["body"] is None
+
+
+def test_the_transcript_shows_removed_messages_in_full(client, owner, live_room):
+    sid, _room, harshit = live_room
+    say(harshit, "regrettable")
+    message_id = host_view(client, owner, sid)["messages"][0]["id"]
+    client.post(f"/api/broadcast/sessions/{sid}/chat/messages/{message_id}/delete",
+                headers=owner)
+    client.post(f"/api/broadcast/sessions/{sid}/stop", headers=owner)
+
+    transcript = client.get(f"/api/broadcast/history/{sid}/chat", headers=owner)
+    assert transcript.status_code == 200, transcript.text
+    message = transcript.json()["messages"][0]
+    assert message["deleted"] is True and message["body"] == "regrettable"
+
+    # And an account without the right reads the same transcript with the
+    # removed half still removed.
+    client.post("/api/users", headers=owner, json={
+        "username": "reader", "display_name": "Reader", "role": "BROADCASTER",
+        "password": PASSWORD})
+    reader = sign_in(client, "reader")
+    theirs = client.get(f"/api/broadcast/history/{sid}/chat", headers=reader)
+    assert theirs.status_code == 200, theirs.text
+    assert theirs.json()["messages"][0]["body"] is None
+
+
+def test_deleting_the_broadcast_really_does_erase_a_removed_message(client, owner, live_room):
+    """The line between the two kinds of deletion.
+
+    Removing a message hides it from the room. Deleting the BROADCAST is what
+    makes it unrecoverable - including the ones already removed.
+    """
+    sid, _room, harshit = live_room
+    say(harshit, "regrettable")
+    message_id = host_view(client, owner, sid)["messages"][0]["id"]
+    client.post(f"/api/broadcast/sessions/{sid}/chat/messages/{message_id}/delete",
+                headers=owner)
+    client.post(f"/api/broadcast/sessions/{sid}/stop", headers=owner)
+
+    removed = client.post("/api/broadcast/history/delete-permanently", headers=owner,
+                          json={"ids": [sid], "confirm": "DELETE", "acknowledged": True})
+    assert removed.status_code == 200, removed.text
+
+    server = client.server_module
+    from sqlalchemy import text
+    with server.engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT COUNT(*) FROM web_chat_messages")).scalar_one() == 0
 
 
 def test_deleting_the_same_message_twice_is_a_404_not_a_second_delete(client, owner, live_room):

@@ -409,10 +409,19 @@ export default function BroadcastHistory() {
                         <HistoryChatImage
                           sessionId={open.id} messageId={message.id} />
                       )}
-                      {message.deleted ? (
+                      {message.deleted && (
                         <p data-testid={`history-chat-removed-${message.id}`}
-                           className="italic text-slate-500">Removed by the host</p>
-                      ) : message.body ? (
+                           className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                          Removed by the host
+                        </p>
+                      )}
+                      {message.deleted && message.body ? (
+                        <p data-testid={`history-chat-removed-body-${message.id}`}
+                           className="whitespace-pre-wrap break-words rounded border border-dashed border-slate-300 bg-slate-50 px-1.5 py-1 text-slate-500 line-through">
+                          {message.body}
+                        </p>
+                      ) : null}
+                      {!message.deleted && message.body ? (
                         <p className="whitespace-pre-wrap break-words text-slate-800">
                           {message.body}
                         </p>
