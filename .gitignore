@@ -353,3 +353,9 @@ frontend/build-deploy/
 
 # Claude Code runtime lock. Machine-local, not configuration.
 .claude/scheduled_tasks.lock
+
+# Project-local GitHub CLI configuration (GH_CONFIG_DIR).
+#
+# Holds hosts.yml with an OAuth token when gh is told to store it in the file
+# rather than the OS keyring. Never committed - it is a credential.
+.gh-config/
