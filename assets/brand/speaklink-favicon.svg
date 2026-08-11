@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img"
+     aria-label="SpeakLink">
+  <title>SpeakLink</title>
+  <!--
+    Favicon and app-tile version: the same mark on a solid tile.
+
+    A browser tab, a Start Menu tile and a taskbar button all sit on a surface
+    this does not control, so the tile supplies its own contrast rather than
+    hoping the host is dark. The outer wave pair is dropped - at 16px it filled
+    the corners with grey mush and cost the mast its shape.
+  -->
+  <rect width="64" height="64" rx="12" fill="#0f172a" />
+  <g fill="none" stroke="#ffffff" stroke-width="5"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M25 53 L32 21 L39 53" />
+    <path d="M27.5 41 L36.5 41" />
+    <path d="M21 29 A 14 14 0 0 1 21 11" />
+    <path d="M43 11 A 14 14 0 0 1 43 29" />
+  </g>
+  <circle cx="32" cy="20" r="5" fill="#ffffff" />
+</svg>

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 64" role="img"
+     aria-label="SpeakLink">
+  <title>SpeakLink</title>
+  <!--
+    Horizontal lockup: the mark, then the word. Dashboard header, README, and
+    anywhere the product introduces itself in a strip.
+
+    The mark geometry is copied verbatim from speaklink-mark.svg rather than
+    redrawn, so the two cannot drift apart.
+
+    "Speak" regular, "Link" bold: the join is the product, so the second half
+    carries the weight. One word, no space - it is one name.
+  -->
+  <g fill="none" stroke="#ffffff" stroke-width="5"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M25 53 L32 21 L39 53" />
+    <path d="M27.5 41 L36.5 41" />
+    <path d="M21 29 A 14 14 0 0 1 21 11" />
+    <path d="M43 11 A 14 14 0 0 1 43 29" />
+  </g>
+  <circle cx="32" cy="20" r="5" fill="#ffffff" />
+  <text x="74" y="43" fill="#ffffff"
+        font-family="Segoe UI, Inter, system-ui, sans-serif"
+        font-size="29" letter-spacing="-0.5">
+    <tspan font-weight="400">Speak</tspan><tspan font-weight="700">Link</tspan>
+  </text>
+</svg>

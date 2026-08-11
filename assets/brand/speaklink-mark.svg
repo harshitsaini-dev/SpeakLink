@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img"
+     aria-label="SpeakLink">
+  <title>SpeakLink</title>
+  <!--
+    The icon-only mark: a transmission mast with live audio leaving it.
+
+    WHY IT LOOKS LIKE THIS
+
+    Drawn once at 16px and judged there, not at poster size. The first version
+    had a narrow A-frame and two extra faint wave arcs; rendered at 16 the
+    arcs turned to grey mush in the corners and the frame read as a letter A.
+    Both are gone. What survives is a mast wide enough to have a base, one
+    crossbar, one wave each side, and a solid transmitter dot - which is the
+    part that tells the eye the halves belong to one object.
+
+    Stroke is 5 units on a 64 grid. Below that the mast vanishes in a browser
+    tab; above it the waves close up and the mark becomes a blob.
+
+    currentColor, so this file follows the text colour wherever it is INLINED.
+    Note that an <img> tag cannot inherit it - a separate document has no
+    parent colour to take. Use the -light and -dark files there.
+  -->
+  <g fill="none" stroke="currentColor" stroke-width="5"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M25 53 L32 21 L39 53" />
+    <path d="M27.5 41 L36.5 41" />
+    <path d="M21 29 A 14 14 0 0 1 21 11" />
+    <path d="M43 11 A 14 14 0 0 1 43 29" />
+  </g>
+  <circle cx="32" cy="20" r="5" fill="currentColor" />
+</svg>
