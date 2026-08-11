@@ -22,7 +22,7 @@ const FRAMES_INDEX = path.join(__dirname, 'fixtures', 'relay-frames.json');
 
 const available = fs.existsSync(FRAMES_BIN) && fs.existsSync(FRAMES_INDEX);
 
-const ROOM_CODE = 'EC-7K4P92';
+const ROOM_CODE = 'SL-7K4P92';
 const PASSWORD = 'Q7KM-92PX';
 
 test.describe('the public SpeakLink listener', () => {

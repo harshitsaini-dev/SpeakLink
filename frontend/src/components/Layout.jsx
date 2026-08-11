@@ -1,6 +1,7 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { Radio, LayoutDashboard, Store as StoreIcon, History, Radar, HardDrive, ScrollText, Users, KeyRound, LogOut, Menu, X, Signal } from "lucide-react";
+import { LayoutDashboard, Store as StoreIcon, History, Radar, HardDrive, ScrollText, Users, KeyRound, LogOut, Menu, X, Signal } from "lucide-react";
+import SpeakLinkMark from "@/components/SpeakLinkMark";
 import { useAuth } from "@/contexts/AuthContext";
 import { MENU_PERMISSION_BY_PATH } from "@/lib/menuPermissions";
 import RecordingPlayer, { PLAYER_BAR_HEIGHT } from "@/components/RecordingPlayer";
@@ -59,7 +60,7 @@ export default function Layout() {
                     bg-slate-900 text-slate-100 flex flex-col transition-transform`}>
         {/* Brand and account never scroll away: only the middle list does. */}
         <div className="h-16 shrink-0 px-5 flex items-center gap-2 border-b border-slate-800">
-          <Radio className="text-red-500" size={22} />
+          <SpeakLinkMark className="text-blue-500" size={30} />
           <div>
             <div className="font-bold tracking-tight text-white text-lg leading-none">SpeakLink</div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-slate-400 mt-0.5">Live Broadcast</div>

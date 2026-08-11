@@ -27,7 +27,7 @@ function panel(overrides = {}) {
   return {
     session_id: 7, campaign_name: "Diwali Offer", is_mine: false,
     target_store_count: 0, status: "OPEN", auto_approve: false, delivery: "ok",
-    public_code: "EC-K7Q92A", password: "Q7KM-92PX", password_available: true,
+    public_code: "SL-K7Q92A", password: "Q7KM-92PX", password_available: true,
     counts: { waiting: 1, admitted: 2, connected: 2, listening: 1,
               buffering: 1, paused: 0 },
     waiting: [{ id: 11, display_name: "Aman", admission_status: "REQUESTED",
@@ -65,14 +65,14 @@ async function show(data = panel()) {
 
 test("the room code and link appear when the server sent them", async () => {
   await show();
-  expect(screen.getByTestId("supervised-room-code").textContent).toContain("EC-K7Q92A");
+  expect(screen.getByTestId("supervised-room-code").textContent).toContain("SL-K7Q92A");
 
   await act(async () => { fireEvent.click(screen.getByTestId("supervised-copy-link")); });
   expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
-    expect.stringContaining("/listen/EC-K7Q92A"));
+    expect.stringContaining("/listen/SL-K7Q92A"));
   // Built from the current origin, so a LAN pilot gets a LAN link.
   expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
-    `${window.location.origin}/listen/EC-K7Q92A`);
+    `${window.location.origin}/listen/SL-K7Q92A`);
   expect(navigator.clipboard.writeText).not.toHaveBeenCalledWith(
     expect.stringContaining("localhost:8000"));
 });

@@ -30,7 +30,7 @@ const LIVE = {
 };
 
 const ROOM = {
-  public_code: 'EC-K7Q92A', status: 'OPEN', auto_approve: false, delivery: 'ok',
+  public_code: 'SL-K7Q92A', status: 'OPEN', auto_approve: false, delivery: 'ok',
   password: 'Q7KM-92PX', password_configured: true, password_rotated_at: null,
   counts: { waiting: 2, admitted: 3, connected: 3, listening: 2, buffering: 1, paused: 0 },
   waiting: Array.from({ length: 12 }, (_, i) => ({

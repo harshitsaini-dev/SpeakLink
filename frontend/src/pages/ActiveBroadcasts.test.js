@@ -341,14 +341,14 @@ test("a 403 on the list is reported, not rendered as an empty page", async () =>
 
 test("the web room summary is shown only with view_ownership", async () => {
   const withRoom = { ...BOB, web_room: {
-    public_code: "EC-K7Q92A", status: "OPEN", auto_approve: false,
+    public_code: "SL-K7Q92A", status: "OPEN", auto_approve: false,
     password: "Q7KM-92PX", password_available: true,
     waiting_count: 1, connected_count: 2, listening_count: 1 } };
 
   // The backend does not send web_room at all without view_ownership, so the
   // page cannot show it - which is the point. Here it IS sent.
   await renderPage({ items: [withRoom], meta: { may_view_ownership: true } });
-  expect(screen.getByTestId("active-web-room-2").textContent).toContain("EC-K7Q92A");
+  expect(screen.getByTestId("active-web-room-2").textContent).toContain("SL-K7Q92A");
 });
 
 test("no web room appears when the backend redacted it", async () => {

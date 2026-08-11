@@ -108,7 +108,7 @@ def test_creating_a_broadcast_creates_exactly_one_room_with_a_password(client, o
     sid = make_link_only_session(client, owner)
     room = room_of(client, owner, sid)
 
-    assert room["public_code"].startswith("EC-")
+    assert room["public_code"].startswith("SL-")
     assert str(sid) not in room["public_code"], "the public code is not the session id"
     # The generated password is offered ONCE, on the page that created it.
     assert room["password"], "the broadcaster is given the password to share"
@@ -182,7 +182,7 @@ def test_an_unknown_room_and_an_ended_room_answer_alike(client, owner):
     sid = make_link_only_session(client, owner)
     room = room_of(client, owner, sid)
 
-    unknown = client.get("/api/listen/rooms/EC-ZZZZZZ")
+    unknown = client.get("/api/listen/rooms/SL-ZZZZZZ")
     assert unknown.status_code == 404
     # No internal identifiers leak in the refusal.
     assert str(sid) not in unknown.text

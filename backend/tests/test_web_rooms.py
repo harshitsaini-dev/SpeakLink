@@ -79,7 +79,7 @@ def test_the_public_code_is_not_the_session_id(engine):
 
     assert str(first.session_id) not in first.public_code
     assert first.public_code != second.public_code
-    assert first.public_code.startswith("EC-")
+    assert first.public_code.startswith("SL-")
 
 
 def test_public_codes_are_random_and_readable():
@@ -93,13 +93,13 @@ def test_public_codes_are_random_and_readable():
 
 def test_a_public_code_collision_is_retried_not_fatal(engine, monkeypatch):
     """The database enforces uniqueness; the application must survive it."""
-    drawn = iter(["EC-AAAAAA", "EC-AAAAAA", "EC-BBBBBB"])
+    drawn = iter(["SL-AAAAAA", "SL-AAAAAA", "SL-BBBBBB"])
     monkeypatch.setattr(web_rooms, "generate_public_code", lambda: next(drawn))
 
     first, _ = web_rooms.create_room(engine, session_id=1)
     second, _ = web_rooms.create_room(engine, session_id=2)
-    assert first.public_code == "EC-AAAAAA"
-    assert second.public_code == "EC-BBBBBB", "the collision was redrawn"
+    assert first.public_code == "SL-AAAAAA"
+    assert second.public_code == "SL-BBBBBB", "the collision was redrawn"
 
 
 def test_a_room_is_found_by_its_code_however_it_was_typed(engine):
@@ -111,7 +111,7 @@ def test_a_room_is_found_by_its_code_however_it_was_typed(engine):
 
 
 def test_an_unknown_code_is_simply_not_found(engine):
-    assert web_rooms.find_room_by_public_code(engine, public_code="EC-ZZZZZZ") is None
+    assert web_rooms.find_room_by_public_code(engine, public_code="SL-ZZZZZZ") is None
     assert web_rooms.find_room_by_public_code(engine, public_code="") is None
     assert web_rooms.find_room_by_public_code(engine, public_code=None) is None
 

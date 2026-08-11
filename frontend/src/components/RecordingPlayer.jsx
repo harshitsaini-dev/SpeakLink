@@ -459,7 +459,7 @@ export default function RecordingPlayer({ session, onClose,
                     disabled={!attached}
                     aria-label={playing ? "Pause" : "Play"}
                     data-testid="recording-toggle"
-                    className="rounded-full bg-red-600 hover:bg-red-500 p-2 disabled:opacity-50">
+                    className="rounded-full bg-blue-600 hover:bg-blue-500 p-2 disabled:opacity-50">
               {playing ? <Pause size={16} /> : <Play size={16} />}
             </button>
             <button type="button" onClick={() => nudge(10)}
@@ -505,13 +505,13 @@ export default function RecordingPlayer({ session, onClose,
               <div className="pointer-events-none absolute inset-x-0 h-1 rounded bg-slate-700"
                    data-testid="recording-seek-background" />
               <div
-                className="pointer-events-none absolute left-0 h-1 rounded bg-red-500"
+                className="pointer-events-none absolute left-0 h-1 rounded bg-blue-500"
                 data-testid="recording-seek-fill"
                 style={{ width: `${visualProgressPercent}%` }}
               />
               {seekable && (
                 <div
-                  className="pointer-events-none absolute h-3 w-3 rounded-full bg-red-500 shadow"
+                  className="pointer-events-none absolute h-3 w-3 rounded-full bg-blue-500 shadow"
                   data-testid="recording-seek-thumb"
                   // translateX(-50%) is what makes `left` mean the thumb's
                   // CENTRE. At 100% the centre lands exactly on the track's
@@ -573,7 +573,7 @@ export default function RecordingPlayer({ session, onClose,
             title="Affects this browser only"
             data-testid="recording-volume"
             onChange={(event) => changeVolume(Number(event.target.value))}
-            className="w-20 accent-red-500"
+            className="w-20 accent-blue-500"
           />
           <button
             type="button"

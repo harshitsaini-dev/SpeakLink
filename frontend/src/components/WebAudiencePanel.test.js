@@ -18,7 +18,7 @@ jest.mock("@/lib/api", () => ({
 const { api } = require("@/lib/api");
 
 const ROOM = {
-  public_code: "EC-7K4P92",
+  public_code: "SL-7K4P92",
   status: "OPEN",
   auto_approve: false,
   delivery: "ok",
@@ -64,18 +64,18 @@ async function renderPanel(room = ROOM) {
 
 test("the Broadcast ID and a copyable link are shown", async () => {
   await renderPanel();
-  expect(screen.getByTestId("web-room-code").textContent).toContain("EC-7K4P92");
+  expect(screen.getByTestId("web-room-code").textContent).toContain("SL-7K4P92");
 
   await act(async () => { fireEvent.click(screen.getByTestId("web-copy-link")); });
   expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
-    expect.stringContaining("/listen/EC-7K4P92"));
+    expect.stringContaining("/listen/SL-7K4P92"));
 });
 
 test("the link is built from the current origin, never a hardcoded host", () => {
   // On a LAN pilot the browser is on 192.168.x.x, and a localhost link would
   // work only on the HQ machine itself.
-  expect(listenerLink("EC-7K4P92")).toBe(`${window.location.origin}/listen/EC-7K4P92`);
-  expect(listenerLink("EC-7K4P92")).not.toContain("localhost:8000");
+  expect(listenerLink("SL-7K4P92")).toBe(`${window.location.origin}/listen/SL-7K4P92`);
+  expect(listenerLink("SL-7K4P92")).not.toContain("localhost:8000");
 });
 
 // ===========================================================================

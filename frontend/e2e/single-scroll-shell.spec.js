@@ -40,7 +40,7 @@ const LIVE_LINK_ONLY = {
 
 /** A deliberately large audience, so the middle card has plenty to hold. */
 const BIG_ROOM = {
-  public_code: 'EC-AAA111', status: 'OPEN', auto_approve: false, delivery: 'ok',
+  public_code: 'SL-AAA111', status: 'OPEN', auto_approve: false, delivery: 'ok',
   password: 'P-1', password_configured: true, password_rotated_at: null,
   counts: { waiting: 12, admitted: 40, connected: 40, listening: 30,
             buffering: 10, paused: 0 },

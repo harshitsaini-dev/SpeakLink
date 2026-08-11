@@ -91,7 +91,7 @@ PARTICIPANT_TABLE = "broadcast_web_participants"
 #: No 0/O, no 1/I/L. A code is read off one screen and typed into another, and
 #: the pairs above are where that goes wrong.
 PUBLIC_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
-PUBLIC_CODE_PREFIX = "EC-"
+PUBLIC_CODE_PREFIX = "SL-"
 PUBLIC_CODE_LENGTH = 6
 #: 31^6 is about 887 million. A room is short-lived and the code is not the only
 #: control - the password or an approval still stands behind it - so this is

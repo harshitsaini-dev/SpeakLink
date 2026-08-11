@@ -82,7 +82,7 @@ async function renderListen() {
 }
 
 async function fillAndJoin({ name = "Harshit", password = "Q7KM-92PX" } = {}) {
-  fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "EC-7K4P92" } });
+  fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "SL-7K4P92" } });
   fireEvent.change(screen.getByTestId("listen-name"), { target: { value: name } });
   fireEvent.change(screen.getByTestId("listen-password"), { target: { value: password } });
   await act(async () => { fireEvent.click(screen.getByTestId("listen-join")); });
@@ -93,9 +93,9 @@ async function fillAndJoin({ name = "Harshit", password = "Q7KM-92PX" } = {}) {
 // ===========================================================================
 
 test("a Broadcast ID in the link is filled in for the listener", async () => {
-  mockParams = { publicCode: "EC-7K4P92" };
+  mockParams = { publicCode: "SL-7K4P92" };
   await renderListen();
-  expect(screen.getByTestId("listen-code").value).toBe("EC-7K4P92");
+  expect(screen.getByTestId("listen-code").value).toBe("SL-7K4P92");
 });
 
 test("the page shows no dashboard, no Stores and no volume control", async () => {
@@ -110,7 +110,7 @@ test("the page shows no dashboard, no Stores and no volume control", async () =>
 
 test("a name is required before joining", async () => {
   await renderListen();
-  fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "EC-7K4P92" } });
+  fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "SL-7K4P92" } });
   await act(async () => { fireEvent.click(screen.getByTestId("listen-join")); });
 
   expect(screen.getByTestId("listen-error").textContent).toMatch(/name/i);
@@ -124,13 +124,13 @@ test("a name is required before joining", async () => {
 test("a correct password goes straight to the live screen", async () => {
   api.post.mockResolvedValue({ data: {
     admitted: true, admission_status: "PASSWORD_ADMITTED",
-    display_name: "Harshit", broadcast_live: true, public_code: "EC-7K4P92",
+    display_name: "Harshit", broadcast_live: true, public_code: "SL-7K4P92",
   } });
   await renderListen();
   await fillAndJoin();
 
   expect(screen.getByTestId("listen-live")).toBeTruthy();
-  expect(screen.getByTestId("listen-room-code").textContent).toContain("EC-7K4P92");
+  expect(screen.getByTestId("listen-room-code").textContent).toContain("SL-7K4P92");
   expect(screen.getByTestId("listen-display-name").textContent).toContain("Harshit");
   // No credential of any kind in the socket URL.
   expect(FakeSocket.last.url).toBe("ws://hq.test/api/listen/ws");
@@ -160,7 +160,7 @@ test("Request Access waits for the broadcaster", async () => {
     display_name: "Aman", broadcast_live: true,
   } });
   await renderListen();
-  fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "EC-7K4P92" } });
+  fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "SL-7K4P92" } });
   fireEvent.change(screen.getByTestId("listen-name"), { target: { value: "Aman" } });
   await act(async () => { fireEvent.click(screen.getByTestId("listen-request")); });
 
@@ -267,7 +267,7 @@ test("the Broadcast ending stops the page rather than retrying forever", async (
     } });
     render(<Listen />);
     await act(async () => {});
-    fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "EC-7K4P92" } });
+    fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "SL-7K4P92" } });
     fireEvent.change(screen.getByTestId("listen-name"), { target: { value: "Harshit" } });
     await act(async () => { fireEvent.click(screen.getByTestId("listen-join")); });
 
@@ -294,7 +294,7 @@ test("a refused session closes the page instead of looping", async () => {
     } });
     render(<Listen />);
     await act(async () => {});
-    fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "EC-7K4P92" } });
+    fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "SL-7K4P92" } });
     fireEvent.change(screen.getByTestId("listen-name"), { target: { value: "Harshit" } });
     await act(async () => { fireEvent.click(screen.getByTestId("listen-join")); });
 
@@ -322,7 +322,7 @@ test("an ordinary disconnect reconnects with backoff", async () => {
     } });
     render(<Listen />);
     await act(async () => {});
-    fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "EC-7K4P92" } });
+    fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "SL-7K4P92" } });
     fireEvent.change(screen.getByTestId("listen-name"), { target: { value: "Harshit" } });
     await act(async () => { fireEvent.click(screen.getByTestId("listen-join")); });
 
@@ -352,7 +352,7 @@ test("a refused socket reports the refusal instead of retrying for ever", async 
     } });
     render(<Listen />);
     await act(async () => {});
-    fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "EC-7K4P92" } });
+    fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "SL-7K4P92" } });
     fireEvent.change(screen.getByTestId("listen-name"), { target: { value: "Harshit" } });
     await act(async () => { fireEvent.click(screen.getByTestId("listen-join")); });
 
@@ -399,7 +399,7 @@ test("a listener whose session is rejected is not told the Broadcast ended", asy
   api.get.mockRejectedValue({ response: { status: 401 } });
 
   await renderListen();
-  fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "EC-7K4P92" } });
+  fireEvent.change(screen.getByTestId("listen-code"), { target: { value: "SL-7K4P92" } });
   fireEvent.change(screen.getByTestId("listen-name"), { target: { value: "Aman" } });
   await act(async () => { fireEvent.click(screen.getByTestId("listen-request")); });
   expect(screen.getByTestId("listen-waiting")).toBeTruthy();

@@ -167,7 +167,7 @@ const LIVE_SESSION = {
 };
 
 const LIVE_ROOM = {
-  public_code: 'EC-AAA111', status: 'OPEN', auto_approve: false, delivery: 'ok',
+  public_code: 'SL-AAA111', status: 'OPEN', auto_approve: false, delivery: 'ok',
   password: 'P-1', password_configured: true, password_rotated_at: null,
   counts: { waiting: 3, admitted: 8, connected: 8, listening: 6, buffering: 2, paused: 0 },
   waiting: Array.from({ length: 3 }, (_, i) => ({

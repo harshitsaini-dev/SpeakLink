@@ -1,6 +1,7 @@
 import React from "react";
 import { useNavigate } from "react-router-dom";
-import { Radio, LogIn } from "lucide-react";
+import { LogIn } from "lucide-react";
+import SpeakLinkMark from "@/components/SpeakLinkMark";
 import { useAuth } from "@/contexts/AuthContext";
 import { loginErrorMessage } from "@/lib/loginError";
 
@@ -43,10 +44,16 @@ export default function Login() {
       </div>
       <div className="relative z-10 w-full max-w-md">
         <div className="mb-8 text-center">
-          <div className="inline-flex items-center gap-3 text-white">
-            <div className="p-3 bg-red-600 rounded-md shadow-lg"><Radio size={26} /></div>
+          <div className="inline-flex items-center gap-4 text-white">
+            {/* Blue rather than red: red is the colour this console uses for
+                live and for danger, and the product's own mark should not
+                compete with either. It matches the Sign In button, so the two
+                deliberate accents on this page are the same colour. */}
+            <div className="p-4 bg-blue-600 rounded-xl shadow-lg text-white">
+              <SpeakLinkMark size={40} />
+            </div>
             <div className="text-left">
-              <div className="text-3xl font-bold tracking-tight">SpeakLink</div>
+              <div className="text-4xl font-bold tracking-tight">SpeakLink</div>
               <div className="text-xs uppercase tracking-[0.2em] text-slate-300 mt-1">HQ → Store Live Broadcast</div>
             </div>
           </div>

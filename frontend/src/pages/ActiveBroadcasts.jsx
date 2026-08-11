@@ -18,7 +18,8 @@
  * marks: you are always allowed to know which broadcast is your own.
  */
 import React from "react";
-import { Radio, Search, RefreshCcw, Square, X } from "lucide-react";
+import { Search, RefreshCcw, Square, X } from "lucide-react";
+import SpeakLinkMark from "@/components/SpeakLinkMark";
 import { api } from "@/lib/api";
 import SupervisedWebAudience from "@/components/SupervisedWebAudience";
 import { useAdminList } from "@/lib/adminList";
@@ -125,7 +126,7 @@ export default function ActiveBroadcasts() {
     <div className="space-y-4" data-testid="active-broadcasts-page">
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div className="flex items-center gap-2">
-          <Radio className="text-red-600" size={20} />
+          <SpeakLinkMark className="text-blue-600" size={22} />
           <h1 className="text-xl font-bold text-slate-900">Active Broadcasts</h1>
           <span data-testid="active-total"
                 className="text-xs font-medium bg-slate-200 text-slate-700 rounded-full px-2 py-0.5">

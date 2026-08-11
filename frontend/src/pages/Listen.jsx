@@ -1,6 +1,7 @@
 import React from "react";
 import { useParams } from "react-router-dom";
-import { Radio, Loader2, Volume2, AlertCircle } from "lucide-react";
+import { Loader2, Volume2, AlertCircle } from "lucide-react";
+import SpeakLinkMark from "@/components/SpeakLinkMark";
 import { api, wsUrl } from "@/lib/api";
 import {
   ListenerPlaybackState,
@@ -404,7 +405,7 @@ export default function Listen() {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4">
       <div className="w-full max-w-sm">
         <div className="flex items-center justify-center gap-2 mb-6">
-          <Radio size={20} className="text-red-500" />
+          <SpeakLinkMark size={34} className="text-blue-500" />
           <h1 className="text-lg font-bold tracking-[0.2em] uppercase">SpeakLink</h1>
         </div>
 
@@ -429,9 +430,9 @@ export default function Listen() {
                 data-testid="listen-code"
                 value={code}
                 onChange={(event) => setCode(event.target.value)}
-                placeholder="EC-7K4P92"
+                placeholder="SL-7K4P92"
                 autoComplete="off"
-                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm uppercase tracking-widest focus:outline-none focus:ring-2 focus:ring-red-500"
+                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm uppercase tracking-widest focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </Field>
             <Field label="Your Name">
@@ -441,7 +442,7 @@ export default function Listen() {
                 onChange={(event) => setName(event.target.value)}
                 placeholder="Harshit"
                 maxLength={40}
-                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500"
+                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </Field>
             <Field label="Password">
@@ -451,7 +452,7 @@ export default function Listen() {
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 autoComplete="off"
-                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500"
+                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </Field>
 
@@ -467,7 +468,7 @@ export default function Listen() {
               type="submit"
               data-testid="listen-join"
               disabled={busy}
-              className="w-full rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+              className="w-full rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
             >
               {busy ? "Joining…" : "Join Broadcast"}
             </button>
@@ -598,7 +599,7 @@ export default function Listen() {
               <button
                 data-testid="listen-tap-to-start"
                 onClick={tapToStart}
-                className="mt-4 w-full rounded-md bg-red-600 px-4 py-3 text-sm font-semibold text-white hover:bg-red-700"
+                className="mt-4 w-full rounded-md bg-blue-600 px-4 py-3 text-sm font-semibold text-white hover:bg-blue-700"
               >
                 Tap to Start Listening
               </button>
