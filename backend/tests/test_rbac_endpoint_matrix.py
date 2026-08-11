@@ -193,13 +193,13 @@ EXPECTED: dict[str, object] = {
     "active_management_list": "broadcast.active_view",
     "active_management_stores": "broadcast.active_view",
     "active_management_stop": "broadcast.active_view",
-    # Adding a Store to a live broadcast enters through the same page
-    # permission as the rest of active management, and then applies three more
-    # gates inside the handler that a table of one code each cannot express:
-    # broadcast.store_delivery, Store Scope, and - for somebody else's
-    # broadcast - stop_any. Those have their own tests, the same way the
-    # cross-owner branch of active_management_stop does.
-    "active_management_add_target": "broadcast.active_view",
+    # Adding a Store to a live broadcast is a Console control, not a
+    # supervision one, so it sits beside the output-volume route rather than
+    # under active management - and carries the physical-delivery permission
+    # rather than the supervision page's. Two more gates live inside the
+    # handler and cannot be expressed as one code: session ownership, and
+    # Store Scope. Both have their own tests.
+    "add_store_to_live_broadcast": "broadcast.store_delivery",
     "broadcast_history": "menu.history.view",
     # A recording is the audio of a broadcast this account is already entitled
     # to read about, so it shares History's permission rather than inventing a

@@ -24,6 +24,11 @@ function shortId(publicId) {
   return typeof publicId === "string" && publicId.length > 8 ? `${publicId.slice(0, 8)}…` : publicId;
 }
 
+/** The same prefix, without the ellipsis, so it can actually be typed. */
+function confirmId(publicId) {
+  return typeof publicId === "string" ? publicId.slice(0, 8) : String(publicId ?? "");
+}
+
 function RoleBadge({ role }) {
   const isPrimary = role === "PRIMARY";
   return (
@@ -670,7 +675,11 @@ function DeleteDeviceDialog({ device, onCancel, onConfirm }) {
     return () => { cancelled = true; };
   }, [device.public_id]);
 
-  const matches = typed === device.public_id;
+  // The short id, not the full 36-character one. A UUID that long is not extra
+  // safety: it is long enough that people paste it, and a paste is not a
+  // decision. The Device is named above, and the id still has to be typed.
+  const confirmWord = confirmId(device.public_id);
+  const matches = typed === confirmWord;
 
   return (
     <div className="rounded border border-red-200 bg-red-50 p-4 space-y-3"
@@ -703,8 +712,8 @@ function DeleteDeviceDialog({ device, onCancel, onConfirm }) {
           {summary.deletable && (
             <>
               <p className="text-sm text-red-800">
-                This cannot be undone. Type the Device id exactly to confirm:
-                <br /><code className="text-xs">{device.public_id}</code>
+                This cannot be undone. Type the short Device id exactly to confirm:
+                <br /><code className="text-xs">{confirmWord}</code>
               </p>
               <input
                 className="w-full max-w-md rounded border px-2 py-1" value={typed}

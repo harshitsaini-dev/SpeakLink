@@ -219,6 +219,7 @@ from receiver_enrollment_codes import (
 )
 from audio_protocol import (
     build_prepare_message,
+    build_stop_message,
     build_set_audio_control_message,
 )
 from auth import verify_password, hash_password, create_access_token, get_current_user
@@ -3640,10 +3641,10 @@ def active_management_stores(sid: int, db: Session = Depends(get_db),
     }
 
 
-@api.post("/broadcast/active-management/{sid}/targets")
-async def active_management_add_target(
+@api.post("/broadcast/sessions/{sid}/targets")
+async def add_store_to_live_broadcast(
     sid: int, payload: LiveTargetAddIn, db: Session = Depends(get_db),
-    user: HQUser = Depends(require(abm.PAGE_CODE)),
+    user: HQUser = Depends(require("broadcast.store_delivery")),
 ):
     """Add ONE Store to a Broadcast that is already on air.
 
@@ -3666,20 +3667,18 @@ async def active_management_add_target(
     is audible; play_status carries what the Receiver reports, and neither is
     acoustic verification.
     """
-    visibility = abm.resolve_visibility(engine, user)
-    rows = _active_management_rows(db, user, visibility)
-    row = next((r for r in rows if r.session_id == sid), None)
-    if row is None:
-        # 404 for "not live" and "not visible to you" alike, so this cannot be
-        # used to probe which session ids exist.
-        raise HTTPException(status_code=404, detail="No such active broadcast")
-
-    # Authority over THIS Broadcast, on the same rule Stop already uses: your
-    # own needs no supervision right, somebody else's does.
-    if not row.is_mine and not visibility.may_stop_any:
-        raise HTTPException(
-            status_code=403,
-            detail="You do not have permission to change another operator's broadcast.")
+    # The operator running this broadcast, and nobody else - the same rule the
+    # output-volume control already applies, for the same reason. A supervisor
+    # entitled to END somebody's broadcast is not thereby entitled to sit
+    # inside it adding and removing shops: that is an invisible, continuous
+    # intervention rather than one accountable act, and the operator on the
+    # other end would have no way to tell it was happening.
+    #
+    # It is also why this lives under /broadcast/sessions and not under
+    # active-management. Reaching it through the supervision page meant
+    # requiring broadcast.active_view, which an ordinary BROADCASTER does not
+    # have - so a Broadcaster could not add a Store to their OWN broadcast.
+    _require_audio_control_owner(sid, user)
 
     # Physical delivery, at the single choke point every physical target passes
     # through. Deliberately separate from Store Scope: one says whether you may
@@ -3775,7 +3774,7 @@ async def active_management_add_target(
         store.id, build_prepare_message(session_id=sid, store_id=store.id))
 
     ready = await manager.wait_for_store_ready(
-        store.id, session_id=sid, timeout=ADD_STORE_READY_TIMEOUT_SECONDS)
+        store.id, timeout=ADD_STORE_READY_TIMEOUT_SECONDS)
     if not ready:
         await fail(f"{store.store_code} did not report ready in time. "
                    "It was not added and nothing else changed.")
