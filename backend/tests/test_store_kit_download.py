@@ -254,16 +254,62 @@ def test_an_upload_that_is_not_a_kit_is_refused(client, owner, name, payload, be
     assert client.get("/api/store-kits", headers=owner).json()["kits"] == []
 
 
-def test_uploading_the_same_name_twice_does_not_silently_replace(client, owner):
-    """Almost always the same build twice - and quietly replacing the file
-    Stores are downloading from is not a thing to do by accident."""
-    assert upload(client, owner, "SpeakLinkStoreInstaller-1.6.0.exe",
-                  b"MZ first").status_code == 200
-    second = upload(client, owner, "SpeakLinkStoreInstaller-1.6.0.exe", b"MZ second")
-    assert second.status_code == 400
-    assert "already here" in second.json()["detail"]
+def test_an_upload_replaces_whatever_was_there_whatever_it_is_called(client, owner):
+    """HQ holds exactly one kit.
+
+    A list of builds means somebody eventually installs the wrong one, and
+    "which build is that Store on?" stops having a single answer.
+    """
+    upload(client, owner, "SpeakLinkStoreInstaller-1.5.0.exe", b"MZ older")
+
+    newer = upload(client, owner, "SpeakLinkStoreInstaller-1.6.0.exe", b"MZ newer")
+    assert newer.status_code == 200, newer.text
+    assert newer.json()["superseded"] == ["SpeakLinkStoreInstaller-1.5.0.exe"]
+
+    listed = client.get("/api/store-kits", headers=owner).json()
+    assert [kit["name"] for kit in listed["kits"]] == ["SpeakLinkStoreInstaller-1.6.0.exe"]
     assert client.get("/api/store-kits/latest/download",
-                      headers=owner).content == b"MZ first"
+                      headers=owner).content == b"MZ newer"
+
+
+def test_the_same_name_uploaded_again_simply_overwrites(client, owner):
+    upload(client, owner, "SpeakLinkStoreInstaller-1.6.0.exe", b"MZ first")
+
+    again = upload(client, owner, "SpeakLinkStoreInstaller-1.6.0.exe", b"MZ second")
+    assert again.status_code == 200, again.text
+    assert again.json()["superseded"] == []
+    assert again.json()["sha256"] == hashlib.sha256(b"MZ second").hexdigest()
+    assert client.get("/api/store-kits/latest/download",
+                      headers=owner).content == b"MZ second"
+    assert len(client.get("/api/store-kits", headers=owner).json()["kits"]) == 1
+
+
+def test_a_failed_write_leaves_the_existing_build_alone(client, owner, monkeypatch):
+    """The old kit is removed only AFTER the new one is safely in place -
+    otherwise a failed upload leaves an HQ with nothing to hand out."""
+    upload(client, owner, "SpeakLinkStoreInstaller-1.5.0.exe", b"MZ older")
+
+    import store_kits
+    def explode(*args, **kwargs):
+        raise OSError("the disk went away")
+    monkeypatch.setattr(store_kits.os, "replace", explode)
+
+    crashed = upload(client, owner, "SpeakLinkStoreInstaller-1.6.0.exe", b"MZ newer")
+    assert crashed.status_code >= 400
+
+    listed = client.get("/api/store-kits", headers=owner).json()
+    assert [kit["name"] for kit in listed["kits"]] == ["SpeakLinkStoreInstaller-1.5.0.exe"]
+    assert client.get("/api/store-kits/latest/download",
+                      headers=owner).content == b"MZ older"
+
+
+def test_a_zip_and_an_exe_do_not_coexist_either(client, owner):
+    """One kit means one FILE, not one of each kind."""
+    upload(client, owner, "SpeakLinkStoreKit-1.6.0.zip", b"PK payload")
+    upload(client, owner, "SpeakLinkStoreInstaller-1.6.0.exe", b"MZ payload")
+
+    listed = client.get("/api/store-kits", headers=owner).json()
+    assert [kit["name"] for kit in listed["kits"]] == ["SpeakLinkStoreInstaller-1.6.0.exe"]
 
 
 def test_a_kit_can_be_removed_again(client, owner):
@@ -296,3 +342,15 @@ def test_an_upload_is_recorded_with_who_did_it(client, owner):
     text = " ".join(str(entry) for entry in entries)
     assert "STORE_KIT_UPLOADED" in text
     assert "founder" in text
+
+
+def test_the_log_names_what_an_upload_replaced(client, owner):
+    """Overwriting the build every Store downloads is worth a record naming
+    what went, not just what arrived."""
+    upload(client, owner, "SpeakLinkStoreInstaller-1.5.0.exe", b"MZ older")
+    upload(client, owner, "SpeakLinkStoreInstaller-1.6.0.exe", b"MZ newer")
+
+    logs = client.get("/api/logs", headers=owner, params={"page_size": 50}).json()
+    entries = logs.get("items", logs) if isinstance(logs, dict) else logs
+    text = " ".join(str(entry) for entry in entries)
+    assert "superseded=SpeakLinkStoreInstaller-1.5.0.exe" in text

@@ -4863,6 +4863,11 @@ async def upload_store_kit(
     taken from the uploader, and the stored filename is built by HQ rather than
     accepted from the request.
 
+    HQ HOLDS EXACTLY ONE KIT. Whatever this upload is called, it replaces
+    whatever was here - a list of builds means somebody eventually installs the
+    wrong one, and "which build is that Store on?" stops having one answer. The
+    names that were removed come back in the response.
+
     HQ does not validate that the file IS the SpeakLink installer, and does not
     pretend to - it checks the extension, the size and the magic bytes, which
     catches the ordinary mistakes. Trusting a build is a human act; the account
@@ -4870,15 +4875,18 @@ async def upload_store_kit(
     """
     raw = await file.read()
     try:
-        kit = store_kits.store_uploaded_kit(raw, filename=file.filename or "")
+        kit, superseded = store_kits.store_uploaded_kit(
+            raw, filename=file.filename or "")
     except store_kits.KitRefused as refusal:
         raise HTTPException(status_code=400, detail=str(refusal))
     with SessionLocal() as db:
         _write_log(db, "warn",
-                   f"STORE_KIT_UPLOADED name={kit.name} "
-                   f"bytes={kit.size_bytes} sha256={kit.sha256} "
-                   f"by={user.username}")
-    return kit.public_dict()
+                   f"STORE_KIT_UPLOADED name={kit.name} bytes={kit.size_bytes} "
+                   f"sha256={kit.sha256} by={user.username}"
+                   + (f" superseded={','.join(superseded)}" if superseded else ""))
+    # The names that went are returned, not swallowed: an operator uploading a
+    # new build is entitled to be told which one it replaced.
+    return {**kit.public_dict(), "superseded": superseded}
 
 
 @api.delete("/store-kits/{name}")

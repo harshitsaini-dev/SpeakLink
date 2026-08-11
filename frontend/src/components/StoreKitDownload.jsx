@@ -50,6 +50,17 @@ export default function StoreKitDownload() {
 
   const upload = async (file) => {
     if (!file || busy) return;
+    // HQ holds exactly one kit, so this replaces whatever is there. Said
+    // before it happens rather than after: an operator who picked the wrong
+    // file is about to overwrite the build every Store downloads.
+    const current = state?.latest?.name;
+    if (current && !window.confirm(
+        `This replaces the build HQ is handing out (${current}).
+
+Continue?`)) {
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
     setBusy(true);
     setError("");
     setNotice("");
@@ -57,7 +68,9 @@ export default function StoreKitDownload() {
       const form = new FormData();
       form.append("file", file);
       const { data } = await api.post("/store-kits", form);
-      setNotice(`${data.name} uploaded. Stores downloading now will get it.`);
+      setNotice((data.superseded || []).length
+        ? `${data.name} uploaded. It replaced ${data.superseded.join(", ")}.`
+        : `${data.name} uploaded. Stores downloading now will get it.`);
       await reload();
     } catch (e) {
       setError(e?.response?.data?.detail || e.message || "That upload failed.");
@@ -152,38 +165,11 @@ export default function StoreKitDownload() {
             <Download size={15} /> {busy ? "Downloading…" : "Download the current kit"}
           </button>
 
-          <p className="break-all font-mono text-[10px] text-slate-500"
-             data-testid="store-kit-sha">
-            SHA256 {latest.sha256}
-          </p>
           <p className="text-xs text-slate-500">
-            Unzip it on the Store PC and run SpeakLink-StoreKit.cmd. It installs,
-            upgrades, repairs or removes - and an upgrade keeps the Store
-            enrolled.
+            Copy it to the Store PC and run it. It installs, upgrades, repairs
+            or removes - and an upgrade keeps the Store enrolled.
           </p>
 
-          {(state.kits || []).length > 1 && (
-            <details data-testid="store-kit-older">
-              <summary className="cursor-pointer text-xs text-slate-600">
-                Older builds ({state.kits.length - 1})
-              </summary>
-              <ul className="mt-1 space-y-1">
-                {state.kits.slice(1).map((kit) => (
-                  <li key={kit.name} className="flex items-center gap-2 text-xs">
-                    <button type="button" disabled={busy}
-                            data-testid={`store-kit-download-${kit.name}`}
-                            onClick={() => download(kit.name)}
-                            className="text-blue-700 underline disabled:opacity-40">
-                      {kit.name}
-                    </button>
-                    <span className="text-slate-400">
-                      {(kit.size_bytes / (1024 * 1024)).toFixed(1)} MB
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
         </div>
       )}
 

@@ -145,13 +145,22 @@ def safe_kit_name(raw: str) -> str:
     return f"{stem}{suffix}"
 
 
-def store_uploaded_kit(raw: bytes, *, filename: str) -> StoreKit:
-    """Write an uploaded kit into the kits directory.
+def store_uploaded_kit(raw: bytes, *, filename: str) -> tuple[StoreKit, list[str]]:
+    """Write an uploaded kit and remove every earlier one.
 
-    Refuses rather than truncates, and refuses rather than overwrites: a kit
-    with a name that is already taken is almost always somebody uploading the
-    same build twice, and silently replacing the one Stores are downloading
-    from is not a thing to do by accident.
+    HQ HOLDS EXACTLY ONE KIT, whatever it is called. That is a decision, not a
+    limitation: a list of builds means somebody eventually installs the wrong
+    one, and "which build is that Store on?" stops having a single answer. The
+    newest upload is what every Store gets, and the older files go.
+
+    Returns the stored kit and the names it superseded, so the caller can log
+    what was removed and tell the operator rather than doing it silently.
+
+    The write is atomic - the bytes go to a temporary file beside the target
+    and are then renamed over it. os.replace is atomic on Windows and POSIX
+    alike, so a Store mid-download gets all of the old file or all of the new
+    one, never half of each. The old files are only removed AFTER that rename
+    succeeds, so a failed upload leaves the estate exactly as it was.
     """
     if not raw:
         raise KitRefused("That file was empty.")
@@ -171,11 +180,29 @@ def store_uploaded_kit(raw: bytes, *, filename: str) -> StoreKit:
     directory = kits_directory()
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / name
-    if target.exists():
-        raise KitRefused(
-            f"{name} is already here. Rename the build, or delete the existing "
-            "one first if you mean to replace it.")
-    target.write_bytes(raw)
+    superseded = [kit.name for kit in list_kits() if kit.name != name]
+
+    staging = directory / f".{name}.incoming"
+    try:
+        staging.write_bytes(raw)
+        os.replace(staging, target)
+    finally:
+        # A failed write must not leave a half-file in the directory the
+        # listing reads from - which is also why the staging name starts with a
+        # dot and could never be served: it does not begin with the prefix.
+        if staging.exists():
+            staging.unlink(missing_ok=True)
+
+    # Only now, with the new file safely in place. Removing the old ones first
+    # would leave an HQ with nothing to hand out if the write then failed.
+    for old in superseded:
+        try:
+            (directory / old).unlink()
+        except OSError:
+            # Reported rather than raised: the new kit IS installed, and
+            # failing the upload over a leftover file would be a lie about
+            # what happened.
+            superseded = [n for n in superseded if n != old]
 
     stat = target.stat()
     return StoreKit(
@@ -184,7 +211,7 @@ def store_uploaded_kit(raw: bytes, *, filename: str) -> StoreKit:
         modified_at=datetime.fromtimestamp(
             stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
         sha256=hashlib.sha256(raw).hexdigest(),
-    )
+    ), superseded
 
 
 def delete_kit(name: str) -> bool:
