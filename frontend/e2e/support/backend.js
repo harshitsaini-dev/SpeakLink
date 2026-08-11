@@ -187,6 +187,9 @@ async function mockBackend(page, options = {}) {
     readyReceiversConfigured: options.current !== undefined,
     sessionId: 8,
     startCalls: [],
+    addTargetCalls: [],
+    removeTargetCalls: [],
+    addTargetRefusal: options.addTargetRefusal || null,
     stopCalls: [],
     ticketsIssued: 0,
     devices: options.devices || DEVICES.map((device) => ({ ...device })),
@@ -1244,10 +1247,68 @@ async function mockBackend(page, options = {}) {
         },
         targets: targetIds.map((storeId, index) => ({
           id: index + 1, store_id: storeId, play_status: 'audio_receiving',
+          // Shaped like the real TargetOut: participation and sound are two
+          // different facts, and the console must be able to tell them apart.
+          lifecycle_state: 'ACTIVE', current_generation: 1,
         })),
         ready_receivers: targetIds,
       };
       return route.fulfill(json({ ok: true }));
+    }
+
+    // ---- One Store, added to or removed from a broadcast already on air.
+    //
+    // Mirrors backend/server.py: the add answers with the lifecycle state and
+    // the generation, the remove is terminal for that participation and says
+    // how many Stores are left. `state.addTargetRefusal` lets a spec model the
+    // refusal that matters most - a Receiver that never reports ready - which
+    // against a real backend would mean waiting twenty seconds.
+    if (method === 'POST' && /^\/broadcast\/sessions\/\d+\/targets$/.test(path)) {
+      const body = JSON.parse(request.postData() || '{}');
+      state.addTargetCalls.push(body.store_id);
+      if (state.addTargetRefusal) {
+        return route.fulfill(json({ detail: state.addTargetRefusal }, 409));
+      }
+      const existing = (state.current.targets || [])
+        .find((t) => t.store_id === body.store_id);
+      if (existing) {
+        existing.lifecycle_state = 'ACTIVE';
+        existing.current_generation = (existing.current_generation || 1) + 1;
+        existing.play_status = 'pending';
+      } else {
+        state.current.targets = [...(state.current.targets || []), {
+          id: (state.current.targets || []).length + 1,
+          store_id: body.store_id, play_status: 'pending',
+          lifecycle_state: 'ACTIVE', current_generation: 1,
+        }];
+      }
+      state.current.ready_receivers = Array.from(
+        new Set([...(state.current.ready_receivers || []), body.store_id]));
+      return route.fulfill(json({
+        session_id: state.sessionId, store_id: body.store_id,
+        lifecycle_state: 'ACTIVE', generation: 1,
+      }));
+    }
+
+    if (method === 'DELETE'
+        && /^\/broadcast\/sessions\/\d+\/targets\/\d+$/.test(path)) {
+      const storeId = Number(path.split('/').pop());
+      state.removeTargetCalls.push(storeId);
+      const target = (state.current.targets || [])
+        .find((t) => t.store_id === storeId);
+      if (target) {
+        // play_status is deliberately LEFT ALONE, exactly as the real backend
+        // leaves it: it records what the Receiver last said, and rewriting it
+        // here would be HQ inventing an acoustic fact.
+        target.lifecycle_state = 'REMOVED';
+      }
+      const remaining = (state.current.targets || [])
+        .filter((t) => t.lifecycle_state !== 'REMOVED').length;
+      return route.fulfill(json({
+        session_id: state.sessionId, store_id: storeId,
+        lifecycle_state: 'REMOVED', generation: 1,
+        stop_delivered: true, stores_remaining: remaining,
+      }));
     }
 
     if (method === 'POST' && /^\/broadcast\/sessions\/\d+\/stop$/.test(path)) {
@@ -1369,9 +1430,10 @@ async function mockBackend(page, options = {}) {
       if (!body.acknowledged) {
         return route.fulfill(json({ detail: 'The acknowledgement is required.' }, 400));
       }
-      if (body.confirm !== publicId) {
+      // Mirrors device_deletion.DELETE_CONFIRMATION: the word, not the id.
+      if (body.confirm !== 'DELETE') {
         return route.fulfill(json({
-          detail: `The typed confirmation did not match. Type the Device id exactly: ${publicId}` }, 409));
+          detail: 'The typed confirmation did not match. Type DELETE exactly.' }, 409));
       }
       state.devices = state.devices.map((d) => (d.public_id === publicId
         ? { ...d, status: 'retired', role: 'STANDBY',

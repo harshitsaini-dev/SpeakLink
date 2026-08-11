@@ -57,7 +57,11 @@ test.describe('HQ navigation stays visible', () => {
     await page.locator('main').evaluate((el) => el.scrollTo(0, el.scrollHeight));
     await page.waitForTimeout(150);
 
-    await expect(page.getByText('SpeakLink', { exact: true }).first()).toBeInViewport();
+    // The wordmark in the sidebar, addressed by test id. getByText matched the
+    // accessible <title> inside the logo SVG first, which is a real accessible
+    // name and deliberately not a visible box - so the assertion was about an
+    // element that can never be in the viewport.
+    await expect(page.getByTestId('sidebar-wordmark')).toBeInViewport();
   });
 
   test('every navigation item stays reachable after scrolling', async ({ page }) => {

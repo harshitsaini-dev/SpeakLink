@@ -353,13 +353,16 @@ test.describe('Receiver Devices fleet', () => {
     await page.getByTestId('fleet-purge-confirm-input').fill('not-the-id');
     await expect(confirm).toBeDisabled();
 
-    await page.getByTestId('fleet-purge-confirm-input').fill(publicId);
+    // DELETE, not the Device's 36-character id. Every other permanent delete
+    // in the app asks for the same word, and an id that long gets pasted -
+    // a paste is not a decision.
+    await page.getByTestId('fleet-purge-confirm-input').fill('DELETE');
     await expect(confirm).toBeEnabled();
     await confirm.click();
 
     await expect(page.getByTestId(`fleet-row-${publicId}`)).toHaveCount(0);
     expect(state.deletePermanentlyCalls[0].body)
-      .toMatchObject({ confirm: publicId, acknowledged: true });
+      .toMatchObject({ confirm: 'DELETE', acknowledged: true });
 
     // A permanently deleted Device is now operationally gone: there is no
     // lifecycle selection that brings it back on screen, which is the point -

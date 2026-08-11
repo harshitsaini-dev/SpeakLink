@@ -62,7 +62,8 @@ export default function Layout() {
         <div className="h-16 shrink-0 px-5 flex items-center gap-2 border-b border-slate-800">
           <SpeakLinkMark className="text-blue-500" size={30} />
           <div>
-            <div className="font-bold tracking-tight text-white text-lg leading-none">SpeakLink</div>
+            <div data-testid="sidebar-wordmark"
+                 className="font-bold tracking-tight text-white text-lg leading-none">SpeakLink</div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-slate-400 mt-0.5">Live Broadcast</div>
           </div>
         </div>
