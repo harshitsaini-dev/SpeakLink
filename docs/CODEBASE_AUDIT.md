@@ -30,7 +30,7 @@ symptoms the operator reported as separate bugs.
 |---|---|---|
 | DB the live backend uses | `...\lan-pilot\20260729-181918\lan-pilot.db` | newest WAL activity; two `uvicorn` processes on `192.168.4.134:8000` |
 | DB containing `owneradmin` | `backend\speaklink_live.db` | inventory: users = `admin` (ADMIN), `owneradmin` (OWNER) |
-| DB containing the working Store Device | `...\lan-pilot\20260729-115328\lan-pilot.db` | Device `1f5a6c77… 'AYUSH'` |
+| DB containing the working Store Device | `...\lan-pilot\20260729-115328\lan-pilot.db` | Device `1f5a6c77… 'TESTPC'` |
 | Current server kind | **THROWAWAY PILOT** | root path carries a timestamp |
 | Databases found on this machine | 14 | all `integrity_check: ok` |
 

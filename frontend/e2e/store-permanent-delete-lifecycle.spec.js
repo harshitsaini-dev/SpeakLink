@@ -4,8 +4,8 @@
  *
  * WHY THIS SPEC EXISTS
  *
- * An operator permanently deleted the Store AYUSHK. It vanished from the Store
- * list, and then adding a Store with code AYUSHK was refused:
+ * An operator permanently deleted the Store TESTSTORE. It vanished from the Store
+ * list, and then adding a Store with code TESTSTORE was refused:
  *
  *     store_code already exists
  *

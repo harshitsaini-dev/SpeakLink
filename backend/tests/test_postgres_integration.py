@@ -163,7 +163,7 @@ def test_store_tombstone_fields_and_deletion_audit_survive(pg):
     """The history-preserving permanent delete: the Store row stays, its
     identity stays readable, and the audit row records what happened."""
     with pg.begin() as c:
-        store_id = _make_store(c, "AYUSHK", "AYUSH")
+        store_id = _make_store(c, "TESTSTORE", "TESTPC")
         session_id = c.execute(text(
             "INSERT INTO broadcast_sessions (campaign_name, started_by, status, "
             "target_mode, selected_store_count, created_at) "
@@ -181,7 +181,7 @@ def test_store_tombstone_fields_and_deletion_audit_survive(pg):
             "INSERT INTO store_deletion_events (actor_user_id, store_id, store_code, "
             "store_name, dependency_counts_json, device_public_ids_json, "
             "enrollment_codes_revoked, credentials_revoked, deleted_at) "
-            "VALUES (1, :i, 'AYUSHK', 'AYUSH', '{}', '[]', 0, 1, :now)"),
+            "VALUES (1, :i, 'TESTSTORE', 'TESTPC', '{}', '[]', 0, 1, :now)"),
             {"i": store_id, "now": now})
 
     with pg.connect() as c:
@@ -189,7 +189,7 @@ def test_store_tombstone_fields_and_deletion_audit_survive(pg):
             "SELECT store_code, store_name, lifecycle_state, deleted_at, deleted_by "
             "FROM stores WHERE id=:i"), {"i": store_id}).first()
         assert row.lifecycle_state == "deleted"
-        assert row.store_code == "AYUSHK" and row.store_name == "AYUSH"
+        assert row.store_code == "TESTSTORE" and row.store_name == "TESTPC"
         assert row.deleted_at is not None and row.deleted_by == 1
 
         # History still readable, still pointing at a real Store name.
@@ -198,7 +198,7 @@ def test_store_tombstone_fields_and_deletion_audit_survive(pg):
             {"i": store_id}).scalar_one() == 1
         assert c.execute(text(
             "SELECT store_code FROM store_deletion_events WHERE store_id=:i"),
-            {"i": store_id}).scalar_one() == "AYUSHK"
+            {"i": store_id}).scalar_one() == "TESTSTORE"
 
 
 # ===========================================================================

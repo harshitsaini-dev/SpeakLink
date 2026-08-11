@@ -472,7 +472,7 @@ def test_a_deleted_stores_code_becomes_available_again(client):
     """The defect this feature exists to fix.
 
     The old tombstone kept the row, so the UNIQUE index kept the Store Code,
-    and an operator who permanently deleted AYUSHK could never create AYUSHK
+    and an operator who permanently deleted TESTSTORE could never create TESTSTORE
     again. Deleting means the code is free - and the Store that takes it is a
     DIFFERENT Store, with a different id.
     """

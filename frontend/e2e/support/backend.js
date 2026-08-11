@@ -784,7 +784,7 @@ async function mockBackend(page, options = {}) {
     //
     // This used to tombstone - lifecycle_state became 'deleted' and the row
     // stayed - which kept the Store Code reserved for ever. That is exactly
-    // the defect the operator hit with AYUSHK.
+    // the defect the operator hit with TESTSTORE.
     // Creating a Store. Mirrors the real uniqueness rule (case-sensitive on
     // store_code, and only against Stores that still EXIST) and the real id
     // rule: a high-water mark, never `length + 1`, because reusing a deleted
