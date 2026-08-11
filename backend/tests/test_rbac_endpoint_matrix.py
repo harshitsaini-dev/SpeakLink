@@ -200,6 +200,9 @@ EXPECTED: dict[str, object] = {
     # handler and cannot be expressed as one code: session ownership, and
     # Store Scope. Both have their own tests.
     "add_store_to_live_broadcast": "broadcast.store_delivery",
+    # Removal is the mirror of the add, and carries the same permission and
+    # the same in-handler gates: session ownership and Store Scope.
+    "remove_store_from_live_broadcast": "broadcast.store_delivery",
     "broadcast_history": "menu.history.view",
     # A recording is the audio of a broadcast this account is already entitled
     # to read about, so it shares History's permission rather than inventing a

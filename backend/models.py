@@ -209,7 +209,11 @@ class BroadcastTarget(Base):
     #:
     #: Defaults to ACTIVE so every row written before dynamic targeting existed
     #: reads as what it was: a Store targeted at start and never touched again.
-    lifecycle_state = Column(String(20), default="ACTIVE", nullable=False)
+    #: server_default as well as default: rows are inserted by raw SQL in
+    #: several places (migrations, reconciliation checks), and those never see
+    #: the Python-side default. Without it a NOT NULL column fails on insert.
+    lifecycle_state = Column(String(20), default="ACTIVE", server_default="ACTIVE",
+                             nullable=False)
 
     #: Which participation this row is on. One generation is one stretch of
     #: being in the Broadcast, and one Windows volume baseline: adding gives 1,
@@ -217,7 +221,8 @@ class BroadcastTarget(Base):
     #: rather than restarting - so a late acknowledgement from a participation
     #: that has ended can be recognised and dropped instead of landing on the
     #: one that replaced it.
-    current_generation = Column(Integer, default=1, nullable=False)
+    current_generation = Column(Integer, default=1, server_default="1",
+                                nullable=False)
 
     session = relationship("BroadcastSession", back_populates="targets")
     store = relationship("Store")

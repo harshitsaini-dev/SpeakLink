@@ -88,10 +88,18 @@ class LiveBroadcast:
     #: stays answerable and a dynamic Add cannot quietly rewrite history.
     #: Mutated only under the runtime lock.
     dynamic_store_ids: set = field(default_factory=set)
+    #: Stores taken OUT of this Broadcast while it was on air. Subtracted here
+    #: rather than removed from the sets above, for the same reason the
+    #: dynamic set exists: "who was targeted at start" must stay answerable.
+    #: A Store added back after removal is added to dynamic_store_ids again and
+    #: dropped from here, so it is once more a target.
+    #: Mutated only under the runtime lock.
+    removed_store_ids: set = field(default_factory=set)
 
     @property
     def all_target_store_ids(self) -> frozenset:
-        return frozenset(self.target_store_ids) | frozenset(self.dynamic_store_ids)
+        both = frozenset(self.target_store_ids) | frozenset(self.dynamic_store_ids)
+        return both - frozenset(self.removed_store_ids)
     #: Which Stores have a pump is asked of the fanout, which knows whether the
     #: task is still alive. This used to be a set here that was only ever added
     #: to, so a Store whose pump had died stayed "started" and never got
@@ -342,6 +350,8 @@ class BroadcastRuntime:
             # this Store could be offered is already routed as framed.
             live.delivery_modes[store_id] = DELIVERY_LATE_JOIN_FRAMED
             live.dynamic_store_ids.add(store_id)
+            # A Store that was removed earlier is a target again from here.
+            live.removed_store_ids.discard(store_id)
             await live.fanout.start_store(store_id,
                                           self._sender_factory(store_id))
             for payload in bootstrap.payloads:
@@ -352,6 +362,28 @@ class BroadcastRuntime:
             "bootstrap_clusters": len(bootstrap.clusters),
             "next_cluster_index": bootstrap.next_cluster_index,
         }
+
+    async def drop_store(self, session_id: int, store_id: int) -> dict | None:
+        """Stop delivering to one Store, leaving the Broadcast running.
+
+        Returns that Store's final queue metrics, or None if this session is
+        not live. Everything happens under the same lock the fanout loop uses,
+        so a chunk cannot be enqueued for a Store between it being untargeted
+        and its pump being stopped.
+        """
+        async with self._lock:
+            live = self._sessions.get(session_id)
+            if live is None:
+                return None
+            # Untarget FIRST. If the pump were stopped first, the next chunk
+            # would find no live pump for a Store still in the target set and
+            # start a new one - the Store would come back on its own.
+            live.removed_store_ids.add(store_id)
+            live.dynamic_store_ids.discard(store_id)
+            # The delivery mode goes too: if this Store is added back it is a
+            # fresh late join, and must be re-decided rather than inherited.
+            live.delivery_modes.pop(store_id, None)
+            return await live.fanout.stop_store(store_id)
 
     def delivery_mode(self, session_id: int, store_id: int) -> str | None:
         live = self._sessions.get(session_id)

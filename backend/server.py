@@ -3803,6 +3803,116 @@ async def add_store_to_live_broadcast(
             "bootstrap": joined}
 
 
+@api.delete("/broadcast/sessions/{sid}/targets/{store_id}")
+async def remove_store_from_live_broadcast(
+    sid: int, store_id: int, db: Session = Depends(get_db),
+    user: HQUser = Depends(require("broadcast.store_delivery")),
+):
+    """Take ONE Store out of a Broadcast that is still on air.
+
+    The mirror of add_store_to_live_broadcast, and gated identically: the
+    operator running this broadcast, holding physical delivery, within their
+    Store Scope.
+
+    WHY THIS IS A STOP AND NOT A PAUSE
+
+    Stop is terminal on this protocol: the Receiver hands the Windows audio
+    output back and forgets the session. That is exactly what removal means -
+    the shop is out, and a shop that is out must not be holding the speakers.
+    Pausing (leaving the Receiver attached but silent) needs a stand-down
+    instruction the Receiver does not have yet, which is why Pause is a later
+    milestone and not a variation of this one.
+
+    ORDER MATTERS. Delivery is cut first, then the Receiver is told, then the
+    lease is released. Releasing the lease first would let another broadcast
+    claim the Store while this one was still pushing audio at it.
+
+    The Store can be added back afterwards; that is a fresh generation, not a
+    resumption, and it rejoins at the live edge like any other late join.
+    """
+    _require_audio_control_owner(sid, user)
+    _require_physical_delivery(user)
+
+    session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
+    if session is None or session.status != "live":
+        raise HTTPException(status_code=409,
+                            detail="This broadcast is no longer live.")
+
+    scope = resolve_store_scope(engine, user)
+    if scope is not None and store_id not in scope:
+        # Same answer as a Store that is not in this broadcast. Out of scope is
+        # not entitled to learn which shops a broadcast is reaching.
+        raise HTTPException(status_code=404,
+                            detail="That Store is not in this broadcast.")
+
+    target = db.query(BroadcastTarget).filter(
+        BroadcastTarget.session_id == sid,
+        BroadcastTarget.store_id == store_id).first()
+    if target is None:
+        raise HTTPException(status_code=404,
+                            detail="That Store is not in this broadcast.")
+
+    participating = (lifecycle.ADDING, lifecycle.PREPARING,
+                     lifecycle.ACTIVE, lifecycle.PAUSING, lifecycle.PAUSED)
+    if target.lifecycle_state not in participating:
+        # Idempotent. A second click, or a Store that already dropped out on
+        # its own, is not an error - the caller's intent is already true.
+        return {"session_id": sid, "store_id": store_id,
+                "lifecycle_state": target.lifecycle_state,
+                "generation": target.current_generation,
+                "already_removed": True}
+
+    # Removing the last Store is ALLOWED, and deliberately so. It leaves a
+    # broadcast that is live and reaching no shop, which sounds like something
+    # to refuse - but every Broadcast has a web room, so it is still reaching
+    # its web audience, and refusing would break the ordinary way an operator
+    # moves an announcement from one shop to another: remove this one, add
+    # that one. Forcing the opposite order is a rule that exists only to be
+    # worked around.
+    #
+    # What is owed instead is honesty, so the count of Stores still receiving
+    # is returned and the console can say "no Stores" rather than implying the
+    # announcement is still going somewhere.
+    remaining = db.query(BroadcastTarget).filter(
+        BroadcastTarget.session_id == sid,
+        BroadcastTarget.store_id != store_id,
+        BroadcastTarget.lifecycle_state.in_(participating)).count()
+
+    target.lifecycle_state = lifecycle.REMOVING
+    db.commit()
+
+    # 1. Cut delivery, so nothing more is queued for a Store on its way out.
+    store_audio_registry.drop_store(session_id=sid, store_id=store_id)
+    await manager.broadcasts.drop_store(sid, store_id)
+
+    # 2. Tell the Receiver, which gives the audio output back. Best effort: a
+    #    Receiver that has already gone offline cannot be told, and that must
+    #    not strand the row in REMOVING or hold the lease.
+    delivered = await manager.send_to_receiver(
+        store_id, build_stop_message(session_id=sid))
+
+    # 3. Only now is the Store free for another broadcast to claim.
+    release_store_lease(engine, session_id=sid, store_id=store_id)
+
+    target.lifecycle_state = lifecycle.REMOVED
+    target.stopped_at = datetime.utcnow()
+    # play_status carries what the Receiver last reported and stays that way.
+    # Overwriting it here would be HQ inventing an acoustic fact.
+    db.commit()
+
+    _write_log(db, "info",
+               f"STORE_REMOVED session_id={sid} store_id={store_id} "
+               f"generation={target.current_generation} "
+               f"stop_delivered={bool(delivered)} actor_user_id={user.id}")
+    await manager.notify_dashboards(
+        {"type": "target_removed", "session_id": sid, "store_id": store_id})
+    return {"session_id": sid, "store_id": store_id,
+            "lifecycle_state": target.lifecycle_state,
+            "generation": target.current_generation,
+            "stop_delivered": bool(delivered),
+            "stores_remaining": remaining}
+
+
 @api.post("/broadcast/active-management/{sid}/stop")
 async def active_management_stop(sid: int, db: Session = Depends(get_db),
                                  user: HQUser = Depends(require(abm.PAGE_CODE))):
