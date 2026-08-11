@@ -525,6 +525,30 @@ class SystemLogOut(BaseModel):
         return _utc_iso(value)
 
 
+class ChatMessageIn(BaseModel):
+    """One chat message, from a listener or from the host.
+
+    The length limit is repeated from web_chat.MAX_BODY rather than imported,
+    because this one produces a 422 with a field name and that one produces a
+    sentence a listener can read. Both refuse rather than truncate: a
+    truncated message changes what somebody said.
+    """
+    body: str = Field(min_length=1, max_length=500)
+
+
+class ChatSettingsIn(BaseModel):
+    """The host's chat controls. Both optional, so turning chat off cannot
+    change the mode as a side effect, or the other way round."""
+    chat_enabled: Optional[bool] = None
+    chat_mode: Optional[str] = Field(default=None, pattern="^(PUBLIC|PRIVATE)$")
+
+
+class ChatMuteIn(BaseModel):
+    """Silencing ONE listener. Deliberately not a Kick: somebody disruptive in
+    chat may still be a shop that needs to hear the announcement."""
+    muted: bool
+
+
 class WebRoomAutoApproveUpdate(BaseModel):
     """Whether a passwordless request is admitted without the broadcaster.
 

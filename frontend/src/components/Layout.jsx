@@ -5,6 +5,7 @@ import SpeakLinkMark from "@/components/SpeakLinkMark";
 import { useAuth } from "@/contexts/AuthContext";
 import { MENU_PERMISSION_BY_PATH } from "@/lib/menuPermissions";
 import RecordingPlayer, { PLAYER_BAR_HEIGHT } from "@/components/RecordingPlayer";
+import EmergencyStopControl from "@/components/EmergencyStopControl";
 import { useRecordingPlayback } from "@/contexts/RecordingPlaybackContext";
 
 const NAV = [
@@ -86,6 +87,13 @@ export default function Layout() {
           ))}
         </nav>
         <div className="shrink-0 p-3 border-t border-slate-800">
+          {/* Above the account block, in reach from EVERY page. It used to be a
+              card on the Console, which meant that stopping a broadcast that
+              had gone wrong required first navigating to the page - at the one
+              moment navigation is worth least. */}
+          <div className="mb-3">
+            <EmergencyStopControl />
+          </div>
           <div className="px-3 py-2 mb-2">
             <div className="text-xs text-slate-400">Signed in as</div>
             <div className="text-sm font-medium text-white">{user?.username}</div>

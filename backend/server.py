@@ -35,6 +35,7 @@ from schemas import (
     ListenerJoin,
     ListenerRequestAccess,
     WebRoomAutoApproveUpdate,
+    ChatMessageIn, ChatSettingsIn, ChatMuteIn,
     LoginRequest, LoginResponse, UserOut,
     StoreCreate, StoreUpdate, StoreOut, StoresMetaOut,
     BroadcastTargetStoreOut, BroadcastTargetsOut,
@@ -236,6 +237,7 @@ import hashlib
 import secrets
 import broadcast_recording
 import web_rooms
+import web_chat
 from web_participant_runtime import (
     HEARTBEAT_INTERVAL_SECONDS,
     PlaybackState,
@@ -644,6 +646,10 @@ def startup_event():
         # purpose - so unlike live readings it has to live in the database.
         broadcast_recording.ensure_recording_schema(engine)
         web_rooms.ensure_web_room_schema(engine)
+        # Chat hangs off the room, which hangs off the session, both
+        # ON DELETE CASCADE - so a broadcast deleted from history takes
+        # its chat with it and there is no second cleanup to forget.
+        web_chat.ensure_chat_schema(engine)
         # Anything left mid-flight by a crash is resolved BEFORE the first
         # request can read it. An unfinished .part is never promoted to
         # AVAILABLE: HQ stopping mid-announcement is exactly when a recording
@@ -6137,6 +6143,187 @@ def listener_admission_state(request: Request, response: Response,
                 path=_listener_cookie_kwargs(request)["path"],
                 samesite="lax", secure=_request_is_https(request), httponly=True)
     return _listener_view(room, participant, live=_session_is_live(room.session_id))
+
+
+# ================ CHAT: THE WEB AUDIENCE'S ONLY WAY TO ANSWER BACK ================
+#
+# A listener can hear the announcement and, until now, had no way to say "we
+# cannot hear you". These routes are that channel and nothing more.
+#
+# The host half and the listener half authenticate completely differently - an
+# HQ bearer token against a session they own, versus a listener cookie against
+# one room - so every rule about who may READ what lives in web_chat.py and is
+# shared by both. Two independent filters would eventually disagree, and what
+# they would disagree about is somebody's private message.
+
+
+def _chat_room_or_404(sid: int):
+    room = web_rooms.get_room_for_session(engine, session_id=sid)
+    if room is None:
+        raise HTTPException(status_code=404, detail="This Broadcast has no web room.")
+    return room
+
+
+def _chat_state_for_host(sid: int, room) -> dict:
+    settings = web_chat.get_settings(engine, room_id=room.id)
+    messages = web_chat.history_for_host(engine, room_id=room.id)
+    return {"session_id": sid, **settings,
+            "messages": [m.public_dict() for m in messages]}
+
+
+@api.get("/broadcast/sessions/{sid}/chat")
+def read_broadcast_chat(sid: int,
+                        user: HQUser = Depends(require(Permission.START_BROADCAST))):
+    """Everything said in this room. The host is the one person a private
+    message was addressed TO, so private messages are theirs to read."""
+    _require_web_room_owner(sid, user)
+    return _chat_state_for_host(sid, _chat_room_or_404(sid))
+
+
+@api.post("/broadcast/sessions/{sid}/chat")
+def post_broadcast_chat_message(
+    sid: int, payload: ChatMessageIn,
+    user: HQUser = Depends(require(Permission.START_BROADCAST)),
+):
+    """The host speaking to the room.
+
+    Not gated on chat_enabled: turning chat off stops the AUDIENCE typing, and
+    an operator may still need to answer the last question before the room
+    goes quiet.
+    """
+    _require_web_room_owner(sid, user)
+    room = _chat_room_or_404(sid)
+    try:
+        message = web_chat.post_host_message(
+            engine, room_id=room.id,
+            display_name=user.display_name or user.username, body=payload.body)
+    except web_chat.ChatRefused as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+    return message.public_dict()
+
+
+@api.put("/broadcast/sessions/{sid}/chat/settings")
+def update_broadcast_chat_settings(
+    sid: int, payload: ChatSettingsIn,
+    user: HQUser = Depends(require(Permission.START_BROADCAST)),
+):
+    """Chat on or off, and public or private.
+
+    Changing the mode never rewrites messages already sent. A message sent
+    while the room was private was sent in confidence and must not be
+    published after the fact; hiding what was already said in public fools
+    nobody who was in the room.
+    """
+    _require_web_room_owner(sid, user)
+    room = _chat_room_or_404(sid)
+    try:
+        if payload.chat_enabled is not None:
+            web_chat.set_chat_enabled(engine, room_id=room.id,
+                                      enabled=payload.chat_enabled)
+        if payload.chat_mode is not None:
+            web_chat.set_chat_mode(engine, room_id=room.id, mode=payload.chat_mode)
+    except web_chat.ChatRefused as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+    with SessionLocal() as db:
+        _write_log(db, "info",
+                   f"CHAT_SETTINGS session_id={sid} enabled={payload.chat_enabled} "
+                   f"mode={payload.chat_mode} by={user.username}")
+    return _chat_state_for_host(sid, room)
+
+
+@api.post("/broadcast/sessions/{sid}/chat/messages/{mid}/delete")
+def delete_broadcast_chat_message(
+    sid: int, mid: int,
+    user: HQUser = Depends(require(Permission.START_BROADCAST)),
+):
+    """Tombstone one message: the row and the author stay, the words go.
+
+    Everyone in the room already saw it. Removing the row would make the
+    transcript claim a conversation that did not happen.
+    """
+    _require_web_room_owner(sid, user)
+    room = _chat_room_or_404(sid)
+    if not web_chat.delete_message(engine, message_id=mid, room_id=room.id,
+                                   actor_user_id=user.id):
+        raise HTTPException(status_code=404,
+                            detail="No such message in this Broadcast's chat.")
+    return _chat_state_for_host(sid, room)
+
+
+@api.post("/broadcast/sessions/{sid}/web-participants/{pid}/chat-mute")
+def set_web_participant_chat_mute(
+    sid: int, pid: int, payload: ChatMuteIn,
+    user: HQUser = Depends(require(Permission.START_BROADCAST)),
+):
+    """Silence ONE listener without removing them.
+
+    Deliberately not a Kick: somebody being disruptive in chat may still be a
+    shop that needs to hear the announcement.
+    """
+    _require_web_room_owner(sid, user)
+    room = _chat_room_or_404(sid)
+    participant = web_rooms.get_participant(engine, participant_id=pid)
+    if participant is None or participant.room_id != room.id:
+        raise HTTPException(status_code=404,
+                            detail="That listener is not in this Broadcast.")
+    web_chat.set_participant_muted(engine, participant_id=pid, muted=payload.muted)
+    return _chat_state_for_host(sid, room)
+
+
+# ---- the listener half -----------------------------------------------------
+
+def _listener_or_401(request: Request):
+    """Resolve the browser's listener cookie to (room, participant).
+
+    Every failure - no cookie, unknown token, kicked, denied, room ended -
+    answers the same way. A caller learning WHICH is a caller learning
+    something about a room they are not in.
+    """
+    token = request.cookies.get(LISTENER_COOKIE)
+    resolved = web_rooms.authenticate_listener(engine, token=token) if token else None
+    if resolved is None:
+        raise HTTPException(status_code=401, detail="Not admitted to a Broadcast.")
+    return resolved
+
+
+@api.get("/listen/chat")
+def read_listener_chat(request: Request):
+    """What THIS listener may see: public messages, plus their own private
+    ones. The filter is in the query rather than applied afterwards - a filter
+    is one early return away from being skipped, and what it would leak is
+    somebody else's private message."""
+    room, participant = _listener_or_401(request)
+    settings = web_chat.get_settings(engine, room_id=room.id)
+    messages = web_chat.history_for_listener(
+        engine, room_id=room.id, participant_id=participant.id)
+    return {
+        "public_code": room.public_code,
+        **settings,
+        "muted": web_chat.is_participant_muted(engine, participant_id=participant.id),
+        "me": participant.id,
+        "messages": [m.public_dict() for m in messages],
+    }
+
+
+@api.post("/listen/chat")
+def post_listener_chat(request: Request, payload: ChatMessageIn):
+    """One message from one admitted listener.
+
+    Every refusal here is one the page already knows about and should have
+    prevented. It is repeated anyway, because a control that only exists in a
+    browser is a suggestion.
+    """
+    room, participant = _listener_or_401(request)
+    try:
+        message = web_chat.post_listener_message(
+            engine, room_id=room.id, participant_id=participant.id,
+            display_name=participant.display_name, body=payload.body)
+    except web_chat.ChatRefused as refusal:
+        # 429 for the rate limit specifically, so a client can tell "slow down"
+        # apart from "you are not allowed to".
+        status = 429 if "Too many messages" in str(refusal) else 403
+        raise HTTPException(status_code=status, detail=str(refusal))
+    return message.public_dict()
 
 
 @api.post("/listen/forget")

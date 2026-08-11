@@ -85,7 +85,7 @@ export default function BroadcastConsole() {
     current, load: loadBroadcast, isLive, meter, micLevels, broadcasterStatus,
     micVolumePercent, micMuted, setMicVolume, setMicMute, micEffectivelySilent,
     error, setError, startBroadcast: startBroadcastAudio,
-    stopBroadcast: stopBroadcastAudio, emergencyStop: emergencyStopAudio,
+    stopBroadcast: stopBroadcastAudio,
     active, isStoreBusyForOthers,
   } = useBroadcast();
 
@@ -112,8 +112,6 @@ export default function BroadcastConsole() {
   // Emergency Stop gets its OWN confirmation, deliberately not the ordinary
   // Start/Stop dialog: it terminates every operator's broadcast, and reusing a
   // dialog somebody clicks through routinely is how that becomes a reflex.
-  const [emergencyConfirmOpen, setEmergencyConfirmOpen] = React.useState(false);
-  const [emergencyResult, setEmergencyResult] = React.useState(null);
   // Output control belongs to THIS broadcast. No session, no controls: there
   // is nothing to be loud on and nothing the backend would accept.
   const liveSessionId = active?.mine?.session_id ?? current?.session?.id ?? null;
@@ -415,32 +413,6 @@ export default function BroadcastConsole() {
     finally { setBusy(false); }
   };
 
-  const emergencyStop = async () => {
-    setBusy(true);
-    setEmergencyResult(null);
-    try {
-      const outcome = await emergencyStopAudio();
-      const count = (outcome?.session_ids || []).length;
-      setEmergencyResult({
-        ok: true,
-        message: count
-          ? `Emergency Stop: ${count} broadcast${count === 1 ? "" : "s"} stopped.`
-          : "Emergency Stop: there were no active broadcasts.",
-      });
-    } catch (e) {
-      // A partial failure must never read as success. The operator has to know
-      // that something is still on air so they can act on it.
-      if (e?.emergencyIncomplete) {
-        setEmergencyResult({ ok: false, message: e.message });
-      }
-      setError(e?.response?.data?.detail?.message
-               || e?.response?.data?.detail || e.message);
-    } finally {
-      setBusy(false);
-      setEmergencyConfirmOpen(false);
-    }
-  };
-
   const startedAtIso = current?.session?.started_at || null;
   const elapsed = useTimer(startedAtIso);
 
@@ -463,26 +435,39 @@ export default function BroadcastConsole() {
 
   return (
     <div className="space-y-6" data-testid="broadcast-console">
-      {/* HEADER: live status + emergency stop */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Live card */}
-        <div className="lg:col-span-2 border border-slate-200 bg-white rounded-md shadow-sm p-5">
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Broadcast Status</div>
-              <div className="mt-1 flex items-center gap-3">
-                {isLive ? (
-                  <>
-                    <span className="live-dot" />
-                    <span className="text-red-600 font-bold uppercase tracking-widest" data-testid="live-indicator">LIVE ON AIR</span>
-                    <span className="text-slate-700 text-sm truncate">· {current?.session?.campaign_name}</span>
-                  </>
-                ) : (
-                  <span className="text-slate-500 uppercase tracking-widest text-sm font-semibold">Idle · Ready to Broadcast</span>
-                )}
-              </div>
+      {/* THE CONSOLE BLOCK: one grid, six cards, the shape an operator reads.
+          Left two columns run Status -> Active Broadcast -> Controls and
+          Targets. The right column is the chat, spanning all three rows.
+
+          One grid rather than three stacked ones, because a tall card can only
+          span rows that belong to the same grid - and equal heights across a
+          row is something grid does for free and hand-tuned heights never
+          quite manage. */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-12 lg:auto-rows-min lg:items-stretch">
+        <div className="lg:col-span-4 lg:h-full flex flex-col border border-slate-200 bg-white rounded-md shadow-sm p-4"
+             data-testid="broadcast-status-card">
+          {/* Label, state and clock on ONE line. The clock was 5xl, which
+              made a card that only reports taller than the card you operate.
+              min-w-0 with truncate on the campaign name so a long name
+              shortens instead of pushing the clock off the row. */}
+          <div className="flex items-center gap-3">
+            <div className="text-[11px] font-bold uppercase tracking-[0.15em] text-slate-500 shrink-0">
+              Status
             </div>
-            <div className="font-mono text-4xl md:text-5xl tracking-tighter text-slate-900" data-testid="live-timer">
+            <div className="flex min-w-0 flex-1 items-center gap-2">
+              {isLive ? (
+                <>
+                  <span className="live-dot shrink-0" />
+                  <span className="shrink-0 text-sm font-bold uppercase tracking-widest text-red-600" data-testid="live-indicator">LIVE</span>
+                  <span className="truncate text-sm text-slate-700" title={current?.session?.campaign_name}>
+                    · {current?.session?.campaign_name}
+                  </span>
+                </>
+              ) : (
+                <span className="text-sm font-semibold uppercase tracking-widest text-slate-500">Idle · Ready</span>
+              )}
+            </div>
+            <div className="shrink-0 font-mono text-3xl md:text-4xl tracking-tight text-slate-900" data-testid="live-timer">
               {isLive ? fmtDur(elapsed) : "00:00:00"}
             </div>
           </div>
@@ -552,30 +537,53 @@ export default function BroadcastConsole() {
           )}
         </div>
 
-        {/* Emergency stop */}
-        <div className="border border-red-200 bg-red-50 rounded-md shadow-sm p-4 flex flex-col justify-between">
-          <div className="text-xs font-bold uppercase tracking-[0.15em] text-red-900 flex items-center gap-1"><AlertOctagon size={14}/> Safety Control</div>
-          {can("broadcast.emergency_stop") ? (
-            <button
-              data-testid="emergency-stop-btn"
-              disabled={busy}
-              onClick={() => setEmergencyConfirmOpen(true)}
-              className="h-24 mt-3 w-full text-lg sm:text-2xl font-bold bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:bg-red-300 text-white rounded-lg shadow-md border border-red-800 uppercase tracking-widest flex items-center justify-center gap-3 transition-all"
-            >
-              <AlertOctagon size={26} /> Emergency Stop All
-            </button>
+
+        <div className="lg:col-span-4 lg:h-full" data-testid="console-audience-card">
+          {liveSessionId ? (
+            <WebAudiencePanel sessionId={liveSessionId} compact />
           ) : (
-            <p className="mt-3 text-xs text-red-800">
-              Your account cannot Emergency Stop. Ask an administrator.
-            </p>
+            <div className="lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
+                Web Audience
+              </div>
+              <p className="mt-2 text-sm text-slate-500">
+                A shareable listener link is created when this Broadcast starts.
+              </p>
+            </div>
           )}
         </div>
-      </div>
 
-      {/* MY ACTIVE BROADCAST */}
+        {/* Target summary */}
+
+        {/* WEB CHAT, the full height of the block on the right.
+            It is tall on purpose: a conversation is a list that grows, and a
+            card that grew with it would push Targets and Controls around the
+            page every time somebody typed. Placed beside the Web Audience
+            because they are the same people.
+
+            The card is here and says so plainly while the backend half is
+            being finished. An empty box implying a working feature would be
+            worse than a sentence saying it is not one yet. */}
+        <div className="lg:col-span-4 lg:row-span-3 lg:h-full flex flex-col border border-slate-200 bg-white rounded-md shadow-sm p-4"
+             data-testid="chat-card">
+          <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
+            Web Chat
+          </div>
+          <div className="flex flex-1 flex-col items-center justify-center gap-1 py-8 text-center">
+            <span data-testid="chat-coming-soon"
+                  className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs font-bold uppercase tracking-widest text-slate-600">
+              Coming soon
+            </span>
+            <p className="mt-2 max-w-[16rem] text-sm text-slate-500">
+              Web listeners will be able to message you here, and you will be
+              able to turn chat off or make it private.
+            </p>
+          </div>
+        </div>
+
       {active?.mine && (
         <div data-testid="my-active-broadcast"
-             className="border border-blue-200 bg-blue-50/60 rounded-md shadow-sm p-4">
+             className="lg:col-span-8 border border-blue-200 bg-blue-50/60 rounded-md shadow-sm p-4">
           <div className="text-xs font-bold uppercase tracking-[0.15em] text-blue-900">
             Your Active Broadcast
           </div>
@@ -594,20 +602,9 @@ export default function BroadcastConsole() {
         </div>
       )}
 
-      {/* A COMPACT LINK, NOT A LIST.
-          This used to render every other operator's broadcast as table rows.
-          That was readable with one concurrent broadcast and unusable with
-          twenty: the Console is where somebody speaks into a microphone, and
-          it was growing without bound behind the controls they came for.
-          Supervision moved to its own page, and what stays here is one line
-          whose height does not depend on how many broadcasts are live -
-          fifty active sessions render exactly the same badge as one.
-          Shown only for accounts holding broadcast.active_view; without it
-          the backend sends active_count: null, so even the NUMBER is
-          withheld rather than hidden client-side. */}
       {active?.may_manage_active && (
         <div data-testid="active-broadcasts-badge"
-             className="border border-slate-200 bg-white rounded-md shadow-sm px-4 py-3 flex items-center justify-between gap-4">
+             className="lg:col-span-8 border border-slate-200 bg-white rounded-md shadow-sm px-4 py-3 flex items-center justify-between gap-4">
           <div className="text-sm text-slate-700">
             <span className="font-bold uppercase tracking-[0.15em] text-xs text-slate-500 mr-2">
               Active Broadcasts
@@ -623,29 +620,7 @@ export default function BroadcastConsole() {
         </div>
       )}
 
-      {emergencyResult && (
-        <div role="alert" data-testid="emergency-result"
-             className={`rounded-md border px-3 py-2 text-sm ${emergencyResult.ok
-               ? "border-slate-300 bg-slate-50 text-slate-800"
-               : "border-red-400 bg-red-100 text-red-900 font-semibold"}`}>
-          {emergencyResult.message}
-        </div>
-      )}
-
-      {/* CONTROLS */}
-      {/* Controls, audience, targets - in that order, on one row.
-          The Web Audience used to sit below the Store table, which during a
-          live broadcast meant scrolling past forty Stores to see who was
-          listening or to admit somebody waiting. It belongs where an operator
-          is already looking. Twelve columns rather than three so the middle
-          card can be the widest without the outer two becoming cramped. */}
-      {/* items-stretch, not items-start. Grid stretches its children by
-          default; items-start was overriding that and letting each card end
-          wherever its content did, so three cards with aligned tops had three
-          different bottoms. Only at lg and above - stacked on a phone, a card
-          should be exactly as tall as what is in it. */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:items-stretch">
-        <div className="lg:col-span-4 lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-3"
+        <div className="lg:col-span-4 lg:h-full overflow-y-auto border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-3"
              data-testid="console-controls-card">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-slate-900">Broadcast Controls</h2>
@@ -770,26 +745,7 @@ export default function BroadcastConsole() {
           <div className="text-xs text-slate-500">Broadcaster: <span className="font-mono">{broadcasterStatus}</span></div>
         </div>
 
-        {/* The web audience, in the middle, where it is seen. Same component
-            and same business logic as before - only its placement changed, so
-            participant state has exactly one implementation. */}
-        <div className="lg:col-span-5 lg:h-full" data-testid="console-audience-card">
-          {liveSessionId ? (
-            <WebAudiencePanel sessionId={liveSessionId} compact />
-          ) : (
-            <div className="lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4">
-              <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
-                Web Audience
-              </div>
-              <p className="mt-2 text-sm text-slate-500">
-                A shareable listener link is created when this Broadcast starts.
-              </p>
-            </div>
-          )}
-        </div>
-
-        {/* Target summary */}
-        <div className="lg:col-span-3 lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-2.5" data-testid="target-summary">
+        <div className="lg:col-span-4 lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-2.5" data-testid="target-summary">
           <div className="flex items-center gap-2">
             <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Broadcast Targets</div>
             {targetMode === ONLY_WITH_LINK && (
@@ -1076,38 +1032,6 @@ export default function BroadcastConsole() {
           failure modes, and one merged list would invite reading a listener's
           Buffering as a shop problem. */}
 
-      {/* Confirm Modal */}
-      {emergencyConfirmOpen && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
-             data-testid="emergency-confirm-modal">
-          <div className="bg-white rounded-lg w-full max-w-md p-5 space-y-3">
-            <h3 className="font-bold text-red-900 uppercase tracking-wide">
-              Stop all active broadcasts?
-            </h3>
-            <p className="text-sm text-slate-800">
-              This stops <strong>every active SpeakLink broadcast</strong>, including
-              broadcasts started by other operators - not only your own. Every
-              targeted Store is told to stop and every Store is released.
-            </p>
-            <p className="text-xs text-slate-600">
-              SpeakLink cannot confirm that a speaker has fallen silent. This sends
-              the stop command and releases the Stores.
-            </p>
-            <div className="flex gap-2 pt-1">
-              <button type="button" data-testid="emergency-cancel-btn"
-                      onClick={() => setEmergencyConfirmOpen(false)}
-                      className="flex-1 px-4 py-2 border border-slate-300 rounded-md text-sm">
-                Cancel
-              </button>
-              <button type="button" data-testid="emergency-confirm-btn" disabled={busy}
-                      onClick={emergencyStop}
-                      className="flex-1 px-4 py-2 bg-red-700 text-white rounded-md text-sm font-bold uppercase disabled:opacity-50">
-                {busy ? "Stopping…" : "Stop All Broadcasts"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {confirmOpen && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" data-testid="confirm-modal">
