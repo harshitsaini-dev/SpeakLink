@@ -1,24 +1,62 @@
-"""SpeakLink backend tests (pytest).
+"""Explicit-target SpeakLink integration tests.
 
-Covers: auth, stores CRUD, receiver verify, broadcast sessions (create/start/stop/emergency),
-concurrency prevention, targeted PLAY dispatch, history, logs, WS handshake for receiver.
-Uses public REACT_APP_BACKEND_URL to mimic real end-user traffic through k8s ingress.
+These tests perform writes. They never choose a server implicitly: callers must
+provide a test-only base URL, confirm its database is isolated, and provide test
+credentials through environment variables. Non-loopback targets require a
+separate, clearly named opt-in.
 """
 import asyncio
 import json
 import os
 import time
 import uuid
+from urllib.parse import urlparse
 
 import pytest
 import requests
 import websockets
 
-BASE_URL = os.environ["REACT_APP_BACKEND_URL"].rstrip("/") if os.environ.get("REACT_APP_BACKEND_URL") else "https://hq-broadcast.preview.emergentagent.com"
+def _enabled(name):
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+raw_base_url = os.environ.get("SPEAKLINK_TEST_BASE_URL", "").strip()
+if not raw_base_url:
+    pytest.skip(
+        "Integration tests require an explicit SPEAKLINK_TEST_BASE_URL; "
+        "use tests/test_smoke.py for the isolated local baseline.",
+        allow_module_level=True,
+    )
+
+parsed_base_url = urlparse(raw_base_url)
+if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.hostname:
+    raise pytest.UsageError("SPEAKLINK_TEST_BASE_URL must be an absolute HTTP(S) URL")
+
+is_loopback = parsed_base_url.hostname.lower() in {"localhost", "127.0.0.1", "::1"}
+if not is_loopback and not _enabled("SPEAKLINK_ALLOW_NONLOCAL_WRITE_TESTS"):
+    raise pytest.UsageError(
+        "Refusing write tests against a non-local URL. Set "
+        "SPEAKLINK_ALLOW_NONLOCAL_WRITE_TESTS=1 only for an isolated test server."
+    )
+
+if not _enabled("SPEAKLINK_TEST_DATABASE_ISOLATED"):
+    pytest.skip(
+        "Integration tests require SPEAKLINK_TEST_DATABASE_ISOLATED=1 after "
+        "confirming the target server uses a disposable or dedicated test database.",
+        allow_module_level=True,
+    )
+
+BASE_URL = raw_base_url.rstrip("/")
 WS_BASE = BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
 
-ADMIN_USER = "admin"
-ADMIN_PASS = "admin123"
+ADMIN_USER = os.environ.get("SPEAKLINK_TEST_ADMIN_USERNAME")
+ADMIN_PASS = os.environ.get("SPEAKLINK_TEST_ADMIN_PASSWORD")
+if not ADMIN_USER or not ADMIN_PASS:
+    pytest.skip(
+        "Integration tests require SPEAKLINK_TEST_ADMIN_USERNAME and "
+        "SPEAKLINK_TEST_ADMIN_PASSWORD.",
+        allow_module_level=True,
+    )
 
 
 # ------------- fixtures -------------
@@ -81,25 +119,30 @@ class TestStores:
         r = api.get(f"{BASE_URL}/api/stores", headers=auth)
         assert r.status_code == 200
         data = r.json()
-        assert len(data) >= 13
+        # The canonical catalog defines 9 Zones and 44 Stores.
+        assert len(data) >= 44
         codes = [s["store_code"] for s in data]
-        for c in ["MUM-001", "DEL-001", "BLR-001", "ONL-001"]:
+        for c in ["UN", "PV", "KN", "NIT"]:
             assert c in codes
 
     def test_search_filter(self, api, auth):
-        r = api.get(f"{BASE_URL}/api/stores?q=MUM", headers=auth)
+        r = api.get(f"{BASE_URL}/api/stores?q=Krishna", headers=auth)
         assert r.status_code == 200
-        assert all("MUM" in s["store_code"] or "MUM" in s["store_name"].upper() for s in r.json())
+        assert all(
+            "KRISHNA" in s["store_code"].upper() or "KRISHNA" in s["store_name"].upper()
+            for s in r.json()
+        )
 
     def test_region_filter(self, api, auth):
-        r = api.get(f"{BASE_URL}/api/stores?region=South", headers=auth)
+        # Zone is carried by the existing indexed Store.region field.
+        r = api.get(f"{BASE_URL}/api/stores?region=SOUTH ZONE", headers=auth)
         assert r.status_code == 200
-        assert all(s["region"] == "South" for s in r.json())
+        assert all(s["region"] == "SOUTH ZONE" for s in r.json())
 
     def test_city_filter(self, api, auth):
-        r = api.get(f"{BASE_URL}/api/stores?city=Bangalore", headers=auth)
+        r = api.get(f"{BASE_URL}/api/stores?city=SOUTH ZONE", headers=auth)
         assert r.status_code == 200
-        assert all(s["city"] == "Bangalore" for s in r.json())
+        assert all(s["city"] == "SOUTH ZONE" for s in r.json())
 
     def test_create_and_duplicate(self, api, auth):
         code = f"TEST-{uuid.uuid4().hex[:6].upper()}"
@@ -108,54 +151,79 @@ class TestStores:
         assert r.status_code == 201, r.text
         created = r.json()
         assert created["store_code"] == code
-        assert created["receiver_token"] and len(created["receiver_token"]) >= 16
+
+        # No Store response carries the shared Receiver credential any more.
+        #
+        # This test used to read it straight out of the create response and use
+        # it to prove that regeneration invalidated the old value. That worked,
+        # and it worked because every authenticated caller could read the
+        # Receiver credential of every Store out of ordinary Store responses -
+        # a read-only VIEWER included, once roles exist. The page never rendered
+        # it; it sat in the body, so in browser memory, devtools, any HAR file
+        # and any proxy log.
+        #
+        # This is a black-box test against a remote server, so it now asserts
+        # the black-box contract: the secret is not there. Rotation semantics -
+        # old value stops working, new value starts - need the value itself, so
+        # they are proven where the database is reachable, in
+        # test_receiver_simulator.py.
+        assert "receiver_token" not in created, "the Store API returned a Receiver credential"
 
         # duplicate
         r2 = api.post(f"{BASE_URL}/api/stores", headers=auth, json=payload)
         assert r2.status_code == 409
 
-        # verify persisted via list
+        # verify persisted via list, and that the list is secret-free too
         r3 = api.get(f"{BASE_URL}/api/stores?q={code}", headers=auth)
-        assert any(s["store_code"] == code for s in r3.json())
+        listed = r3.json()
+        assert any(s["store_code"] == code for s in listed)
+        for entry in listed:
+            assert "receiver_token" not in entry
 
-        # regenerate token
-        old_tok = created["receiver_token"]
+        # regeneration still works and still says nothing
         r4 = api.post(f"{BASE_URL}/api/stores/{created['id']}/regenerate-token", headers=auth)
         assert r4.status_code == 200
-        new_tok = r4.json()["receiver_token"]
-        assert new_tok != old_tok
+        assert "receiver_token" not in r4.json(), (
+            "regenerate-token handed the new credential back through an ordinary "
+            "Store response"
+        )
 
-        # verify old token no longer valid
-        r5 = api.get(f"{BASE_URL}/api/receiver/verify", params={"token": old_tok})
-        assert r5.status_code == 200
-        assert r5.json()["ok"] is False
-
-        # new token works
-        r6 = api.get(f"{BASE_URL}/api/receiver/verify", params={"token": new_tok})
-        assert r6.status_code == 200 and r6.json()["ok"] is True
-
-        # soft delete (disable)
+        # DELETE means archive: the row, its Devices, its sessions and its
+        # events all stay readable. Nothing is removed.
         r7 = api.delete(f"{BASE_URL}/api/stores/{created['id']}", headers=auth)
         assert r7.status_code == 200
 
-        # new token now invalid because store inactive
-        r8 = api.get(f"{BASE_URL}/api/receiver/verify", params={"token": new_tok})
-        assert r8.json()["ok"] is False
+        # It leaves the ordinary Store list, and its history is still there.
+        listed = api.get(f"{BASE_URL}/api/stores", headers=auth).json()
+        assert not any(s["store_code"] == code for s in listed)
+        archived = api.get(f"{BASE_URL}/api/stores?include_archived=true", headers=auth).json()
+        assert any(s["store_code"] == code for s in archived)
 
 
-# ------------- receiver verify -------------
-class TestReceiverVerify:
-    def test_invalid_token(self, api):
+# ------------- the removed query-token endpoints -------------
+class TestNoCredentialTravelsInAUrl:
+    """GET /api/receiver/verify?token=... and POST /api/receiver/event are gone.
+
+    The first put a raw Store credential in a query string, which reaches access
+    logs, proxy logs, browser history, copied links and Referer headers - anyone
+    who could read one log line could connect a Receiver as that Store. The
+    second took the same credential in a body from an unauthenticated caller.
+
+    Nothing that ships called either: the Agent and the hardware pilot both
+    authenticate over the Receiver WebSocket with a header. So they were deleted
+    rather than moved to one, and these tests keep them deleted.
+    """
+
+    def test_the_verify_endpoint_is_gone(self, api):
         r = api.get(f"{BASE_URL}/api/receiver/verify", params={"token": "not-a-real-token"})
-        assert r.status_code == 200
-        assert r.json()["ok"] is False
+        assert r.status_code == 404
 
-    def test_valid_token(self, api, stores):
-        s = stores[0]
-        r = api.get(f"{BASE_URL}/api/receiver/verify", params={"token": s["receiver_token"]})
-        assert r.status_code == 200
-        assert r.json()["ok"] is True
-        assert r.json()["store"]["id"] == s["id"]
+    def test_the_event_endpoint_is_gone(self, api):
+        r = api.post(
+            f"{BASE_URL}/api/receiver/event",
+            json={"token": "not-a-real-token", "event_type": "connected"},
+        )
+        assert r.status_code == 404
 
 
 # ------------- broadcast flow -------------
@@ -273,16 +341,20 @@ class TestLogs:
 class TestWebsocket:
     def test_ws_receiver_invalid(self):
         async def go():
-            uri = f"{WS_BASE}/api/ws/receiver/BADTOKEN_XYZ"
+            uri = f"{WS_BASE}/api/ws/receiver"
             try:
-                async with websockets.connect(uri, open_timeout=8):
+                async with websockets.connect(
+                    uri,
+                    additional_headers={"Authorization": "Bearer BADTOKEN_XYZ"},
+                    open_timeout=8,
+                ):
                     return "connected"
             except websockets.exceptions.InvalidStatus as e:
                 return f"http-{e.response.status_code}"
             except websockets.exceptions.ConnectionClosed as e:
                 return f"closed-{e.code}"
             except Exception as e:
-                return f"err-{type(e).__name__}-{e}"
+                return f"err-{type(e).__name__}"
 
         result = asyncio.run(go())
         # Starlette converts pre-accept close() into HTTP 403 during handshake.
@@ -297,8 +369,16 @@ class TestWebsocket:
         tok1, tok2 = s1["receiver_token"], s2["receiver_token"]
 
         async def scenario():
-            ws1 = await websockets.connect(f"{WS_BASE}/api/ws/receiver/{tok1}", open_timeout=10)
-            ws2 = await websockets.connect(f"{WS_BASE}/api/ws/receiver/{tok2}", open_timeout=10)
+            ws1 = await websockets.connect(
+                f"{WS_BASE}/api/ws/receiver",
+                additional_headers={"Authorization": f"Bearer {tok1}"},
+                open_timeout=10,
+            )
+            ws2 = await websockets.connect(
+                f"{WS_BASE}/api/ws/receiver",
+                additional_headers={"Authorization": f"Bearer {tok2}"},
+                open_timeout=10,
+            )
             try:
                 # allow server to register
                 await asyncio.sleep(1.0)

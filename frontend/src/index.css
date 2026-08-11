@@ -2,6 +2,25 @@
 @tailwind components;
 @tailwind utilities;
 
+/* The application shell is exactly one viewport tall and never scrolls.
+ *
+ * html, body and #root had no height or overflow rules at all, so they were
+ * height:auto / overflow:visible - free to grow past the viewport and produce a
+ * SECOND vertical scrollbar beside the one that belongs to main. Scrolling that
+ * outer one carried the whole UI, header included, upward.
+ *
+ * Constraining all three makes the outer scroll impossible rather than merely
+ * absent. This is deliberately not a hidden scrollbar: there is one scroll
+ * container, not two with one of them painted out.
+ *
+ * The public listener page sets its own min-height and is unaffected: it has no
+ * shell to constrain.
+ */
+html, body, #root {
+    height: 100%;
+    overflow: hidden;
+}
+
 html, body {
     margin: 0;
     font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;

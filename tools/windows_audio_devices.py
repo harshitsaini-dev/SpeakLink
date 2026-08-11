@@ -1,0 +1,284 @@
+"""Read-only Windows audio output-device inventory and safe selection.
+
+Why this exists: the installed FFmpeg build has **no audio output muxer** at
+all (its ``-devices`` list contains only the ``caca`` video muxer), and
+``ffplay`` only exposes DirectShow *capture* device options while playing to
+whatever SDL considers the default. Neither can send audio to one explicitly
+chosen Windows endpoint, and the pilot must never silently use the default
+device. This module therefore wraps PortAudio (via ``sounddevice``) purely to
+enumerate output devices and to resolve exactly one of them.
+
+Safety rules enforced here:
+
+- Enumeration is read-only. It never opens a stream, never plays a sound and
+  never changes the Windows default device.
+- Selection is exact. A stable ``index:N`` selector is preferred; an exact
+  device name is accepted only when it matches exactly one output device.
+- Partial names, different casing and "first match wins" are all refused. On a
+  real Windows machine the same device name commonly appears under several
+  host APIs, so guessing would silently pick the wrong endpoint.
+- A Bluetooth endpoint may be listed, but it can only ever be reached through
+  an explicit selector, never automatically.
+
+Nothing here handles credentials, and a device name is never an identity.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Iterable
+
+
+class AudioDeviceError(RuntimeError):
+    """Base class for controlled, secret-free audio device failures."""
+
+
+class DeviceEnumerationUnsupportedError(AudioDeviceError):
+    """Raised when the audio backend cannot enumerate devices at all."""
+
+
+class DeviceNotFoundError(AudioDeviceError):
+    """Raised when no output device matches the supplied selector exactly."""
+
+
+class AmbiguousDeviceError(AudioDeviceError):
+    """Raised when a selector matches more than one output device."""
+
+
+INDEX_SELECTOR_PREFIX = "index:"
+# A verified selector pins an index to the exact name that was there when the
+# operator chose it: "index:7@Headphones ()".
+VERIFIED_SELECTOR_SEPARATOR = "@"
+
+# Heuristic markers for a wireless endpoint. PortAudio does not expose the
+# transport, and hardware validation showed a Bluetooth A2DP endpoint named
+# only "Headphones (Nirvana X TWS Stereo)" - no obvious marker at all. This
+# list is therefore a warning aid, never a guarantee: the operator still has
+# to confirm the endpoint is the wired one.
+_WIRELESS_MARKERS = (
+    "bluetooth", "bthhfenum", "hands-free", "handsfree",
+    "a2dp", "tws", "airpods", "wireless", "earbud",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class OutputDevice:
+    """One playback endpoint. Contains no credential and no identity."""
+
+    index: int
+    name: str
+    host_api: str
+    max_output_channels: int
+    default_samplerate: int
+    is_default: bool
+
+    @property
+    def selector(self) -> str:
+        """The stable selector an operator should copy."""
+        return f"{INDEX_SELECTOR_PREFIX}{self.index}"
+
+    @property
+    def looks_wireless(self) -> bool:
+        """Heuristic only. A false negative is possible, so the operator must
+        still confirm the endpoint is the wired one."""
+        lowered = self.name.lower()
+        return any(marker in lowered for marker in _WIRELESS_MARKERS)
+
+    # Kept for readability at call sites that specifically mean Bluetooth.
+    looks_like_bluetooth = looks_wireless
+
+    @property
+    def verified_selector(self) -> str:
+        """Index pinned to the exact name, so a renumber fails closed."""
+        return f"{self.selector}{VERIFIED_SELECTOR_SEPARATOR}{self.name}"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "default_samplerate": self.default_samplerate,
+            "host_api": self.host_api,
+            "index": self.index,
+            "is_default": self.is_default,
+            "max_output_channels": self.max_output_channels,
+            "name": self.name,
+            "selector": self.selector,
+            "verified_selector": self.verified_selector,
+        }
+
+
+def _default_backend():
+    try:
+        import sounddevice
+    except Exception as error:  # pragma: no cover - depends on the machine
+        raise DeviceEnumerationUnsupportedError(
+            "the sounddevice/PortAudio backend is not available, so Windows "
+            "output devices cannot be enumerated"
+        ) from error
+    return sounddevice
+
+
+def list_output_devices(*, backend: Any | None = None) -> tuple[OutputDevice, ...]:
+    """Enumerate playback devices. Opens nothing and changes nothing."""
+    audio = backend or _default_backend()
+    try:
+        hostapis = audio.query_hostapis()
+        devices = audio.query_devices()
+    except AudioDeviceError:
+        raise
+    except Exception as error:
+        raise DeviceEnumerationUnsupportedError(
+            "the audio backend could not enumerate output devices"
+        ) from error
+
+    try:
+        default_output = audio.default.device[1]
+    except Exception:
+        default_output = None
+
+    collected: list[OutputDevice] = []
+    for index, device in enumerate(devices):
+        channels = int(device.get("max_output_channels", 0) or 0)
+        if channels <= 0:
+            continue  # capture-only endpoint
+        host_index = int(device.get("hostapi", 0) or 0)
+        try:
+            host_api = str(hostapis[host_index]["name"])
+        except (IndexError, KeyError, TypeError):
+            host_api = "unknown"
+        collected.append(
+            OutputDevice(
+                index=index,
+                name=str(device.get("name", "")).strip(),
+                host_api=host_api,
+                max_output_channels=channels,
+                default_samplerate=int(float(device.get("default_samplerate", 0) or 0)),
+                is_default=(index == default_output),
+            )
+        )
+    return tuple(collected)
+
+
+def resolve_output_device(
+    selector: str | None,
+    *,
+    backend: Any | None = None,
+    devices: Iterable[OutputDevice] | None = None,
+) -> OutputDevice:
+    """Resolve exactly one output device. Fails closed on anything ambiguous."""
+    if not isinstance(selector, str) or not selector.strip():
+        raise AudioDeviceError(
+            "an explicit output device selector is required; the pilot never "
+            "picks a device for you"
+        )
+    cleaned = selector.strip()
+    available = tuple(devices) if devices is not None else list_output_devices(backend=backend)
+
+    if cleaned.lower().startswith(INDEX_SELECTOR_PREFIX):
+        remainder = cleaned[len(INDEX_SELECTOR_PREFIX):]
+        expected_name = None
+        if VERIFIED_SELECTOR_SEPARATOR in remainder:
+            raw_index, expected_name = remainder.split(VERIFIED_SELECTOR_SEPARATOR, 1)
+            raw_index = raw_index.strip()
+            expected_name = expected_name.strip()
+        else:
+            raw_index = remainder.strip()
+        if not raw_index.isdigit():
+            raise DeviceNotFoundError(f"{cleaned!r} is not a valid index selector")
+        wanted = int(raw_index)
+        for device in available:
+            if device.index != wanted:
+                continue
+            if expected_name is not None and device.name != expected_name:
+                raise DeviceNotFoundError(
+                    f"index {wanted} is no longer {expected_name!r}; it is now "
+                    f"{device.name!r}. Windows renumbers devices whenever one is "
+                    "added or removed, so this selector was refused rather than "
+                    "opening the wrong endpoint. Run the device list again."
+                )
+            return device
+        raise DeviceNotFoundError(
+            f"no output device has index {wanted}; the list may have been "
+            "renumbered. Run the device list command again."
+        )
+
+    # Exact name match only. No partial matching, no case folding: the same
+    # display name legitimately appears under several host APIs.
+    matches = [device for device in available if device.name == cleaned]
+    if not matches:
+        raise DeviceNotFoundError(
+            f"no output device is named exactly {cleaned!r}; copy the exact name "
+            "or, better, the stable index selector from the device list"
+        )
+    if len(matches) > 1:
+        options = ", ".join(f"{d.selector} ({d.host_api})" for d in matches)
+        raise AmbiguousDeviceError(
+            f"{cleaned!r} matches {len(matches)} output devices, so it is ambiguous. "
+            f"Use one of these stable selectors instead: {options}"
+        )
+    return matches[0]
+
+
+def format_device_table(devices: Iterable[OutputDevice]) -> str:
+    """Human-readable inventory. Never prints a credential."""
+    rows = list(devices)
+    lines = [
+        "Windows audio OUTPUT devices (read-only; nothing was opened or changed)",
+        "",
+        f"{'SELECTOR':<12} {'NAME':<46} {'HOST API':<22} {'CH':>3} {'RATE':>7}  FLAGS",
+        f"{'-' * 12} {'-' * 46} {'-' * 22} {'-' * 3} {'-' * 7}  {'-' * 20}",
+    ]
+    for device in rows:
+        flags = []
+        if device.is_default:
+            flags.append("current-default")
+        if device.looks_wireless:
+            flags.append("wireless?")
+        lines.append(
+            f"{device.selector:<12} {device.name[:46]:<46} {device.host_api[:22]:<22} "
+            f"{device.max_output_channels:>3} {device.default_samplerate:>7}  "
+            f"{','.join(flags)}"
+        )
+    if not rows:
+        lines.append("(no output devices were reported)")
+    lines.extend([
+        "",
+        "Bare indices are NOT stable: Windows renumbers every device whenever one",
+        "is added or removed, so a saved 'index:N' can later mean a different",
+        "endpoint. Prefer the VERIFIED selector below, which pins the index to the",
+        "exact name and fails closed after a renumber:",
+        "",
+        *[f"    {device.verified_selector}" for device in rows],
+        "",
+        "Prefer a wired USB audio adapter or a 3.5 mm output.",
+        "'wireless?' is a name heuristic only - it can miss a wireless endpoint,",
+        "so confirm the device is the wired one yourself.",
+        "The pilot never picks a device for you and never changes the Windows default.",
+        "A device being listed does not mean an amplifier or speaker is connected.",
+    ])
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="windows_audio_devices",
+        description=(
+            "List Windows audio output devices. Read-only: it opens no stream, "
+            "plays no sound and never changes the Windows default device."
+        ),
+    )
+    parser.add_argument("action", choices=("list",), nargs="?", default="list")
+    parser.parse_args(argv)
+
+    try:
+        print(format_device_table(list_output_devices()))
+    except AudioDeviceError as error:
+        import sys
+
+        print(f"Device enumeration refused: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    raise SystemExit(main())

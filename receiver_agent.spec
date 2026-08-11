@@ -1,0 +1,186 @@
+# PyInstaller spec for SpeakLinkReceiver.exe
+#
+# A Store desktop must need nothing installed: no Python, no pip, no virtual
+# environment, no source checkout, no Node. This produces a one-folder package
+# that can be copied to a till and run.
+#
+# One-folder rather than one-file, deliberately. A one-file build unpacks itself
+# into %TEMP% on every launch, which means: a slower start, a directory that
+# antivirus and cleanup tools both take an interest in, and - the one that
+# matters here - the packaged FFmpeg ending up somewhere different from the
+# executable each run. The Agent resolves FFmpeg relative to its own location,
+# and a stable location is worth more than a single file.
+#
+# THE IMPORT PROBLEM THIS SOLVES
+#
+# tools/audio_receiver_pilot.py reaches the backend's audio modules by putting
+# ../backend on sys.path at import time:
+#
+#     BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
+#     sys.path.insert(0, str(BACKEND_DIR))
+#     from audio_protocol import ...
+#     from audio_streaming import ...
+#
+# In a frozen bundle there is no ../backend, so that insert finds nothing and
+# the imports would fail. Naming them as hidden imports with `backend` on the
+# search path bundles them as ordinary top-level modules, so the same import
+# statements resolve - and the now-pointless sys.path.insert is harmless.
+#
+# `tools` is a namespace package with no __init__.py, which is why each module
+# under it is named individually rather than collected as a package.
+
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_dynamic_libs
+
+REPOSITORY_ROOT = Path(SPECPATH).resolve()
+
+#: The SpeakLink Windows icon, derived from the website favicon by
+#: tools/build_windows_icon.py. One asset for every shipped executable: a
+#: build that quietly fell back to PyInstaller's default icon would put a
+#: Python logo on a Store PC desktop.
+ICON = str(REPOSITORY_ROOT / "assets" / "speaklink.ico")
+BACKEND = REPOSITORY_ROOT / "backend"
+TOOLS = REPOSITORY_ROOT / "tools"
+
+# sounddevice is a single module, not a package, so PyInstaller's collectors
+# find nothing for it. Its PortAudio DLLs live in a separate _sounddevice_data
+# package and have to be named. Without them, hardware sink mode raises at the
+# moment an operator tries to use it - null-sink mode never touches them.
+portaudio = collect_dynamic_libs("_sounddevice_data")
+_data_root = BACKEND / ".venv" / "Lib" / "site-packages" / "_sounddevice_data"
+if not portaudio and _data_root.exists():
+    portaudio = [
+        (str(dll), "_sounddevice_data/portaudio-binaries")
+        for dll in (_data_root / "portaudio-binaries").glob("*.dll")
+    ]
+
+analysis = Analysis(
+    [str(TOOLS / "receiver_agent.py")],
+    pathex=[str(REPOSITORY_ROOT), str(BACKEND), str(TOOLS)],
+    binaries=portaudio,
+    datas=[],
+    hiddenimports=[
+        # Reached through tools/ which has no __init__.py.
+        "tools.receiver_agent",
+        "tools.audio_receiver_pilot",
+        "tools.receiver_credential_store",
+        "tools.windows_audio_devices",
+        # Windows master volume/mute. Imported lazily inside functions so the
+        # analyser cannot see them, and pycaw reaches Core Audio through
+        # comtypes' generated COM wrappers - which PyInstaller also cannot
+        # infer, hence naming the transport explicitly alongside it.
+        "tools.windows_endpoint_volume",
+        "tools.windows_endpoint_restore",
+        "pycaw",
+        "pycaw.pycaw",
+        "comtypes",
+        "comtypes.client",
+        "comtypes.stream",
+        # Backend modules imported after a sys.path insert that does not exist
+        # in a bundle. See the note above.
+        "audio_protocol",
+        "audio_streaming",
+        # Imported lazily inside functions, so the analyser cannot see them.
+        "websockets",
+        "websockets.client",
+        "websockets.asyncio.client",
+        "sounddevice",
+        "_sounddevice_data",
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    # Nothing that would drag the HQ server, its database or its test suite
+    # onto a till. A Store desktop has no business carrying any of it.
+    excludes=[
+        "server", "db", "models", "schemas", "seed", "auth", "rbac",
+        "migrations", "store_lifecycle", "receiver_primary_device",
+        "fastapi", "starlette", "sqlalchemy", "uvicorn", "jwt", "bcrypt",
+        "pytest", "_pytest", "requests",
+        "tkinter", "matplotlib", "numpy", "PIL",
+    ],
+    noarchive=False,
+    optimize=0,
+)
+
+pyz = PYZ(analysis.pure)
+
+# TWO EXECUTABLES, ONE CODEBASE, AND WHY
+#
+# Windows decides whether a process gets a console window from a flag in the
+# executable header, not from how it was launched. Task Scheduler's "hidden"
+# setting hides the task in its own UI; it does not stop a console application
+# creating a console. So a console-mode Receiver started at logon puts a black
+# window on the Store counter, and a member of staff eventually closes it.
+#
+# The obvious fix - build the whole thing windowed - breaks the commands an
+# operator and a technician actually need: `list-audio-devices` prints a table,
+# `enrol` reads a code from a hidden prompt, `status` and `diagnose` print
+# reports. A windowed process has no stdout to print any of it to.
+#
+# So the package ships both, built from the same analysis so they cannot drift:
+#
+#   SpeakLinkReceiver.exe            console - enrol, status, list-audio-devices,
+#                                   diagnose, and anything a person runs and reads
+#   SpeakLinkReceiverBackground.exe  windowed - what the scheduled task runs, and
+#                                   the only one that must never show a window
+#
+# The background executable writes everything to the rotating log file instead,
+# which is why file logging had to exist before this was possible.
+console_executable = EXE(
+    pyz,
+    analysis.scripts,
+    [],
+    exclude_binaries=True,
+    name="SpeakLinkReceiver",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    icon=ICON,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+background_executable = EXE(
+    pyz,
+    analysis.scripts,
+    [],
+    exclude_binaries=True,
+    name="SpeakLinkReceiverBackground",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    # A windowed build normally pops a message box on an unhandled exception.
+    # On an unattended Store counter that is a dialog nobody will ever close,
+    # and the Receiver would sit there dead behind it. Failures belong in the
+    # log file.
+    disable_windowed_traceback=True,
+    argv_emulation=False,
+    target_arch=None,
+    # Branded too. It is windowless, but it is the process an operator sees in
+    # Task Manager and the one Task Scheduler lists - both show the executable
+    # icon, and a Python logo there says the machine is running something other
+    # than SpeakLink.
+    icon=ICON,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+collection = COLLECT(
+    console_executable,
+    background_executable,
+    analysis.binaries,
+    analysis.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="SpeakLinkReceiver",
+)

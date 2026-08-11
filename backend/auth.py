@@ -28,10 +28,16 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(user_id: int, username: str) -> str:
+def create_access_token(user_id: int, username: str, session_version: int = 1) -> str:
     payload = {
         "sub": str(user_id),
         "username": username,
+        # The whole revocation mechanism. Anything that must end this account's
+        # sessions - a password change or reset, a role change, a disable, an
+        # archive - increments the stored value, and every request below
+        # compares the two. Without it a token stays valid for the rest of its
+        # eight hours no matter what an administrator just did.
+        "sv": int(session_version),
         "exp": datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS),
         "type": "access",
     }
@@ -48,13 +54,27 @@ def decode_token(token: str) -> dict:
 
 
 def _extract_token(request: Request) -> str:
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        return auth[7:]
-    # fallback: query param (used by WebSocket)
-    qtoken = request.query_params.get("token")
-    if qtoken:
-        return qtoken
+    """Read the access token from the Authorization header, and nowhere else.
+
+    This used to fall back to ``?token=`` in the query string, for the benefit
+    of WebSockets. The HQ sockets now authenticate with single-use tickets, so
+    the fallback protected nothing and was simply a second, worse way into
+    every authenticated route.
+
+    Worse, because a URL is the least private part of a request: it reaches
+    application access logs, reverse-proxy logs, browser history, copied links,
+    monitoring tools, screenshots and Referer headers. A reusable token sitting
+    in one is a session anybody who can read a log line can take over. Ordinary
+    HTTP has no excuse either - every client here, browsers included, can set a
+    header perfectly well.
+
+    The token is not echoed in the refusal, so a bad value cannot be read back
+    out of an error response or a log that records it.
+    """
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, credential = authorization.partition(" ")
+    if scheme == "Bearer" and credential.strip():
+        return credential
     raise HTTPException(status_code=401, detail="Not authenticated")
 
 
@@ -66,4 +86,12 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> HQUser:
     user = db.query(HQUser).filter(HQUser.id == int(payload["sub"])).first()
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found or inactive")
+
+    # A token minted before the account changed is no longer this account's
+    # token. Tokens with no version at all are from before this existed and are
+    # refused rather than trusted - the alternative is a permanent bypass that
+    # anybody holding an older token keeps forever.
+    current_version = int(getattr(user, "session_version", 1) or 1)
+    if int(payload.get("sv", 0)) != current_version:
+        raise HTTPException(status_code=401, detail="Session is no longer valid")
     return user

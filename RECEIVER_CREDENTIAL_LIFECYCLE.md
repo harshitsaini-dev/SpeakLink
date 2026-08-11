@@ -1,0 +1,798 @@
+# SpeakLink Receiver Credential Lifecycle Design
+
+Status: Phase 1 schema and isolated lifecycle services implemented; controlled cutover rehearsal added while the default runtime remains legacy-only
+
+Last updated: 2026-07-24
+
+## Scope and security goals
+
+This design separates a physical/logical Store, an installed Receiver Device,
+and each credential issued to that device. It covers enrollment, hashing at
+rest, rotation, revocation, versioning, audit, and a staged SQLite migration.
+It does not implement the Windows Receiver Agent, audio, LinkGuard, frontend
+changes, or a database migration.
+
+Core rules:
+
+- A Store may have zero, one, or multiple Receiver Devices.
+- Store operational status is never credential or device status.
+- Only keyed token hashes are stored after migration.
+- A raw credential is returned exactly once at enrollment or rotation.
+- Raw credentials, Authorization headers, and token hashes are forbidden from
+  logs and audit metadata.
+- Authentication failures remain indistinguishable.
+- Revocation prevents new authentication immediately. Closing an already
+  connected device is a separate manager action performed after the revocation
+  transaction commits.
+- A Store may have at most two active Receiver Devices. This is enforced by a
+  pure policy helper now and must be enforced transactionally by the Phase 2
+  device service.
+- Credentials are initially non-expiring but explicitly revocable.
+- Planned rotation grace is capped at 15 minutes; compromise rotation uses no
+  grace period.
+- Credential audit retention is at least 12 months.
+
+## Current credential behavior
+
+There is currently no Receiver Device entity. `stores.receiver_token` is a
+non-null, unique, indexed `String(64)`. Seeded and newly created Stores receive
+`uuid.uuid4().hex`; regeneration immediately overwrites the value. A Store can
+therefore have only one current raw receiver credential and no credential
+history, version, expiry, revocation timestamp, rotation relationship, or
+device identity.
+
+Current backend exposure and use:
+
+| Location | Current behavior |
+| --- | --- |
+| `seed.py` | Generates one raw token for each seeded Store. |
+| `POST /api/stores` | ~~Generates a raw token and returns it in `StoreOut`.~~ **Fixed `532f226`** — `StoreOut` no longer carries it. |
+| `GET /api/stores` and Store responses | ~~Return every raw token to authenticated HQ callers.~~ **Fixed `532f226`** — proved live first: every authenticated caller, and once roles exist every read-only VIEWER, could read all 44 Stores' credentials out of the response body. |
+| `POST /api/stores/{id}/regenerate-token` | ~~Immediately replaces and returns the raw token.~~ **Fixed `532f226`** — still rotates, answers through the same secret-free schema. |
+| `GET /api/receiver/verify?token=...` | ~~Development-only query-token verification.~~ **Removed** — a raw Store credential in a URL reaches access logs, proxy logs, browser history, copied links and `Referer` headers. |
+| `POST /api/receiver/event` | ~~Accepts a raw token in the JSON body.~~ **Removed** — unauthenticated, and it wrote a row against whichever Store the body named. |
+| `WS /api/ws/receiver` | Compares the Bearer value with active Store raw tokens **and Device credentials**, Device first. This is now the only way a Receiver authenticates. |
+
+Both endpoints were deleted rather than moved to `Authorization: Bearer`, because
+nothing that ships called either. `tools/receiver_agent.py` and
+`tools/audio_receiver_pilot.py` both authenticate over the Receiver WebSocket
+with a header; the only caller was `frontend/src/pages/Receiver.jsx`, unrouted
+since the query-token work and therefore never bundled. Re-plumbing an endpoint
+no client uses would have preserved the attack surface and delivered nothing.
+
+The legacy `stores.receiver_token` **column remains**: Receivers on the shared
+token still authenticate with it during the migration period. Only the API
+stopped saying it out loud.
+
+Current frontend exposure:
+
+- Store Management receives every `receiver_token`, builds a copyable
+  `/receiver?token=...` URL, and invokes immediate regeneration.
+- The legacy Receiver page reads the raw token from its URL, calls the query
+  verification endpoint, includes the token in event bodies, and still builds
+  the removed token-path WebSocket URL.
+- These browser paths are development-only and are not a production receiver
+  enrollment mechanism.
+
+Tests in `backend_test.py`, `test_receiver_ws_auth.py`,
+`test_receiver_ws_contract.py`, and `test_receiver_simulator.py` retrieve raw
+Store tokens. The pure receiver contract test also proves acknowledgement
+payloads reject a `receiver_token` field.
+
+## Existing relational and audit facilities
+
+Current foreign keys are:
+
+- `broadcast_sessions.started_by -> hq_users.id`
+- `broadcast_targets.session_id -> broadcast_sessions.id`
+- `broadcast_targets.store_id -> stores.id`
+- `receiver_events.store_id -> stores.id`
+
+SQLite connections enable foreign keys and WAL. Unique/indexed fields include
+Store code, raw receiver token, HQ username, Store city/region, broadcast
+session status, target Store/session IDs, receiver-event Store ID, and system
+log level. `ix_receiver_events_store_time` indexes Store and descending event
+time.
+
+`receiver_events` is useful for runtime connection/playback history but is
+Store-scoped and has unstructured `details`. `system_logs` is also unstructured.
+Neither can be the canonical credential audit because neither identifies a
+device and credential safely.
+
+## Proposed token format and hashing
+
+New credentials use this shape:
+
+```text
+speaklink_rcv_v<credential-version>.<credential-public-id>.<random-secret>
+```
+
+- The public ID is independent random material and safe to display.
+- The secret contains at least 256 bits generated by Python `secrets`.
+- The public ID and version are routing/display metadata, not authentication
+  proof.
+- Store the full-token HMAC-SHA-256 digest using a dedicated server-side key:
+  `hmac-sha256$v<hash-key-version>$<digest>`.
+- Store the hash-key version separately as an indexed integer as well. Hash
+  keys live in a secret manager/environment, never SQLite or Git.
+- Compare candidate and stored digests with `hmac.compare_digest`.
+
+The HMAC is deterministic, allowing indexed digest lookup without scanning all
+credentials. High token entropy already resists offline guessing; the external
+HMAC key adds defense if the database alone is stolen.
+
+Legacy UUID-hex tokens are accepted only by explicitly named migration helpers.
+The new parser never silently treats a legacy token as a new credential.
+
+## Phase 1 additive data model
+
+`backend/migrations.py` now creates the following schema through migration
+version 1. It is not registered with application startup and is not created by
+`Base.metadata.create_all`.
+
+### `receiver_devices`
+
+| Column | Proposed rule |
+| --- | --- |
+| `id` | Integer primary key. |
+| `public_id` | Non-secret random device ID; unique and indexed. |
+| `store_id` | Required FK to `stores.id`, `ON DELETE RESTRICT`, indexed. |
+| `display_name` | Bounded operator-facing name. |
+| `status` | `active`, `disabled`, or `retired`; independent of Store status. |
+| `enrolled_at` | UTC server time. |
+| `disabled_at` | Nullable UTC server time. |
+| `created_by` | Nullable FK to `hq_users.id` only for migration/system-created rows; required by application for new enrollment. |
+| `created_at`, `updated_at` | UTC server times. |
+
+A Store may have multiple devices. Disabling a Store should block all its
+devices, while disabling one device must not change Store status or other
+devices.
+
+Indexes:
+
+- unique `receiver_devices(public_id)`
+- `receiver_devices(store_id, status)`
+
+### `receiver_credentials`
+
+| Column | Proposed rule |
+| --- | --- |
+| `id` | Integer primary key. |
+| `device_id` | Required FK to `receiver_devices.id`, `ON DELETE RESTRICT`. |
+| `public_id` | Independent non-secret display ID; unique and indexed. |
+| `credential_version` | Positive, monotonically increasing per device. |
+| `token_format` | `legacy_uuid_hex` or `speaklink_rcv`; bounded enum/check. |
+| `token_hash` | Unique HMAC digest; never returned. |
+| `hash_key_version` | Positive key identifier used to select the external HMAC key. |
+| `issued_at` | Required UTC server time. |
+| `expiry_policy` | Explicit `expires_at` or `non_expiring`. |
+| `expires_at` | Required only for the expiring policy. |
+| `revoked_at` | Nullable UTC server time. |
+| `last_used_at` | Nullable, coalesced server time; not updated per heartbeat. |
+| `created_by` | Nullable FK for migration/system rows; required for new HQ actions. |
+| `replaces_credential_id` | Nullable self-FK identifying rotation ancestry. |
+| `replaced_at` | Nullable UTC rotation time. |
+| `accept_until` | Nullable end of the old credential grace window. |
+| `status` | `active`, `superseded`, `revoked`, or `expired`. |
+| `created_at` | UTC server time. |
+
+Constraints and indexes:
+
+- unique `(device_id, credential_version)`
+- unique `token_hash`
+- unique `public_id`
+- index `(device_id, status)`
+- index `(hash_key_version, token_hash)`
+- index `expires_at` and `revoked_at`
+- checks for positive versions and consistent expiry/replacement timestamps
+
+Rotation overlap means two credentials may temporarily authenticate, so the
+database must not enforce only one active row per device. Application logic and
+transactions enforce the bounded overlap.
+
+### `receiver_credential_events`
+
+Proposed canonical audit fields:
+
+- integer primary key
+- `event_type`: enrolled, rotated, revoked, expired, migrated, authenticated,
+  authentication_failed, device_disabled, or key_rehashed
+- device, credential, Store, and actor foreign keys where applicable
+- UTC `event_at`
+- bounded `outcome` and reason code
+- correlation ID
+- sanitized JSON metadata containing only allowlisted public IDs, integer IDs,
+  versions, migration phase, outcome, and bounded reason
+
+Indexes:
+
+- `(device_id, event_at DESC)`
+- `(credential_id, event_at DESC)`
+- `(store_id, event_at DESC)`
+- `(event_type, event_at DESC)`
+
+Never store raw tokens, Authorization headers, secrets, token hashes, exception
+text, or arbitrary request bodies in audit metadata. Authentication-failure
+events should be rate-limited/aggregated and must not identify a guessed device.
+
+### Migration state
+
+Add a singleton/versioned migration record with an explicit state such as:
+
+```text
+legacy_only -> backfilled -> dual_verify -> hash_only -> raw_neutralized
+```
+
+The verifier follows this database state, not an accidental environment
+default. Invalid or unknown states fail closed.
+
+## Lifecycle behavior
+
+### Enrollment
+
+1. Authorize an HQ operator for receiver enrollment.
+2. Create the Receiver Device and first credential in one transaction.
+3. Write a structured enrollment audit event in the same transaction.
+4. Commit.
+5. Return the raw credential exactly once over TLS to a controlled client.
+6. If delivery is lost, rotate; never add an endpoint that reads the raw value.
+
+### Phase 2 isolated enrollment service
+
+`backend/receiver_device_service.py` implements the service-layer portion of
+enrollment using only an explicitly supplied SQLite engine. It is not imported
+by FastAPI, startup, Store creation, WebSocket authentication, the simulator,
+or any frontend code. Credentials produced by this service in isolated tests
+are therefore not accepted by the current production authentication path.
+
+The service fails closed unless migration version 1, all required Phase 1
+tables/columns/indexes/named constraints, SQLite foreign-key enforcement, and
+the singleton `legacy_only` state are present and consistent. It also requires
+an existing active Store and active HQ actor. Broad role authorization remains
+an API-layer responsibility for a later task.
+
+Enrollment uses one `BEGIN IMMEDIATE` transaction. After acquiring the write
+lock it counts only `active` devices, rejects enrollment when two are already
+active, generates UUID device and credential public IDs plus a high-entropy
+credential, stores its versioned HMAC hash, and inserts `device_enrolled` and
+`credential_issued` audit events. A disabled or retired device does not consume
+an active-device slot; disabling is a separate future service operation.
+
+The initial credential uses version 1 and `speaklink_rcv` format. Absence of an
+expiry produces the explicit `non_expiring` policy; a supplied expiry must be
+future, timezone-aware UTC and produces the `expires_at` policy. The HMAC key
+and version are injected, and only the key version is persisted.
+
+`ReceiverEnrollmentResult.take_raw_credential()` releases the raw credential
+once and permanently clears the result's reference. Its string representation
+is redacted. There is intentionally no retrieval helper. If the caller loses
+the response, recovery is a future replacement/rotation operation—not reading
+the previous credential.
+
+Any validation, constraint, audit, injected test failure, or persistence error
+rolls back the device, credential, and both audit rows. Enrollment never changes
+`stores.receiver_token`, Store runtime status, `schema_migrations`, or receiver
+credential migration state. Audit JSON is created through the existing strict
+allowlist and contains only public identifiers, integer IDs, version, and fixed
+outcome; it excludes tokens, hashes, keys, Authorization values, passwords, and
+free-form exception details.
+
+### Authentication
+
+1. Strictly parse the Bearer credential outside logs.
+2. Determine legacy/new format only while migration state permits it.
+3. Compute the versioned HMAC and use indexed lookup.
+4. Check device active, Store active, credential status, expiry, revocation,
+   replacement grace, and hash-key availability.
+5. Return the same fixed failure for every rejection.
+6. Coalesce `last_used_at` writes, for example once per 15 minutes, rather than
+   writing every heartbeat.
+
+Authentication establishes CONNECTED only. It never establishes READY,
+PLAYBACK_CONFIRMED, or SPEAKER_VERIFIED.
+
+### Isolated migration-state authentication service
+
+`backend/receiver_auth_service.py` implements the future verifier as a
+read-only service over an explicitly injected SQLite engine and bounded,
+external HMAC key ring. It is reachable only through the explicitly injected
+migration-aware runtime adapter; normal server startup, Store APIs, the
+simulator, frontend, and Receiver Agent do not construct that adapter.
+Default production WebSocket authentication therefore remains unchanged.
+
+| State | Required legacy flag | Raw Store path | Hashed legacy path | Hashed `speaklink_rcv` path |
+| --- | ---: | --- | --- | --- |
+| `legacy_only` | 1 | active Store only | disabled | disabled |
+| `backfilled` | 1 | complete eligible mapping required | disabled | disabled |
+| `dual_verify` | 1 | allowed | allowed | allowed |
+| `hash_only` | 0 | ignored | allowed | allowed |
+| `raw_neutralized` | 0 | ignored | allowed | allowed |
+
+Unknown states and inconsistent state/flag combinations fail closed.
+`backfilled` and `dual_verify` require exactly one consistent legacy
+Device/Credential mapping per Store. Active Stores map to active Devices;
+inactive Stores retain disabled mappings but cannot authenticate.
+
+Hash-backed verification requires an active Store, active Device, usable
+credential, matching strict token format, available hash-key version, and a
+state that permits hashes. Expiry, revocation, issuance, and replacement-grace
+boundaries use `credential_is_usable`. New credentials use their public ID for
+bounded lookup; legacy hash work is bounded by the injected key ring.
+
+In `dual_verify`, a legacy token matching both raw and HMAC paths must resolve
+to the same Store, Device, and Credential. The service returns one canonical
+hash-backed identity; disagreement fails closed. External rejections always
+use `Receiver authentication failed`. Schema, migration, foreign-key, state,
+and key-ring failures use the separate fixed `Receiver authentication
+configuration is not ready` message.
+
+The immutable result exposes only non-secret identity, migration state, and
+verification source. Authentication performs no commit, audit, `last_used_at`,
+Store health, receiver-snapshot, readiness, playback, or speaker-verification
+write. Success proves identity only.
+
+### Isolated migration-state transition rehearsal
+
+`backend/receiver_migration_transition_service.py` applies only these adjacent
+edges to an explicitly injected temporary SQLite engine:
+
+```text
+backfilled -> dual_verify -> hash_only
+backfilled <- dual_verify <- hash_only
+```
+
+The exact state/flag results are `backfilled/1`, `dual_verify/1`, and
+`hash_only/0`. Direct `backfilled -> hash_only`, direct
+`hash_only -> backfilled`, transitions from `legacy_only`, transitions to or
+from `raw_neutralized`, unknown edges, and same-state replay are rejected
+without writes. Same-state replay uses a typed already-applied error.
+
+Every approved edge uses one `BEGIN IMMEDIATE` transaction. The service
+validates the Phase 1 ledger/schema, state/flag consistency, foreign keys,
+active HQ actor, non-empty Store fleet, strict unique raw Store tokens,
+complete legacy mappings, HMAC key availability, hash structure, and applicable
+credential lifecycle boundaries. `backfilled -> dual_verify`,
+`dual_verify -> hash_only`, and `hash_only -> dual_verify` additionally require
+complete hash readiness for every active Store and active Device.
+
+Narrowing transitions require an injected immutable connection summary no more
+than 30 seconds old. `dual_verify -> hash_only` requires zero active
+`legacy_store_token` connections; `dual_verify -> backfilled` requires zero
+active hash-authenticated connections. Expanding transitions require no
+disconnect. The summary contains counts and a UTC capture time only—never
+credentials or receiver health state.
+
+Success changes the singleton state/flag and appends exactly one sanitized
+`migration_state_changed` event. Store, Device, Credential, schema-ledger, and
+existing audit rows remain unchanged. Any validation, injected hook, state
+update, audit, or final-check failure rolls back both the state and appended
+event.
+
+Current WebSockets authenticate only during handshake. A database transition
+does not re-authenticate or disconnect an existing socket. Future production
+integration must obtain a trustworthy source-tagged connection inventory and
+either prove the removed source has zero sockets or perform an explicit
+disconnect/re-authentication procedure. This rehearsal accepts an injected
+summary only and performs no runtime action.
+
+`raw_neutralized` remains outside this service because erasing raw Store
+credentials is a destructive storage migration that needs separately verified
+backups and rollback artifacts; a state-row change cannot recreate erased
+secrets.
+
+### Isolated active Receiver connection inventory
+
+`backend/receiver_connection_inventory.py` defines a pure, process-local
+inventory for future WebSocket integration. Each immutable connection record
+contains a bounded connection ID, Store row ID, optional Device/Credential row
+IDs, UTC authentication time, and exactly one handshake source:
+`legacy_store_token` or `hashed_device_credential`. A legacy result may omit
+Device/Credential identity before migration, while a hash-backed result must
+include both. Authentication source cannot be changed in place; re-authentication
+requires removing the old connection and registering a new connection ID.
+
+The inventory uses a lock, defaults to a maximum of 256 active connections,
+and rejects capacities outside 1 through 4096. Identical duplicate registration
+is an idempotent no-change; a different immutable record using the same
+connection ID fails closed. Removal is exact and idempotent. Generation changes
+only for an actual registration or removal, and no attempt history is retained.
+
+Snapshots atomically copy and sort the bounded record set, reconcile total,
+source, and per-Store counts, and preserve older snapshots after later
+mutations. A pure constructor adapter uses one snapshot to populate the existing
+`ActiveReceiverConnectionSummary` shape without querying SQLite or invoking a
+migration transition. The caller supplies the transition summary constructor,
+so the inventory itself imports no SQLAlchemy or transition-service code.
+
+The runtime manager now owns this inventory, but the inventory remains
+independent of authentication implementations and the transition service. It
+stores no WebSocket, token, hash, key, header,
+receiver health, session, or audio data. Authentication source proves only the
+credential path used at handshake; it is not evidence of READY, audio receipt,
+playback confirmation, or speaker verification.
+
+The inventory is lost on backend restart and each Uvicorn worker would own an
+independent copy. SpeakLink therefore remains limited to one worker until a
+shared authoritative coordination design exists. A newly empty inventory after
+restart is not, by itself, proof about remote speakers or sockets; the restart
+must actually have terminated those network connections. The current legacy
+runtime integration described next registers only after authentication and
+removes exact identities. Future narrowing transitions must still reconcile
+restart and active-connection behavior explicitly.
+
+### Current legacy WebSocket inventory integration
+
+`WSManager` now owns exactly one injectable `ActiveReceiverConnectionInventory`
+and a separate Store-to-current-connection-ID map. The production Receiver
+handshake still authenticates only the raw active `Store.receiver_token` from
+the `Authorization: Bearer` header. After authentication, the server generates
+a new UUID-hex connection ID and UTC authentication time; manager acceptance
+then registers a `legacy_store_token` record with no Device or Credential ID.
+The existing Store online/`last_seen` write occurs only after this registration
+succeeds. Failed authentication creates neither manager nor inventory state,
+and capacity failure after acceptance closes the socket with a fixed,
+credential-free response without marking the Store online.
+
+The one-current-connection-per-Store policy is unchanged. When B replaces A,
+the manager closes A, removes A's exact inventory ID, and installs B under a new
+ID. All normal, abrupt, exceptional, cancellation, send-failure, and delayed
+finally cleanup paths compare the socket and immutable connection ID. A's late
+cleanup is idempotent and cannot remove B, mark B offline, or mutate B's
+receiver snapshot. A stale socket is also prevented from applying messages or
+freshness changes to the replacement connection.
+
+The manager exposes a read-only transition summary built from one atomic
+inventory snapshot. It does not invoke a transition, query or modify SQLite,
+or expose a FastAPI route. Current runtime summaries contain legacy-source
+connections only; the hashed-source count remains zero. The isolated
+dual-verification service is not called, hashed runtime credentials are not
+enabled, and migration state is unchanged.
+
+Inventory identity does not imply READY, audio receipt, playback confirmation,
+acoustic verification, or audible speakers. It remains process-local, observes
+only connections registered after process startup, disappears on restart, and
+is not shared across workers. SpeakLink must continue using one Uvicorn worker.
+A restart terminates sockets owned by that process, but loss of inventory state
+alone is not proof of Receiver Agent or speaker health. Transition execution
+and dual-authentication runtime cutover remain separately controlled future
+work.
+
+### Explicit Receiver runtime authentication boundary
+
+`backend/receiver_runtime_auth.py` now defines the typed boundary used by the
+Receiver WebSocket handshake. `ReceiverRuntimeIdentity` contains only Store,
+optional Device/Credential row IDs, and the canonical server-selected
+authentication source. It contains no token, hash, key, header, ORM object,
+socket, or Receiver health state.
+
+The normal imported application explicitly constructs
+`LegacyStoreTokenRuntimeAuthenticator`. It preserves the existing active-Store
+raw-token comparison, uses constant-time comparison, never reads migration
+tables, and always returns `legacy_store_token` without Device/Credential IDs.
+No environment flag or startup behavior enables hashed authentication.
+
+`MigrationAwareReceiverRuntimeAuthenticator` is a separate adapter that must be
+constructed with an explicit SQLite engine and bounded HMAC key ring, then
+injected into a specific application instance. It delegates to the read-only
+credential authentication service and preserves its exact state matrix:
+
+| State | Accepted runtime paths when explicitly injected | Canonical source |
+| --- | --- | --- |
+| `legacy_only` | Active raw Store legacy token only | `legacy_store_token` |
+| `backfilled` | Active raw Store legacy token only, with complete consistent mapping | `legacy_store_token` |
+| `dual_verify` | Identity-consistent dual-matched legacy UUID or usable `speaklink_rcv` | `hashed_device_credential` |
+| `hash_only` | Hash-backed legacy UUID or usable `speaklink_rcv` only | `hashed_device_credential` |
+| `raw_neutralized` | Hash-backed credentials only | `hashed_device_credential` |
+
+In `dual_verify`, a legacy UUID that succeeds through both raw and backfilled
+hash verification is canonically hash-backed and carries exact Device and
+Credential IDs. The Receiver cannot select a path, and classification is not
+based only on token shape. Source is immutable for the socket lifetime;
+reclassification requires disconnect, re-authentication, and a new server
+connection ID.
+
+This classification means a dual-matched legacy UUID socket increments the
+hashed—not legacy—transition-summary count. It does not block a future
+`dual_verify -> hash_only` narrowing, but it does block
+`dual_verify -> backfilled` until disconnect/re-authentication because
+`backfilled` disables hashed authentication.
+
+The WebSocket verifies identity before acceptance, manager/inventory
+registration, snapshot creation, or Store health writes. It then reconciles the
+returned Store ID without querying by raw token again and registers the exact
+source and optional canonical IDs. Replacement in either source direction
+retains the existing exact connection-ID rule, so delayed cleanup from the old
+socket cannot remove or mark the replacement offline.
+
+Credential tables, migration state, and the schema ledger remain read-only.
+Only the pre-existing Store connection-health fields and Receiver connection
+event may be written after successful registration. Authentication failure and
+inventory-capacity failure occur without those health writes. Authentication
+proves identity only; it never implies READY, audio receipt, playback,
+LinkGuard verification, or audible speakers.
+
+Migration-aware runtime behavior is exercised only by explicitly configured
+temporary-database test applications. There is no cutover flag, transition API,
+key auto-loading, default hashed verification, frontend change, or real-database
+migration. The inventory remains process-local and the initial deployment still
+requires one Uvicorn worker.
+
+### Isolated controlled cutover rehearsal
+
+`backend/receiver_cutover_rehearsal.py` coordinates the previously isolated
+runtime-authentication, connection-inventory, and migration-transition
+components without creating a route or startup hook. Construction requires an
+explicit SQLite engine, the exact migration-aware runtime authenticator for
+that engine, an injected manager, active HQ actor ID, and an immutable copy of
+a bounded strong HMAC key map. It rejects the protected
+`backend/speaklink_live.db` path before connection and does not read keys from
+environment variables or persist them.
+
+The rehearsal fixtures use generated test-only key version 1 for backfilled
+`legacy_uuid_hex` HMAC rows and version 2 for newly enrolled `speaklink_rcv`
+rows. Both versions must be present and correct before hash readiness can
+succeed. Key versions may appear as non-secret routing metadata; key material
+is redacted from results and never enters logs, exceptions, inventory records,
+or audit metadata.
+
+Each operation obtains legacy/hashed connection counts from one atomic manager
+inventory snapshot and delegates the state change to the existing
+`BEGIN IMMEDIATE` transition service. Immutable results contain only states,
+the legacy flag, source counts, fleet readiness counts, UTC time, runtime
+action, and a fixed result code. The supported sequence is:
+
+```text
+backfilled -> dual_verify -> hash_only
+backfilled <- dual_verify <- hash_only
+```
+
+- `backfilled -> dual_verify` expands acceptance and needs no disconnect.
+  Existing legacy sockets remain classified as legacy until reconnecting.
+- `dual_verify -> hash_only` narrows acceptance and requires a fresh atomic
+  summary with zero legacy-source sockets.
+- `hash_only -> dual_verify` expands acceptance while raw Store tokens remain
+  intact and valid; it does not relabel or disconnect existing hash sockets.
+- `dual_verify -> backfilled` narrows acceptance and requires a fresh summary
+  with zero hash-source sockets.
+
+Blocked or stale-summary transitions change neither state nor audit rows and do
+not disconnect sockets. A successful transition changes only the singleton
+migration-state row and appends one sanitized `migration_state_changed` event;
+Store, Device, Credential, and schema-ledger rows remain unchanged. Injected
+failures after state update roll back both state and audit writes.
+
+The loopback rehearsal uses a random `127.0.0.1` port and one Uvicorn worker.
+It proves legacy and hash-backed handshakes, canonical inventory sources,
+same-Store replacement, delayed cleanup safety, capacity rejection, and the
+complete forward/rollback sequence. An existing socket is never automatically
+re-authenticated: changing its source requires disconnect, a new handshake,
+and a new server connection ID.
+
+This remains temporary-database-only infrastructure. The normal application
+still constructs the legacy authenticator, no public transition endpoint or
+environment cutover flag exists, and no real migration or raw-token
+neutralization occurs. Authentication continues to prove identity only—not
+READY, audio receipt, playback, LinkGuard verification, or audible speakers.
+
+### Rotation
+
+Create the new version and link it to the previous credential in one
+transaction. Recommended default is immediate invalidation. If operations
+require grace, the pure helper enforces the approved maximum of 15 minutes.
+Compromise rotation has zero grace. Return the new raw token once after commit.
+
+### Revocation
+
+Set `revoked_at`, status, and audit event in one transaction. New handshakes
+must fail immediately after commit. Then ask the in-memory manager to close any
+connection for that device. Failure to close the existing socket does not roll
+back revocation; the socket must be treated as unauthorized on its next action.
+
+## SQLite-safe staged migration
+
+No phase should run against a live production file without a reviewed migration
+script, maintenance plan, verified backup, and isolated rehearsal.
+
+### Backup preparation for every phase
+
+1. Stop Uvicorn and confirm no process holds the application database.
+2. Capture the database, WAL, and SHM as one consistent backup set, or use the
+   SQLite online backup API after the writer is stopped. Never copy only the
+   main file while WAL data may be outstanding.
+3. Verify the backup can be opened and record its file metadata and Store count
+   without selecting raw credential values.
+4. Securely back up the external HMAC keys and versions separately from SQLite.
+5. Run `PRAGMA integrity_check` and `PRAGMA foreign_key_check` against the
+   verified backup.
+6. Enter maintenance mode and invoke the reviewed migration runner with the
+   explicit protected-database opt-in.
+7. Validate Store counts, identifiers, indexes, foreign keys, and migration
+   state before leaving maintenance mode.
+8. Keep the database/WAL/SHM backup set and HMAC-key rollback artifacts until
+   pilot validation is complete.
+
+### Phase 1: additive schema
+
+- Implemented by `run_receiver_credential_phase_one(engine)` using one
+  `BEGIN IMMEDIATE` transaction and an explicit `schema_migrations` ledger.
+- Creates the device, credential, credential-event, and migration-state tables
+  plus indexes. UUID public IDs, foreign keys, uniqueness, bounded enum/check
+  constraints, expiry/revocation indexes, and HMAC lookup indexes are present.
+- Do not alter or clear `stores.receiver_token`.
+- Set migration state to `legacy_only`.
+- Deploy code that ignores the new tables, preserving existing behavior.
+- The runner is idempotent, installs SQLite foreign-key enforcement, and rolls
+  back all Phase 1 DDL/state on failure. It accepts an injected engine, imports
+  no default database engine, and refuses `backend/speaklink_live.db` before
+  connection unless a future maintenance caller explicitly opts in.
+- No Store, device, credential, or event rows are backfilled in Phase 1.
+
+### Isolated legacy backfill rehearsal
+
+`backend/receiver_credential_backfill.py` rehearses the complete fleet mapping
+only against an explicitly injected SQLite engine. It refuses the protected
+`backend/speaklink_live.db` path before connection and is not imported by
+startup, FastAPI, WebSockets, Store APIs, the simulator, or frontend code.
+
+One `BEGIN IMMEDIATE` transaction validates the Phase 1 ledger/schema, exact
+`legacy_only` state, enabled legacy verification, foreign keys, the complete
+Store fleet, every legacy UUID-hex token, and absence of partial/conflicting
+new rows before inserting anything. A zero-Store fleet fails closed without
+writes or a state transition.
+
+Every active Store receives an `active` legacy Receiver Device with no
+`disabled_at`. Every inactive Store receives a `disabled` Device whose
+`disabled_at` is the supplied UTC rehearsal time. Each Store receives one
+credential version 1 with a generated UUID public ID,
+`token_format=legacy_uuid_hex`, an injected-key HMAC hash, explicit
+`non_expiring` policy, and nullable migration actor. The deterministic display
+name uses only the Store integer ID. Store operational status is never copied
+into readiness, playback, or acoustic health.
+
+For every Store, the transaction creates `device_enrolled` and
+`credential_issued` audit events. After fleet count, relationship, hash,
+Store-snapshot, schema-ledger, raw-token-absence, and foreign-key checks pass,
+it changes temporary migration state to `backfilled` and records one
+`migration_state_changed` event. Legacy verification remains enabled because
+dual verification is not implemented.
+
+Any failure rolls back every Device, credential, audit event, and state change.
+A validated replay in `backfilled` state raises `BackfillAlreadyAppliedError`
+without writes. The rehearsal never changes `stores.receiver_token`, Store
+IDs/counts, operational fields, or `schema_migrations`.
+
+A future real migration still requires maintenance mode, verified database/
+WAL/SHM and HMAC-key backups, integrity/foreign-key checks, reviewed key
+custody, count reconciliation, pilot validation, and retained rollback
+artifacts. This rehearsal is not authorization: future hashed authentication
+must require an active Store, active Device, usable credential, and migration
+state that explicitly permits hash verification.
+
+### Phase 3: controlled dual verification
+
+- Deploy a verifier that reads explicit migration state and supports legacy and
+  new hash rows only in `dual_verify`.
+- Rebuild `stores` in a separately reviewed SQLite transaction if necessary to
+  make `receiver_token` nullable while preserving every value, FK, index, and
+  relationship. SQLite cannot simply drop the existing NOT NULL/unique column
+  constraints.
+- New Receiver Device enrollments store only hashes and return raw credentials
+  once. New Stores may have no Receiver Device.
+- Stop returning raw legacy values from normal Store schemas and stop creating
+  kiosk URLs in a later, separately reviewed frontend/API change.
+- A rollback after new hash-only enrollment must return to the dual-verifier
+  build, not the original legacy-only binary, because the original binary
+  cannot authenticate new credentials.
+
+### Phase 4: disable legacy verification
+
+- Produce a migration readiness report using public device IDs only.
+- Require zero active unmigrated devices and validate authentication telemetry.
+- In one transaction set migration state to `hash_only` and audit the change.
+- Keep legacy raw columns temporarily for rollback, but never consult them.
+- Reverting the state to `dual_verify` is permitted only while raw values and
+  the correct HMAC key are intact and the rollback is approved.
+
+### Phase 5: neutralize/remove raw storage
+
+- Take a new verified backup and enter maintenance mode.
+- First neutralize raw values by setting the nullable legacy column to NULL in
+  one reviewed transaction; validate before commit.
+- Removing the column requires the standard SQLite table-rebuild sequence:
+  create the replacement Store table, copy explicit columns, validate counts,
+  swap tables, recreate every index/trigger, and run foreign-key/integrity
+  checks before commit.
+- This destructive phase rolls back by restoring the verified backup, not by
+  attempting to recreate raw credentials.
+
+## Validation queries
+
+Migration scripts should execute equivalent parameterized checks without ever
+selecting raw token values:
+
+```sql
+SELECT COUNT(*) FROM stores;
+SELECT COUNT(*) FROM receiver_devices;
+SELECT COUNT(*) FROM receiver_credentials;
+
+SELECT COUNT(*)
+FROM receiver_devices d
+LEFT JOIN stores s ON s.id = d.store_id
+WHERE s.id IS NULL;
+
+SELECT COUNT(*)
+FROM receiver_credentials c
+LEFT JOIN receiver_devices d ON d.id = c.device_id
+WHERE d.id IS NULL OR c.token_hash IS NULL;
+
+SELECT token_hash, COUNT(*)
+FROM receiver_credentials
+GROUP BY token_hash
+HAVING COUNT(*) > 1;
+
+SELECT device_id, credential_version, COUNT(*)
+FROM receiver_credentials
+GROUP BY device_id, credential_version
+HAVING COUNT(*) > 1;
+
+PRAGMA foreign_key_check;
+PRAGMA integrity_check;
+```
+
+Additional phase checks must compare expected Store/backfill counts, confirm
+every active device has at least one usable hash credential, confirm no grace
+window exceeds policy, and confirm migration-state transitions are monotonic.
+
+## Partial failure and one-worker behavior
+
+- A failed transaction leaves its migration-state value unchanged.
+- Runtime treats missing hash keys, unknown key versions, partial device rows,
+  unknown migration state, and inconsistent credential timestamps as
+  authentication failures.
+- Do not auto-create or repair credential rows during authentication.
+- One Uvicorn worker is compatible with this model and avoids conflicting
+  process-local connection maps. Database state remains authoritative for
+  revocation; in-memory snapshots never override it.
+- Schema migrations require maintenance mode even with one worker. WAL improves
+  ordinary concurrency but does not make table rebuilds safe during traffic.
+
+## Pure helper implementation
+
+`backend/receiver_credentials.py` currently provides schema-independent:
+
+- secure versioned credential generation
+- strict new and legacy migration token parsing
+- versioned HMAC-SHA-256 hashing and constant-time verification
+- UTC expiry, revocation, inactive, and replacement-grace evaluation
+- bounded rotation planning
+- approved two-active-device and 15-minute rotation-grace policy validation
+- redacted credential representations
+- allowlisted, bounded audit metadata sanitization
+
+These helpers remain outside public APIs. The explicitly injected
+migration-aware runtime adapter reaches them through the read-only
+authentication service; the default WebSocket path does not.
+
+## Approved initial policies and remaining Phase 3 work
+
+Approved: maximum two active devices per Store, initially non-expiring but
+revocable credentials, maximum 15-minute planned rotation grace, immediate
+compromise invalidation, eventual active-socket disconnect after revocation,
+external HMAC keys, and at least 12 months of audit retention.
+
+Remaining decisions and implementation work:
+
+1. HMAC key custody, initial version, disaster recovery, and key-rotation plan.
+   Existing hashes cannot be re-HMACed without seeing a raw credential; key
+   rotation requires dual keys plus rehash-on-success or credential rotation.
+2. HQ authorization roles and API design for enrollment, rotation, revocation,
+   and audit read. The isolated enrollment service must not be exposed before
+   this review.
+3. Design and isolate-test controlled dual verification that requires active
+   Store, active Device, usable credential, and an explicitly permitting
+   migration state. Do not integrate it into production authentication yet.
+4. Rotation/replacement and revocation services, including active-socket
+   disconnect coordination after revocation commits.
+5. Authentication-failure aggregation and external security audit export.
+6. Removal schedule for the legacy browser Receiver page, query verifier, event
+   token body, raw Store schema field, and Store Management kiosk links.

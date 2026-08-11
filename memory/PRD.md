@@ -27,7 +27,7 @@ Build a separate, independent system that lets HQ operators speak live into a br
 10. Session logs + system logs
 
 ## What's Been Implemented (2026-01-07)
-- ✅ Full JWT auth (login, /me, logout) with bcrypt + admin seeded (admin/admin123)
+- ✅ Full JWT auth (login, /me, logout) with bcrypt + admin seeded ([REMOVED INSECURE HISTORICAL DEFAULT])
 - ✅ 13 sample stores seeded (Mumbai, Pune, Delhi, Gurgaon, Bangalore, Hyderabad, Chennai, Kolkata, Online)
 - ✅ Store CRUD, regenerate-token, soft-disable, filters (city/region/status/q)
 - ✅ Broadcast session lifecycle (create/start/stop/emergency-stop) + concurrent broadcast lock
