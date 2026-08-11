@@ -1,5 +1,6 @@
 import React from "react";
 import RecordingActions from "@/components/RecordingActions";
+import { CHAT_FILTERS, filterChatMessages } from "@/lib/chatFilter";
 import { useRecordingPlayback } from "@/contexts/RecordingPlaybackContext";
 import { api } from "@/lib/api";
 import StatusBadge from "@/components/StatusBadge";
@@ -40,6 +41,8 @@ export default function BroadcastHistory() {
   //: detail rather than on a second click: the conversation IS part of what
   //: happened, and a tab somebody has to find is a tab most people never do.
   const [chat, setChat] = React.useState(null);
+  const [chatQuery, setChatQuery] = React.useState("");
+  const [chatKind, setChatKind] = React.useState("all");
   const [confirming, setConfirming] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [actionError, setActionError] = React.useState("");
@@ -56,10 +59,22 @@ export default function BroadcastHistory() {
     });
   }, []);
 
+  //: What the transcript shows right now. Derived rather than stored, so the
+  //: filter can never drift out of step with the messages it is filtering.
+  const visibleChat = React.useMemo(
+    () => filterChatMessages(chat?.messages || [],
+                             { query: chatQuery, kind: chatKind }),
+    [chat, chatQuery, chatKind]);
+
   const openDetail = async (id) => {
     const { data } = await api.get(`/broadcast/sessions/${id}`);
     setOpen(data);
     setChat(null);
+    // A search belongs to the transcript being read, not to the reader. Two
+    // sessions opened in a row must not silently apply the first one's filter
+    // to the second and look empty.
+    setChatQuery("");
+    setChatKind("all");
     try {
       const transcript = await api.get(`/broadcast/history/${id}/chat`);
       setChat(transcript.data);
@@ -321,8 +336,31 @@ export default function BroadcastHistory() {
                   hosted the Broadcast, and this page is read by accounts
                   trusted with the history itself. */}
               <div className="mt-6" data-testid="history-chat">
-                <div className="mb-2 text-xs uppercase text-slate-500">
-                  Chat ({chat?.messages?.length || 0})
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <div className="text-xs uppercase text-slate-500">
+                    Chat ({visibleChat.length}
+                    {visibleChat.length !== (chat?.messages?.length || 0)
+                      && ` of ${chat?.messages?.length || 0}`})
+                  </div>
+                  <div className="ml-auto flex gap-2">
+                    <label htmlFor="history-chat-search" className="sr-only">
+                      Search this transcript
+                    </label>
+                    <input id="history-chat-search" data-testid="history-chat-search"
+                           value={chatQuery} onChange={(e) => setChatQuery(e.target.value)}
+                           placeholder="Search messages or names…"
+                           className="rounded border border-slate-300 px-2 py-1 text-xs" />
+                    <label htmlFor="history-chat-filter" className="sr-only">
+                      Filter this transcript
+                    </label>
+                    <select id="history-chat-filter" data-testid="history-chat-filter"
+                            value={chatKind} onChange={(e) => setChatKind(e.target.value)}
+                            className="rounded border border-slate-300 bg-white px-1 py-1 text-xs">
+                      {CHAT_FILTERS.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 {chat === null && (
                   <p className="text-sm text-slate-500">Loading the transcript…</p>
@@ -337,8 +375,17 @@ export default function BroadcastHistory() {
                     Nobody said anything during this Broadcast.
                   </p>
                 )}
+                {chat && !chat.unavailable && chat.messages.length > 0
+                  && visibleChat.length === 0 && (
+                  // Said differently from an empty transcript on purpose: "no
+                  // matches" and "nobody spoke" are different facts about the
+                  // Broadcast.
+                  <p className="text-sm text-slate-500" data-testid="history-chat-no-matches">
+                    No messages match that search.
+                  </p>
+                )}
                 <div className="space-y-1.5">
-                  {(chat?.messages || []).map((message) => (
+                  {visibleChat.map((message) => (
                     <div key={message.id} data-testid={`history-chat-message-${message.id}`}
                          className={`rounded border px-2 py-1.5 text-sm ${
                            message.author_kind === "HOST"

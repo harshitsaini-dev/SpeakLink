@@ -176,3 +176,34 @@ test("an image message fetches its bytes through the API, not a bare src", async
     `/broadcast/sessions/${SESSION}/chat/messages/1/image`,
     { responseType: "blob" });
 });
+
+test("searching narrows the messages, and says so when nothing matches", async () => {
+  await renderPanel({ messages: [
+    message(1, { body: "we cannot hear you" }),
+    message(2, { body: "all fine here", author_name: "Priya" }),
+  ] });
+
+  fireEvent.change(screen.getByTestId("chat-search"), { target: { value: "hear" } });
+  expect(screen.getByTestId("chat-message-1")).toBeTruthy();
+  expect(screen.queryByTestId("chat-message-2")).toBeNull();
+
+  fireEvent.change(screen.getByTestId("chat-search"), { target: { value: "zzz" } });
+  // "No matches" is not "nobody has spoken" - an operator who read one as the
+  // other would think the room had gone quiet.
+  expect(screen.getByTestId("chat-no-matches")).toBeTruthy();
+  expect(screen.queryByTestId("chat-empty")).toBeNull();
+
+  fireEvent.click(screen.getByTestId("chat-clear-filter"));
+  expect(screen.getByTestId("chat-message-2")).toBeTruthy();
+});
+
+test("the filter picks out one kind of message", async () => {
+  await renderPanel({ messages: [
+    message(1),
+    message(2, { author_kind: "HOST", author_name: "superadmin" }),
+  ] });
+
+  fireEvent.change(screen.getByTestId("chat-filter"), { target: { value: "host" } });
+  expect(screen.queryByTestId("chat-message-1")).toBeNull();
+  expect(screen.getByTestId("chat-message-2")).toBeTruthy();
+});

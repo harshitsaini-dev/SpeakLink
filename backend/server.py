@@ -38,6 +38,7 @@ from schemas import (
     ListenerRequestAccess,
     WebRoomAutoApproveUpdate,
     ChatMessageIn, ChatSettingsIn, ChatMuteIn,
+    BulkTargetActionIn,
     LoginRequest, LoginResponse, UserOut,
     StoreCreate, StoreUpdate, StoreOut, StoresMetaOut,
     BroadcastTargetStoreOut, BroadcastTargetsOut,
@@ -3812,6 +3813,116 @@ async def add_store_to_live_broadcast(
             "lifecycle_state": target.lifecycle_state,
             "generation": generation,
             "bootstrap": joined}
+
+
+#: What a bulk request may ask for, mapped to the single-Store handler that
+#: already knows how to do it. Reusing the handlers rather than reimplementing
+#: them is deliberate: a second copy of "add a Store" would eventually disagree
+#: with the first about leases, generations or the live edge, and the
+#: disagreement would only show up in a shop.
+_BULK_ACTIONS = ("add", "remove", "pause", "resume")
+
+
+@api.post("/broadcast/sessions/{sid}/targets/bulk")
+async def bulk_target_action(
+    sid: int, payload: BulkTargetActionIn, db: Session = Depends(get_db),
+    user: HQUser = Depends(require("broadcast.store_delivery")),
+):
+    """Add, remove, pause or resume every Store in a Zone, City or list.
+
+    ONE ACTION, MANY SHOPS, AND AN HONEST ANSWER FOR EACH. The response is a
+    per-Store outcome list rather than a single ok/failed, because a Zone
+    action almost never succeeds uniformly: some shops are offline, one is in
+    somebody else's broadcast, another is already paused. Collapsing that into
+    "12 of 17 succeeded" would leave the operator to guess which five.
+
+    SEQUENTIAL, deliberately. Adding a Store waits for its Receiver to report
+    ready, so a Zone of twenty could be twenty waits - but the alternative is
+    concurrent database work on one Session, and a corrupted target list is a
+    worse outcome than a slow one. Pause and remove are fast enough that this
+    does not matter; add and resume are the slow pair and are documented as
+    such in the UI.
+
+    A refusal for one Store never stops the rest. That is the whole reason for
+    doing this in a loop that catches: an operator silencing a Zone because
+    something is wrong needs the other sixteen shops silenced even if one is
+    unreachable.
+    """
+    _require_audio_control_owner(sid, user)
+    _require_physical_delivery(user)
+
+    session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
+    if session is None or session.status != "live":
+        raise HTTPException(status_code=409,
+                            detail="This broadcast is no longer live.")
+
+    scope = resolve_store_scope(engine, user)
+    store_ids = _resolve_bulk_target_stores(db, payload, scope)
+    if not store_ids:
+        # Not an error. A Zone with no Stores this account may reach is a
+        # truthful answer to a truthful question, and pretending otherwise
+        # would send an operator hunting for a fault that is not there.
+        return {"session_id": sid, "action": payload.action,
+                "requested": 0, "succeeded": 0, "results": []}
+
+    handler = {
+        "add": lambda store_id: add_store_to_live_broadcast(
+            sid, LiveTargetAddIn(store_id=store_id), db=db, user=user),
+        "remove": lambda store_id: remove_store_from_live_broadcast(
+            sid, store_id, db=db, user=user),
+        "pause": lambda store_id: pause_store_in_live_broadcast(
+            sid, store_id, db=db, user=user),
+        "resume": lambda store_id: resume_store_in_live_broadcast(
+            sid, store_id, db=db, user=user),
+    }[payload.action]
+
+    results = []
+    for store_id in store_ids:
+        try:
+            outcome = await handler(store_id)
+            results.append({"store_id": store_id, "ok": True,
+                            "lifecycle_state": outcome.get("lifecycle_state"),
+                            "detail": None})
+        except HTTPException as refusal:
+            # Recorded and carried on with. The refusal text is the same
+            # sentence the single-Store route would have shown, so an operator
+            # reads one vocabulary whichever way they acted.
+            results.append({"store_id": store_id, "ok": False,
+                            "lifecycle_state": None,
+                            "detail": str(refusal.detail)})
+        except Exception as failure:  # pragma: no cover - defence in depth
+            logger.warning("Bulk %s failed for store %s: %s",
+                           payload.action, store_id, failure)
+            results.append({"store_id": store_id, "ok": False,
+                            "lifecycle_state": None,
+                            "detail": "That Store could not be changed."})
+
+    succeeded = sum(1 for row in results if row["ok"])
+    _write_log(db, "info",
+               f"BULK_TARGET_ACTION session_id={sid} action={payload.action} "
+               f"requested={len(store_ids)} succeeded={succeeded} "
+               f"actor_user_id={user.id}")
+    return {"session_id": sid, "action": payload.action,
+            "requested": len(store_ids), "succeeded": succeeded,
+            "results": results}
+
+
+def _resolve_bulk_target_stores(db: Session, payload, scope) -> list[int]:
+    """Which Stores a bulk request actually names, within the caller's scope.
+
+    Scope is applied HERE rather than left to the per-Store handlers, so a
+    scoped operator asking for a whole Zone gets their own Stores acted on
+    instead of a list of refusals for shops they are not allowed to know about.
+    """
+    query = db.query(Store).filter(Store.is_active.is_(True))
+    if payload.region:
+        query = query.filter(Store.region == payload.region)
+    if payload.city:
+        query = query.filter(Store.city == payload.city)
+    if payload.store_ids:
+        query = query.filter(Store.id.in_(payload.store_ids))
+    rows = query.order_by(Store.store_code.asc()).all()
+    return [row.id for row in rows if scope is None or row.id in scope]
 
 
 @api.post("/broadcast/sessions/{sid}/targets/{store_id}/pause")

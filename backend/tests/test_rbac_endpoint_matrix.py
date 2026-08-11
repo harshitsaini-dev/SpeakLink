@@ -219,6 +219,9 @@ EXPECTED: dict[str, object] = {
     # what one Store is doing inside a broadcast the caller owns.
     "pause_store_in_live_broadcast": "broadcast.store_delivery",
     "resume_store_in_live_broadcast": "broadcast.store_delivery",
+    # A Zone action is the same authority applied many times, so it carries the
+    # same permission - and applies Store Scope when it resolves the list.
+    "bulk_target_action": "broadcast.store_delivery",
     "broadcast_history": "menu.history.view",
     # A recording is the audio of a broadcast this account is already entitled
     # to read about, so it shares History's permission rather than inventing a

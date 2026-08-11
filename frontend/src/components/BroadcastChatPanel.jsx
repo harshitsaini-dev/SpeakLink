@@ -2,6 +2,7 @@ import React from "react";
 import { Send, MessageSquareOff, MessageSquare, Lock, Globe, Trash2, ImagePlus } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatIstTimeOfDay } from "@/lib/time";
+import { CHAT_FILTERS, filterChatMessages } from "@/lib/chatFilter";
 
 /**
  * The host's side of the web audience chat.
@@ -33,6 +34,8 @@ export default function BroadcastChatPanel({ sessionId }) {
   const [draft, setDraft] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState("");
+  const [query, setQuery] = React.useState("");
+  const [kind, setKind] = React.useState("all");
   const listRef = React.useRef(null);
   const fileRef = React.useRef(null);
 
@@ -124,7 +127,9 @@ export default function BroadcastChatPanel({ sessionId }) {
 
   const enabled = state?.chat_enabled ?? true;
   const isPrivate = state?.chat_mode === "PRIVATE";
-  const messages = state?.messages || [];
+  const allMessages = state?.messages || [];
+  const messages = filterChatMessages(allMessages, { query, kind });
+  const filtering = Boolean(query.trim()) || kind !== "all";
 
   return (
     <div className="flex h-full min-h-[22rem] max-h-[calc(100vh-9rem)] flex-col overflow-hidden border border-slate-200 bg-white rounded-md shadow-sm"
@@ -171,13 +176,45 @@ export default function BroadcastChatPanel({ sessionId }) {
         </div>
       </div>
 
+      {/* Finding one message in a busy room. Filtering happens over what is
+          already loaded rather than as a server query: the transcript a
+          console holds is bounded, and a round trip per keystroke would make
+          the search feel broken on a slow link. */}
+      <div className="flex shrink-0 gap-2 border-b border-slate-200 px-3 py-2">
+        <label htmlFor="chat-search" className="sr-only">Search chat</label>
+        <input id="chat-search" data-testid="chat-search" value={query}
+               onChange={(e) => setQuery(e.target.value)}
+               placeholder="Search messages or names…"
+               className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        <label htmlFor="chat-filter" className="sr-only">Filter chat</label>
+        <select id="chat-filter" data-testid="chat-filter" value={kind}
+                onChange={(e) => setKind(e.target.value)}
+                className="rounded border border-slate-300 bg-white px-1 py-1 text-xs">
+          {CHAT_FILTERS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      </div>
+
       {/* Only this scrolls. */}
       <div ref={listRef} data-testid="chat-messages"
            className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain p-3">
         {messages.length === 0 && (
-          <p className="text-sm text-slate-500" data-testid="chat-empty">
-            Nothing yet. Messages from web listeners appear here.
-          </p>
+          // Two different facts, said differently. "Nothing matched" is not
+          // "nobody has spoken", and an operator who mistook one for the other
+          // would think the room had gone quiet.
+          filtering ? (
+            <p className="text-sm text-slate-500" data-testid="chat-no-matches">
+              No messages match that search.{" "}
+              <button type="button" data-testid="chat-clear-filter"
+                      onClick={() => { setQuery(""); setKind("all"); }}
+                      className="underline">Show all {allMessages.length}</button>
+            </p>
+          ) : (
+            <p className="text-sm text-slate-500" data-testid="chat-empty">
+              Nothing yet. Messages from web listeners appear here.
+            </p>
+          )
         )}
         {messages.map((message) => (
           <div key={message.id} data-testid={`chat-message-${message.id}`}

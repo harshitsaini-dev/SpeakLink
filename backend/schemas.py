@@ -1,7 +1,8 @@
 """Pydantic schemas for SpeakLink API."""
 from datetime import datetime, timezone
 from typing import ClassVar, Optional, List
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import (BaseModel, ConfigDict, Field, field_serializer,
+                      model_validator)
 
 # One source of truth for how long a human password must be. Four copies of a
 # number is four chances for them to disagree, and the disagreement shows up as
@@ -523,6 +524,28 @@ class SystemLogOut(BaseModel):
     @field_serializer("created_at", when_used="json")
     def _serialize_utc(self, value: datetime) -> Optional[str]:
         return _utc_iso(value)
+
+
+class BulkTargetActionIn(BaseModel):
+    """One action, applied to a Zone, a City, or a named list of Stores.
+
+    All three selectors are optional and combine with AND, so "the offline
+    shops in NORTH" is expressible without a second endpoint. At least one is
+    required: an empty selector would mean every Store in the estate, and that
+    is not something anybody should be able to ask for by forgetting a field.
+    """
+    action: str = Field(pattern="^(add|remove|pause|resume)$")
+    region: Optional[str] = Field(default=None, max_length=100)
+    city: Optional[str] = Field(default=None, max_length=100)
+    store_ids: Optional[List[int]] = None
+
+    @model_validator(mode="after")
+    def require_a_selector(self):
+        if not (self.region or self.city or self.store_ids):
+            raise ValueError(
+                "name a Zone, a City or a list of Stores - an empty selector "
+                "would mean the whole estate")
+        return self
 
 
 class ChatMessageIn(BaseModel):
