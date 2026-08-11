@@ -86,7 +86,7 @@ Process-scoped: they live only in this window and are never written to Git, a
 repository `.env`, a report or a log.
 
 ```powershell
-Set-Location 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)'
+Set-Location 'C:\Users\admin\Desktop\SpeakLink'
 $env:ADMIN_USERNAME = 'pilot-operator'
 $env:ADMIN_PASSWORD = 'choose-a-temporary-pilot-only-value'
 $env:JWT_SECRET     = 'choose-another-temporary-pilot-only-value'
@@ -101,7 +101,7 @@ $env:JWT_SECRET     = 'choose-another-temporary-pilot-only-value'
 Or directly:
 
 ```powershell
-Set-Location 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)\backend'
+Set-Location 'C:\Users\admin\Desktop\SpeakLink\backend'
 & .\.venv\Scripts\python.exe ..\tools\local_audio_pilot.py prepare
 & .\.venv\Scripts\python.exe ..\tools\local_audio_pilot.py smoke
 ```
@@ -145,7 +145,7 @@ Only do this after Part A passes.
 ### B1. Start the pilot backend and frontend
 
 ```powershell
-Set-Location 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)'
+Set-Location 'C:\Users\admin\Desktop\SpeakLink'
 .\scripts\Start-SpeakLinkLocalPilot.ps1
 ```
 
@@ -155,7 +155,7 @@ Open **Store Management** in the browser, copy the receiver credential for the
 Store you will test, then in a **second** PowerShell window:
 
 ```powershell
-Set-Location 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)'
+Set-Location 'C:\Users\admin\Desktop\SpeakLink'
 $env:SPEAKLINK_RECEIVER_TOKEN = '<paste-the-store-credential>'
 .\scripts\Start-SpeakLinkAudioReceiverPilot.ps1
 ```
@@ -229,7 +229,7 @@ They must be unchanged.
 Nothing above is committed. To reset only the pilot database:
 
 ```powershell
-Set-Location 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)\backend'
+Set-Location 'C:\Users\admin\Desktop\SpeakLink\backend'
 & .\.venv\Scripts\python.exe ..\tools\local_pilot.py reset --reset-pilot-db
 ```
 

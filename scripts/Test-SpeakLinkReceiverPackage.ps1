@@ -8,7 +8,7 @@
     let a broken package pass here and fail on the one machine it matters.
 
     It also copies the package to a path containing spaces before running it.
-    That is not paranoia: this repository lives in "HQ-Broadcast-Full (1)" and
+    That is not paranoia: this repository lives in a folder whose name contains a space and
     has already been bitten twice by unquoted paths.
 #>
 [CmdletBinding()]

@@ -3,7 +3,7 @@
 One page. Every command runs from the repository root:
 
 ```
-C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)
+C:\Users\admin\Desktop\SpeakLink
 ```
 
 ---

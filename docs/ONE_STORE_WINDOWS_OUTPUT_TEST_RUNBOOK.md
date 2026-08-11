@@ -56,7 +56,7 @@ the device list, but it is flagged and is never selected automatically.
 ## Step 1 - List output devices (read-only)
 
 ```powershell
-Set-Location 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)'
+Set-Location 'C:\Users\admin\Desktop\SpeakLink'
 .\scripts\List-SpeakLinkAudioDevices.ps1
 ```
 
@@ -143,7 +143,7 @@ Copy the Store's receiver credential from **Store Management**, then in a
 **second** PowerShell window:
 
 ```powershell
-Set-Location 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)'
+Set-Location 'C:\Users\admin\Desktop\SpeakLink'
 $env:SPEAKLINK_AUDIO_SINK_MODE     = 'windows'
 $env:SPEAKLINK_AUDIO_OUTPUT_DEVICE = 'index:18@Headphones ()'
 $env:SPEAKLINK_RECEIVER_TOKEN      = '<paste-the-store-credential>'

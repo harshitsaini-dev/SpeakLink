@@ -60,7 +60,7 @@ disappear when you close it. They are never written to Git, to a repository
 `.env`, to the pilot state file or to any log.
 
 ```powershell
-Set-Location 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)'
+Set-Location 'C:\Users\admin\Desktop\SpeakLink'
 $env:ADMIN_USERNAME = 'pilot-operator'
 $env:ADMIN_PASSWORD = 'choose-a-temporary-pilot-only-value'
 $env:JWT_SECRET     = 'choose-another-temporary-pilot-only-value'
@@ -71,7 +71,7 @@ Use throwaway values. Do not reuse a real password.
 ## Step 2 - Prepare the isolated pilot database
 
 ```powershell
-Set-Location 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)\backend'
+Set-Location 'C:\Users\admin\Desktop\SpeakLink\backend'
 & .\.venv\Scripts\python.exe ..\tools\local_pilot.py prepare
 ```
 
@@ -124,7 +124,7 @@ port. Nothing is left running.
 ## Step 4 - Start the pilot for manual browser testing
 
 ```powershell
-Set-Location 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)'
+Set-Location 'C:\Users\admin\Desktop\SpeakLink'
 .\scripts\Start-SpeakLinkLocalPilot.ps1
 ```
 
@@ -149,7 +149,7 @@ credential variable is unset, or if the port is already in use.
 10. In a **second** PowerShell window, start the simulator for one Store.
     Copy that Store's receiver credential from Store Management's receiver URL:
     ```powershell
-    Set-Location 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)'
+    Set-Location 'C:\Users\admin\Desktop\SpeakLink'
     $env:SPEAKLINK_RECEIVER_TOKEN = '<paste-the-store-credential>'
     python tools\receiver_simulator.py `
       --url ws://127.0.0.1:8000/api/ws/receiver `
@@ -170,7 +170,7 @@ credential variable is unset, or if the port is already in use.
 ## Step 6 - Stop the pilot
 
 ```powershell
-Set-Location 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)'
+Set-Location 'C:\Users\admin\Desktop\SpeakLink'
 .\scripts\Stop-SpeakLinkLocalPilot.ps1
 ```
 
@@ -184,7 +184,7 @@ never deletes the pilot database.
 Only if you want a clean pilot database:
 
 ```powershell
-Set-Location 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)\backend'
+Set-Location 'C:\Users\admin\Desktop\SpeakLink\backend'
 & .\.venv\Scripts\python.exe ..\tools\local_pilot.py reset --reset-pilot-db
 ```
 

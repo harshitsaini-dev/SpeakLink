@@ -209,12 +209,14 @@ operator-inaccessible.
 ### 2. PowerShell launchers did not quote paths containing spaces
 
 `bd8e419`. `Start-Process -ArgumentList` joins elements with spaces without
-quoting them. This repository lives at `...\HQ-Broadcast-Full (1)`, so Python
-received a truncated path:
+quoting them. The repository lived at a path containing a space at the time, so
+Python received a truncated path and reported that it could not open a file
+whose name stopped at the first space.
 
-```
-python.exe: can't open file 'C:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full'
-```
+The repository has since moved to a path with no space in it, so this exact
+failure no longer reproduces here - but the defect it exposed is unchanged and
+the quoting fix is what guards it. Any Windows path with a space breaks this,
+and that includes `C:\Program Files` and most user folders.
 
 The Receiver died instantly — it never connected, and never reported
 `DEVICE_ERROR` either. It simply was not there. Never caught because the

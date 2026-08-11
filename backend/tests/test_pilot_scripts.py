@@ -42,10 +42,10 @@ def _elements(inner: str) -> list[str]:
 # Start-Process argument quoting
 #
 # Found while starting the Bluetooth amplifier Receiver. This repository lives
-# at "...\HQ-Broadcast-Full (1)", and PowerShell joins -ArgumentList elements
+# at "a path containing a space", and PowerShell joins -ArgumentList elements
 # with spaces WITHOUT quoting them. The unquoted script path was therefore split
 # at the space and python reported:
-#     can't open file '...\HQ-Broadcast-Full': [Errno 2] No such file
+#     can't open file 'a path containing a space': [Errno 2] No such file
 # The Receiver process died instantly, so it never connected and never reported
 # DEVICE_ERROR either - it simply was not there. Any Windows path containing a
 # space breaks this, which includes "C:\Program Files" and most user folders.

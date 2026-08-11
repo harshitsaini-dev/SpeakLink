@@ -29,7 +29,7 @@ SPEAKER_VERIFIED, and not a second desktop.
 import json, os, secrets, subprocess, sys, threading, time
 from pathlib import Path
 
-ROOT = Path(r"c:\Users\admin\Desktop\SpeakLink\HQ-Broadcast-Full (1)")
+ROOT = Path(r"c:\Users\admin\Desktop\SpeakLink")
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "backend"))
 import requests
 
