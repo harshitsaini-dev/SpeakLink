@@ -3924,7 +3924,7 @@ Broadcast History, session detail, `broadcast_targets`,
 tombstone - proven directly against the database inside the test suite,
 not just through the API. `TargetOut` now carries `store_code`/
 `store_name`/`store_deleted`, populated from the (never-removed) Store
-row, so a historical target renders "AYUSHK (Deleted)" instead of a bare
+row, so a historical target renders "TESTSTORE (Deleted)" instead of a bare
 id or a blank name.
 
 ### Permission and confirmation
@@ -4242,7 +4242,7 @@ contain them, and inventing rows for them would be fabrication.
 
 Bindapur remains Store id 31 with Device
 `3b1ff11f-0b18-4f56-b911-30f036cbddd9` active and primary. RBAC roles,
-permission overrides, scope audit history and the AYUSHK tombstone (with
+permission overrides, scope audit history and the TESTSTORE tombstone (with
 its deletion audit row and three broadcast-target history rows) all
 survived. Zero orphans across ten FK relationships, zero duplicate
 store_code/public_id/username/primary-per-Store, and every sequence
@@ -5471,8 +5471,8 @@ controlled restart checkpoint.
 ## True Store permanent delete (feature/true-store-permanent-delete)
 
 The same defect as the User one, in a second place. An operator permanently
-deleted the Store AYUSHK; it vanished from the list, and adding a Store with
-code AYUSHK was then refused with `store_code already exists`.
+deleted the Store TESTSTORE; it vanished from the list, and adding a Store with
+code TESTSTORE was then refused with `store_code already exists`.
 `store_deletion.py` tombstoned the row and said so in its own docstring — the
 code was "never handed out to a new Store afterward".
 
@@ -5502,10 +5502,10 @@ and the `receiver_token` dies with the row.
 
 ### Proven on a copy of the live database
 
-3 tombstones purged (58 `AYUSHK`, 59 `test`, 60 `ayushk`), stores 47 → 44,
+3 tombstones purged (58 `TESTSTORE`, 59 `test`, 60 `teststore`), stores 47 → 44,
 active 44 unchanged, archived unchanged. Device 5 detached and retired with
-snapshot `AYUSHK`; 29 Receiver events and 2 enrolment codes detached with
-history intact; audit preserved; idempotent. AYUSHK recreated as **id 61** —
+snapshot `TESTSTORE`; 29 Receiver events and 2 enrolment codes detached with
+history intact; audit preserved; idempotent. TESTSTORE recreated as **id 61** —
 never reusing 58, 59 or 60 — with zero inherited Devices, credentials,
 enrolment codes, scopes or leases, its own `receiver_token`, and no historical
 row bound to it. `integrity_check ok`, `foreign_key_check` clean.

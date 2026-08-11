@@ -2,10 +2,10 @@
 
 THE DEFECT THIS FILE EXISTS FOR
 
-An operator permanently deleted the Store AYUSHK. It vanished from the Store
+An operator permanently deleted the Store TESTSTORE. It vanished from the Store
 list, and then:
 
-    Add Store -> store_code AYUSHK  ->  "store_code already exists"
+    Add Store -> store_code TESTSTORE  ->  "store_code already exists"
 
 The old design tombstoned the row, so the UNIQUE index kept the code for ever.
 ``store_deletion.py`` said so in its own docstring - the code was "never handed

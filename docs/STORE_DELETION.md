@@ -51,8 +51,8 @@ Permanent deletion used to be a *tombstone*: the row stayed, marked deleted.
 new Store afterward". So an operator saw this:
 
 ```
-Store Management  ->  permanently delete AYUSHK  ->  it disappears
-Add Store         ->  store_code AYUSHK          ->  "store_code already exists"
+Store Management  ->  permanently delete TESTSTORE  ->  it disappears
+Add Store         ->  store_code TESTSTORE          ->  "store_code already exists"
 ```
 
 A Store that still occupies the code namespace has not been deleted; it has

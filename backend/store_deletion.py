@@ -28,7 +28,7 @@ Receiver authentication) already excludes it without having learned
 anything new, exactly like ``ARCHIVED`` before it. ``deleted_at``/
 ``deleted_by`` record who and when. The Store's ``store_code`` and
 ``store_name`` are left exactly as they were - that identity is what makes
-old Broadcast History readable ("AYUSHK" rather than a blank name or a
+old Broadcast History readable ("TESTSTORE" rather than a blank name or a
 raw id) - and are never handed out to a new Store afterward.
 """
 

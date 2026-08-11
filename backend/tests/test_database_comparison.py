@@ -96,7 +96,7 @@ def candidates(tmp_path):
                   users=[("lan-pilot-ufkzyp", "OWNER")],
                   stores=[("LAN-1", "LAN pilot Store")],
                   devices=[("c5e23dff", 1, "Legacy Receiver 1", "active"),
-                           ("1f5a6c77", 1, "AYUSH", "active")],
+                           ("1f5a6c77", 1, "TESTPC", "active")],
                   sessions=28, logs=96)
     return repository, newest, older
 
@@ -186,7 +186,7 @@ def test_it_names_devices_without_their_secrets(candidates):
     report = inspect_database(older)
     # `devices` is the count; `devices_detail` carries the safe rows.
     names = {name for _public, name, _status in report.devices_detail}
-    assert "AYUSH" in names
+    assert "TESTPC" in names
     assert report.devices == 2
 
 
@@ -214,7 +214,7 @@ def test_it_says_which_database_holds_which_unique_thing(candidates):
     repository, newest, older = candidates
     text = describe_comparison(compare([repository, newest, older]))
     assert "owneradmin" in text
-    assert "AYUSH" in text
+    assert "TESTPC" in text
 
 
 def test_it_recommends_without_deciding(candidates):

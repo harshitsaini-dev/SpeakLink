@@ -237,7 +237,7 @@ rows), which is correct - the live RC12 database does not contain them.
 
 Bindapur is Store id 31 with Device
 `3b1ff11f-0b18-4f56-b911-30f036cbddd9` active and primary. RBAC roles,
-permission overrides, scope audit history and the AYUSHK tombstone (with
+permission overrides, scope audit history and the TESTSTORE tombstone (with
 its deletion audit row and broadcast history) all survived. Zero orphans
 across ten FK relationships, zero duplicate identities, and every
 sequence resumes past its migrated MAX(id).

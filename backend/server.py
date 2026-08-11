@@ -2203,8 +2203,8 @@ def tombstone_store(store_id: int, payload: StoreTombstoneRequest,
 
     This used to tombstone: the row stayed, marked deleted, so every history
     row referring to it stayed valid. It kept history readable and it kept the
-    Store Code reserved for ever - an operator who permanently deleted AYUSHK
-    could never create AYUSHK again, and store_deletion.py said so in its own
+    Store Code reserved for ever - an operator who permanently deleted TESTSTORE
+    could never create TESTSTORE again, and store_deletion.py said so in its own
     docstring.
 
     Now the row is deleted and history is made independent of it first: each

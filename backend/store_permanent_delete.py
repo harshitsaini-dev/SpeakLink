@@ -7,8 +7,8 @@ tombstoned it. Its own docstring says the Store's ``store_code`` is "left
 exactly as it was ... and never handed out to a new Store afterward", and that
 is precisely what the operator hit:
 
-    Permanently delete AYUSHK
-    Add Store -> store_code AYUSHK  ->  "store_code already exists"
+    Permanently delete TESTSTORE
+    Add Store -> store_code TESTSTORE  ->  "store_code already exists"
 
 A Store that still occupies the code namespace has not been deleted; it has
 been hidden. This is the same defect the User feature fixed, in a second
