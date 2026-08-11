@@ -56,7 +56,7 @@ if ($null -eq $yarn) {
     throw 'Yarn was not found on PATH. Install Yarn 1.22.x before starting the pilot frontend.'
 }
 if (-not (Test-Path $pilotData)) {
-    throw "The pilot database is not prepared at $pilotData. Run the prepare command first (see LOCAL_PILOT_TEST_RUNBOOK.md)."
+    throw "The pilot database is not prepared at $pilotData. Run the prepare command first (see docs/LOCAL_PILOT_TEST_RUNBOOK.md)."
 }
 if ([string]::IsNullOrWhiteSpace($env:ADMIN_PASSWORD)) {
     throw 'ADMIN_PASSWORD is not set for this PowerShell session. Set a temporary pilot-only value before starting. It is never stored by this script.'

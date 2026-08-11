@@ -295,9 +295,9 @@ this repository** — only a kit folder.
 
 Copy the whole kit folder to the Store computer. The operator follows
 `README-FIRST.txt` inside it. Details and the reasoning:
-[STORE_PILOT_KIT_RUNBOOK.md](STORE_PILOT_KIT_RUNBOOK.md),
-[RECEIVER_TASK_SCHEDULER_RUNBOOK.md](RECEIVER_TASK_SCHEDULER_RUNBOOK.md),
-[PRIVATE_LAN_TWO_DESKTOP_TEST_RUNBOOK.md](PRIVATE_LAN_TWO_DESKTOP_TEST_RUNBOOK.md).
+[docs/STORE_PILOT_KIT_RUNBOOK.md](docs/STORE_PILOT_KIT_RUNBOOK.md),
+[docs/RECEIVER_TASK_SCHEDULER_RUNBOOK.md](docs/RECEIVER_TASK_SCHEDULER_RUNBOOK.md),
+[docs/PRIVATE_LAN_TWO_DESKTOP_TEST_RUNBOOK.md](docs/PRIVATE_LAN_TWO_DESKTOP_TEST_RUNBOOK.md).
 
 Never use `artifacts\SpeakLinkReceiver-1.0.0` — it is marked
 `STALE-DO-NOT-DEPLOY` and kept only as evidence.

@@ -122,7 +122,7 @@ export default function StoreManagement() {
   // credential into a URL - and therefore into clipboards, chat messages,
   // browser history and any log that saw the link. A Receiver computer will
   // earn its own credential through one-time enrolment instead; see
-  // RECEIVER_ENROLMENT.md.
+  // docs/RECEIVER_ENROLMENT.md.
   return (
     <div className="space-y-4" data-testid="stores-page">
       <div className="flex items-center justify-between">

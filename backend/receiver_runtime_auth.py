@@ -169,7 +169,7 @@ class DualRuntimeAuthenticator:
     swallowed into "bad credential", because that is the operator's problem and
     hiding it would look like every Receiver suddenly having a bad token.
 
-    Removing this class is the documented cutover. See RECEIVER_ENROLMENT.md.
+    Removing this class is the documented cutover. See docs/RECEIVER_ENROLMENT.md.
     """
 
     def __init__(self, *, device: object, legacy: object) -> None:

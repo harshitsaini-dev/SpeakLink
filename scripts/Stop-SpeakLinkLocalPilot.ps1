@@ -80,7 +80,7 @@ foreach ($name in 'ADMIN_PASSWORD', 'JWT_SECRET', 'SPEAKLINK_DB_PATH', 'REACT_AP
 Write-Output ''
 Write-Output "The pilot database was NOT deleted. It remains under $PilotRoot\data."
 Write-Output 'To remove it deliberately, use the reset command documented in'
-Write-Output 'LOCAL_PILOT_TEST_RUNBOOK.md (it requires an explicit --reset-pilot-db flag).'
+Write-Output 'docs/LOCAL_PILOT_TEST_RUNBOOK.md (it requires an explicit --reset-pilot-db flag).'
 Write-Output ''
 
 # Report success only when it is true. The previous version printed "stopped"

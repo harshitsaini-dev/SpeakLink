@@ -1,6 +1,6 @@
 """DPAPI-protected custody for the versioned Receiver HMAC key ring.
 
-`RECEIVER_HOSTING_KEY_STORAGE_ADR.md` chose this shape and rejected the
+`docs/RECEIVER_HOSTING_KEY_STORAGE_ADR.md` chose this shape and rejected the
 alternatives explicitly: a key in `.env` fails secret protection entirely if the
 host or a backup is exposed, and a key in SQLite destroys the separation between
 "database compromise" and "key compromise" that the whole credential design

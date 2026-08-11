@@ -1,6 +1,6 @@
 """The Receiver HMAC key must live somewhere a database copy cannot reach.
 
-`RECEIVER_HOSTING_KEY_STORAGE_ADR.md` already decided how: a DPAPI-protected
+`docs/RECEIVER_HOSTING_KEY_STORAGE_ADR.md` already decided how: a DPAPI-protected
 versioned key container, outside Git and outside SQLite, with only non-secret
 key-version metadata in ordinary configuration. A key in `.env` and a key in
 SQLite were both explicitly rejected - the second because it destroys the

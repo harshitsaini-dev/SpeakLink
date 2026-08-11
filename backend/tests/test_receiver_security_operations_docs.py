@@ -14,8 +14,8 @@ import re
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-ADR_PATH = REPOSITORY_ROOT / "RECEIVER_HOSTING_KEY_STORAGE_ADR.md"
-REVIEW_PATH = REPOSITORY_ROOT / "RECEIVER_SECURITY_OPERATIONS_REVIEW.md"
+ADR_PATH = REPOSITORY_ROOT / "docs/RECEIVER_HOSTING_KEY_STORAGE_ADR.md"
+REVIEW_PATH = REPOSITORY_ROOT / "docs/RECEIVER_SECURITY_OPERATIONS_REVIEW.md"
 
 # Runtime/frontend files this task must never modify. Fingerprinted at
 # collection time so a later test in this module can prove they are still

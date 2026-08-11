@@ -718,7 +718,7 @@ schema change and invites another rebaseline. Guard the *fact*, not just the byt
 
 ## Run the runbook before you need the runbook
 
-`docs/ROLLBACK_PLAN.md` told an operator to run:
+`ROLLBACK_PLAN.md` told an operator to run:
 
 ```powershell
 python tools\compare_databases.py --left <current> --right <backup>

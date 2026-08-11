@@ -136,7 +136,7 @@ none".
 | Store task/recovery tests (Phase 5 of the sprint brief) | `NOT STARTED` |
 | Receiver onboarding: USED state + setup progress | `NOT STARTED` |
 | Audio/WebSocket/queue P0/P1 audit | `NOT STARTED` |
-| `docs/SECURITY_AUDIT.md` | `NOT STARTED` |
+| `SECURITY_AUDIT.md` | `NOT STARTED` |
 | Load tests 2/5/10/20/40 | `NOT STARTED` |
 | Live HQ task installation, reboot/sign-in, locked desktop | `OPERATOR CHECKPOINT` |
 
@@ -160,7 +160,7 @@ Commits `da9c0e8` (Receiver status file), `ed4b58b` (store_setup_core.py),
 | Store task/recovery automated tests (Phase 2 of the sprint brief) | `NOT STARTED` | |
 | Receiver enrollment status evidence, USED state (Phase 3) | `NOT STARTED` | |
 | Audio/WebSocket/queue audit (Phase 4) | `NOT STARTED` | |
-| `docs/SECURITY_AUDIT.md` (Phase 5) | `NOT STARTED` | |
+| `SECURITY_AUDIT.md` (Phase 5) | `NOT STARTED` | |
 | Load tests 2/5/10/20/40 (Phase 7) | `NOT STARTED` | |
 | Final Release Candidate artifacts (Phase 8) | `NOT STARTED` | |
 
@@ -195,7 +195,7 @@ Commits `9657558`, `11a95c6`, `bbab632`, `34f6a6e`.
 | `SpeakLinkStoreSetup.exe` rebuilt from current source | `AUTOMATED PASS` | PE subsystem 2; launched, real window, 0 new conhost processes |
 | Enrollment USED state + setup progress (Phase 4) | `NOT STARTED` | |
 | Audio/WebSocket bounded-queue audit (Phase 5) | `NOT STARTED` | |
-| `docs/SECURITY_AUDIT.md` (Phase 6) | `NOT STARTED` | |
+| `SECURITY_AUDIT.md` (Phase 6) | `NOT STARTED` | |
 | Playwright / frontend build this sprint | `NOT RUN` | not re-run; no frontend code changed |
 | Load tests 2/5/10/20/40 (Phase 7) | `NOT STARTED` | |
 | Final Release Candidate artifacts (Phase 8) | `NOT STARTED` | |
@@ -236,7 +236,7 @@ Commits `1981f78`, `8788628`, `2cac9b6`.
 | Emergency Stop clears queues | `AUTOMATED PASS` (pre-existing) | `_end_session` calls `stop_audio_fanout()` before clearing live state |
 | Playwright Chromium | `AUTOMATED PASS` | 164 passed, 0 failed - run fresh this sprint |
 | Frontend production build | `AUTOMATED PASS` | Done - run fresh this sprint |
-| `docs/SECURITY_AUDIT.md` (Phase 6) | `NOT STARTED` | |
+| `SECURITY_AUDIT.md` (Phase 6) | `NOT STARTED` | |
 | Load tests 2/5/10/20/40 (Phase 7) | `NOT STARTED` | needs a running persistent server |
 | Final Release Candidate artifacts (Phase 8) | `NOT STARTED` | |
 
@@ -268,14 +268,14 @@ Commits `9e84dca`, `4eb865f`, `9e6d83b`, and the audit-document commit.
 
 | Item | Status | Evidence |
 |---|---|---|
-| Security audit (14 areas) | `COMPLETE` | [docs/SECURITY_AUDIT.md](SECURITY_AUDIT.md) - 398 file-visits, adversarial refutation pass |
+| Security audit (14 areas) | `COMPLETE` | [SECURITY_AUDIT.md](SECURITY_AUDIT.md) - 398 file-visits, adversarial refutation pass |
 | P1: broadcaster uplink authorization | `FIXED` | ticket audience + double permission check; 14 tests |
 | P1: enrolment cap counted dead codes | `FIXED` | expiry term added; 3 tests |
 | P1: HQ start script orphaned -ArgumentList | `FIXED` | parser-verified; structural guard over 42 scripts |
 | **P0: live JWT_SECRET in speaklink-live.zip** | **`RESOLVED 2026-07-30`** | secret rotated, both ADMIN passwords changed, archive removed on approval; guard now `2 passed` |
 | P1: standby acks share the primary snapshot | `FIXED 2026-07-30` | commit `3c3d945`; 16 tests written RED first; **four** consequences, not the one recorded |
 | Audio metrics endpoint | `AUTOMATED PASS` | `GET /api/broadcast/audio-metrics`, VIEW_STATUS, 9 tests |
-| Load tests 2/5/10/20/40 | `COMPLETE` | [docs/LOAD_TEST_REPORT.md](LOAD_TEST_REPORT.md) - all five levels clean |
+| Load tests 2/5/10/20/40 | `COMPLETE` | [LOAD_TEST_REPORT.md](LOAD_TEST_REPORT.md) - all five levels clean |
 | Fresh artifacts (HQ, Receiver, StoreSetup, Store kit) | `AUTOMATED PASS` | all four rebuilt from source and verified |
 | Playwright chromium | `AUTOMATED PASS` | 164 passed, run fresh |
 | Frontend production build | `AUTOMATED PASS` | Done, run fresh |

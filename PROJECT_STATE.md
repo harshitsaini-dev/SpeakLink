@@ -6,7 +6,7 @@ Current branch: `test/one-store-bluetooth-amplifier-live`
 > **Live audio now reaches a real amplifier on one Store.** A spoken
 > announcement was heard clearly through the speakers connected to a Bluetooth
 > amplifier — see
-> [`ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md`](ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md)
+> [`docs/ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md`](docs/ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md)
 > and the summary at the end of this document. `SPEAKER_VERIFIED` remains
 > `NOT_IMPLEMENTED` and the project is `NOT_READY_FOR_PRODUCTION`.
 
@@ -114,7 +114,7 @@ Stop each process with `Ctrl+C` in its own terminal.
 
 ## Receiver status contract
 
-`RECEIVER_STATUS_CONTRACT.md` and `backend/receiver_contract.py` define:
+`docs/RECEIVER_STATUS_CONTRACT.md` and `backend/receiver_contract.py` define:
 
 - Independent connection, readiness, playback, and acoustic state axes.
 - Strict Pydantic acknowledgement schemas with UTC timestamps, UUID message
@@ -210,7 +210,7 @@ passwords, JWTs, or receiver tokens.
 
 ## Receiver credential lifecycle Phase 1
 
-`RECEIVER_CREDENTIAL_LIFECYCLE.md` defines separate `receiver_devices`,
+`docs/RECEIVER_CREDENTIAL_LIFECYCLE.md` defines separate `receiver_devices`,
 `receiver_credentials`, structured credential audit events, and an explicit
 migration-state record. Phase 1 now has an explicit versioned runner in
 `backend/migrations.py`, validated only with pytest temporary SQLite files.
@@ -444,7 +444,7 @@ FFmpeg, or LinkGuard behavior is included.
 
 ## Production cutover and key-custody review documents
 
-`RECEIVER_PRODUCTION_CUTOVER_RUNBOOK.md` now defines a review-only,
+`docs/RECEIVER_PRODUCTION_CUTOVER_RUNBOOK.md` now defines a review-only,
 maintenance-mode sequence from authorization through staged pilot expansion.
 It covers separate database/WAL/SHM and HMAC-key backups, isolated restore
 verification, additive migration, complete fleet backfill, controlled
@@ -452,7 +452,7 @@ verification, additive migration, complete fleet backfill, controlled
 fresh source-count blockers, stop conditions, and emergency abort behavior.
 The pilot expands through 1, 3, 5, and 10 Stores before the remaining fleet.
 
-`RECEIVER_HMAC_KEY_CUSTODY.md` defines key purpose, positive versioning,
+`docs/RECEIVER_HMAC_KEY_CUSTODY.md` defines key purpose, positive versioning,
 fail-closed lookup, Windows-compatible storage choices, role separation,
 handling controls, separate encrypted recovery, loss/compromise response, and
 rotation design. It selects no final platform and contains no real key material.
@@ -566,7 +566,7 @@ trusted acoustic speaker verification remain separate evidence.
 ## Receiver hosting, service-identity, and key-storage ADR
 
 A formal security/operations review and hosting/key-storage ADR are complete:
-`RECEIVER_SECURITY_OPERATIONS_REVIEW.md` and `RECEIVER_HOSTING_KEY_STORAGE_ADR.md`.
+`docs/RECEIVER_SECURITY_OPERATIONS_REVIEW.md` and `docs/RECEIVER_HOSTING_KEY_STORAGE_ADR.md`.
 The ADR status is "Proposed for pilot approval" — it selects a provisional pilot
 baseline and explicitly does not implement, configure, or execute it.
 
@@ -589,7 +589,7 @@ Named human approvals are still required before any implementation: a
 security approver, operations approver, product owner, database backup owner,
 and rollback owner must sign off on the ADR, and every "Not ready or
 unresolved" item in the security review's pilot-readiness checklist needs an
-owner before Phase E of `RECEIVER_PRODUCTION_CUTOVER_RUNBOOK.md` can begin.
+owner before Phase E of `docs/RECEIVER_PRODUCTION_CUTOVER_RUNBOOK.md` can begin.
 
 Next recommended task: a test-first, implementation-neutral Windows
 deployment specification (directory layout, service-identity permissions,
@@ -711,7 +711,7 @@ across 8 consecutive runs.
 `backend/store_catalog_reconciliation.py` compares an explicitly supplied,
 operator-isolated SQLite snapshot against the canonical catalog and reports the
 difference. It is **implemented and strictly read-only**; it performs no
-cleanup and authorizes none. `STORE_CATALOG_RECONCILIATION_RUNBOOK.md`
+cleanup and authorizes none. `docs/STORE_CATALOG_RECONCILIATION_RUNBOOK.md`
 documents it in full.
 
 Usage (from `backend`, with the project virtual environment):
@@ -781,7 +781,7 @@ not ALL_40_STORES_READY.
 
 `tools/local_pilot.py` prepares an isolated, disposable pilot database outside
 the repository and runs a loopback-only software smoke test against it.
-`LOCAL_PILOT_TEST_RUNBOOK.md` is the beginner-facing Windows runbook, and
+`docs/LOCAL_PILOT_TEST_RUNBOOK.md` is the beginner-facing Windows runbook, and
 `scripts/Start-SpeakLinkLocalPilot.ps1` / `scripts/Stop-SpeakLinkLocalPilot.ps1`
 wrap manual browser testing.
 
@@ -873,7 +873,7 @@ readiness statement only. It is explicitly **not** READY_FOR_SPEAKER_TEST, not
 SPEAKER_VERIFIED, not AMPLIFIER_VERIFIED, not READY_FOR_PRODUCTION and not
 ALL_STORES_READY.
 
-`ONE_STORE_LIVE_AUDIO_TEST_RUNBOOK.md` is the operator-facing runbook.
+`docs/ONE_STORE_LIVE_AUDIO_TEST_RUNBOOK.md` is the operator-facing runbook.
 
 ### Audio format
 
@@ -988,7 +988,7 @@ Status: **READY_FOR_ONE_STORE_WINDOWS_OUTPUT_TEST**. This is explicitly **not**
 SPEAKER_VERIFIED, not AMPLIFIER_VERIFIED, not BLUETOOTH_VERIFIED, not
 ECHO_GUARD_VERIFIED, not READY_FOR_PRODUCTION and not ALL_STORES_READY.
 
-`ONE_STORE_WINDOWS_OUTPUT_TEST_RUNBOOK.md` is the operator-facing runbook.
+`docs/ONE_STORE_WINDOWS_OUTPUT_TEST_RUNBOOK.md` is the operator-facing runbook.
 
 ### Why a new dependency was required
 
@@ -1081,7 +1081,7 @@ and after all pilot work.
 ## One-Store Windows output hardware validation
 
 Outcome: **`HARDWARE_PILOT_BLOCKED`**. Full evidence is in
-`ONE_STORE_WINDOWS_OUTPUT_VALIDATION_RESULT.md`.
+`docs/ONE_STORE_WINDOWS_OUTPUT_VALIDATION_RESULT.md`.
 
 No sound was played, no audio device was ever opened, and no operator audible
 observation was obtained. The operator had **no amplifier and no wired path to
@@ -1124,7 +1124,7 @@ unproven.
 
 ## Windows Deployment Specification
 
-Status: **not started**. `RECEIVER_HOSTING_KEY_STORAGE_ADR.md` remains
+Status: **not started**. `docs/RECEIVER_HOSTING_KEY_STORAGE_ADR.md` remains
 "Proposed for pilot approval" and no deployment specification, Windows service
 identity, DPAPI secret container, ACL layout or TLS configuration has been
 written or executed.
@@ -1246,9 +1246,9 @@ broadcast was actually audible, feeding the existing trusted-verifier
 operator observation and nothing more.
 
 Three separate still-open tasks: run the hardware checklist in
-`ONE_STORE_WINDOWS_OUTPUT_TEST_RUNBOOK.md` with a real USB/3.5 mm adapter and
+`docs/ONE_STORE_WINDOWS_OUTPUT_TEST_RUNBOOK.md` with a real USB/3.5 mm adapter and
 record the observation form; perform the browser microphone checklist in
-`ONE_STORE_LIVE_AUDIO_TEST_RUNBOOK.md`; and run the reconciliation report once
+`docs/ONE_STORE_LIVE_AUDIO_TEST_RUNBOOK.md`; and run the reconciliation report once
 against an operator-produced isolated snapshot of the real database. That means the
 operator stops the backend, takes a quiesced copy of
 `backend/speaklink_live.db` plus any WAL/SHM files to a path outside the
@@ -1272,9 +1272,9 @@ started**.
 ## One-Store Bluetooth amplifier live test (2026-07-26)
 
 **Outcome: `BLUETOOTH_AMPLIFIER_LIVE_TEST_PASSED`.** Full record:
-[`ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md`](ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md).
+[`docs/ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md`](docs/ONE_STORE_BLUETOOTH_AMPLIFIER_VALIDATION_RESULT.md).
 Procedure to repeat it:
-[`ONE_STORE_BLUETOOTH_AMPLIFIER_TEST_RUNBOOK.md`](ONE_STORE_BLUETOOTH_AMPLIFIER_TEST_RUNBOOK.md).
+[`docs/ONE_STORE_BLUETOOTH_AMPLIFIER_TEST_RUNBOOK.md`](docs/ONE_STORE_BLUETOOTH_AMPLIFIER_TEST_RUNBOOK.md).
 
 ```
 OPERATOR_CHIME_OBSERVATION      = HEARD_CLEARLY
@@ -1306,11 +1306,11 @@ from an explicit Receiver acknowledgement; none was inferred from another.
 
 ### Corrected earlier claim
 
-`ONE_STORE_WINDOWS_OUTPUT_VALIDATION_RESULT.md` called
+`docs/ONE_STORE_WINDOWS_OUTPUT_VALIDATION_RESULT.md` called
 `index:18@Headphones ()` "the only candidate wired analog endpoint". That is
 wrong: `Headphones ()` is a WDM-KS view of the **Bluetooth** stack and vanishes
 when the adapter is unplugged. Both that document and
-`ONE_STORE_WINDOWS_OUTPUT_TEST_RUNBOOK.md` now carry a correction notice.
+`docs/ONE_STORE_WINDOWS_OUTPUT_TEST_RUNBOOK.md` now carry a correction notice.
 
 ### Defects found and fixed, each test-first
 
@@ -1562,7 +1562,7 @@ afterwards and got faster (2.7 min → 1.6 min).
 
 The security finding stays on the record; the usable pair does not. Replaced
 with `[REMOVED INSECURE HISTORICAL DEFAULT]` in `memory/PRD.md`,
-`test_reports/iteration_1.json`, `PROJECT_STATE.md` and `test_result.md`. The
+`test_reports/iteration_1.json`, `PROJECT_STATE.md` and `docs/test_result.md`. The
 Playwright regression guard now assembles the historical value from parts, so
 the assertion still protects against its return without the repository holding
 a copy-pasteable credential. `README.md` now states that `ADMIN_USERNAME` and
@@ -1892,7 +1892,7 @@ Receiver device enrolment.
 ## Receiver device enrolment, first half (2026-07-27)
 
 Branch `security/receiver-device-enrolment`. Full detail:
-[`RECEIVER_ENROLMENT.md`](RECEIVER_ENROLMENT.md).
+[`docs/RECEIVER_ENROLMENT.md`](docs/RECEIVER_ENROLMENT.md).
 
 ### What the inspection found
 
@@ -1943,7 +1943,7 @@ length that does not vary with the Store or the administrator.
 ### Deliberately not delivered: the credential half
 
 Redeeming a code must produce a device credential, and issuing one needs the
-HMAC key ring. `RECEIVER_HOSTING_KEY_STORAGE_ADR.md` already decided how that key
+HMAC key ring. `docs/RECEIVER_HOSTING_KEY_STORAGE_ADR.md` already decided how that key
 must be held:
 
 > DPAPI-protected versioned HMAC-key container outside Git and SQLite …
@@ -2095,7 +2095,7 @@ are the same operation with a different package.
 lock/unlock behaviour, crash recovery timing, backend-outage reconnect timing,
 and audible playback. All of those need the operator and the second desktop —
 the manual checklist is in
-[STORE_RECEIVER_ACCEPTANCE_CHECKLIST.md](STORE_RECEIVER_ACCEPTANCE_CHECKLIST.md).
+[docs/STORE_RECEIVER_ACCEPTANCE_CHECKLIST.md](docs/STORE_RECEIVER_ACCEPTANCE_CHECKLIST.md).
 
 ### 2026-07-29 (later still) — OWNER, and an 8-character password minimum
 
@@ -2257,7 +2257,7 @@ audio/WebSocket/queue audit, the security audit document, load tests and E2E.
    verified backup and a rehearsed rollback.
 3. Retiring `stores.receiver_token` once every Store has enrolled Devices.
 4. **Actual second-desktop operator execution.** Everything so far is
-   same-computer evidence. `PRIVATE_LAN_TWO_DESKTOP_TEST_RUNBOOK.md` is ready
+   same-computer evidence. `docs/PRIVATE_LAN_TWO_DESKTOP_TEST_RUNBOOK.md` is ready
    and has not been run by an operator.
 5. HTTPS/WSS persistent staging. The LAN pilot sends the Device credential over
    plain HTTP and says so at every start.

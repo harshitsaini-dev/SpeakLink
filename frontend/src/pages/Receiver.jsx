@@ -10,7 +10,7 @@
  * It is kept rather than deleted because a browser-based Receiver harness is
  * still worth having. It needs rebuilding on top of one-time device enrolment
  * first, so that it holds a credential belonging to one computer instead of a
- * secret shared by every Receiver in a Store. See RECEIVER_ENROLMENT.md.
+ * secret shared by every Receiver in a Store. See docs/RECEIVER_ENROLMENT.md.
  */
 import React from "react";
 import { useSearchParams } from "react-router-dom";

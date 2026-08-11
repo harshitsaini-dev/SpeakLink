@@ -36,7 +36,7 @@ export default function App() {
               /ws/receiver/{token}, a backend route that does not exist, and
               reaching it required a Store credential in the URL. A Receiver
               computer will earn its own credential through one-time enrolment
-              instead; see RECEIVER_ENROLMENT.md. The component is kept for that
+              instead; see docs/RECEIVER_ENROLMENT.md. The component is kept for that
               rework rather than deleted. */}
           <Route
             element={

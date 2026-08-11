@@ -338,7 +338,7 @@ The two `PRAGMA table_info` sites are the serious ones: they run at every
 start-up, so **HQ would not have booted against PostgreSQL at all**. The
 cutover would have failed at boot rather than at a feature.
 
-See `docs/learning-guide.md` for the full family of SQLite-vs-PostgreSQL
+See `learning-guide.md` for the full family of SQLite-vs-PostgreSQL
 differences and why a bound Python `bool` is preferred over a dialect branch.
 
 ### Required cleanup evidence
