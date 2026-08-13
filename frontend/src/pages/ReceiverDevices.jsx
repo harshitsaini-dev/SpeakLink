@@ -186,6 +186,49 @@ function EnrolmentCodePanel({ issued, record, onDismiss }) {
 }
 
 function ShownOnce({ label, value, testId, onDismiss }) {
+  const [copied, setCopied] = React.useState(false);
+
+  /**
+   * Put the value on the clipboard, exactly.
+   *
+   * THIS BUTTON DID NOT EXIST, and an enrolment failed for an afternoon
+   * because of it. The code was on screen in a monospace block with nothing to
+   * click, so it was selected by hand and retyped - once four characters
+   * short, then at full length with a character wrong. HQ cannot tell either
+   * of those from a code that never existed: all three are a hash matching
+   * nothing, and the message is the same generic sentence.
+   *
+   * The fallback matters as much as the modern path: navigator.clipboard is
+   * unavailable on plain HTTP outside localhost, which is exactly how this HQ
+   * is reached from a Store.
+   */
+  const copy = async () => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const carrier = document.createElement("textarea");
+        carrier.value = value;
+        carrier.setAttribute("readonly", "");
+        carrier.style.position = "fixed";
+        carrier.style.opacity = "0";
+        document.body.appendChild(carrier);
+        carrier.select();
+        document.execCommand("copy");
+        carrier.remove();
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Said out loud rather than swallowed: a Copy button that silently does
+      // nothing is worse than none, because the next thing that happens is
+      // somebody pastes whatever was on the clipboard before.
+      setCopied(false);
+      window.alert("This browser would not let SpeakLink copy. Select the code "
+                   + "and copy it manually.");
+    }
+  };
+
   return (
     <div
       data-testid={testId}
@@ -208,7 +251,17 @@ function ShownOnce({ label, value, testId, onDismiss }) {
         <span data-testid={`${testId}-length`} className="font-mono">
           {String(value).length} characters
         </span>
-        {" — use Copy rather than reading it out."}
+        {" — copy it rather than reading it out."}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          data-testid={`${testId}-copy`}
+          onClick={copy}
+          className="px-3 py-1.5 border border-amber-500 bg-white rounded text-xs font-semibold hover:bg-amber-100"
+        >
+          {copied ? "Copied" : "Copy code"}
+        </button>
       </div>
       <div className="text-xs text-amber-900">{SHOWN_ONCE_WARNING}</div>
       <button
