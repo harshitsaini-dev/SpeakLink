@@ -392,7 +392,7 @@ def test_an_unreachable_hq_fails_the_connection_test_and_stops_there(fresh):
 
 def test_an_invalid_code_is_refused_generically(fresh, tmp_path):
     result = core.redeem_enrollment(authorization=_authorized(), 
-        backend_url="https://hq.example.com", code="ECHO-NOPE-NOPE",
+        backend_url="https://hq.example.com", code="ECHONOPEaaaaaaaaaaaaaaaaaaaaaaaa"[:32],
         device_name="A", hostname="A", credential_path=tmp_path / "a.bin",
         protector=FakeCredentialProtector("e2e-computer"),
         transport=_RealBackendTransport(fresh),

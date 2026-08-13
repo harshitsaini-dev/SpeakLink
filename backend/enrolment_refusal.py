@@ -50,6 +50,15 @@ _PATTERNS = (
     ("no such", RefusalCategory.UNKNOWN_TOKEN),
     ("unknown", RefusalCategory.UNKNOWN_TOKEN),
     ("not found", RefusalCategory.UNKNOWN_TOKEN),
+    # The phrase the code service ACTUALLY uses, which was missing - so the
+    # single most common refusal, a code that does not match anything, was
+    # logged as "could not classify". Four hours of a real enrolment were spent
+    # reading INVALID_STATE and looking for an exotic fault.
+    ("not recognised", RefusalCategory.UNKNOWN_TOKEN),
+    ("not recognized", RefusalCategory.UNKNOWN_TOKEN),
+    ("no enrolment code was presented", RefusalCategory.UNKNOWN_TOKEN),
+    # And the Store guard's own wording, for the same reason.
+    ("not available for enrolment", RefusalCategory.STORE_DISABLED),
 )
 
 

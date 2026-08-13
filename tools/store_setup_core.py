@@ -236,6 +236,44 @@ class EnrolmentUiResult:
 #: The category the caller gave (revoked/expired/etc, if any) is not surfaced
 #: here either: this module never receives it, because the backend does not
 #: send it to an unauthenticated enrolment caller.
+#: What a SpeakLink enrolment code looks like. HQ mints
+#: secrets.token_urlsafe(24), which is always 32 characters from the URL-safe
+#: base64 alphabet. Checked HERE, before the network, because an incomplete
+#: code is the commonest way enrolment fails and the server cannot tell the
+#: difference between "you missed four characters" and "that code is not ours"
+#: - to HQ both are simply a hash that matches nothing.
+CODE_LENGTH = 32
+CODE_ALPHABET = set(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+
+
+def describe_code_shape(code: object) -> "str | None":
+    """A sentence about why this cannot be an enrolment code, or None.
+
+    Deliberately not a validator that rejects: HQ decides what is valid, and a
+    client that refused a code HQ would have accepted is worse than a wasted
+    round trip. This only speaks up when the string cannot possibly be one -
+    the wrong length, or characters a code never contains.
+    """
+    if not isinstance(code, str):
+        return None
+    trimmed = code.strip()
+    if not trimmed:
+        return "Enter the one-time code from HQ."
+    if len(trimmed) != CODE_LENGTH:
+        return (f"That code is {len(trimmed)} characters; a SpeakLink code is "
+                f"{CODE_LENGTH}. It looks "
+                + ("incomplete - copy it again from HQ with the Copy button."
+                   if len(trimmed) < CODE_LENGTH
+                   else "too long - check nothing extra was pasted with it."))
+    stray = {character for character in trimmed} - CODE_ALPHABET
+    if stray:
+        shown = "".join(sorted(stray))[:6]
+        return (f"That code contains characters a SpeakLink code never has "
+                f"({shown}). Copy it again from HQ with the Copy button.")
+    return None
+
+
 GENERIC_ENROLMENT_FAILURE = (
     "That enrolment code could not be used. Check it and try again, or ask HQ "
     "for a new one."
@@ -272,6 +310,14 @@ def redeem_enrollment(
     the Agent's business, not the Store Kit's.
     """
     _require_authorization(authorization, "Enrolling this computer")
+
+    # Before the code is spent. HQ answers a malformed code and a genuinely
+    # unknown one identically - both are a hash matching nothing - so the one
+    # thing that CAN be told apart is told apart here, where the string is.
+    shape = describe_code_shape(code)
+    if shape is not None:
+        return EnrolmentUiResult(state=EnrolmentUiState.REFUSED, detail=shape)
+
     try:
         outcome = enrol(
             backend_url=backend_url,

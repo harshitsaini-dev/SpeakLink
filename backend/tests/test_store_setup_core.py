@@ -122,7 +122,7 @@ def test_a_successful_enrolment_reports_enrolled(tmp_path):
 
     result = core.redeem_enrollment(authorization=_authorized(), 
         backend_url="https://hq.example.com",
-        code="ECHO-TEST-CODE",
+        code="ECHOTESTCODEaaaaaaaaaaaaaaaaaaaa"[:32],
         device_name="till-1",
         hostname="TILL-1",
         credential_path=tmp_path / "cred.bin",
@@ -140,7 +140,7 @@ def test_a_refused_code_is_generic_to_the_caller(tmp_path):
 
     result = core.redeem_enrollment(authorization=_authorized(), 
         backend_url="https://hq.example.com",
-        code="ECHO-EXPIRED-CODE",
+        code="ECHOEXPIREDCODEaaaaaaaaaaaaaaaaa"[:32],
         device_name="till-1",
         hostname="TILL-1",
         credential_path=tmp_path / "cred.bin",
@@ -164,7 +164,7 @@ def test_an_already_enrolled_computer_is_refused_without_spending_the_code(tmp_p
             return 201, {}
 
     result = core.redeem_enrollment(authorization=_authorized(), 
-        backend_url="https://hq.example.com", code="ECHO-A-CODE",
+        backend_url="https://hq.example.com", code="ECHOACODEaaaaaaaaaaaaaaaaaaaaaaa"[:32],
         device_name="till-1", hostname="TILL-1",
         credential_path=credential_path, protector=FakeCredentialProtector("test-computer"),
         transport=_FakeTransport(),
@@ -392,7 +392,7 @@ def test_detect_existing_installation_when_enrolled(tmp_path, monkeypatch):
     credential_path = tmp_path / "cred.bin"
     protector = FakeCredentialProtector("test-computer")
     receiver_agent.enrol(
-        backend_url="https://hq.example.com", code="ECHO-A-CODE",
+        backend_url="https://hq.example.com", code="ECHOACODEaaaaaaaaaaaaaaaaaaaaaaa"[:32],
         device_name="till-1", hostname="TILL-1",
         credential_path=credential_path, protector=protector,
         transport=_EnrolTransport(),
