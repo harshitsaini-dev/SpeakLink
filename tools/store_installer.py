@@ -46,6 +46,16 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+try:  # frozen build
+    from tools.speaklink_version import BUILD_MARKER, STORE_KIT_VERSION
+except ImportError:  # running from a source checkout
+    from speaklink_version import BUILD_MARKER, STORE_KIT_VERSION
+
+#: Carried in the packaged bytecode so the build can read it back and refuse to
+#: ship an installer built from cached modules - which is exactly what shipped
+#: once: a 1.6.3 installer whose wizard was the 1.6.2 one.
+_BUILD_MARKER = BUILD_MARKER
+
 APP_NAME = "SpeakLink Store Receiver"
 TASK_NAME = "SpeakLink Store Receiver"
 #: The Receiver sits under Receiver\ inside the payload, beside the enrolment
@@ -600,6 +610,13 @@ def do_install_or_upgrade(report, *, backend_url: str | None = None,
     adopt_legacy_installation(report)
     unpack_payload(report, install_root(), on_progress)
     write_settings(report, backend_url)
+    # Stamped after the files land, so a later run reports the version of what
+    # is actually installed rather than what some manifest claimed.
+    try:
+        (install_root() / "kit-manifest.json").write_text(
+            json.dumps({"version": STORE_KIT_VERSION}, indent=2), encoding="utf-8")
+    except OSError:
+        pass
     create_desktop_shortcut(report)
 
     note = _register_task_or_fall_back(report)
@@ -695,7 +712,7 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand on a Store PC
     from tkinter import filedialog, messagebox, scrolledtext, ttk
 
     window = tk.Tk()
-    window.title(f"{APP_NAME} - Installer")
+    window.title(f"{APP_NAME} - Installer {STORE_KIT_VERSION}")
     window.geometry("660x600")
     window.resizable(False, False)
     try:
@@ -708,7 +725,12 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand on a Store PC
     state = read_state()
 
     tk.Label(window, text="SpeakLink Store Receiver",
-             font=("Segoe UI", 15, "bold")).pack(pady=(14, 2))
+             font=("Segoe UI", 15, "bold")).pack(pady=(14, 0))
+    # On screen, not buried in a log: "which build is on that till?" has to be
+    # answerable from a photograph, and the version a person reads must be the
+    # version that is actually running.
+    tk.Label(window, text=f"Installer {STORE_KIT_VERSION}", fg="#64748b",
+             font=("Segoe UI", 9)).pack(pady=(0, 2))
     machine_label = tk.Label(window, text=state.summary(), fg="#475569",
                              font=("Segoe UI", 9))
     machine_label.pack()

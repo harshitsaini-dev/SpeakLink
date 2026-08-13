@@ -27,6 +27,9 @@ analysis = Analysis(
     datas=[],
     hiddenimports=[
         "tools.store_setup_gui",
+        # One version for the whole kit - see tools/speaklink_version.py.
+        "tools.speaklink_version",
+        "speaklink_version",
         "tools.store_setup_core",
         # store_setup_core imports it at module level, so the analysis would
         # find it anyway. Named explicitly because the whole Settings Password

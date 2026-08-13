@@ -45,7 +45,7 @@ analysis = Analysis(
     # sets only the first ships an installer whose window wears a stranger's
     # face.
     datas=[(str(PAYLOAD), "."), (str(ICON), ".")],
-    hiddenimports=["tkinter", "tkinter.messagebox", "tkinter.scrolledtext"],
+    hiddenimports=["speaklink_version", "tkinter", "tkinter.messagebox", "tkinter.scrolledtext"],
     hookspath=[],
     runtime_hooks=[],
     # The installer is tkinter and the standard library. Excluding the science

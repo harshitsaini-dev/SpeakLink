@@ -12,6 +12,16 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
+
+try:  # frozen build
+    from tools.speaklink_version import BUILD_MARKER, STORE_KIT_VERSION
+except ImportError:  # running from a source checkout
+    from speaklink_version import BUILD_MARKER, STORE_KIT_VERSION
+
+#: Kept as a module constant so the packaged bytecode carries it, which is how
+#: the build proves the wizard inside an installer is the wizard that was just
+#: compiled rather than a cached one.
+_BUILD_MARKER = BUILD_MARKER
 from tkinter import ttk
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -199,7 +209,7 @@ DEFAULT_HQ_URL = "http://192.168.4.134:8000"
 #: One button whose label reflects what is on disk, so an operator is
 #: never offered "Change" on a Store that has no password.
 SETTINGS_PASSWORD_BUTTON_LABEL = "Settings Password"
-WINDOW_TITLE = "SpeakLink Store Setup"
+WINDOW_TITLE = f"SpeakLink Store Setup {STORE_KIT_VERSION}"  # the version is on screen so "which build is that?" is answerable from a photograph of the till
 
 
 class StoreSetupApp(tk.Tk):
