@@ -109,9 +109,85 @@ CREDENTIAL_FILE = "device-credential.bin"
 Reporter = "callable(str) -> None"
 
 
+#: Where the Store Kit itself lives - the setup wizard, the scripts and the
+#: Receiver package they install FROM.
+#:
+#: Deliberately NOT "receiver-app", which is where the Receiver is installed
+#: TO. They were the same folder, and a Store PC paid for it:
+#:
+#:     $sourceRoot = (Resolve-Path $PackagePath).Path
+#:     ...(SpeakLink)(receiver-app)(Receiver) ... because it does not exist
+#:
+#: The install script empties its destination before copying - correctly - and
+#: the destination contained the package it was about to copy from. It deleted
+#: 27 files of its own source and then could not find the rest. No amount of
+#: retrying or verifying downstream can survive that; the two folders simply
+#: must not be one folder.
+KIT_FOLDER_NAME = "store-kit"
+
+#: The folder earlier kits used, kept only so an upgrade can find and move them.
+LEGACY_KIT_FOLDER_NAME = "receiver-app"
+
+
 def install_root() -> Path:
     return Path(os.environ.get("SPEAKLINK_INSTALL_ROOT")
-                or (Path(os.environ["LOCALAPPDATA"]) / "SpeakLink" / "receiver-app"))
+                or (Path(os.environ["LOCALAPPDATA"]) / "SpeakLink" / KIT_FOLDER_NAME))
+
+
+def legacy_kit_root() -> Path:
+    """Where kits up to 1.7.4 unpacked themselves - inside the Receiver's own
+    install root, which is the collision above."""
+    return Path(os.environ["LOCALAPPDATA"]) / "SpeakLink" / LEGACY_KIT_FOLDER_NAME
+
+
+def receiver_install_root() -> Path:
+    """Where the Receiver itself is installed - the destination, not the kit.
+
+    Separate from install_root() since 1.7.5. Before that they were one folder
+    and the Receiver's installer deleted the kit it was copying from.
+    """
+    return Path(os.environ.get("SPEAKLINK_RECEIVER_INSTALL_ROOT")
+                or (Path(os.environ["LOCALAPPDATA"]) / "SpeakLink" / LEGACY_KIT_FOLDER_NAME))
+
+
+#: The kit's own belongings, by name. Used only to clear an older kit out of
+#: the Receiver's folder without touching the Receiver.
+KIT_MEMBERS = ("SpeakLinkStoreSetup.exe", "kit-manifest.json", "scripts", "artifacts")
+
+
+def retire_legacy_kit_folder(report) -> None:
+    """Remove an older kit from the Receiver's install root.
+
+    Up to 1.7.4 the kit unpacked itself into SpeakLink\receiver-app, which is
+    also where the Receiver is installed. Leaving those files there would mean
+    two setup wizards on one machine, and the older one would install from a
+    package the newer one no longer maintains.
+
+    ONLY the kit's own members are removed, by name. A Receiver that is
+    correctly installed in that folder is left completely alone - this runs
+    before an installation, and deleting a working Receiver to tidy up would
+    be a far worse fault than the untidiness.
+    """
+    legacy = legacy_kit_root()
+    if legacy == install_root() or not legacy.exists():
+        return
+    removed = []
+    for name in KIT_MEMBERS:
+        target = legacy / name
+        if not target.exists():
+            continue
+        try:
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink()
+            removed.append(name)
+        except OSError:
+            # Reported, never fatal. A leftover file is untidy; refusing to
+            # install because of one is not.
+            report(f"  could not remove the old kit's {name}; leaving it")
+    if removed:
+        report(f"Removed the older kit from {legacy}: {', '.join(removed)}")
 
 
 def state_root() -> Path:
@@ -608,6 +684,7 @@ def do_install_or_upgrade(report, *, backend_url: str | None = None,
     # the machine ends up with one Receiver rather than two fighting over the
     # same Device and the same audio endpoint.
     adopt_legacy_installation(report)
+    retire_legacy_kit_folder(report)
     unpack_payload(report, install_root(), on_progress)
     write_settings(report, backend_url)
     # Stamped after the files land, so a later run reports the version of what
@@ -689,9 +766,10 @@ def do_uninstall(report, *, remove_credential: bool = False) -> str:
     remove_startup_shortcut()
     remove_desktop_shortcut()
 
-    if install_root().exists():
-        report(f"Removing {install_root()}…")
-        shutil.rmtree(install_root(), ignore_errors=True)
+    for folder in (install_root(), receiver_install_root()):
+        if folder.exists():
+            report(f"Removing {folder}…")
+            shutil.rmtree(folder, ignore_errors=True)
 
     if remove_credential:
         report("Removing the Device credential and settings…")

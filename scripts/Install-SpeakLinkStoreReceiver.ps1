@@ -69,6 +69,32 @@ Write-Output '=== installing the SpeakLink Store Receiver ==='
 if (-not (Test-Path $PackagePath)) { throw "No package at $PackagePath." }
 $PackagePath = (Resolve-Path $PackagePath).Path
 
+# The destination is emptied before the copy. If the package to copy FROM sits
+# inside it, that step destroys its own source - which is exactly what happened
+# on a Store PC:
+#
+#     install folder is held open; replacing its contents in place
+#     27 file(s) could not be removed and will be overwritten
+#     ...\SpeakLink\receiver-app\Receiver ... because it does not exist
+#
+# The Store Kit had unpacked itself into SpeakLink\receiver-app, and
+# SpeakLink\receiver-app is where the Receiver is installed to. The kit now
+# uses its own folder, and this refuses the arrangement outright so that no
+# future caller can arrive at it again by accident. Checked here, BEFORE
+# anything is deleted, because after the delete there is nothing left to
+# report with.
+$resolvedInstallRoot = if (Test-Path $InstallRoot) { (Resolve-Path $InstallRoot).Path } else { $InstallRoot }
+$normalisedRoot = $resolvedInstallRoot.TrimEnd('\') + '\'
+if ($PackagePath.TrimEnd('\').Equals($resolvedInstallRoot.TrimEnd('\'), 'OrdinalIgnoreCase') -or
+    $PackagePath.StartsWith($normalisedRoot, 'OrdinalIgnoreCase')) {
+    throw ("The package to install from is inside the folder being installed " +
+           "to, so installing would delete its own source.`n" +
+           "    package     : $PackagePath`n" +
+           "    install root: $resolvedInstallRoot`n" +
+           'Keep the Store Kit somewhere of its own and run this again. ' +
+           'Nothing has been changed.')
+}
+
 $consoleExe = Join-Path $PackagePath 'SpeakLinkReceiver.exe'
 $backgroundExe = Join-Path $PackagePath 'SpeakLinkReceiverBackground.exe'
 foreach ($required in @($consoleExe, $backgroundExe, (Join-Path $PackagePath 'ffmpeg.exe'),

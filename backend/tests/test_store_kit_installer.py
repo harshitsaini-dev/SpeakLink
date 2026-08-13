@@ -558,3 +558,97 @@ def test_the_cli_accepts_the_paths_it_is_relaunched_with(tmp_path, monkeypatch):
     assert code == 0
     assert os.environ["SPEAKLINK_INSTALL_ROOT"] == str(tmp_path / "app")
     assert os.environ["SPEAKLINK_STATE_ROOT"] == str(tmp_path / "state")
+
+
+# ===========================================================================
+# The kit must not live inside the folder it installs into
+#
+# Up to 1.7.4 it did. The Receiver's install script empties its destination
+# before copying - correctly - and the destination held the package it was
+# about to copy from. A Store PC reported:
+#
+#     install folder is held open; replacing its contents in place
+#     27 file(s) could not be removed and will be overwritten
+#     ...\SpeakLink\receiver-app\Receiver ... because it does not exist
+#
+# The installer had deleted its own source. Nothing downstream can recover
+# from that, so the two folders must simply never be one folder.
+# ===========================================================================
+
+def test_the_kit_folder_is_not_the_receivers_install_root(monkeypatch, tmp_path):
+    installer = installer_module()
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.delenv("SPEAKLINK_INSTALL_ROOT", raising=False)
+    monkeypatch.delenv("SPEAKLINK_RECEIVER_INSTALL_ROOT", raising=False)
+
+    assert installer.install_root() != installer.receiver_install_root(), (
+        "the kit and the Receiver share a folder again")
+    # And neither may be inside the other, which has the same consequence.
+    kit = str(installer.install_root()).lower()
+    receiver = str(installer.receiver_install_root()).lower()
+    assert not kit.startswith(receiver + "\\")
+    assert not receiver.startswith(kit + "\\")
+
+
+def test_the_install_script_refuses_a_package_inside_its_destination():
+    """The safety net, in the script itself, so no future caller can arrive
+    at this arrangement by accident - and checked BEFORE anything is deleted,
+    because afterwards there is nothing left to report with."""
+    from pathlib import Path
+
+    body = (Path(__file__).resolve().parents[2] / "scripts" /
+            "Install-SpeakLinkStoreReceiver.ps1").read_text(encoding="utf-8")
+    refusal = body.index("would delete its own source")
+    removal = body.index("Remove-Item $InstallRoot")
+    assert refusal < removal, "the refusal must come before the deletion"
+
+
+def test_an_older_kit_is_cleared_out_of_the_receivers_folder(monkeypatch, tmp_path):
+    installer = installer_module()
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.delenv("SPEAKLINK_INSTALL_ROOT", raising=False)
+    legacy = installer.legacy_kit_root()
+    (legacy / "scripts").mkdir(parents=True)
+    (legacy / "SpeakLinkStoreSetup.exe").write_text("old wizard", encoding="utf-8")
+    (legacy / "scripts" / "Install-SpeakLinkStoreReceiver.ps1").write_text("x",
+                                                                          encoding="utf-8")
+
+    said = []
+    installer.retire_legacy_kit_folder(said.append)
+
+    assert not (legacy / "SpeakLinkStoreSetup.exe").exists()
+    assert not (legacy / "scripts").exists()
+    assert any("Removed the older kit" in line for line in said)
+
+
+def test_retiring_the_old_kit_never_touches_an_installed_receiver(monkeypatch, tmp_path):
+    """This runs before an installation. Deleting a working Receiver to tidy
+    up would be a far worse fault than the untidiness."""
+    installer = installer_module()
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.delenv("SPEAKLINK_INSTALL_ROOT", raising=False)
+    legacy = installer.legacy_kit_root()
+    legacy.mkdir(parents=True)
+    (legacy / "SpeakLinkReceiverBackground.exe").write_text("running", encoding="utf-8")
+    (legacy / "SHA256SUMS.txt").write_text("hashes", encoding="utf-8")
+    (legacy / "SpeakLinkStoreSetup.exe").write_text("old wizard", encoding="utf-8")
+
+    installer.retire_legacy_kit_folder(lambda _message: None)
+
+    assert (legacy / "SpeakLinkReceiverBackground.exe").exists(), (
+        "an installed Receiver was deleted while tidying up an old kit")
+    assert (legacy / "SHA256SUMS.txt").exists()
+    assert not (legacy / "SpeakLinkStoreSetup.exe").exists()
+
+
+def test_uninstall_removes_the_receiver_as_well_as_the_kit():
+    """Uninstall removed one folder because there was one folder. With two,
+    removing only the kit leaves the Receiver installed and running - an
+    uninstall the shop can still hear."""
+    import inspect
+
+    body = inspect.getsource(installer_module().do_uninstall)
+    assert "receiver_install_root()" in body
