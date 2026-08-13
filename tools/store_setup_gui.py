@@ -271,8 +271,13 @@ class StoreSetupApp(tk.Tk):
         # an installation with a path nobody can act on.
         self.package_missing = resource_paths.missing_resources()
 
+        # The settings file beside the credential, not the one belonging to
+        # whoever is signed in. They are the same file on a real Store PC, and
+        # different files in a test - which is the point: a test that read the
+        # real one would answer "is this installed?" about the wrong computer.
         existing = core.detect_existing_installation(
-            credential_path=self.credential_path, protector=self.protector)
+            credential_path=self.credential_path, protector=self.protector,
+            config_path=self.state_root / "config.json")
         self.existing = existing
 
         # THE ROUTING THAT WAS MISSING. A sealed credential proves only that this
@@ -286,11 +291,26 @@ class StoreSetupApp(tk.Tk):
         if assessment is not None and assessment.verdict in (
                 EnrolmentVerdict.OLD_ENROLMENT_DETECTED, EnrolmentVerdict.ARCHIVED_STORE):
             self._show(OldEnrolmentScreen(self._container, self, assessment))
-        elif (assessment is not None
-                and assessment.verdict is EnrolmentVerdict.CURRENT_ENROLLED_SETUP_INCOMPLETE):
+        elif ((assessment is not None
+                 and assessment.verdict is EnrolmentVerdict.CURRENT_ENROLLED_SETUP_INCOMPLETE)
+                or (existing.is_installed and not existing.receiver_installed)):
             # Enrolled and accepted, but never installed. The one-time code is
             # already spent, so this must NOT go anywhere near stale recovery -
             # that would destroy a valid Device and need a second code.
+            #
+            # The second condition is the LOCAL one, and it was missing. Whether
+            # this computer has a finished installation is written on this
+            # computer - the settings file records the installed version only
+            # after the installer has verified every file - so it can be
+            # answered with the network unplugged. The verdict above cannot: it
+            # needs HQ.
+            #
+            # A real Store PC enrolled, failed during installation, and was then
+            # opened while HQ happened to be unreachable. With only the HQ-side
+            # test, it fell through to the rerun screen, which announced a setup
+            # that did not exist and offered Repair - and Repair cannot repair
+            # what was never installed. It ended in a PowerShell binding error
+            # about an empty audio parameter.
             self._show(ResumeSetupScreen(self._container, self, assessment))
         elif existing.is_installed or (assessment is not None and assessment.local_enrolled):
             self._show(RerunScreen(self._container, self, existing,
@@ -956,10 +976,17 @@ class InstallScreen(ttk.Frame):
             except core.NoVerifiedReceiverPackage as failure:
                 return core.InstallResult(state=core.InstallState.INSTALL_FAILED,
                                           detail=str(failure))
+            if device is None or not device.verified_selector:
+                return core.InstallResult(
+                    state=core.InstallState.INSTALL_FAILED,
+                    detail=("No audio output has been chosen and tested yet, so "
+                            "there is nothing to install against. Go back to "
+                            "Audio Output, pick the speaker this shop uses and "
+                            "confirm you heard the test sound."))
             arguments = [
                 "-PackagePath", str(package_path),
                 "-BackendUrl", self.app.state_data["backend_url"],
-                "-AudioOutputDevice", device.verified_selector if device else "",
+                "-AudioOutputDevice", device.verified_selector,
             ]
             if self.app.state_data.get("expected_hq_host"):
                 arguments += ["-ExpectedHqHost", self.app.state_data["expected_hq_host"]]
@@ -1011,7 +1038,7 @@ class RerunScreen(ttk.Frame):
                     f"Device ID: {existing.device_public_id}\n"
                     f"HQ: {assessment.hq_address}\n\n{assessment.message}")
         elif assessment is not None and assessment.verdict is EnrolmentVerdict.HQ_UNREACHABLE:
-            heading = "This computer has an SpeakLink setup"
+            heading = "This computer has a SpeakLink setup"
             body = (f"Device ID: {existing.device_public_id}\n"
                     f"HQ: {assessment.hq_address}\n\n{assessment.message}")
         else:
@@ -1027,6 +1054,43 @@ class RerunScreen(ttk.Frame):
         ttk.Label(self, textvariable=self.status_var, wraplength=480,
                  justify="left").pack(pady=6, padx=24)
 
+        # GROUPED BY WHAT AN ACTION DOES, not by the order the handlers were
+        # written in.
+        #
+        # Eleven identical buttons in one two-column block gave "Test Sound"
+        # and "Uninstall Application" exactly the same weight and put them a
+        # few pixels apart. The person using this is standing in a shop,
+        # usually in a hurry, often on the phone - and the flattest thing on
+        # the screen was the one that throws the installation away.
+        #
+        # Everyday actions first, because they are what this screen is opened
+        # for; the tools an engineer asks for over the phone next; and the two
+        # that destroy something last, behind a typed word, visibly apart and
+        # under their own heading.
+        everyday = ttk.LabelFrame(self, text="Everyday")
+        everyday.pack(fill="x", padx=24, pady=(10, 4))
+        for column, (label, handler) in enumerate((
+            ("Status", self._status),
+            ("Test Sound", self._test_sound),
+            ("Change Audio Output", self._change_audio_output),
+            ("Restart Receiver", self._restart),
+            ("Stop Receiver", self._stop),
+            ("Repair", self._repair),
+        )):
+            ttk.Button(everyday, text=label, command=handler, width=24).grid(
+                row=column // 3, column=column % 3, padx=4, pady=3, sticky="w")
+
+        engineer = ttk.LabelFrame(self, text="When HQ asks for it")
+        engineer.pack(fill="x", padx=24, pady=4)
+        for column, (label, handler) in enumerate((
+            ("Redacted Diagnostics", self._diagnostics),
+            ("Export Redacted Diagnostics", self._export_diagnostics),
+            ("Open Log Folder", self._open_log_folder),
+            (SETTINGS_PASSWORD_BUTTON_LABEL, self._settings_password),
+        )):
+            ttk.Button(engineer, text=label, command=handler, width=24).grid(
+                row=column // 3, column=column % 3, padx=4, pady=3, sticky="w")
+
         # The gate for the two destructive actions, INLINE rather than in a
         # modal dialog. A modal was not a gate here at all: in an automated or
         # headless session the dialog's default button fires on its own, so the
@@ -1034,34 +1098,24 @@ class RerunScreen(ttk.Frame):
         # confirmation that did not confirm. Inline, the typed text is read from
         # this widget on the main thread and handed to store_setup_core as data,
         # so core's comparison is the single real check.
-        confirm_row = ttk.Frame(self)
-        confirm_row.pack(padx=24, pady=(4, 0), anchor="w")
+        confirm_row = ttk.LabelFrame(self, text="Destructive - these cannot be undone")
+        confirm_row.pack(fill="x", padx=24, pady=(10, 12))
         ttk.Label(confirm_row,
-                 text=f"To Uninstall or Replace Device Identity, type the "
-                      f"confirmation word first:").pack(anchor="w")
+                 text=("Uninstall removes the Receiver from this computer. "
+                       "Replace Device Identity also gives up this Store's "
+                       "registration, and a new enrolment code from HQ is then "
+                       "needed to get it back.\n\n"
+                       f"To use either, type {core.CONFIRMATION_WORD} here first:"),
+                 wraplength=440, justify="left").pack(anchor="w", padx=8, pady=(4, 2))
         self.confirm_var = tk.StringVar(master=self, value="")
-        ttk.Entry(confirm_row, textvariable=self.confirm_var, width=24).pack(anchor="w", pady=2)
-
-        button_row = ttk.Frame(self)
-        button_row.pack(padx=24, anchor="w")
-        for column, (label, handler) in enumerate((
-            ("Status", self._status),
-            ("Repair", self._repair),
-            ("Change Audio Output", self._change_audio_output),
-            ("Test Sound", self._test_sound),
-            ("Restart Receiver", self._restart),
-            ("Stop Receiver", self._stop),
-            ("Redacted Diagnostics", self._diagnostics),
-            ("Export Redacted Diagnostics", self._export_diagnostics),
-            ("Open Log Folder", self._open_log_folder),
-            ("Uninstall Application", self._uninstall),
-            (SETTINGS_PASSWORD_BUTTON_LABEL, self._settings_password),
-        )):
-            ttk.Button(button_row, text=label, command=handler, width=26).grid(
-                row=column // 2, column=column % 2, padx=4, pady=2, sticky="w")
-
-        ttk.Button(self, text="Replace Device Identity (requires a fresh code)",
-                  command=self._replace_identity).pack(pady=8, padx=24, anchor="w")
+        ttk.Entry(confirm_row, textvariable=self.confirm_var, width=24).pack(
+            anchor="w", padx=8, pady=2)
+        destructive = ttk.Frame(confirm_row)
+        destructive.pack(anchor="w", padx=8, pady=(4, 8))
+        ttk.Button(destructive, text="Uninstall Application",
+                  command=self._uninstall, width=24).grid(row=0, column=0, padx=4)
+        ttk.Button(destructive, text="Replace Device Identity",
+                  command=self._replace_identity, width=32).grid(row=0, column=1, padx=4)
 
     # -- helpers --------------------------------------------------------------
     def _busy(self, message: str) -> None:
@@ -1749,10 +1803,17 @@ class ResumeSetupScreen(ttk.Frame):
     identity and required HQ to issue another code for nothing.
     """
 
-    def __init__(self, parent, app: "StoreSetupApp", assessment):
+    def __init__(self, parent, app: "StoreSetupApp", assessment=None):
         super().__init__(parent)
         self.app = app
         self.assessment = assessment
+
+        # Reachable or not, the remaining work is the same, so this screen must
+        # open either way. Everything below HQ - the Store's name, its zone -
+        # is HQ's to answer, and when HQ has not answered this says so rather
+        # than printing "None (None)" or failing on an attribute that is not
+        # there.
+        reached_hq = assessment is not None and bool(assessment.store_name)
 
         ttk.Label(self, text="Setup is not finished",
                   font=("Segoe UI", 14, "bold")).pack(pady=(16, 6))
@@ -1760,17 +1821,24 @@ class ResumeSetupScreen(ttk.Frame):
             "This computer is already registered with HQ. Only the last steps "
             "are left - choosing the speaker and installing the Receiver.\n\n"
             "You do NOT need another enrolment code."
+            + ("" if reached_hq else
+               "\n\nHQ could not be reached just now, so the Store's details "
+               "cannot be shown. That does not change what is left to do, and "
+               "the Device identity on this computer is kept.")
         ), wraplength=470, justify="left").pack(pady=4, padx=24)
 
+        existing = getattr(app, "existing", None)
         detail = ttk.LabelFrame(self, text="This computer")
         detail.pack(fill="x", padx=24, pady=12)
         rows = [
-            ("Store", f"{assessment.store_name} ({assessment.store_code})"),
-            ("Zone", assessment.zone or "not recorded"),
-            ("Device name", assessment.device_name or "not recorded"),
-            ("Device ID", assessment.device_public_id or "unknown"),
-            ("HQ", assessment.hq_address or "unknown"),
-            ("HQ accepted this computer", "Yes"),
+            ("Store", f"{assessment.store_name} ({assessment.store_code})"
+                      if reached_hq else "not known - HQ could not be reached"),
+            ("Zone", (assessment.zone if assessment else None) or "not recorded"),
+            ("Device name", (assessment.device_name if assessment else None) or "not recorded"),
+            ("Device ID", (assessment.device_public_id if assessment else None)
+                          or (existing.device_public_id if existing else None) or "unknown"),
+            ("HQ", (assessment.hq_address if assessment else None) or "unknown"),
+            ("HQ accepted this computer", "Yes" if reached_hq else "not checked just now"),
             ("Receiver installed", "No - this is what is left to do"),
         ]
         for index, (label, value) in enumerate(rows):

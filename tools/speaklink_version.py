@@ -14,7 +14,7 @@ it shipped cannot, because there is only one number.
 
 #: Bumped by hand, deliberately - a version is a claim a person makes about a
 #: build, not something a script should invent from a date.
-STORE_KIT_VERSION = "1.7.3"
+STORE_KIT_VERSION = "1.7.4"
 
 #: A string the build verifies is present in the FROZEN wizard before the
 #: installer is allowed to ship. PyInstaller reuses cached modules when it

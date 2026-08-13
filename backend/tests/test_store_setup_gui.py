@@ -122,11 +122,52 @@ def test_an_already_enrolled_computer_opens_on_the_rerun_screen(tmp_path):
         transport=_Transport(),
     )
 
+    _record_completed_installation(tmp_path)
     application = gui.StoreSetupApp(credential_path=credential_path, protector=protector)
     try:
         from tools.store_setup_gui import RerunScreen
 
         assert isinstance(application._current, RerunScreen)
+    finally:
+        application.destroy()
+
+
+def test_enrolled_but_never_installed_opens_on_the_resume_screen(tmp_path):
+    """The state a failed installation leaves behind, with HQ unreachable.
+
+    A Store PC enrolled, failed during installation, and was reopened while HQ
+    could not be reached. The only test for "enrolled but not installed" asked
+    HQ, so with HQ silent the wizard fell through to the rerun screen, called it
+    a setup, and offered Repair - which ended in a PowerShell binding error
+    about an empty audio parameter. Whether this computer has a finished
+    installation is written on THIS computer and needs no network.
+    """
+    from tools import receiver_agent, store_setup_gui as gui
+
+    protector = FakeCredentialProtector("test-computer")
+    credential_path = tmp_path / "cred.bin"
+    valid = "speaklink_rcv_v1.11111111-1111-1111-1111-111111111111." + "A" * 43
+
+    class _Transport:
+        def post_json(self, url, payload, *, timeout):
+            return 201, {"device_public_id": "dev-9", "store_id": 4,
+                        "credential": valid}
+
+    receiver_agent.enrol(
+        backend_url="https://hq.example.com", code="ECHO-A-CODE",
+        device_name="till-1", hostname="TILL-1",
+        credential_path=credential_path, protector=protector,
+        transport=_Transport(),
+    )
+    # Deliberately NOT _record_completed_installation: that is the whole point.
+
+    application = gui.StoreSetupApp(credential_path=credential_path, protector=protector)
+    try:
+        from tools.store_setup_gui import ResumeSetupScreen
+
+        assert isinstance(application._current, ResumeSetupScreen), (
+            "an enrolled computer with nothing installed must be sent to the "
+            "screen that finishes the installation")
     finally:
         application.destroy()
 
@@ -267,6 +308,7 @@ def test_the_rerun_screen_offers_every_required_action(tmp_path):
         device_name="till-1", hostname="TILL-1",
         credential_path=credential_path, protector=protector, transport=_Transport(),
     )
+    _record_completed_installation(tmp_path)
     application = gui.StoreSetupApp(credential_path=credential_path, protector=protector)
     try:
         texts = _all_button_texts(application._current)
@@ -372,6 +414,25 @@ def test_replace_identity_never_hardcodes_the_confirmation_word():
         "the confirmation word is supplied by the GUI, not by the operator")
 
 
+def _record_completed_installation(tmp_path):
+    """What the installer writes as its LAST act, after every file is verified.
+
+    These tests mean "a computer with a working setup", and until now they only
+    enrolled one. Enrolment and installation are two different things, and a
+    real Store PC proved it: it enrolled, then failed while installing, and the
+    wizard - which could only see the credential - offered to Repair an
+    installation that was never there.
+    """
+    import json
+    (tmp_path / "config.json").write_text(json.dumps({
+        "backend_url": "https://hq.example.com",
+        "audio_sink": "windows",
+        "audio_output_device": "index:0@Speakers",
+        "installed_version": "1.7.3",
+        "source_commit": "abcdef1",
+    }), encoding="utf-8")
+
+
 def _enrolled_app(tmp_path):
     from tools import receiver_agent, store_setup_gui as gui
 
@@ -388,6 +449,7 @@ def _enrolled_app(tmp_path):
         device_name="till-1", hostname="TILL-1",
         credential_path=credential_path, protector=protector, transport=_Transport(),
     )
+    _record_completed_installation(tmp_path)
     return gui.StoreSetupApp(credential_path=credential_path, protector=protector), credential_path
 
 
@@ -469,3 +531,55 @@ def test_every_tk_variable_has_an_explicit_master():
     masterless = re.findall(r"tk\.(?:String|Boolean|Int|Double)Var\((?!master=)", source)
     assert masterless == [], (
         f"{len(masterless)} Tk variable(s) rely on tkinter's global default root")
+
+
+# ===========================================================================
+# The rerun screen's buttons
+#
+# Eleven identical buttons sat in one two-column block, so "Test Sound" and
+# "Uninstall Application" had the same weight and were a few pixels apart. The
+# flattest thing on the screen was the one that throws the installation away.
+# ===========================================================================
+
+def test_the_destructive_actions_are_not_mixed_in_with_the_everyday_ones(tmp_path):
+    """Both destructive buttons must live under the typed-confirmation gate,
+    and no everyday button may share that group."""
+    from tools import store_setup_gui as gui
+
+    application, _ = _enrolled_app(tmp_path)
+    try:
+        screen = application._current
+        groups = {}
+
+        def walk(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, gui.ttk.LabelFrame):
+                    groups[child.cget("text")] = _all_button_texts(child)
+                walk(child)
+
+        walk(screen)
+        destructive = next((buttons for title, buttons in groups.items()
+                            if "Destructive" in title), None)
+        assert destructive is not None, "the destructive actions have no group"
+        assert any("Uninstall" in text for text in destructive)
+        assert any("Replace Device Identity" in text for text in destructive)
+        for everyday in ("Test Sound", "Status", "Restart Receiver"):
+            assert not any(everyday in text for text in destructive), (
+                f"{everyday} must not sit beside the actions that destroy things")
+    finally:
+        application.destroy()
+
+
+def test_every_action_survives_the_regrouping(tmp_path):
+    """A layout change must not quietly drop a button. This is the same list
+    the rerun-actions test asserts, checked after the regrouping."""
+    application, _ = _enrolled_app(tmp_path)
+    try:
+        texts = _all_button_texts(application._current)
+        for required in ("Status", "Repair", "Change Audio Output", "Test Sound",
+                         "Restart Receiver", "Stop Receiver", "Redacted Diagnostics",
+                         "Export Redacted Diagnostics", "Open Log Folder",
+                         "Uninstall Application", "Replace Device Identity"):
+            assert any(required in text for text in texts), f"{required} was lost"
+    finally:
+        application.destroy()

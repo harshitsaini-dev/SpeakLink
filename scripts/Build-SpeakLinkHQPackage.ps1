@@ -63,7 +63,7 @@ function Get-PeSubsystem {
     } finally { $stream.Dispose() }
 }
 
-Write-Output '=== building an SpeakLink HQ package ==='
+Write-Output '=== building a SpeakLink HQ package ==='
 
 # ---------------------------------------------------------------------------
 # What it is being built from

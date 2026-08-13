@@ -53,11 +53,42 @@ if (-not $AudioOutputDevice) { $AudioOutputDevice = $config.audio_output_device 
 
 if (-not $BackendUrl) { throw 'The saved settings name no backend, and none was given.' }
 
+# A repair needs something to repair, and an ENROLLED computer is not an
+# INSTALLED one.
+#
+# THE FAILURE THIS EXISTS FOR
+#
+# A Store PC enrolled successfully and then failed during installation. The
+# settings file already existed - enrolment writes it - so it held a backend
+# URL and nothing else: no audio device, no installed version. The wizard saw
+# a settings file, called that a setup, and offered Repair. Repair passed the
+# empty audio device straight into Install, whose parameter refuses an empty
+# string, and the operator was shown
+#
+#     Cannot bind argument to parameter 'AudioOutputDevice' because it is an
+#     empty string
+#
+# which describes a PowerShell parameter and not one thing the person standing
+# in the shop can act on. The right answer was always "this was never
+# installed; install it".
+if (-not $AudioOutputDevice) {
+    throw ('These saved settings name no audio output, which means the ' +
+           'installation on this computer never finished - enrolment writes ' +
+           'the settings file before the Receiver is installed. There is ' +
+           'nothing to repair. Run the installation instead; the Device ' +
+           'identity already on this computer is kept.')
+}
+
 Write-Output "  saved backend : $($config.backend_url)"
 Write-Output "  saved audio   : $($config.audio_sink) -> $($config.audio_output_device)"
 if ($BackendUrl -ne $config.backend_url) { Write-Output "  OVERRIDE backend: $BackendUrl" }
 if ($AudioOutputDevice -ne $config.audio_output_device) { Write-Output "  OVERRIDE audio  : $AudioOutputDevice" }
-Write-Output "  installed ver : $($config.installed_version) ($($config.source_commit))"
+# "installed ver : ()" is what an unfinished installation printed, and empty
+# parentheses read as a display fault rather than as the answer.
+$installedVersion = if ($config.installed_version) {
+    "$($config.installed_version) ($($config.source_commit))"
+} else { 'unknown - no completed installation is recorded' }
+Write-Output "  installed ver : $installedVersion"
 
 $credentialPath = Join-Path $stateRoot 'device-credential.bin'
 Write-Output "  credential    : $(if (Test-Path $credentialPath) { 'present - will be preserved' } else { 'ABSENT - this Store is not enrolled' })"

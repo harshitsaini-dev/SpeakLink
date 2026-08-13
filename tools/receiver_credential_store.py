@@ -355,7 +355,7 @@ def _open(path: Path, protector) -> dict:
     raw = path.read_bytes()
     if len(raw) <= len(MAGIC) or not raw.startswith(MAGIC):
         raise CredentialCorrupt(
-            "that file is not an SpeakLink Receiver Device credential"
+            "that file is not a SpeakLink Receiver Device credential"
         )
     try:
         unsealed = protector.unprotect(raw[len(MAGIC):])

@@ -17,7 +17,7 @@
 
     WHAT IS VERIFIED BEFORE ANYTHING IS REMOVED
 
-    That the task runs an SpeakLink HQ runtime, and that a process to be stopped
+    That the task runs a SpeakLink HQ runtime, and that a process to be stopped
     was started from the install root being uninstalled. A task name and a
     process name are both things somebody else can use.
 #>
@@ -54,7 +54,7 @@ if (-not $task) {
 } else {
     $ran = ($task.Actions | ForEach-Object { "$($_.Execute)" }) -join ' '
     if ($ran -notmatch 'SpeakLinkHQRuntime\.exe') {
-        throw ("The task '$TaskName' runs '$ran', which is not an SpeakLink HQ " +
+        throw ("The task '$TaskName' runs '$ran', which is not a SpeakLink HQ " +
                'runtime. Refusing to remove a task that is not ours. Nothing was changed.')
     }
     Write-Output "  task '$TaskName' runs $ran - ours, will be removed"

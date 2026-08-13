@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Verify an SpeakLink HQ package before anybody installs it. Read-only.
+    Verify a SpeakLink HQ package before anybody installs it. Read-only.
 
 .DESCRIPTION
     Most of this script's work is negative. Checking that the expected files are

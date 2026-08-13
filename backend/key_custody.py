@@ -297,7 +297,7 @@ def _open(path: Path, protector: Protector) -> dict:
         )
     raw = path.read_bytes()
     if len(raw) <= len(MAGIC) or not raw.startswith(MAGIC):
-        raise KeyContainerCorrupt("that file is not an SpeakLink key container")
+        raise KeyContainerCorrupt("that file is not a SpeakLink key container")
     return _decode(protector.unprotect(raw[len(MAGIC):]))
 
 

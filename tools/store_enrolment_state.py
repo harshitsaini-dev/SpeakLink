@@ -155,7 +155,7 @@ def assess(*, local_status: dict, hq_address: str, device_lookup=None,
             verdict=EnrolmentVerdict.HQ_UNREACHABLE,
             local_enrolled=True, device_public_id=public_id, store_id=store_id,
             hq_address=hq_address,
-            message=("This computer has an SpeakLink setup, but HQ could not be "
+            message=("This computer has a SpeakLink setup, but HQ could not be "
                      "reached, so we cannot tell whether it still works. Check "
                      "the network and the HQ address, then try again."),
         )

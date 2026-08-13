@@ -55,7 +55,7 @@ function Get-PeSubsystem {
     } finally { $stream.Dispose() }
 }
 
-Write-Output '=== building an SpeakLink Store Setup package ==='
+Write-Output '=== building a SpeakLink Store Setup package ==='
 
 Push-Location $repositoryRoot
 try {
@@ -204,7 +204,7 @@ Commit  : $commit
 
 WHAT THIS IS
 
-SpeakLinkStoreSetup.exe sets this computer up as an SpeakLink Receiver. It asks
+SpeakLinkStoreSetup.exe sets this computer up as a SpeakLink Receiver. It asks
 four things and then enrols the computer with HQ. You do not need Python and
 you do not need to edit any file.
 

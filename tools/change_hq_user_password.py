@@ -242,7 +242,7 @@ def change_password(
         ).fetchone()
     except sqlite3.Error as failure:
         raise ChangeRefused(
-            f"{database} could not be read as an SpeakLink database "
+            f"{database} could not be read as a SpeakLink database "
             f"({failure.__class__.__name__})."
         ) from None
     finally:
@@ -396,7 +396,7 @@ def main(argv=None) -> int:
     running = running_speaklink_processes()
     if running and not arguments.allow_running_hq:
         print()
-        print("REFUSED: something that looks like an SpeakLink backend is running:")
+        print("REFUSED: something that looks like a SpeakLink backend is running:")
         for entry in running:
             print(f"    {entry}")
         print("Stop it first, so no session minted under the old password survives")

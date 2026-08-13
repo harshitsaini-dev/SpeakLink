@@ -120,7 +120,7 @@ def ensure_user_auth_schema(engine: Engine, *, session_factory=None,
             }
         if "hq_users" not in tables:
             raise UserSchemaError(
-                "this database has no hq_users table, so it is not an SpeakLink HQ "
+                "this database has no hq_users table, so it is not a SpeakLink HQ "
                 "database. Check SPEAKLINK_DB_PATH points at the right file."
             )
 

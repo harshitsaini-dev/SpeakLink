@@ -39,7 +39,7 @@ $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($task) {
     $execute = ($task.Actions | ForEach-Object { $_.Execute }) -join ' '
     if ($execute -notmatch 'SpeakLinkReceiver') {
-        throw ("The task '$TaskName' runs '$execute', which is not an SpeakLink " +
+        throw ("The task '$TaskName' runs '$execute', which is not a SpeakLink " +
                'executable. Refusing to remove a task this script did not install.')
     }
     if ($PSCmdlet.ShouldProcess($TaskName, 'Unregister the scheduled task')) {

@@ -7,7 +7,7 @@
 
     It refuses to remove a task it did not recognise. The name is a parameter,
     so a typo could name somebody else's scheduled task; this checks the task's
-    action actually points at an SpeakLinkReceiver executable before removing it.
+    action actually points at a SpeakLinkReceiver executable before removing it.
 
     It stops only Receiver processes started from the package the task names,
     verified by executable path. Nothing else on the machine is touched - not
@@ -39,7 +39,7 @@ if (-not $task) {
 
 $execute = ($task.Actions | ForEach-Object { $_.Execute }) -join ' '
 if ($execute -notmatch 'SpeakLinkReceiver') {
-    throw ("The task '$TaskName' runs '$execute', which is not an SpeakLinkReceiver " +
+    throw ("The task '$TaskName' runs '$execute', which is not a SpeakLinkReceiver " +
            'executable. Refusing to remove a task this script did not install.')
 }
 Write-Output "  task    : $TaskName"

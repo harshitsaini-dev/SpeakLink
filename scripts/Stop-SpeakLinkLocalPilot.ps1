@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Reads only the scoped pilot PID files, verifies that each recorded process
-    really is an SpeakLink pilot process before touching it, then stops the
+    really is a SpeakLink pilot process before touching it, then stops the
     COMPLETE process tree that PID owns - deepest descendant first - and reports
     success only after every owned PID is confirmed gone and its port released.
 

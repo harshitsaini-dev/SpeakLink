@@ -192,7 +192,7 @@ def test_hq_connection(
     if status != 200 or body.get("status") != "ok":
         return ConnectionResult(
             state=ConnectionState.CONNECTION_FAILED,
-            detail=f"{base} answered but not as an SpeakLink HQ backend",
+            detail=f"{base} answered but not as a SpeakLink HQ backend",
             base_url=base,
         )
 
@@ -751,22 +751,54 @@ def wait_for_connected(
 # ===========================================================================
 @dataclass(frozen=True, slots=True)
 class ExistingInstallation:
+    #: Enrolled: this computer holds a Device credential. Historically named
+    #: `is_installed`, and that name was the bug - see `receiver_installed`.
     is_installed: bool
     device_public_id: "str | None" = None
     store_id: "int | None" = None
     detail: str = ""
+    #: Installed: a Receiver was actually put on this computer and finished.
+    #:
+    #: These are two different facts and a Store PC proved it. Enrolment
+    #: succeeded, installation then failed, and the wizard - which only knew
+    #: about the credential - announced a setup, offered Repair, and Repair
+    #: died on an empty audio parameter. An enrolled computer with nothing
+    #: installed needs the INSTALLER, and now it can be told apart.
+    receiver_installed: bool = False
 
 
-def detect_existing_installation(*, credential_path, protector) -> ExistingInstallation:
+def receiver_is_installed(config_path=None) -> bool:
+    """Whether a completed installation is recorded in the settings file.
+
+    `installed_version` is written by the installer as its last act, after the
+    files are copied and every checksum has been verified. Enrolment writes the
+    same file earlier and never writes that key, so its presence is the honest
+    difference between the two states.
+    """
+    try:
+        config = load_config(config_path or default_config_path())
+    except Exception:  # noqa: BLE001 - an unreadable config is not an install
+        return False
+    return bool(getattr(config, "installed_version", None))
+
+
+def detect_existing_installation(*, credential_path, protector,
+                                 config_path=None) -> ExistingInstallation:
     """Never silently re-enrol: this is the check every rerun path is gated on."""
     status = describe_status(credential_path, protector=protector)
+    installed = receiver_is_installed(config_path)
     if not status.get("enrolled"):
-        return ExistingInstallation(is_installed=False, detail=status.get("note", ""))
+        return ExistingInstallation(is_installed=False, detail=status.get("note", ""),
+                                    receiver_installed=installed)
     return ExistingInstallation(
         is_installed=True,
         device_public_id=status.get("device_public_id"),
         store_id=status.get("store_id"),
-        detail="this computer is already enrolled as a Receiver Device",
+        detail=("this computer is already enrolled as a Receiver Device"
+                if installed else
+                "this computer is enrolled, but no Receiver is installed on it - "
+                "the installation did not finish"),
+        receiver_installed=installed,
     )
 
 
