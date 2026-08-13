@@ -286,7 +286,12 @@ def _validate_phase_one(connection: Connection) -> None:
         )
     }
     if not _REQUIRED_INDEXES <= indexes:
-        raise MigrationNotReadyError("receiver credential Phase 1 indexes are inconsistent")
+        # NAMED. "indexes are inconsistent" sent a day of investigation in
+        # every direction except the database, because the one thing it did
+        # not say was which index and which table.
+        absent = ", ".join(sorted(_REQUIRED_INDEXES - indexes))
+        raise MigrationNotReadyError(
+            f"receiver credential Phase 1 indexes are inconsistent: missing {absent}")
 
     for table_name, markers in _REQUIRED_CONSTRAINT_MARKERS.items():
         table_sql = connection.execute(

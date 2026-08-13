@@ -420,6 +420,77 @@ def running_pid() -> int | None:
     return pid
 
 
+def port_owner(port: int) -> int | None:
+    """The pid listening on this port, or None.
+
+    THE FAILURE THIS EXISTS FOR
+
+    Two servers were running from this repository at once. The launcher knew
+    about one; the other held the port. Every restart therefore stopped the
+    process that was serving nothing, started a replacement that could not
+    bind, and left the real server - with its own, older copy of the code in
+    memory - answering every request. Backend fixes appeared to do nothing for
+    hours, while frontend changes worked, because static files are read from
+    disk per request and Python code is not.
+
+    A pid file describes what this repository STARTED. It cannot describe what
+    is actually serving, and those are different questions.
+    """
+    if platform.system() == "Windows":
+        result = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                                capture_output=True, text=True)
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 5 and parts[3].upper() == "LISTENING":
+                local = parts[1]
+                if local.rsplit(":", 1)[-1] == str(port):
+                    try:
+                        return int(parts[4])
+                    except ValueError:
+                        return None
+        return None
+
+    result = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                            capture_output=True, text=True)
+    for line in result.stdout.split():
+        try:
+            return int(line)
+        except ValueError:
+            continue
+    return None
+
+
+def describe_process(pid: int) -> str:
+    """A one-line description of a pid, for a message an operator has to act on."""
+    if platform.system() == "Windows":
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}')"
+             ".CommandLine"],
+            capture_output=True, text=True)
+        line = result.stdout.strip()
+    else:
+        result = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                                capture_output=True, text=True)
+        line = result.stdout.strip()
+    return line or f"pid {pid} (command line unavailable)"
+
+
+def foreign_port_holder(config: "Config") -> int | None:
+    """A pid serving our port that this repository did not start.
+
+    Returned rather than killed. The rule that this launcher never hunts for
+    processes to kill is a good one - it is why it has never taken down an
+    unrelated program - and the answer to an unknown holder is to say so, not
+    to guess.
+    """
+    holder = port_owner(config.port)
+    if holder is None:
+        return None
+    ours = running_pid()
+    return None if holder == ours else holder
+
+
 def clear_runtime_files() -> None:
     for path in (pid_file(), state_file()):
         try:
@@ -523,6 +594,17 @@ def command_run(config: Config) -> int:
 
 
 def command_start(config: Config) -> int:
+    intruder = foreign_port_holder(config)
+    if intruder is not None:
+        raise LaunchError(
+            f"Port {config.port} is already being served by pid {intruder}, "
+            "which this repository did not start:\n"
+            f"    {describe_process(intruder)}\n"
+            "Starting now would add a second copy that cannot bind, and the "
+            "one already running would keep answering - with whatever code it "
+            "loaded when IT started. Stop that process first "
+            f"(taskkill /PID {intruder} /T /F), then start again.")
+
     """Background. Convenience, mainly for a Windows operator."""
     existing = running_pid()
     if existing:
@@ -619,8 +701,25 @@ def command_stop(config: Config) -> int:
                       f"{STOP_TIMEOUT_SECONDS}s.")
 
 
+def warn_if_port_still_served(config: Config) -> None:
+    """After stopping ours, say plainly if something is STILL serving.
+
+    Silence here is what let a stale server answer for hours: stop reported
+    success, start reported success, and the thing on the port never changed.
+    """
+    holder = port_owner(config.port)
+    if holder is None:
+        return
+    print(f"WARNING: port {config.port} is still being served by pid {holder}, "
+          "which this repository did not start:")
+    print(f"    {describe_process(holder)}")
+    print("Anything you change in the backend will NOT take effect until that "
+          f"process is stopped (taskkill /PID {holder} /T /F).")
+
+
 def command_restart(config: Config) -> int:
     command_stop(config)
+    warn_if_port_still_served(config)
     if running_pid() is not None:
         raise LaunchError("Refusing to start a second instance: the previous "
                           "one is still running.")
@@ -646,6 +745,20 @@ def command_status(config: Config) -> int:
     else:
         print("  process    : not running")
     print(f"  api        : {'answering' if answering else 'not answering'}")
+
+    # WHO IS ACTUALLY ON THE PORT. This line is the one that was missing while
+    # a stale server answered every request for hours: status reported our pid
+    # alive and the api answering, and both were true - of two different
+    # processes.
+    holder = port_owner(config.port)
+    if holder is not None and holder != pid:
+        print(f"  serving    : pid {holder}  <-- NOT the process this "
+              "repository started")
+        print(f"               {describe_process(holder)}")
+        print("               Backend changes will not take effect until it "
+              "is stopped.")
+    elif holder is not None:
+        print(f"  serving    : pid {holder} (ours)")
     if pid and answering:
         print("  state      : READY")
         return 0

@@ -138,15 +138,74 @@ if ($DryRun -or -not $PSCmdlet.ShouldProcess($TaskName, 'Install the Store Recei
 # ---------------------------------------------------------------------------
 # Stop anything running from the install root, then replace it
 # ---------------------------------------------------------------------------
-$running = @(Get-CimInstance Win32_Process -Filter "Name = 'SpeakLinkReceiverBackground.exe' OR Name = 'SpeakLinkReceiver.exe'" |
-             Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallRoot, 'OrdinalIgnoreCase') })
+# The At-Logon task goes first. Stopping the process without stopping the task
+# that owns it is a race the task wins: Task Scheduler can restart it between
+# the kill and the delete, and the reinstall then fails on a folder that was
+# free a moment earlier.
+if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+    Write-Output '  stopping the existing At-Logon task'
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null
+}
+
+# Matched by NAME, not only by path. An upgrade from an older kit - or an
+# install root reached by a different spelling of the same folder (a mapped
+# drive, a short 8.3 path, a different case) - leaves a process this filter
+# would not have recognised, and it is that process which holds the folder.
+# There is no SpeakLink Receiver on a Store PC that should survive a reinstall,
+# so the name is the right test.
+$running = @(Get-CimInstance Win32_Process `
+                -Filter "Name = 'SpeakLinkReceiverBackground.exe' OR Name = 'SpeakLinkReceiver.exe'" `
+                -ErrorAction SilentlyContinue)
 foreach ($process in $running) {
     Write-Output "  stopping running Receiver PID $($process.ProcessId)"
     Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
 }
 if ($running.Count -gt 0) { Start-Sleep -Seconds 2 }
 
-if (Test-Path $InstallRoot) { Remove-Item $InstallRoot -Recurse -Force }
+# Removal retries, because a handle closes on Windows's schedule, not ours.
+#
+# THE FAILURE THIS EXISTS FOR
+#
+# A real Store PC refused the whole installation with
+#
+#     Remove-Item : ...\SpeakLink\receiver-app because it is in use
+#
+# after enrolment had already succeeded - the worst possible moment to stop,
+# because the Device was registered and the computer had nothing installed to
+# use it. A process had just been killed; its handles had not been released
+# yet; and one Remove-Item attempt decided that was fatal.
+if (Test-Path $InstallRoot) {
+    $removed = $false
+    foreach ($attempt in 1..5) {
+        try {
+            Remove-Item $InstallRoot -Recurse -Force -ErrorAction Stop
+            $removed = $true
+            break
+        } catch {
+            if ($attempt -eq 5) { break }
+            Write-Output "  install folder still in use, waiting (attempt $attempt of 5)"
+            Start-Sleep -Seconds 2
+        }
+    }
+    if (-not $removed) {
+        # Last resort: empty what CAN be emptied and install over the rest.
+        #
+        # This is not a weakened installation. Every file is copied fresh below
+        # and then verified against SHA256SUMS.txt, so anything left behind
+        # that matters is overwritten, and anything stale that is NOT
+        # overwritten is caught by that check rather than shipped.
+        Write-Output '  install folder is held open; replacing its contents in place'
+        Get-ChildItem $InstallRoot -Force -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object { $_.FullName.Length } -Descending |
+            ForEach-Object { Remove-Item $_.FullName -Force -Recurse -ErrorAction SilentlyContinue }
+        $held = @(Get-ChildItem $InstallRoot -Force -Recurse -File -ErrorAction SilentlyContinue)
+        if ($held.Count -gt 0) {
+            Write-Output ("  $($held.Count) file(s) could not be removed and will be " +
+                          'overwritten; the checksum test below still covers them')
+        }
+    }
+}
 New-Item -ItemType Directory -Force -Path $InstallRoot, $stateRoot, $logDirectory | Out-Null
 
 # Copied file by file, with a short retry on the transient locks that real

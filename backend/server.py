@@ -113,7 +113,8 @@ from broadcast_reservation import (
 import active_broadcast_management as abm
 from enrolment_refusal import (RefusalCategory,
                                classify_enrolment_refusal,
-                               describe_outstanding_codes)
+                               describe_outstanding_codes,
+                               fingerprint)
 from deletion_safety import (
     DeletionRefused,
     delete_device_if_unused,
@@ -246,6 +247,8 @@ import broadcast_recording
 import web_rooms
 import web_chat
 import store_kits
+from receiver_index_repair import repair_receiver_indexes
+from receiver_auth_reasons import DeviceEnrolmentBlocked
 import chat_attachments
 from web_participant_runtime import (
     HEARTBEAT_INTERVAL_SECONDS,
@@ -654,6 +657,9 @@ def startup_event():
         # survive an HQ restart - outliving a disconnection is its whole
         # purpose - so unlike live readings it has to live in the database.
         broadcast_recording.ensure_recording_schema(engine)
+        # An index is derivable, and its absence stopped every enrolment on a
+        # live estate for a day. Recreated here rather than merely reported.
+        repair_receiver_indexes(engine)
         web_rooms.ensure_web_room_schema(engine)
         # Chat hangs off the room, which hangs off the session, both
         # ON DELETE CASCADE - so a broadcast deleted from history takes
@@ -1352,6 +1358,12 @@ def enroll_receiver(
             headers={"Retry-After": str(retry_after)},
         )
 
+    # Derived here, once, so that nothing below this line can reach the raw
+    # code. The fingerprint is 8 hex characters of a hash: enough to tell two
+    # attempts apart in a log, not enough to reconstruct anything.
+    presented_fingerprint = fingerprint(payload.code)
+    presented_length = len(payload.code or "")
+
     key_ring = receiver_key_ring()
     try:
         result = redeem_and_enroll(
@@ -1363,6 +1375,15 @@ def enroll_receiver(
             software_version=payload.software_version,
             key_ring=key_ring,
         )
+    except DeviceEnrolmentBlocked as blocked:
+        # HQ cannot verify what it would issue - the credential migration state
+        # says so - and it refused BEFORE claiming the code, so nothing was
+        # spent. This escaped as a 500 until a test tripped it: an operator saw
+        # "Internal Server Error" for a condition the exception was carrying a
+        # written explanation of.
+        _write_log(db, "warn",
+                   f"enrollment_blocked reason={getattr(blocked.reason, 'value', blocked.reason)}")
+        raise HTTPException(status_code=503, detail=str(blocked))
     except EnrollmentUnavailable as unavailable:
         # The operator's problem, not the caller's, and it must never look like
         # a bad code.
@@ -1396,7 +1417,9 @@ def enroll_receiver(
         context = ""
         if category is RefusalCategory.UNKNOWN_TOKEN:
             try:
-                context = " " + describe_outstanding_codes(db)
+                context = (f" presented_fingerprint={presented_fingerprint}"
+                           f" presented_length={presented_length}"
+                           " " + describe_outstanding_codes(db))
             except Exception:  # noqa: BLE001 - never fail a refusal over a hint
                 context = ""
         _write_log(db, "warn",

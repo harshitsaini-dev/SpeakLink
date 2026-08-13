@@ -108,6 +108,22 @@ def describe_for_operator(category: RefusalCategory) -> str:
     return _DESCRIPTIONS[category]
 
 
+def fingerprint(code: object) -> str:
+    """Eight hex characters of the SHA-256 of a code.
+
+    Enough to say "the string HQ received is the string HQ issued" or "it is
+    not", and useless for anything else: the codes are 24 bytes of urandom, so
+    a 32-bit prefix of their digest cannot be reversed or replayed. Written
+    only when a code matched nothing - the case where the alternative is
+    guessing at where the string changed.
+    """
+    import hashlib
+
+    if not isinstance(code, str) or not code.strip():
+        return "none"
+    return hashlib.sha256(code.strip().encode("utf-8")).hexdigest()[:8]
+
+
 def describe_outstanding_codes(db) -> str:
     """How many codes were usable when a presented one matched nothing.
 
@@ -132,9 +148,14 @@ def describe_outstanding_codes(db) -> str:
         return "outstanding_codes=0"
     newest = max(rows, key=lambda row: row.expires_at_epoch)
     age = max(0, int(now - (newest.expires_at_epoch - CODE_TTL_HINT_SECONDS)))
+    # The stored digests, shortened. Compared against the presented one, this
+    # says in one line whether the string arrived intact - which is the only
+    # question left once the code, the store and the clock have been ruled out.
+    stored = ",".join(sorted(row.code_hash[:8] for row in rows))
     return (f"outstanding_codes={len(rows)} "
             f"newest_issued_seconds_ago={age} "
-            f"newest_store_id={newest.store_id}")
+            f"newest_store_id={newest.store_id} "
+            f"outstanding_fingerprints={stored}")
 
 
 #: Only used to turn an expiry back into an issue time for the log line above.

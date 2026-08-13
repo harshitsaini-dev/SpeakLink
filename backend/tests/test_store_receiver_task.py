@@ -342,3 +342,53 @@ def test_the_verifier_checks_for_orphan_ffmpeg():
 def test_the_verifier_checks_exactly_one_receiver_is_running():
     body = _text(VERIFY)
     assert "Count -eq 1" in body
+
+
+# ===========================================================================
+# A held-open install folder must not end the installation
+#
+# A real Store PC failed here, AFTER enrolment had already succeeded - the
+# worst possible moment, because the Device was registered at HQ and the
+# computer had nothing installed to use it:
+#
+#     Remove-Item : ...\SpeakLink\receiver-app because it is in use
+#
+# The old Receiver had just been killed and its handles had not been released
+# yet. One attempt, no retry, and the whole install was lost.
+# ===========================================================================
+
+def test_the_installer_stops_the_task_before_the_processes():
+    """Killing the process without stopping the task is a race the task wins:
+    Task Scheduler can restart it between the kill and the delete."""
+    body = _text(INSTALL)
+    stop_task = body.index("Stop-ScheduledTask")
+    stop_process = body.index("Stop-Process -Id $($process.ProcessId)"
+                              if "Stop-Process -Id $($process.ProcessId)" in body
+                              else "Stop-Process")
+    assert stop_task < stop_process, "the task must be stopped first"
+
+
+def test_the_installer_matches_a_running_receiver_by_name():
+    """An upgrade from an older kit, or the same folder reached by a different
+    spelling, leaves a process a path filter does not recognise - and it is
+    that process which holds the folder open."""
+    body = _text(INSTALL)
+    window = body[body.index("Stop-ScheduledTask"):body.index("Remove-Item $InstallRoot")]
+    assert "Name = 'SpeakLinkReceiverBackground.exe'" in window
+    assert "StartsWith($InstallRoot" not in window, (
+        "matching only by path is what let the holding process survive")
+
+
+def test_removing_the_install_root_is_retried():
+    body = _text(INSTALL)
+    window = body[body.index("Stop-ScheduledTask"):]
+    assert "1..5" in window and "still in use, waiting" in window
+
+
+def test_a_folder_that_cannot_be_removed_is_replaced_in_place():
+    """Falling back is safe only because every file is checksum-verified after
+    the copy - so this asserts the check is still there, not merely the
+    fallback."""
+    body = _text(INSTALL)
+    assert "replacing its contents in place" in body
+    assert "SHA256SUMS.txt" in body, "the fallback relies on this staying"
