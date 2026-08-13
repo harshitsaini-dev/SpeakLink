@@ -209,6 +209,15 @@ DEFAULT_HQ_URL = "http://192.168.4.134:8000"
 #: One button whose label reflects what is on disk, so an operator is
 #: never offered "Change" on a Store that has no password.
 SETTINGS_PASSWORD_BUTTON_LABEL = "Settings Password"
+def _describe_code_length(code: str) -> str:
+    """"28 / 32" while typing, so a short code is seen rather than submitted."""
+    length = len(code.strip())
+    if length == 0:
+        return ""
+    return f"{length} / {core.CODE_LENGTH}" + ("" if length == core.CODE_LENGTH
+                                               else "  ← check this")
+
+
 WINDOW_TITLE = f"SpeakLink Store Setup {STORE_KIT_VERSION}"  # the version is on screen so "which build is that?" is answerable from a photograph of the till
 
 
@@ -530,10 +539,20 @@ class EnrolmentScreen(ttk.Frame):
         code_row.pack(padx=24, pady=4, anchor="w")
         self.code_var = tk.StringVar(master=self)
         self.code_entry = ttk.Entry(code_row, textvariable=self.code_var, width=32, show="*")
+        # A live count beside the box. The code is masked, so a missing
+        # character is invisible - and a code four characters short is refused
+        # by HQ with the same sentence as a code that never existed.
+        self.code_length_var = tk.StringVar(master=self, value="")
+        self.code_var.trace_add(
+            "write",
+            lambda *_: self.code_length_var.set(
+                _describe_code_length(self.code_var.get())))
         self.code_entry.pack(side="left")
         self.show_var = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(code_row, text="Show", variable=self.show_var,
                         command=self._toggle_show).pack(side="left", padx=6)
+        ttk.Label(code_row, textvariable=self.code_length_var,
+                  foreground="#b45309").pack(side="left")
 
         ttk.Label(self, text="Device name").pack(anchor="w", padx=24, pady=(8, 0))
         self.device_name_var = tk.StringVar(master=self, value=app.state_data["device_name"])

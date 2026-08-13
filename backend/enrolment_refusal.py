@@ -106,3 +106,38 @@ _DESCRIPTIONS = {
 def describe_for_operator(category: RefusalCategory) -> str:
     """A sentence a beginner can act on. Carries no code and no credential."""
     return _DESCRIPTIONS[category]
+
+
+def describe_outstanding_codes(db) -> str:
+    """How many codes were usable when a presented one matched nothing.
+
+    Written for the case that actually happened: a code was generated, a code
+    was typed in forty seconds later, and HQ said it matched nothing. From the
+    log alone that is indistinguishable from "somebody is guessing at codes" -
+    and the difference decides whether the operator generates another code or
+    checks how they are copying it.
+
+    Counts and ages only. No code, no part of a code, no hash.
+    """
+    import time
+
+    from models import ReceiverEnrollmentCode
+
+    now = time.time()
+    rows = (db.query(ReceiverEnrollmentCode)
+            .filter(ReceiverEnrollmentCode.redeemed_at_epoch.is_(None))
+            .filter(ReceiverEnrollmentCode.expires_at_epoch > now)
+            .all())
+    if not rows:
+        return "outstanding_codes=0"
+    newest = max(rows, key=lambda row: row.expires_at_epoch)
+    age = max(0, int(now - (newest.expires_at_epoch - CODE_TTL_HINT_SECONDS)))
+    return (f"outstanding_codes={len(rows)} "
+            f"newest_issued_seconds_ago={age} "
+            f"newest_store_id={newest.store_id}")
+
+
+#: Only used to turn an expiry back into an issue time for the log line above.
+#: Kept here rather than imported so this module stays free of the code
+#: service, which imports the classifier.
+CODE_TTL_HINT_SECONDS = 15 * 60

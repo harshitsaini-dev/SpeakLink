@@ -111,7 +111,9 @@ from broadcast_reservation import (
     reserve_stores_for_session,
 )
 import active_broadcast_management as abm
-from enrolment_refusal import classify_enrolment_refusal
+from enrolment_refusal import (RefusalCategory,
+                               classify_enrolment_refusal,
+                               describe_outstanding_codes)
 from deletion_safety import (
     DeletionRefused,
     delete_device_if_unused,
@@ -1380,7 +1382,25 @@ def enroll_receiver(
         #
         # The raw code is never part of either.
         category = classify_enrolment_refusal(str(refusal))
-        _write_log(db, "warn", f"enrollment_code_rejected category={category.value}")
+        # WHAT ELSE WAS TRUE AT THAT MOMENT, for the one category that is
+        # otherwise undiagnosable from HQ. "That code matched nothing" leaves
+        # an operator unable to tell a mistyped code from a stale one from a
+        # code issued against a different HQ - so the log says how many usable
+        # codes were outstanding, and how long ago the newest was issued.
+        #
+        # A code issued 40 seconds ago plus a presented code that matches
+        # nothing is a copying problem, and the log now says so instead of
+        # leaving somebody to generate a sixth code.
+        #
+        # No part of any code is recorded. Counting is not disclosure.
+        context = ""
+        if category is RefusalCategory.UNKNOWN_TOKEN:
+            try:
+                context = " " + describe_outstanding_codes(db)
+            except Exception:  # noqa: BLE001 - never fail a refusal over a hint
+                context = ""
+        _write_log(db, "warn",
+                   f"enrollment_code_rejected category={category.value}{context}")
         raise HTTPException(status_code=400, detail=ENROLMENT_REFUSED)
 
     enrollment_limiter.forget(client_key)

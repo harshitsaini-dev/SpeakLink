@@ -199,6 +199,17 @@ function ShownOnce({ label, value, testId, onDismiss }) {
       >
         {value}
       </code>
+      {/* THE LENGTH, next to the code. A Store enrolment failed for an hour
+          because 28 of 32 characters had been copied, and nothing anywhere
+          said how many there should be - HQ cannot tell a short code from an
+          unknown one, so the count is the only thing that makes the mistake
+          visible before it is made. */}
+      <div className="text-xs text-amber-900">
+        <span data-testid={`${testId}-length`} className="font-mono">
+          {String(value).length} characters
+        </span>
+        {" — use Copy rather than reading it out."}
+      </div>
       <div className="text-xs text-amber-900">{SHOWN_ONCE_WARNING}</div>
       <button
         type="button"
