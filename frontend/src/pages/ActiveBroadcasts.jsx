@@ -21,7 +21,7 @@ import React from "react";
 import { Search, RefreshCcw, Square, X } from "lucide-react";
 import SpeakLinkMark from "@/components/SpeakLinkMark";
 import { api } from "@/lib/api";
-import { SearchableSelect } from "@/components/AdminFilters";
+import { SearchableSelect, ExportButton } from "@/components/AdminFilters";
 import SupervisedWebAudience from "@/components/SupervisedWebAudience";
 import { useAdminList } from "@/lib/adminList";
 
@@ -226,6 +226,7 @@ export default function ActiveBroadcasts() {
                             options={stores} />
         )}
 
+        <ExportButton dataset="active-broadcasts" list={list} testId="active-export" />
         <select
           data-testid="active-sort"
           value={filters.sort}

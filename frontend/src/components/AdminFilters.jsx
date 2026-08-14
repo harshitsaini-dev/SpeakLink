@@ -88,7 +88,7 @@ export function SearchInput({ value, onChange, placeholder = "Search…", testId
  * on a plain click - so choosing a fifth item looks like it deselected the
  * other four.
  */
-export function FilterSelect({ label, value, onChange, options, testId,
+export function FilterSelect({ label, value, onChange, options = [], testId,
                                allLabel = "All", multiple = true,
                                disabled = false, selectedSummary = null }) {
   const [open, setOpen] = React.useState(false);
@@ -100,7 +100,13 @@ export function FilterSelect({ label, value, onChange, options, testId,
   const [needle, setNeedle] = React.useState("");
   const holder = React.useRef(null);
 
-  const normalised = options.map((option) => (
+  // Defaulted, and defensively so. A page passes `options={options.stores}`
+  // where that list arrives from a second request - and until it does, or if
+  // it fails, the value is undefined. Reading .map off it took a whole page
+  // white, which is the failure mode this control must never have: a filter
+  // with nothing to offer is a filter with nothing to offer, not a broken
+  // screen.
+  const normalised = (options || []).map((option) => (
     typeof option === "string" ? { value: option, label: option } : option));
   const chosen = String(value ?? "").split(",").map((v) => v.trim()).filter(Boolean);
   const term = needle.trim().toLowerCase();
@@ -218,9 +224,9 @@ export function FilterSelect({ label, value, onChange, options, testId,
  * choosing part made exclusive - so "Zone", "City" and "Store" pickers behave
  * the same way everywhere, whether they take one value or several.
  */
-export function SearchableSelect({ label, value, onChange, options, testId,
+export function SearchableSelect({ label, value, onChange, options = [], testId,
                                    placeholder = "— select —", disabled }) {
-  const normalised = options.map((option) => (
+  const normalised = (options || []).map((option) => (
     typeof option === "string" ? { value: option, label: option } : option));
   const chosen = normalised.find((option) => String(option.value) === String(value ?? ""));
   return (

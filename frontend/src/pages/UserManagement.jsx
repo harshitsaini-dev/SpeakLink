@@ -112,7 +112,7 @@ export default function UserManagement() {
 
   React.useEffect(() => {
     api.get("/receivers/filter-options")
-      .then(({ data }) => setScopeOptions(data))
+      .then(({ data }) => setScopeOptions({ regions: data.regions || [], cities: data.cities || [], stores: data.stores || [] }))
       .catch(() => { /* the Scope filters simply stay empty */ });
   }, []);
 

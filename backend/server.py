@@ -7918,6 +7918,23 @@ EXPORTS = {
                     ("offline_store_count", "Stores offline")],
         "sorts": "BROADCAST_HISTORY_SORTS",
     },
+    "receiver-devices": {
+        "permission": "menu.receivers.view",
+        "columns": [("display_name", "Device"), ("public_id", "Identifier"),
+                    ("store_code", "Store code"), ("store_name", "Store"),
+                    ("city", "City"), ("region", "Zone"),
+                    ("is_primary", "Primary"), ("status", "Status"),
+                    ("last_seen_at", "Last seen")],
+        "sorts": "RECEIVER_DEVICE_SORTS",
+    },
+    "active-broadcasts": {
+        "permission": "broadcast.active_view",
+        "columns": [("campaign_name", "Campaign"), ("target_mode", "Mode"),
+                    ("started_by_display_name", "Broadcaster"),
+                    ("started_at", "Started"),
+                    ("target_store_count", "Stores")],
+        "sorts": "ACTIVE_BROADCAST_SORTS",
+    },
     "system-logs": {
         "permission": "menu.logs.view",
         "columns": [("created_at", "Time"), ("level", "Level"),
@@ -7950,6 +7967,21 @@ BROADCAST_HISTORY_SORTS = {
     "status": lambda row: row.get("status"),
     "started_by": lambda row: row.get("started_by_display_name")
                               or row.get("started_by_username"),
+}
+RECEIVER_DEVICE_SORTS = {
+    "display_name": lambda row: row.get("display_name"),
+    "public_id": lambda row: row.get("public_id"),
+    "store_name": lambda row: row.get("store_name"),
+    "city": lambda row: row.get("city"),
+    "region": lambda row: row.get("region"),
+    "status": lambda row: row.get("status"),
+    "last_seen_at": lambda row: row.get("last_seen_at"),
+}
+ACTIVE_BROADCAST_SORTS = {
+    "campaign_name": lambda row: row.get("campaign_name"),
+    "target_mode": lambda row: row.get("target_mode"),
+    "started_at": lambda row: row.get("started_at"),
+    "target_store_count": lambda row: row.get("target_store_count"),
 }
 SYSTEM_LOG_SORTS = {
     "created_at": lambda row: row.get("created_at"),
@@ -8026,6 +8058,21 @@ def _export_rows(dataset: str, params: dict, user: HQUser, db: Session) -> list[
             archived_only=str(params.get("archived_only", "")).lower()
                           in ("1", "true", "yes"),
             sort=params.get("sort"), dir=params.get("dir", "asc"),
+            page=1, page_size=MAX_EXPORT_ROWS, db=db, user=user)["items"]
+    if dataset == "receiver-devices":
+        return search_receiver_devices(
+            q=params.get("q"), store_id=_as_int(params.get("store_id")),
+            city=params.get("city"), region=params.get("region"),
+            status_f=params.get("status"),
+            lifecycle=params.get("lifecycle"),
+            is_primary=None, include_archived=True,
+            page=1, page_size=MAX_EXPORT_ROWS, db=db, user=user)["items"]
+    if dataset == "active-broadcasts":
+        return active_management_list(
+            q=params.get("q"), owner=params.get("owner") or "all",
+            owner_user_id=_as_int(params.get("owner_user_id")),
+            store_id=_as_int(params.get("store_id")),
+            sort=params.get("sort") or abm.SORT_NEWEST,
             page=1, page_size=MAX_EXPORT_ROWS, db=db, user=user)["items"]
     if dataset == "system-logs":
         return search_logs(

@@ -3,7 +3,7 @@ import { api } from "@/lib/api";
 import StatusBadge from "@/components/StatusBadge";
 import { RefreshCw } from "lucide-react";
 import { useAdminList } from "@/lib/adminList";
-import { FilterBar, SearchInput, FilterSelect, ListState, Pager, SortableTh } from "@/components/AdminFilters";
+import { FilterBar, SearchInput, FilterSelect, ListState, Pager, SortableTh, ExportButton } from "@/components/AdminFilters";
 
 /**
  * Receiver Status, filtered by the server.
@@ -28,7 +28,7 @@ export default function ReceiverStatus() {
   React.useEffect(() => {
     let cancelled = false;
     api.get("/receivers/filter-options")
-      .then(({ data }) => { if (!cancelled) setOptions(data); })
+      .then(({ data }) => { if (!cancelled) setOptions({ regions: data.regions || [], cities: data.cities || [], stores: data.stores || [] }); })
       .catch(() => { /* the list's own error state already reports a failure */ });
     return () => { cancelled = true; };
   }, []);
@@ -47,11 +47,13 @@ export default function ReceiverStatus() {
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">Receiver Status</h1>
           <p className="text-sm text-slate-500">Live connection status of every store receiver.</p>
         </div>
-                <ExportButton dataset="receiver-status" list={list} testId="receivers-export" />
-        <button data-testid="receivers-refresh-btn" onClick={list.reload}
-                className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
-          <RefreshCw size={14} /> Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <ExportButton dataset="receiver-status" list={list} testId="receivers-export" />
+          <button data-testid="receivers-refresh-btn" onClick={list.reload}
+                  className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
+            <RefreshCw size={14} /> Refresh
+          </button>
+        </div>
       </div>
 
       <FilterBar onClear={list.clearFilters} activeCount={list.activeCount}

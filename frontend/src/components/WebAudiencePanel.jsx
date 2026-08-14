@@ -1,6 +1,7 @@
 import React from "react";
 import { Link2, Copy, KeyRound, RefreshCw, UserCheck, UserX, LogOut } from "lucide-react";
 import { api } from "@/lib/api";
+import { FilterSelect } from "@/components/AdminFilters";
 
 /**
  * The broadcaster's view of their web audience.
@@ -45,6 +46,15 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
   const [copied, setCopied] = React.useState(null);
+  //: Finding ONE person in an audience.
+  //:
+  //: Nine listeners fit on a screen and two hundred do not, and the second is
+  //: exactly when somebody needs a particular person - the one who reported no
+  //: sound, the one who should not be in the room. Filtered in the browser
+  //: because this panel already holds the whole audience: a round trip would
+  //: add latency to a list that is already here.
+  const [audienceQuery, setAudienceQuery] = React.useState("");
+  const [audienceState, setAudienceState] = React.useState("");
 
   const load = React.useCallback(async () => {
     if (!sessionId) return;
@@ -94,6 +104,25 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
   // console with no explanation - indistinguishable, to the operator, from a
   // web audience feature that had broken. It says which it is now.
   if (!sessionId) return null;
+  // Applied to both lists by the same rule: somebody looking for a person does
+  // not know which of the two they are in, and that is usually the question.
+  const named = (raw) => String(raw || "").split(",").map((v) => v.trim())
+    .filter(Boolean);
+  const matchesName = (person) => {
+    const needle = audienceQuery.trim().toLowerCase();
+    return !needle
+      || String(person.display_name || "").toLowerCase().includes(needle);
+  };
+  // A join request has not played anything yet, so the playback filter does
+  // not apply to it. Hiding a pending person under "Playing" would read as
+  // the request having been answered.
+  const waiting = (room?.waiting || []).filter(matchesName);
+  const listeners = (room?.listeners || []).filter((person) => {
+    if (!matchesName(person)) return false;
+    const states = named(audienceState);
+    return !states.length || states.includes(person.playback_state);
+  });
+
   if (!room) {
     return (
       <div data-testid="web-audience-loading"
@@ -233,17 +262,40 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
 
         {error && <p data-testid="web-audience-error" className="text-sm text-red-600">{error}</p>}
 
+        {/* Search and filter, over BOTH lists. Nine listeners fit on a screen
+            and two hundred do not, and the second is exactly when somebody
+            needs one particular person. */}
+        {((room.waiting || []).length + (room.listeners || []).length) > 0 && (
+          <div className="flex flex-wrap items-center gap-2"
+               data-testid="web-audience-filters">
+            <input value={audienceQuery} data-testid="web-audience-search"
+                   onChange={(event) => setAudienceQuery(event.target.value)}
+                   placeholder="Search by name…"
+                   className="flex-1 min-w-[160px] rounded border border-slate-300 px-2 py-1 text-xs" />
+            <FilterSelect label="" testId="web-audience-state" allLabel="Any state"
+                          value={audienceState} onChange={setAudienceState}
+                          options={Object.entries(PLAYBACK_LABEL).map(
+                            ([value, label]) => ({ value, label }))} />
+          </div>
+        )}
+
         {/* ---- pending ---- */}
         {(room.waiting || []).length > 0 && (
           <div data-testid="web-join-requests">
             <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-2">
               Join Requests
+              {waiting.length !== (room.waiting || []).length && (
+                <span className="ml-2 font-normal normal-case tracking-normal text-slate-400"
+                      data-testid="audience-waiting-count">
+                  showing {waiting.length} of {(room.waiting || []).length}
+                </span>
+              )}
             </p>
             {/* Bounded, because a hundred people waiting must not push the
                 Store table a thousand pixels down the page. The list scrolls
                 inside itself and every action stays reachable. */}
             <ul className={`divide-y divide-slate-200 rounded border border-slate-200 ${compact ? "max-h-40 overflow-y-auto" : ""}`}>
-              {room.waiting.map((person) => (
+              {waiting.map((person) => (
                 <li key={person.id}
                     data-testid={`web-request-${person.id}`}
                     className="flex items-center gap-3 px-3 py-2">
@@ -283,7 +335,7 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
             </p>
           ) : (
             <ul className={`divide-y divide-slate-200 rounded border border-slate-200 ${compact ? "max-h-48 overflow-y-auto" : ""}`}>
-              {room.listeners.map((person) => (
+              {listeners.map((person) => (
                 <li key={person.id}
                     data-testid={`web-listener-${person.id}`}
                     className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm">

@@ -19,7 +19,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import { RefreshCw, Star, Trash2, ExternalLink } from "lucide-react";
 import { useAdminList } from "@/lib/adminList";
 import {
-  FilterBar, SearchInput, FilterSelect, ListState, Pager, DestructiveModal,
+  FilterBar, SearchInput, FilterSelect, ListState, Pager, SortableTh,
+  ExportButton, DestructiveModal,
 } from "@/components/AdminFilters";
 import StoreKitDownload from "@/components/StoreKitDownload";
 
@@ -41,6 +42,7 @@ const shortId = (id) =>
 export default function ReceiverDeviceFleet() {
   const { can } = useAuth();
   const list = useAdminList("/receiver-devices/search", {
+    sort: "", dir: "asc",
     q: "", region: "", city: "", store_id: "", status: "", is_primary: "",
     // One control, one source of truth. include_deleted is never sent: this
     // screen is operational, and a permanently deleted Device is not.
@@ -53,7 +55,7 @@ export default function ReceiverDeviceFleet() {
 
   React.useEffect(() => {
     api.get("/receivers/filter-options")
-      .then(({ data }) => setOptions(data))
+      .then(({ data }) => setOptions({ regions: data.regions || [], cities: data.cities || [], stores: data.stores || [] }))
       .catch(() => { /* the list's own error state already reports a failure */ });
   }, []);
 
@@ -67,6 +69,7 @@ export default function ReceiverDeviceFleet() {
             enrol, rotate or promote.
           </p>
         </div>
+        <ExportButton dataset="receiver-devices" list={list} testId="fleet-export" />
         <button data-testid="fleet-refresh-btn" onClick={list.reload}
                 className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
           <RefreshCw size={14} /> Refresh
@@ -134,13 +137,13 @@ export default function ReceiverDeviceFleet() {
           <caption className="sr-only">Receiver Devices across every visible Store</caption>
           <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
             <tr>
-              <th scope="col" className="px-3 py-2">Device</th>
-              <th scope="col" className="px-3 py-2">Identifier</th>
-              <th scope="col" className="px-3 py-2">Store</th>
-              <th scope="col" className="px-3 py-2">City</th>
-              <th scope="col" className="px-3 py-2">Zone</th>
+              <SortableTh column="display_name" label="Device" list={list} />
+              <SortableTh column="public_id" label="Identifier" list={list} />
+              <SortableTh column="store_name" label="Store" list={list} />
+              <SortableTh column="city" label="City" list={list} />
+              <SortableTh column="region" label="Zone" list={list} />
               <th scope="col" className="px-3 py-2">Role</th>
-              <th scope="col" className="px-3 py-2">Status</th>
+              <SortableTh column="status" label="Status" list={list} />
               <th scope="col" className="px-3 py-2">Lifecycle</th>
               <th scope="col" className="px-3 py-2 text-right">Actions</th>
             </tr>

@@ -57,7 +57,12 @@ export default function BroadcastHistory() {
       api.get("/receivers/filter-options").catch(() => null),
     ]).then(([u, o]) => {
       if (u) setUsers(u.data.items || []);
-      if (o) setOptions(o.data);
+      // Merged into the shape this page expects rather than replacing it: a
+      // response missing a key would otherwise take the whole page white,
+      // which is exactly what happened on Receiver Status.
+      if (o) setOptions({ regions: o.data.regions || [],
+                          cities: o.data.cities || [],
+                          stores: o.data.stores || [] });
     });
   }, []);
 
