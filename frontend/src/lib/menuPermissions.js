@@ -14,6 +14,10 @@ export const MENU_PERMISSION_BY_PATH = {
   // ordinary Broadcaster holds the second without the first.
   "/active-broadcasts": "broadcast.active_view",
   "/announcements": "menu.announcements.view",
+  // The same permission as the live page. Whether a shop played something an
+  // hour ago is the same subject as whether it is playing now, and a second
+  // right would only create a way to see one and not the other.
+  "/announcement-history": "menu.announcements.view",
   "/stores": "menu.stores.view",
   "/history": "menu.history.view",
   "/receivers": "menu.receivers.view",

@@ -472,3 +472,226 @@ def test_an_unauthenticated_caller_reaches_nothing(client):
     for path in ("/api/announcements/status", "/api/announcements/audio",
                  "/api/announcements/templates"):
         assert client.get(path).status_code in (401, 403), path
+
+
+# ===========================================================================
+# Archiving and deleting are two different things
+#
+# They used to be one, and the button that did it wore a wastebin. Somebody
+# archived a recording, watched it vanish from the list, and found the bytes
+# still on the server: the interface said "deleted" and meant "hidden".
+# ===========================================================================
+
+def test_archiving_leaves_the_file_on_disk_and_the_row_findable(client):
+    import announcements
+    headers = sign_in(client)
+    created = upload(client, headers)
+    path = announcements.audio_directory() / created["storage_name"]
+    assert path.is_file()
+
+    client.delete(f"/api/announcements/audio/{created['id']}", headers=headers)
+    assert path.is_file(), "archiving removed the file"
+    everything = client.get("/api/announcements/audio?status=all",
+                            headers=headers).json()
+    assert [row["id"] for row in everything["items"]] == [created["id"]]
+
+
+def test_deleting_permanently_removes_the_row_and_the_file(client):
+    import announcements
+    headers = sign_in(client)
+    created = upload(client, headers)
+    path = announcements.audio_directory() / created["storage_name"]
+
+    response = client.post(
+        f"/api/announcements/audio/{created['id']}/delete-permanently",
+        headers=headers, json={"confirmation": "DELETE"})
+    assert response.status_code == 200, response.text
+    assert not path.exists(), "the file was left behind"
+    everything = client.get("/api/announcements/audio?status=all",
+                            headers=headers).json()
+    assert everything["items"] == []
+
+
+def test_deleting_without_the_confirmation_word_changes_nothing(client):
+    import announcements
+    headers = sign_in(client)
+    created = upload(client, headers)
+    path = announcements.audio_directory() / created["storage_name"]
+
+    for wrong in ("", "delete this", "yes"):
+        response = client.post(
+            f"/api/announcements/audio/{created['id']}/delete-permanently",
+            headers=headers, json={"confirmation": wrong})
+        assert response.status_code == 400
+    assert path.is_file()
+
+
+def test_a_recording_a_template_still_uses_cannot_be_deleted(client):
+    """Deleting the audio out from under a live campaign leaves a template
+    that plays nothing and cannot say why."""
+    headers = sign_in(client)
+    make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    make_template(client, headers, audio_id=audio["id"], name="Festival")
+
+    response = client.post(
+        f"/api/announcements/audio/{audio['id']}/delete-permanently",
+        headers=headers, json={"confirmation": "DELETE"})
+    assert response.status_code == 409
+    assert "Festival" in response.json()["detail"]
+    assert "archive it instead" in response.json()["detail"].lower()
+
+
+def test_permanent_deletion_is_not_granted_by_the_upload_right(client):
+    """Uploading is an everyday action; destroying an estate's recording is
+    not, and holding the first must not imply the second."""
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    make_user(client, headers, "editor", "ADMIN")
+    admin = sign_in(client, "editor")
+
+    # ADMIN may archive...
+    assert client.delete(f"/api/announcements/audio/{audio['id']}",
+                         headers=admin).status_code == 200
+    # ...but permanent deletion is withheld from ADMIN by default, like every
+    # other *.delete_permanently code.
+    assert client.post(
+        f"/api/announcements/audio/{audio['id']}/delete-permanently",
+        headers=admin, json={"confirmation": "DELETE"}).status_code == 403
+
+
+# ===========================================================================
+# History: what played, where, and why it stopped
+# ===========================================================================
+
+def test_playing_and_pausing_writes_a_history_row_with_the_reason(client):
+    """"It went quiet at 4pm" is only answerable if the reason was recorded at
+    the time. Paused by a person and ducked by a broadcast look identical
+    afterwards and are not the same event."""
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+    client.post(f"/api/announcements/stores/{store_id}/pause", headers=headers)
+
+    history = client.get("/api/announcements/history", headers=headers).json()
+    rows = [row for row in history["items"] if row["store_id"] == store_id]
+    assert len(rows) == 1
+    assert rows[0]["template_name"] == "Festival"
+    assert rows[0]["audio_title"] == "Diwali Offer"
+    assert rows[0]["ended_reason"] == "paused"
+    assert rows[0]["ended_at"]
+
+
+def test_a_history_row_stays_readable_after_the_recording_is_deleted(client):
+    """A JOIN to a row that no longer exists renders "unknown" for something
+    that was perfectly well known at the time."""
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+    client.post(f"/api/announcements/stores/{store_id}/pause", headers=headers)
+
+    client.delete(f"/api/announcements/templates/{template['id']}", headers=headers)
+    client.post(f"/api/announcements/audio/{audio['id']}/delete-permanently",
+                headers=headers, json={"confirmation": "DELETE"})
+
+    history = client.get("/api/announcements/history", headers=headers).json()
+    rows = [row for row in history["items"] if row["store_id"] == store_id]
+    assert rows[0]["audio_title"] == "Diwali Offer"
+    assert rows[0]["template_name"] == "Festival"
+
+
+def test_history_can_be_searched_filtered_and_paged(client):
+    headers = sign_in(client)
+    north = make_store(client, headers, "NA", region="NORTH")
+    make_store(client, headers, "SA", region="SOUTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    zoned = client.get("/api/announcements/history?zone=NORTH",
+                       headers=headers).json()
+    assert [row["store_id"] for row in zoned["items"]] == [north]
+
+    searched = client.get("/api/announcements/history?q=diwali",
+                          headers=headers).json()
+    assert searched["total"] == 1
+
+    # "Still playing" is the ABSENCE of an end, not a reason - spelled out
+    # rather than left to somebody discovering that an empty filter differs.
+    still = client.get("/api/announcements/history?reason=open",
+                       headers=headers).json()
+    assert still["total"] == 1
+    assert still["items"][0]["ended_at"] is None
+
+    paged = client.get("/api/announcements/history?page=2&page_size=1",
+                       headers=headers).json()
+    assert paged["items"] == []
+
+
+def test_restarting_a_store_does_not_leave_two_open_history_rows(client):
+    """Two open rows for one Store make every later "what was playing" answer
+    ambiguous."""
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    for _ in range(3):
+        client.post(f"/api/announcements/templates/{template['id']}/play",
+                    headers=headers)
+        client.post(f"/api/announcements/stores/{store_id}/pause", headers=headers)
+        client.post(f"/api/announcements/stores/{store_id}/play", headers=headers)
+
+    history = client.get("/api/announcements/history?page_size=100",
+                         headers=headers).json()
+    open_rows = [row for row in history["items"]
+                 if row["store_id"] == store_id and row["ended_at"] is None]
+    assert len(open_rows) == 1
+
+
+def test_archiving_a_history_entry_keeps_it_in_the_record(client):
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+    entry = client.get("/api/announcements/history", headers=headers).json()["items"][0]
+
+    assert client.post(f"/api/announcements/history/{entry['id']}/archive",
+                       headers=headers).status_code == 200
+    assert client.get("/api/announcements/history",
+                      headers=headers).json()["total"] == 0
+    assert client.get("/api/announcements/history?include_archived=true",
+                      headers=headers).json()["total"] == 1
+
+
+def test_deleting_a_history_entry_needs_the_word_and_the_right(client):
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+    entry = client.get("/api/announcements/history", headers=headers).json()["items"][0]
+
+    assert client.post(f"/api/announcements/history/{entry['id']}/delete-permanently",
+                       headers=headers, json={"confirmation": "yes"}
+                       ).status_code == 400
+
+    make_user(client, headers, "editor", "ADMIN")
+    assert client.post(f"/api/announcements/history/{entry['id']}/delete-permanently",
+                       headers=sign_in(client, "editor"),
+                       json={"confirmation": "DELETE"}).status_code == 403
+
+    assert client.post(f"/api/announcements/history/{entry['id']}/delete-permanently",
+                       headers=headers, json={"confirmation": "DELETE"}
+                       ).status_code == 200
+    assert client.get("/api/announcements/history?include_archived=true",
+                      headers=headers).json()["total"] == 0

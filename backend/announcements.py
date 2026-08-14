@@ -52,6 +52,7 @@ AUDIO_TABLE = "announcement_audio"
 TEMPLATE_TABLE = "announcement_templates"
 ITEM_TABLE = "announcement_template_items"
 PLAYBACK_TABLE = "announcement_playback"
+HISTORY_TABLE = "announcement_history"
 
 #: A Store is in exactly one of these at any moment.
 STATE_STOPPED = "STOPPED"
@@ -216,6 +217,35 @@ def ensure_announcement_schema(engine: Engine) -> None:
             )
             """
         )
+        connection.exec_driver_sql(
+            f"""
+            CREATE TABLE IF NOT EXISTS {HISTORY_TABLE} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store_id INTEGER NOT NULL,
+                template_id INTEGER,
+                audio_id INTEGER,
+                -- Denormalised on purpose. A history row must stay readable
+                -- after the template is archived and the recording deleted,
+                -- and a JOIN to a row that no longer exists reads as "unknown"
+                -- for something that was perfectly well known at the time.
+                store_code VARCHAR(50),
+                store_name VARCHAR(200),
+                zone VARCHAR(100),
+                template_name VARCHAR(120),
+                audio_title VARCHAR(200),
+                started_at VARCHAR(40) NOT NULL,
+                ended_at VARCHAR(40),
+                started_by INTEGER,
+                ended_by INTEGER,
+                -- Why it stopped: paused | broadcast | stopped | superseded.
+                -- "It went quiet at 4pm" is answerable only if the reason was
+                -- written down at the time.
+                ended_reason VARCHAR(20),
+                volume_percent INTEGER,
+                archived_at VARCHAR(40)
+            )
+            """
+        )
         for statement in (
             f"CREATE INDEX IF NOT EXISTS ix_announcement_audio_status "
             f"ON {AUDIO_TABLE}(status)",
@@ -229,6 +259,12 @@ def ensure_announcement_schema(engine: Engine) -> None:
             f"ON {ITEM_TABLE}(zone)",
             f"CREATE INDEX IF NOT EXISTS ix_announcement_playback_state "
             f"ON {PLAYBACK_TABLE}(state)",
+            f"CREATE INDEX IF NOT EXISTS ix_announcement_history_started "
+            f"ON {HISTORY_TABLE}(started_at)",
+            f"CREATE INDEX IF NOT EXISTS ix_announcement_history_store "
+            f"ON {HISTORY_TABLE}(store_id, started_at)",
+            f"CREATE INDEX IF NOT EXISTS ix_announcement_history_open "
+            f"ON {HISTORY_TABLE}(store_id, ended_at)",
         ):
             connection.exec_driver_sql(statement)
 

@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "@/lib/api";
-import { Play, Pause, RefreshCw, Volume2, Upload, Trash2 } from "lucide-react";
+import { Play, Pause, RefreshCw, Volume2, Upload, Trash2, Plus, X } from "lucide-react";
 import { useAdminList } from "@/lib/adminList";
 import { FilterBar, SearchInput, FilterSelect, ListState, Pager } from "@/components/AdminFilters";
 import { useAuth } from "@/contexts/AuthContext";
@@ -61,6 +61,9 @@ export default function Announcements() {
   // first: the operator scrolls past a recordings list to reach a Pause button
   // for a shop that is annoying customers right now.
   const [tab, setTab] = React.useState("console");
+  const [building, setBuilding] = React.useState(false);
+  const [stores, setStores] = React.useState([]);
+  const [deleting, setDeleting] = React.useState(null);
   const [busy, setBusy] = React.useState("");
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");
@@ -69,6 +72,7 @@ export default function Announcements() {
   const mayControlAll = can("announcements.control_all");
   const mayUpload = can("announcements.upload");
   const mayManageTemplates = can("announcements.templates.manage");
+  const mayDeletePermanently = can("announcements.delete_permanently");
 
   const loadSupporting = React.useCallback(() => {
     api.get("/announcements/templates", { params: { page_size: 200 } })
@@ -76,6 +80,12 @@ export default function Announcements() {
       .catch(() => { /* the status list reports a failure already */ });
     api.get("/announcements/audio", { params: { page_size: 200 } })
       .then(({ data }) => setAudio(data.items || []))
+      .catch(() => {});
+    // The Stores this ACCOUNT may see, from the same scoped endpoint the other
+    // admin pages use - so a template can never be pointed at a shop its
+    // author is not allowed to open.
+    api.get("/receivers/filter-options")
+      .then(({ data }) => setStores(data.stores || []))
       .catch(() => {});
   }, []);
 
@@ -279,7 +289,7 @@ export default function Announcements() {
       {tab === "setup" && (<>
       {/* ---- Templates ---- */}
       <section className="bg-white rounded-lg border border-slate-200">
-        <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
+        <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-3">
           <div>
             <h2 className="font-semibold text-slate-900">Templates</h2>
             <p className="text-xs text-slate-500">
@@ -287,7 +297,19 @@ export default function Announcements() {
               nothing to choose - only play and pause.
             </p>
           </div>
+          {mayManageTemplates && (
+            <button data-testid="template-new"
+                    onClick={() => setBuilding((open) => !open)}
+                    className="inline-flex items-center gap-1 px-3 py-2 rounded-md text-sm text-white bg-slate-900 hover:bg-slate-800">
+              <Plus className="w-4 h-4" /> {building ? 'Cancel' : 'New template'}
+            </button>
+          )}
         </div>
+        {building && mayManageTemplates && (
+          <TemplateBuilder audio={audio} zones={zones} stores={stores}
+                           onCancel={() => setBuilding(false)}
+                           onCreated={() => { setBuilding(false); loadSupporting(); }} />
+        )}
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-600">
             <tr>
@@ -387,21 +409,57 @@ export default function Announcements() {
                   {recording.original_filename} - {(recording.byte_size / 1024).toFixed(0)} KB
                 </div>
               </div>
-              {mayUpload && (
-                <button data-testid={`recording-archive-${recording.id}`}
-                        onClick={() => act(`Archive ${recording.title}`, async () => {
-                          const response = await api.delete(
-                            `/announcements/audio/${recording.id}`);
-                          loadSupporting();
-                          return response;
-                        })}
-                        className="p-1.5 rounded border border-slate-300 hover:bg-slate-50">
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              )}
+              {/* Two actions, honestly named.
+                  A wastebin icon that archived was the interface saying
+                  "deleted" and meaning "hidden": the recording left the list
+                  and the bytes stayed on the server. Archiving is the
+                  everyday, reversible one and now says so in words; deleting
+                  is separate, needs its own right, and asks for the same
+                  confirmation word as every other permanent delete here. */}
+              <div className="flex items-center gap-2">
+                {mayUpload && (
+                  <button data-testid={`recording-archive-${recording.id}`}
+                          onClick={() => act(`Archive ${recording.title}`, async () => {
+                            const response = await api.delete(
+                              `/announcements/audio/${recording.id}`);
+                            loadSupporting();
+                            return response;
+                          })}
+                          className="px-2 py-1 rounded border border-slate-300 text-sm hover:bg-slate-50">
+                    Archive
+                  </button>
+                )}
+                {mayDeletePermanently && (
+                  <button data-testid={`recording-delete-${recording.id}`}
+                          onClick={() => setDeleting(recording)}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded border border-rose-300 text-sm text-rose-700 hover:bg-rose-50">
+                    <Trash2 className="w-4 h-4" /> Delete
+                  </button>
+                )}
+              </div>
             </li>
           ))}
         </ul>
+        {deleting && (
+          <div className="px-4 py-4 border-t border-rose-200 bg-rose-50 space-y-2"
+               data-testid="recording-delete-confirm">
+            <p className="text-sm text-rose-900">
+              Delete <strong>{deleting.title}</strong> permanently? The
+              recording and its file are removed and cannot be recovered.
+              Archive it instead if you only want it out of the list.
+            </p>
+            <DeleteConfirmation
+              onCancel={() => setDeleting(null)}
+              onConfirm={(word) => act(`Delete ${deleting.title}`, async () => {
+                const response = await api.post(
+                  `/announcements/audio/${deleting.id}/delete-permanently`,
+                  { confirmation: word });
+                setDeleting(null);
+                loadSupporting();
+                return response;
+              })} />
+          </div>
+        )}
       </section>
       </>)}
     </div>
@@ -502,5 +560,256 @@ function UploadRecording({ onUploaded }) {
       </button>
       {failure && <span className="text-sm text-rose-700" data-testid="recording-upload-error">{failure}</span>}
     </form>
+  );
+}
+
+
+/**
+ * Building a template.
+ *
+ * The whole point of the feature is that this is done ONCE: afterwards nobody
+ * chooses a recording for a shop again, they only press play and pause. So the
+ * form asks for everything that decision needs - including when it stops -
+ * rather than leaving the expiry to somebody's memory.
+ *
+ * A line names a Store or a zone, never both. The server enforces that too;
+ * here it is a choice rather than two fields, so the impossible combination
+ * cannot be typed in the first place.
+ */
+function TemplateBuilder({ audio, zones, stores, onCancel, onCreated }) {
+  const [name, setName] = React.useState("");
+  const [description, setDescription] = React.useState("");
+  const [startsAt, setStartsAt] = React.useState("");
+  const [expiresAt, setExpiresAt] = React.useState("");
+  const [lines, setLines] = React.useState([
+    { audio_id: "", target: "zone", zone: "", store_id: "", store_ids: [],
+      volume_percent: 80 },
+  ]);
+  const [busy, setBusy] = React.useState(false);
+  const [failure, setFailure] = React.useState("");
+
+  const setLine = (index, changes) => setLines((current) =>
+    current.map((line, position) =>
+      position === index ? { ...line, ...changes } : line));
+
+  async function submit(event) {
+    event.preventDefault();
+    setFailure("");
+    // "Several Stores" is expanded here into one line per Store rather than
+    // being a third kind of line on the server. A template line names one
+    // Store or one zone - that rule is what makes "which Stores does this
+    // reach" answerable in one place - and a third shape would have to be
+    // resolved by every reader of the table.
+    const items = lines
+      .filter((line) => line.audio_id)
+      .flatMap((line) => {
+        const common = {
+          audio_id: Number(line.audio_id),
+          volume_percent: Number(line.volume_percent),
+        };
+        if (line.target === "zone") return [{ ...common, zone: line.zone }];
+        if (line.target === "stores") {
+          return (line.store_ids || []).map((id) => ({
+            ...common, store_id: Number(id) }));
+        }
+        return [{ ...common, store_id: Number(line.store_id) }];
+      });
+    if (!items.length) {
+      setFailure("Add at least one recording and where it plays.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.post("/announcements/templates", {
+        name,
+        description,
+        // Sent as an instant, not a date. "Expires on the 5th" is ambiguous
+        // about whether the 5th is included, and a jingle that runs a day too
+        // long is a promotion that outlives its own price.
+        starts_at: startsAt ? new Date(startsAt).toISOString() : null,
+        expires_at: expiresAt ? new Date(expiresAt).toISOString() : null,
+        items,
+      });
+      onCreated?.();
+    } catch (error) {
+      setFailure(error?.response?.data?.detail || "That template was not accepted.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} data-testid="template-builder"
+          className="px-4 py-4 border-b border-slate-200 bg-slate-50 space-y-3">
+      <div className="flex flex-wrap gap-2">
+        <input value={name} onChange={(event) => setName(event.target.value)}
+               placeholder="Template name" data-testid="template-name" required
+               className="px-3 py-2 border border-slate-300 rounded-md text-sm min-w-[220px]" />
+        <input value={description} onChange={(event) => setDescription(event.target.value)}
+               placeholder="What is it for? (optional)" data-testid="template-description"
+               className="px-3 py-2 border border-slate-300 rounded-md text-sm flex-1 min-w-[220px]" />
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1">
+          <span className="text-[10px] uppercase tracking-widest text-slate-500">Starts</span>
+          <input type="datetime-local" value={startsAt} data-testid="template-starts"
+                 onChange={(event) => setStartsAt(event.target.value)}
+                 className="px-3 py-2 border border-slate-300 rounded-md text-sm" />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-[10px] uppercase tracking-widest text-slate-500">Stops</span>
+          <input type="datetime-local" value={expiresAt} data-testid="template-expires"
+                 onChange={(event) => setExpiresAt(event.target.value)}
+                 className="px-3 py-2 border border-slate-300 rounded-md text-sm" />
+        </label>
+        <p className="text-xs text-slate-500 max-w-sm">
+          Leave both empty to run until somebody stops it. An expiry is how a
+          festival jingle stops on its own instead of playing into February.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        {lines.map((line, index) => (
+          <div key={index} className="flex flex-wrap items-center gap-2"
+               data-testid={`template-line-${index}`}>
+            <select value={line.audio_id} required
+                    data-testid={`template-line-audio-${index}`}
+                    onChange={(event) => setLine(index, { audio_id: event.target.value })}
+                    className="px-3 py-2 border border-slate-300 rounded-md text-sm min-w-[200px]">
+              <option value="">Which recording?</option>
+              {audio.map((recording) => (
+                <option key={recording.id} value={recording.id}>{recording.title}</option>
+              ))}
+            </select>
+
+            <select value={line.target} data-testid={`template-line-target-${index}`}
+                    onChange={(event) => setLine(index, { target: event.target.value })}
+                    className="px-3 py-2 border border-slate-300 rounded-md text-sm">
+              <option value="zone">a whole zone</option>
+              <option value="store">one Store</option>
+              <option value="stores">several Stores</option>
+            </select>
+
+            {line.target === "stores" ? (
+              <div className="flex flex-col gap-1">
+                <select multiple value={line.store_ids}
+                        data-testid={`template-line-stores-${index}`}
+                        onChange={(event) => setLine(index, {
+                          store_ids: Array.from(event.target.selectedOptions,
+                                                (option) => option.value) })}
+                        className="px-3 py-2 border border-slate-300 rounded-md text-sm min-w-[260px] h-28">
+                  {stores.map((store) => (
+                    <option key={store.id} value={store.id}>
+                      {store.store_name} ({store.store_code})
+                    </option>
+                  ))}
+                </select>
+                <span className="text-xs text-slate-500">
+                  {line.store_ids.length
+                    ? `${line.store_ids.length} chosen`
+                    : "Ctrl-click or drag to choose more than one"}
+                </span>
+              </div>
+            ) : line.target === "zone" ? (
+              <select value={line.zone} required
+                      data-testid={`template-line-zone-${index}`}
+                      onChange={(event) => setLine(index, { zone: event.target.value })}
+                      className="px-3 py-2 border border-slate-300 rounded-md text-sm min-w-[160px]">
+                <option value="">Which zone?</option>
+                {zones.map((zone) => <option key={zone} value={zone}>{zone}</option>)}
+              </select>
+            ) : (
+              <select value={line.store_id} required
+                      data-testid={`template-line-store-${index}`}
+                      onChange={(event) => setLine(index, { store_id: event.target.value })}
+                      className="px-3 py-2 border border-slate-300 rounded-md text-sm min-w-[220px]">
+                <option value="">Which Store?</option>
+                {stores.map((store) => (
+                  <option key={store.id} value={store.id}>
+                    {store.store_name} ({store.store_code})
+                  </option>
+                ))}
+              </select>
+            )}
+
+            <label className="flex items-center gap-2 text-sm text-slate-600">
+              <Volume2 className="w-4 h-4 text-slate-400" />
+              <input type="range" min="0" max="100" value={line.volume_percent}
+                     data-testid={`template-line-volume-${index}`}
+                     onChange={(event) => setLine(index,
+                       { volume_percent: Number(event.target.value) })}
+                     className="w-24" />
+              <span className="tabular-nums w-8">{line.volume_percent}%</span>
+            </label>
+
+            {lines.length > 1 && (
+              <button type="button" data-testid={`template-line-remove-${index}`}
+                      onClick={() => setLines((current) =>
+                        current.filter((_, position) => position !== index))}
+                      className="p-1.5 rounded border border-slate-300 hover:bg-white">
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        ))}
+        <button type="button" data-testid="template-line-add"
+                onClick={() => setLines((current) => [...current,
+                  { audio_id: "", target: "zone", zone: "", store_id: "",
+                    store_ids: [], volume_percent: 80 }])}
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md border border-slate-300 text-sm hover:bg-white">
+          <Plus className="w-4 h-4" /> Another line
+        </button>
+      </div>
+
+      {failure && (
+        <p className="text-sm text-rose-800" data-testid="template-builder-error">{failure}</p>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button type="submit" disabled={busy} data-testid="template-save"
+                className="px-3 py-2 rounded-md text-sm text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-50">
+          {busy ? "Saving…" : "Save template"}
+        </button>
+        <button type="button" onClick={onCancel} data-testid="template-cancel"
+                className="px-3 py-2 rounded-md text-sm border border-slate-300 hover:bg-white">
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+
+/**
+ * The typed confirmation, inline rather than a browser dialog.
+ *
+ * The same shape the Devices page uses and for the same reason: a modal's
+ * default button can fire on its own in an automated or headless session, so
+ * the dialog returns "confirmed" with nothing typed - a confirmation that did
+ * not confirm. Read from this field, on the main thread, and handed to the
+ * server as data; the server compares it again, which is the real check.
+ */
+function DeleteConfirmation({ onConfirm, onCancel }) {
+  const [word, setWord] = React.useState("");
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <label className="text-sm text-rose-900">
+        Type DELETE to confirm:
+      </label>
+      <input value={word} onChange={(event) => setWord(event.target.value)}
+             data-testid="recording-delete-word"
+             className="px-3 py-2 border border-rose-300 rounded-md text-sm w-32" />
+      <button data-testid="recording-delete-confirm-btn"
+              disabled={word.trim().toUpperCase() !== "DELETE"}
+              onClick={() => onConfirm(word)}
+              className="px-3 py-2 rounded-md text-sm text-white bg-rose-700 hover:bg-rose-800 disabled:opacity-40">
+        Delete permanently
+      </button>
+      <button data-testid="recording-delete-cancel" onClick={onCancel}
+              className="px-3 py-2 rounded-md text-sm border border-slate-300 hover:bg-white">
+        Cancel
+      </button>
+    </div>
   );
 }

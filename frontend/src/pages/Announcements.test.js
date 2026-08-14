@@ -148,3 +148,136 @@ test("a refusal from the server is shown rather than swallowed", async () => {
   const failure = await screen.findByTestId("announcements-error");
   expect(failure.textContent).toContain("A live broadcast is playing in this Store.");
 });
+
+
+// ===========================================================================
+// Building a template
+//
+// Without this form the whole feature is unusable: the page could list and
+// archive templates, and there was no way to create one.
+// ===========================================================================
+
+test("a template can be built, and it names one Store or one zone per line", async () => {
+  api.get.mockImplementation((path) => {
+    if (path.startsWith("/announcements/status")) return Promise.resolve(listResponse([STORE]));
+    if (path.startsWith("/announcements/audio")) {
+      return Promise.resolve(listResponse([{ id: 7, title: "Diwali Offer",
+                                             original_filename: "d.mp3",
+                                             byte_size: 1024 }]));
+    }
+    if (path.startsWith("/receivers/filter-options")) {
+      return Promise.resolve({ data: { stores: [
+        { id: 4, store_name: "Nehru Place", store_code: "NA" }] } });
+    }
+    return Promise.resolve(listResponse([]));
+  });
+  api.post.mockResolvedValue({ data: { id: 1 } });
+
+  render(<Announcements />);
+  await screen.findByTestId("announcement-row-4");
+  fireEvent.click(screen.getByTestId("announcements-tab-setup"));
+  fireEvent.click(await screen.findByTestId("template-new"));
+
+  fireEvent.change(screen.getByTestId("template-name"),
+                   { target: { value: "Festival" } });
+  fireEvent.change(await screen.findByTestId("template-line-audio-0"),
+                   { target: { value: "7" } });
+  fireEvent.change(screen.getByTestId("template-line-zone-0"),
+                   { target: { value: "NORTH" } });
+  fireEvent.click(screen.getByTestId("template-save"));
+
+  await waitFor(() => expect(api.post).toHaveBeenCalled());
+  const [path, payload] = api.post.mock.calls[0];
+  expect(path).toBe("/announcements/templates");
+  expect(payload.name).toBe("Festival");
+  expect(payload.items).toEqual([
+    { audio_id: 7, volume_percent: 80, zone: "NORTH" }]);
+  // Never both: the impossible combination cannot even be typed.
+  expect(payload.items[0].store_id).toBeUndefined();
+});
+
+test("choosing one Store swaps the zone picker away entirely", async () => {
+  api.get.mockImplementation((path) => {
+    if (path.startsWith("/announcements/status")) return Promise.resolve(listResponse([STORE]));
+    if (path.startsWith("/announcements/audio")) {
+      return Promise.resolve(listResponse([{ id: 7, title: "Diwali Offer",
+                                             original_filename: "d.mp3",
+                                             byte_size: 1024 }]));
+    }
+    if (path.startsWith("/receivers/filter-options")) {
+      return Promise.resolve({ data: { stores: [
+        { id: 4, store_name: "Nehru Place", store_code: "NA" }] } });
+    }
+    return Promise.resolve(listResponse([]));
+  });
+
+  render(<Announcements />);
+  await screen.findByTestId("announcement-row-4");
+  fireEvent.click(screen.getByTestId("announcements-tab-setup"));
+  fireEvent.click(await screen.findByTestId("template-new"));
+
+  fireEvent.change(await screen.findByTestId("template-line-target-0"),
+                   { target: { value: "store" } });
+  expect(screen.queryByTestId("template-line-zone-0")).toBeNull();
+  expect(screen.getByTestId("template-line-store-0")).toBeTruthy();
+});
+
+test("a template with no complete line is refused before it is sent", async () => {
+  render(<Announcements />);
+  await screen.findByTestId("announcement-row-4");
+  fireEvent.click(screen.getByTestId("announcements-tab-setup"));
+  fireEvent.click(await screen.findByTestId("template-new"));
+
+  fireEvent.submit(screen.getByTestId("template-builder"));
+  expect(await screen.findByTestId("template-builder-error")).toBeTruthy();
+  expect(api.post).not.toHaveBeenCalled();
+});
+
+
+test("a line can name several Stores, and each becomes its own line", async () => {
+  // Expanded in the browser rather than being a third kind of line on the
+  // server: a template line names one Store or one zone, and that rule is what
+  // makes "which Stores does this reach" answerable in one place.
+  api.get.mockImplementation((path) => {
+    if (path.startsWith("/announcements/status")) return Promise.resolve(listResponse([STORE]));
+    if (path.startsWith("/announcements/audio")) {
+      return Promise.resolve(listResponse([{ id: 7, title: "Diwali Offer",
+                                             original_filename: "d.mp3",
+                                             byte_size: 1024 }]));
+    }
+    if (path.startsWith("/receivers/filter-options")) {
+      return Promise.resolve({ data: { stores: [
+        { id: 4, store_name: "Nehru Place", store_code: "NA" },
+        { id: 5, store_name: "Dwarka Mor", store_code: "DM" },
+        { id: 6, store_name: "Uttam Nagar", store_code: "UN" }] } });
+    }
+    return Promise.resolve(listResponse([]));
+  });
+  api.post.mockResolvedValue({ data: { id: 1 } });
+
+  render(<Announcements />);
+  await screen.findByTestId("announcement-row-4");
+  fireEvent.click(screen.getByTestId("announcements-tab-setup"));
+  fireEvent.click(await screen.findByTestId("template-new"));
+
+  fireEvent.change(screen.getByTestId("template-name"),
+                   { target: { value: "Two shops" } });
+  fireEvent.change(await screen.findByTestId("template-line-audio-0"),
+                   { target: { value: "7" } });
+  fireEvent.change(screen.getByTestId("template-line-target-0"),
+                   { target: { value: "stores" } });
+
+  const picker = await screen.findByTestId("template-line-stores-0");
+  Array.from(picker.options).forEach((option) => {
+    option.selected = ["4", "6"].includes(option.value);
+  });
+  fireEvent.change(picker);
+  fireEvent.click(screen.getByTestId("template-save"));
+
+  await waitFor(() => expect(api.post).toHaveBeenCalled());
+  const [, payload] = api.post.mock.calls[0];
+  expect(payload.items).toEqual([
+    { audio_id: 7, volume_percent: 80, store_id: 4 },
+    { audio_id: 7, volume_percent: 80, store_id: 6 },
+  ]);
+});

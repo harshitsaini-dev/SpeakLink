@@ -486,7 +486,26 @@ export default function UserManagement() {
   );
 }
 
-const GROUP_ORDER = ["Broadcast", "Stores", "Receivers", "History", "Logs", "Users"];
+//: The order groups are shown in - NOT the list of groups that exist.
+//:
+//: It used to be both, and that was a real defect: a permission group added to
+//: the backend catalog simply did not appear here, so the rights existed,
+//: the API enforced them, and there was no way to grant them to anybody. The
+//: Announcements group was invisible for exactly that reason.
+//:
+//: Anything not named here is now shown after these, in the catalog's own
+//: order. A new group being in the wrong POSITION is a cosmetic problem; a new
+//: group being absent is a right nobody can give.
+const GROUP_ORDER = ["Broadcast", "Announcements", "Stores", "Receivers",
+                     "History", "Logs", "Users"];
+
+/** Known groups first, in the order above; then anything the catalog has that
+ *  this file has not been told about. */
+export function orderGroups(groups) {
+  const known = GROUP_ORDER.filter((group) => groups.includes(group));
+  const rest = groups.filter((group) => !GROUP_ORDER.includes(group));
+  return [...known, ...rest];
+}
 
 /**
  * Beginner-friendly rights editor: Role / Override / Effective, per
@@ -588,8 +607,8 @@ function RightsEditor({ user, onCancel, onSaved }) {
 
   const categories = React.useMemo(() => {
     if (!rows) return [];
-    const present = new Set(rows.map((row) => row.group));
-    return GROUP_ORDER.filter((g) => present.has(g));
+    const present = Array.from(new Set(rows.map((row) => row.group)));
+    return orderGroups(present);
   }, [rows]);
 
   const grouped = React.useMemo(() => {
@@ -600,7 +619,7 @@ function RightsEditor({ user, onCancel, onSaved }) {
       if (!byGroup.has(row.group)) byGroup.set(row.group, []);
       byGroup.get(row.group).push(row);
     }
-    return GROUP_ORDER.filter((g) => byGroup.has(g)).map((g) => [g, byGroup.get(g)]);
+    return orderGroups(Array.from(byGroup.keys())).map((g) => [g, byGroup.get(g)]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, search, category, effect, overriddenOnly, pending]);
 

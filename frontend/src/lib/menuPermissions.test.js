@@ -19,6 +19,9 @@ test("every top-level nav route names its menu permission", () => {
     // capability as running a broadcast, and a VIEWER holds the first
     // without the second.
     "/announcements": "menu.announcements.view",
+    // Same subject as the live page, so the same permission: a second right
+    // would only create a way to see one and not the other.
+    "/announcement-history": "menu.announcements.view",
     "/stores": "menu.stores.view",
     "/history": "menu.history.view",
     "/receivers": "menu.receivers.view",

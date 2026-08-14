@@ -199,8 +199,31 @@ def set_state(engine: Engine, *, store_id: int, state: str,
         fields["volume_percent"] = announcements.validate_volume(volume_percent)
     if state == STATE_PLAYING:
         fields["started_at"] = now
+
+    previous = get_playback(engine, store_id=store_id)
     with engine.begin() as connection:
         _write_playback(connection, store_id=store_id, **fields)
+
+    # Written here rather than at each route. Six callers change a Store's
+    # state - including the ducking hook inside broadcast start and stop - and
+    # recording it per-caller means the one nobody remembers is the one that
+    # leaves a gap in the history.
+    try:
+        if state == STATE_PLAYING and previous["state"] != STATE_PLAYING:
+            open_history(engine, store_id=store_id,
+                         template_id=fields.get("template_id",
+                                                previous.get("template_id")),
+                         audio_id=fields.get("audio_id", previous.get("audio_id")),
+                         volume_percent=fields.get("volume_percent",
+                                                   previous.get("volume_percent")),
+                         actor_id=actor_id)
+        elif state != STATE_PLAYING and previous["state"] == STATE_PLAYING:
+            close_history(engine, store_id=store_id,
+                          reason={"PAUSED": "paused", "DUCKED": "broadcast",
+                                  "STOPPED": "stopped"}.get(state, state.lower()),
+                          actor_id=actor_id)
+    except Exception:  # noqa: BLE001 - history must never fail a live action
+        pass
     return get_playback(engine, store_id=store_id)
 
 
@@ -354,4 +377,110 @@ def live_status(engine: Engine, *, search: str = "", zone: str = "",
         rows = [row for row in rows if (row.get("zone") or "") == zone]
     if state:
         rows = [row for row in rows if row.get("state") == state]
+    return rows
+
+
+# ===========================================================================
+# History: what played, where, and when it stopped
+#
+# Written as rows that OPEN and CLOSE rather than as events, because the
+# question people actually ask is "what was this shop playing at four o'clock",
+# and answering that from a stream of events means replaying them. A row with a
+# start and an end answers it with a comparison.
+#
+# Every descriptive field is copied in, not joined. A history row has to stay
+# readable after the template is archived and the recording deleted - and a
+# JOIN to a row that no longer exists renders "unknown" for something that was
+# perfectly well known at the time.
+# ===========================================================================
+
+def open_history(engine: Engine, *, store_id: int, template_id, audio_id,
+                 volume_percent: int, actor_id) -> None:
+    """A Store started playing. Closes any row left open for it first.
+
+    Left-open rows are not hypothetical: HQ can be restarted while a shop is
+    playing. Closing the previous one here means the history cannot accumulate
+    two open rows for one Store, which is the state that makes every later
+    "what was playing" answer ambiguous.
+    """
+    close_history(engine, store_id=store_id, reason="superseded", actor_id=actor_id)
+    with engine.begin() as connection:
+        descriptive = connection.execute(text(
+            "SELECT s.store_code, s.store_name, s.region AS zone, "
+            f"       t.name AS template_name, a.title AS audio_title "
+            "FROM stores s "
+            f"LEFT JOIN {TEMPLATE_TABLE} t ON t.id = :template_id "
+            f"LEFT JOIN {AUDIO_TABLE} a ON a.id = :audio_id "
+            "WHERE s.id = :store_id"),
+            {"store_id": store_id, "template_id": template_id,
+             "audio_id": audio_id}).first()
+        row = dict(descriptive._mapping) if descriptive else {}
+        connection.execute(text(
+            f"INSERT INTO {announcements.HISTORY_TABLE} "
+            "(store_id, template_id, audio_id, store_code, store_name, zone, "
+            " template_name, audio_title, started_at, started_by, volume_percent) "
+            "VALUES (:store_id, :template_id, :audio_id, :store_code, "
+            "        :store_name, :zone, :template_name, :audio_title, "
+            "        :started_at, :started_by, :volume_percent)"),
+            {"store_id": store_id, "template_id": template_id,
+             "audio_id": audio_id,
+             "store_code": row.get("store_code"), "store_name": row.get("store_name"),
+             "zone": row.get("zone"), "template_name": row.get("template_name"),
+             "audio_title": row.get("audio_title"),
+             "started_at": _now(), "started_by": actor_id,
+             "volume_percent": volume_percent})
+
+
+def close_history(engine: Engine, *, store_id: int, reason: str,
+                  actor_id=None) -> None:
+    """Whatever this Store had open, ended, with the reason written down.
+
+    "It went quiet at 4pm" is only answerable if the reason was recorded at the
+    time: paused by a person and ducked by a broadcast look identical
+    afterwards and are not the same event.
+    """
+    with engine.begin() as connection:
+        connection.execute(text(
+            f"UPDATE {announcements.HISTORY_TABLE} "
+            "SET ended_at = :now, ended_reason = :reason, ended_by = :actor "
+            "WHERE store_id = :store_id AND ended_at IS NULL"),
+            {"now": _now(), "reason": reason, "actor": actor_id,
+             "store_id": store_id})
+
+
+def list_history(engine: Engine, *, search: str = "", zone: str = "",
+                 reason: str = "", store_id=None, template_id=None,
+                 since: str = "", until: str = "",
+                 include_archived: bool = False) -> list[dict]:
+    with engine.connect() as connection:
+        rows = _rows(connection,
+                     f"SELECT * FROM {announcements.HISTORY_TABLE} "
+                     "ORDER BY started_at DESC, id DESC")
+    if not include_archived:
+        rows = [row for row in rows if not row.get("archived_at")]
+    needle = (search or "").strip().lower()
+    if needle:
+        rows = [row for row in rows
+                if needle in (row.get("store_code") or "").lower()
+                or needle in (row.get("store_name") or "").lower()
+                or needle in (row.get("template_name") or "").lower()
+                or needle in (row.get("audio_title") or "").lower()]
+    if zone:
+        rows = [row for row in rows if (row.get("zone") or "") == zone]
+    if reason:
+        # "still playing" is a filter people want and it is the ABSENCE of an
+        # end, not a reason - so it is spelled here rather than left to
+        # somebody constructing an empty-string query.
+        if reason == "open":
+            rows = [row for row in rows if not row.get("ended_at")]
+        else:
+            rows = [row for row in rows if row.get("ended_reason") == reason]
+    if store_id is not None:
+        rows = [row for row in rows if row.get("store_id") == store_id]
+    if template_id is not None:
+        rows = [row for row in rows if row.get("template_id") == template_id]
+    if since:
+        rows = [row for row in rows if (row.get("started_at") or "") >= since]
+    if until:
+        rows = [row for row in rows if (row.get("started_at") or "") <= until]
     return rows

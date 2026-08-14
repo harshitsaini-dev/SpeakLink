@@ -250,6 +250,7 @@ import announcements
 import announcement_service
 import announcement_protocol
 import receiver_output_device
+import broadcast_group
 import store_kits
 from receiver_index_repair import repair_receiver_indexes
 from receiver_auth_reasons import DeviceEnrolmentBlocked
@@ -674,6 +675,8 @@ def startup_event():
         announcements.ensure_announcement_schema(engine)
         # Which speaker each Store plays through, and what it reported it has.
         receiver_output_device.ensure_output_device_schema(engine)
+        # More than one voice on one broadcast; see broadcast_group.py.
+        broadcast_group.ensure_group_schema(engine)
         # Anything left mid-flight by a crash is resolved BEFORE the first
         # request can read it. An unfinished .part is never promoted to
         # AVAILABLE: HQ stopping mid-announcement is exactly when a recording
@@ -6107,8 +6110,18 @@ async def ws_broadcaster(websocket: WebSocket, ticket: str = Query(...),
     with SessionLocal() as db:
         session = db.query(BroadcastSession).filter(
             BroadcastSession.id == session_id).first()
-        if (session is None or session.status != "live"
-                or session.started_by != int(user_id)):
+        # The host, OR somebody this broadcast has admitted as a second voice.
+        #
+        # JOINED and nothing else - re-read here, not taken from anything the
+        # browser sent. This single line is the whole of group broadcasting:
+        # the request, the approval and the participant list are bookkeeping
+        # around it, and a REQUESTED or DENIED account that could still push
+        # audio would make every one of them decoration.
+        admitted = (session is not None
+                    and (session.started_by == int(user_id)
+                         or broadcast_group.is_on_air(engine, session_id=session_id,
+                                                      user_id=int(user_id))))
+        if session is None or session.status != "live" or not admitted:
             await websocket.close(code=4404)
             return
 
@@ -7533,6 +7546,157 @@ async def set_store_audio_output(
     return result
 
 
+# ================ GROUP BROADCASTING ================
+#
+# Two ways in, and the difference is a permission: broadcast.group_join walks
+# in, everybody else asks the host. See broadcast_group.py.
+
+
+def _live_session_or_404(sid: int, db: Session) -> BroadcastSession:
+    session = db.query(BroadcastSession).filter(BroadcastSession.id == sid).first()
+    if session is None or session.status != "live":
+        raise HTTPException(status_code=404,
+                            detail="That broadcast is not live.")
+    return session
+
+
+def _require_group_host(session: BroadcastSession, user: HQUser) -> None:
+    """Only the host answers requests.
+
+    The host is the one person who can hear what is happening on that
+    broadcast right now, which is the whole reason a request goes to them
+    rather than to whoever is nearest an admin account. broadcast.group_host
+    lets somebody OPEN their own broadcast to others; it does not let them
+    answer for somebody else's.
+    """
+    if session.started_by != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the broadcaster who started this broadcast can answer "
+                   "requests to join it.")
+
+
+@api.get("/broadcast/sessions/{sid}/group")
+def list_group_participants(
+    sid: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("menu.broadcast.view")),
+):
+    session = _live_session_or_404(sid, db)
+    participants = broadcast_group.list_participants(engine, session_id=sid)
+    mine = broadcast_group.get_participant(engine, session_id=sid, user_id=user.id)
+    return {
+        "session_id": sid,
+        "host_user_id": session.started_by,
+        "is_host": session.started_by == user.id,
+        "me": mine,
+        "my_status": broadcast_group.describe(mine),
+        # The full list only for the host. Who else asked to speak on somebody
+        # else's broadcast is the host's business, not every account's.
+        "participants": participants if session.started_by == user.id
+                        else [p for p in participants
+                              if p["state"] == broadcast_group.STATE_JOINED],
+    }
+
+
+@api.post("/broadcast/sessions/{sid}/group/join")
+def join_group_broadcast(
+    sid: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("broadcast.start")),
+):
+    """Join, or ask to.
+
+    broadcast.start is required either way: this puts a voice on the
+    loudspeakers of real shops, and an account that may not broadcast at all
+    must not reach that by asking somebody else nicely.
+    """
+    session = _live_session_or_404(sid, db)
+    if session.started_by == user.id:
+        raise HTTPException(status_code=400,
+                            detail="You are already the host of this broadcast.")
+    # The same resolver every route's dependency uses, so "may they join
+    # directly" cannot drift from what the permissions page shows.
+    may_join_directly = "broadcast.group_join" in resolve_effective_permissions(
+        engine, user)
+    try:
+        participant = broadcast_group.join_or_request(
+            engine, session_id=sid, user_id=user.id,
+            may_join_directly=may_join_directly)
+    except broadcast_group.GroupRefused as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+
+    _write_log(db, "info",
+               f"group_broadcast_{participant['state'].lower()} session={sid} "
+               f"user={user.username} by_right={bool(may_join_directly)}")
+    return {"participant": participant,
+            "status": broadcast_group.describe(participant),
+            "on_air": participant["state"] == broadcast_group.STATE_JOINED}
+
+
+@api.post("/broadcast/sessions/{sid}/group/requests/{user_id}/approve")
+def approve_group_request(
+    sid: int, user_id: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("broadcast.group_host")),
+):
+    session = _live_session_or_404(sid, db)
+    _require_group_host(session, user)
+    try:
+        participant = broadcast_group.decide(engine, session_id=sid,
+                                             user_id=user_id, approve=True,
+                                             decided_by=user.id)
+    except broadcast_group.GroupRefused as refusal:
+        raise HTTPException(status_code=404, detail=str(refusal))
+    _write_log(db, "info",
+               f"group_broadcast_approved session={sid} user_id={user_id} "
+               f"by={user.username}")
+    return participant
+
+
+@api.post("/broadcast/sessions/{sid}/group/requests/{user_id}/deny")
+def deny_group_request(
+    sid: int, user_id: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("broadcast.group_host")),
+):
+    session = _live_session_or_404(sid, db)
+    _require_group_host(session, user)
+    try:
+        participant = broadcast_group.decide(engine, session_id=sid,
+                                             user_id=user_id, approve=False,
+                                             decided_by=user.id)
+    except broadcast_group.GroupRefused as refusal:
+        raise HTTPException(status_code=404, detail=str(refusal))
+    _write_log(db, "info",
+               f"group_broadcast_denied session={sid} user_id={user_id} "
+               f"by={user.username}")
+    return participant
+
+
+@api.post("/broadcast/sessions/{sid}/group/leave")
+def leave_group_broadcast(
+    sid: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("menu.broadcast.view")),
+):
+    """Leave, or withdraw a request that has not been answered.
+
+    Deliberately not gated on broadcast.start: an account that has been
+    demoted since joining must still be able to take itself off air, and
+    refusing that would leave a voice on the loudspeakers with no way to
+    remove it except stopping the whole broadcast.
+    """
+    _live_session_or_404(sid, db)
+    participant = broadcast_group.leave(engine, session_id=sid, user_id=user.id)
+    if participant is None:
+        raise HTTPException(status_code=404,
+                            detail="You are not on this broadcast.")
+    _write_log(db, "info",
+               f"group_broadcast_left session={sid} user={user.username}")
+    return participant
+
+
 # ================ RECORDED ANNOUNCEMENTS ================
 
 async def _dispatch_announcement(store_id: int, row: dict) -> None:
@@ -7758,6 +7922,75 @@ def archive_announcement_audio(
     return {"ok": True, "id": audio_id, "title": row["title"]}
 
 
+
+
+@api.post("/announcements/audio/{audio_id}/delete-permanently")
+def delete_announcement_audio_permanently(
+    audio_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.delete_permanently")),
+):
+    """Really gone: the row AND the file on disk.
+
+    WHY THIS EXISTS SEPARATELY FROM ARCHIVING
+
+    Archiving was the only option, and the button that did it wore a wastebin.
+    Somebody archived a recording, watched it vanish from the list, and found
+    the bytes still on the server - the interface had said "deleted" and meant
+    "hidden". Two different actions were being spelled the same way.
+
+    So there are now two, and they are honestly named. Archiving is the
+    everyday one and is reversible. This one is not, which is why it needs its
+    own permission, the typed confirmation word, and a refusal when a template
+    still depends on the recording: deleting the audio out from under a live
+    campaign would leave a template that plays nothing and says nothing about
+    why.
+    """
+    confirmation = (payload or {}).get("confirmation", "")
+    if str(confirmation).strip().upper() != "DELETE":
+        raise HTTPException(
+            status_code=400,
+            detail="Type DELETE to confirm. This removes the recording and its "
+                   "file permanently and cannot be undone.")
+
+    row = _announcement_or_404(audio_id)
+    users = [template["name"] for template in
+             announcement_service.list_templates(engine, status="all")
+             if any(item.get("audio_id") == audio_id
+                    for item in template.get("items") or [])]
+    if users:
+        raise HTTPException(
+            status_code=409,
+            detail=("This recording is still used by: " + ", ".join(users[:5])
+                    + ". Remove it from those templates first, or archive it "
+                      "instead - deleting it would leave a template that plays "
+                      "nothing and cannot say why."))
+
+    # The file first. A row without its file is a listing that fails when
+    # somebody presses play; a file without its row is bytes nobody can reach,
+    # which is untidy but harmless. If the delete of one has to fail, this is
+    # the order that fails the safer way.
+    path = announcements.audio_directory() / row["storage_name"]
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError as failure:
+        raise HTTPException(
+            status_code=500,
+            detail=f"The recording's file could not be removed ({failure}). "
+                   "Nothing has been deleted.")
+
+    with engine.begin() as connection:
+        connection.execute(text(
+            "DELETE FROM " + announcements.AUDIO_TABLE + " WHERE id = :id"),
+            {"id": audio_id})
+    _write_log(db, "warn",
+               f"announcement_deleted_permanently id={audio_id} "
+               f"title={row['title']!r} by={user.username}")
+    return {"ok": True, "id": audio_id, "title": row["title"]}
+
+
 # ---- Templates ----------------------------------------------------------
 
 @api.get("/announcements/templates")
@@ -7853,6 +8086,98 @@ def archive_announcement_template(
     _write_log(db, "info",
                f"announcement_template_archived id={template_id} by={user.username}")
     return {"ok": True, "id": template_id}
+
+
+
+
+@api.get("/announcements/history")
+def announcement_history(
+    q: Optional[str] = None,
+    zone: Optional[str] = None,
+    reason: Optional[str] = None,
+    store_id: Optional[int] = None,
+    template_id: Optional[int] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    include_archived: bool = False,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    user: HQUser = Depends(require("menu.announcements.view")),
+):
+    """What played, where, and why it stopped.
+
+    Rows OPEN and CLOSE rather than being a stream of events, because the
+    question people ask is "what was this shop playing at four o'clock" - and
+    answering that from events means replaying them, while a row with a start
+    and an end answers it with a comparison.
+
+    ``reason=open`` selects what is still playing. That is the ABSENCE of an
+    end rather than a reason, and spelling it here is better than leaving
+    somebody to discover that an empty filter means something different.
+    """
+    page, page_size = normalize_paging(page, page_size)
+    rows = announcement_service.list_history(
+        engine, search=q or "", zone=zone or "", reason=reason or "",
+        store_id=store_id, template_id=template_id,
+        since=since or "", until=until or "",
+        include_archived=include_archived)
+    offset = (page - 1) * page_size
+    return Page(items=rows[offset:offset + page_size], total=len(rows),
+                page=page, page_size=page_size).as_dict()
+
+
+@api.post("/announcements/history/{entry_id}/archive")
+def archive_announcement_history(
+    entry_id: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.templates.manage")),
+):
+    """Out of the everyday list, still in the record.
+
+    The same shape as Broadcast History: archiving is reversible and is the
+    everyday tidy-up; destroying the record of what a shop played is a
+    different act with a different permission.
+    """
+    with engine.begin() as connection:
+        result = connection.execute(text(
+            "UPDATE " + announcements.HISTORY_TABLE +
+            " SET archived_at = :now WHERE id = :id AND archived_at IS NULL"),
+            {"id": entry_id, "now": announcements.utcnow().isoformat()})
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404,
+                            detail="No such history entry, or it is already archived.")
+    _write_log(db, "info",
+               f"announcement_history_archived id={entry_id} by={user.username}")
+    return {"ok": True, "id": entry_id}
+
+
+@api.post("/announcements/history/{entry_id}/delete-permanently")
+def delete_announcement_history_permanently(
+    entry_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.delete_permanently")),
+):
+    """Really gone.
+
+    Its own permission and the typed word, because this destroys the answer to
+    "what was that shop playing" for a moment that has passed - and unlike a
+    recording, there is nothing to re-upload.
+    """
+    if str((payload or {}).get("confirmation", "")).strip().upper() != "DELETE":
+        raise HTTPException(
+            status_code=400,
+            detail="Type DELETE to confirm. This removes the record of what "
+                   "played and cannot be undone.")
+    with engine.begin() as connection:
+        result = connection.execute(text(
+            "DELETE FROM " + announcements.HISTORY_TABLE + " WHERE id = :id"),
+            {"id": entry_id})
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="No such history entry.")
+    _write_log(db, "warn",
+               f"announcement_history_deleted id={entry_id} by={user.username}")
+    return {"ok": True, "id": entry_id}
 
 
 # ---- Playing and pausing ------------------------------------------------

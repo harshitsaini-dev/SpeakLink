@@ -48,6 +48,11 @@ const NAV_GROUPS = [
     title: "Records",
     items: [
       { to: "/history", label: "Broadcast History", icon: History, testid: "nav-history" },
+      // Beside Broadcast History rather than under Announcements: both answer
+      // "what happened", and somebody looking for one will look where the
+      // other is.
+      { to: "/announcement-history", label: "Announcement History", icon: Megaphone,
+        testid: "nav-announcement-history" },
       { to: "/logs", label: "System Logs", icon: ScrollText, testid: "nav-logs" },
     ],
   },
