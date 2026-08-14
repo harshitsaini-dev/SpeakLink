@@ -42,6 +42,8 @@ import shutil
 import subprocess
 import sys
 import threading
+from dataclasses import replace
+import tempfile
 import uuid
 
 
@@ -627,6 +629,10 @@ class AudioReceiverPilot:
         self.report_path = report_path
         self.sink = sink or SinkConfiguration(sink_mode=SINK_MODE_NULL, device=None)
         self.pcm_sink = None
+        #: The recorded announcement this Store is playing, if any. Outlives
+        #: every broadcast session, because that is the whole point of it.
+        self._announcement = None
+        self._announcement_volume_percent = 80
         # Newest output-volume command applied. Monotonic within a
         # session; a command that is not strictly newer is dropped.
         self._last_audio_command_id = 0
@@ -826,7 +832,233 @@ class AudioReceiverPilot:
                 await self._on_resume(connection, payload)
             elif kind == "set_audio_control":
                 await self._on_set_audio_control(connection, payload)
+            # Announcements and speaker selection. Handled in the same loop
+            # because they arrive on the same connection and, unlike every
+            # verb above, are meaningful when NO broadcast is running - which
+            # is most of the time.
+            elif kind == "announcement_play":
+                await self._on_announcement_play(connection, payload)
+            elif kind == "announcement_pause":
+                await self._on_announcement_pause(connection, payload)
+            elif kind == "announcement_stop":
+                await self._on_announcement_stop(connection, payload)
+            elif kind == "announcement_set_volume":
+                await self._on_announcement_set_volume(connection, payload)
+            elif kind == "list_output_devices":
+                await self._on_list_output_devices(connection, payload)
+            elif kind == "set_output_device":
+                await self._on_set_output_device(connection, payload)
             # Unknown control messages are ignored rather than acted upon.
+
+    # ------------------------------------------------------------------
+    # Recorded announcements and remote speaker selection
+    #
+    # These run OUTSIDE any broadcast session, which is most of the time. They
+    # deliberately touch no session state: an announcement is not a broadcast,
+    # and confusing the two is how a Store ends up reporting playback for a
+    # session that does not exist.
+    # ------------------------------------------------------------------
+
+    def _announcement_credential(self) -> str:
+        return getattr(self, "_credential", "") or ""
+
+    def _announcement_backend_url(self) -> str:
+        """The HTTP origin of the HQ this Store is already connected to.
+
+        Derived from the socket URL rather than configured separately, so a
+        Store cannot end up fetching recordings from one HQ while taking
+        commands from another.
+        """
+        url = self.ws_url or ""
+        if url.startswith("wss://"):
+            return "https://" + url[len("wss://"):].split("/", 1)[0]
+        if url.startswith("ws://"):
+            return "http://" + url[len("ws://"):].split("/", 1)[0]
+        return url
+
+    def _announcement_state_root(self):
+        from pathlib import Path
+
+        root = getattr(self, "state_root", None)
+        if root is not None:
+            return Path(root)
+        return Path(tempfile.gettempdir()) / "speaklink-receiver"
+
+    async def _on_announcement_play(self, connection, payload: dict) -> None:
+        from tools import announcement_player
+
+        volume = payload.get("volume_percent", 80)
+        try:
+            path = await asyncio.to_thread(
+                announcement_player.fetch_if_absent,
+                state_root=self._announcement_state_root(),
+                sha256=str(payload.get("sha256") or ""),
+                download_path=payload.get("download_path"),
+                backend_url=self._announcement_backend_url(),
+                credential=self._announcement_credential(),
+            )
+        except Exception as failure:  # noqa: BLE001
+            # Reported, never swallowed. A Store that cannot fetch a recording
+            # is silent, and silence is the failure HQ cannot see for itself:
+            # without this message the console would show PLAYING for a shop
+            # playing nothing.
+            await self._send(connection, {
+                "type": "announcement_failed",
+                "audio_id": payload.get("audio_id"),
+                "error": str(failure)[:500],
+            })
+            return
+
+        if self._announcement is not None:
+            self._announcement.stop()
+        self._announcement_volume_percent = volume
+        self._announcement = announcement_player.AnnouncementPlayback(
+            path=path, sink=self.pcm_sink, volume_percent=volume)
+        self._announcement.start()
+        await self._send(connection, {
+            "type": "announcement_playing",
+            "audio_id": payload.get("audio_id"),
+            "template_id": payload.get("template_id"),
+        })
+
+    async def _on_announcement_pause(self, connection, payload: dict) -> None:
+        if self._announcement is not None:
+            self._announcement.pause()
+        await self._send(connection, {
+            "type": "announcement_paused",
+            "reason": payload.get("reason") or "hq",
+        })
+
+    async def _on_announcement_stop(self, connection, payload: dict) -> None:
+        if self._announcement is not None:
+            self._announcement.stop()
+            self._announcement = None
+        await self._send(connection, {"type": "announcement_stopped"})
+
+    async def _on_announcement_set_volume(self, connection, payload: dict) -> None:
+        """Level only, without restating what is playing.
+
+        Restating would restart the recording, so the jingle would jump back to
+        its first word every time somebody nudged the slider.
+        """
+        try:
+            percent = int(payload.get("volume_percent"))
+        except (TypeError, ValueError):
+            return
+        self._announcement_volume_percent = max(0, min(100, percent))
+        if self._announcement is not None:
+            self._announcement.set_volume(self._announcement_volume_percent)
+
+    async def _on_list_output_devices(self, connection, payload: dict) -> None:
+        """Tell HQ what this computer actually has.
+
+        Sent whole every time rather than as a change: HQ replaces its list
+        with this one, so a speaker that has been unplugged DISAPPEARS from
+        what an operator may choose. Offering an endpoint that is no longer
+        there is exactly the mistake that leaves a shop silent.
+        """
+        from tools.windows_audio_devices import AudioDeviceError, list_output_devices
+
+        try:
+            found = await asyncio.to_thread(list_output_devices)
+            devices = [{**device.as_dict(),
+                        "looks_wireless": device.looks_wireless}
+                       for device in found]
+        except AudioDeviceError as failure:
+            await self._send(connection, {
+                "type": "output_devices", "devices": [],
+                "error": str(failure)[:500]})
+            return
+        await self._send(connection, {"type": "output_devices",
+                                      "devices": devices})
+
+    async def _on_set_output_device(self, connection, payload: dict) -> None:
+        """Switch speaker, and say which one this computer ended up on.
+
+        Resolved BEFORE anything changes, with the same resolver the setup
+        wizard uses - so HQ and the Store cannot disagree about what a
+        selector means, and an ambiguous one fails closed rather than picking
+        something.
+
+        The reply names the device rather than merely reporting success.
+        Nobody at HQ can hear the result, and "applied" on its own is not an
+        answer to "which speaker is the shop on".
+        """
+        from tools.windows_audio_devices import (
+            AudioDeviceError, resolve_output_device)
+
+        try:
+            device = await asyncio.to_thread(resolve_output_device,
+                                             payload.get("selector"))
+        except AudioDeviceError as failure:
+            await self._send(connection, {
+                "type": "output_device_result", "result": "refused",
+                "error": str(failure)[:500]})
+            return
+
+        try:
+            await asyncio.to_thread(self._switch_output_device, device)
+        except Exception as failure:  # noqa: BLE001
+            await self._send(connection, {
+                "type": "output_device_result", "result": "refused",
+                "error": f"that speaker could not be opened: {failure}"[:500]})
+            return
+
+        await self._send(connection, {
+            "type": "output_device_result", "result": "applied",
+            "applied_selector": device.verified_selector,
+            "applied_device_name": device.name,
+        })
+
+    def _switch_output_device(self, device) -> None:
+        """Open the new speaker, then remember it.
+
+        The order matters and is the whole of this method. The new device is
+        opened FIRST: if it cannot be opened, the Store keeps playing through
+        the one it has and reports a refusal, rather than being left with
+        nothing while HQ believes the change worked.
+
+        Saving it to the configuration is not an afterthought either. Without
+        that, the next restart silently returns the shop to its old speaker -
+        and it would do so hours later, with nobody connecting the silence to
+        a change made from HQ that morning.
+        """
+        replacement = SinkConfiguration(sink_mode=SINK_MODE_WINDOWS,
+                                        device=device)
+        opened = WindowsPcmSink(replacement)
+        opened.start()
+
+        previous = self.pcm_sink
+        self.sink = replacement
+        self.pcm_sink = opened
+        if previous is not None:
+            try:
+                previous.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if self._announcement is not None:
+            # The announcement keeps playing, through the new speaker.
+            self._announcement._sink = opened
+
+        self._remember_output_device(device)
+
+    def _remember_output_device(self, device) -> None:
+        """Persist the selection, so a restart does not undo it."""
+        config_path = getattr(self, "config_path", None)
+        if config_path is None:
+            return
+        try:
+            from tools.receiver_agent import load_config, save_config
+
+            config = load_config(config_path)
+            save_config(config_path,
+                        replace(config,
+                                audio_output_device=device.verified_selector))
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "The speaker was changed but could not be saved to %s, so a "
+                "restart will return this Store to its previous one.",
+                config_path)
 
     async def _on_prepare(self, connection, payload: dict) -> None:
         try:

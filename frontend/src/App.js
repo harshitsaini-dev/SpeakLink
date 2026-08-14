@@ -10,6 +10,7 @@ import Login from "@/pages/Login";
 import Listen from "@/pages/Listen";
 import BroadcastConsole from "@/pages/BroadcastConsole";
 import ActiveBroadcasts from "@/pages/ActiveBroadcasts";
+import Announcements from "@/pages/Announcements";
 import StoreManagement from "@/pages/StoreManagement";
 import BroadcastHistory from "@/pages/BroadcastHistory";
 import ReceiverStatus from "@/pages/ReceiverStatus";
@@ -61,6 +62,10 @@ export default function App() {
                 MENU_PERMISSION_BY_PATH - which ProtectedRoute enforces on a
                 direct URL visit, not only on the sidebar link. */}
             <Route path="/active-broadcasts" element={<ActiveBroadcasts />} />
+            {/* Gated by menu.announcements.view in MENU_PERMISSION_BY_PATH,
+                which ProtectedRoute enforces on a direct URL visit - the
+                sidebar link being hidden is presentation, never a boundary. */}
+            <Route path="/announcements" element={<Announcements />} />
             <Route path="/stores" element={<StoreManagement />} />
             {/* The Store id is in the path, never a credential. Both secrets
                 this page can show - an enrolment code and a rotated credential -

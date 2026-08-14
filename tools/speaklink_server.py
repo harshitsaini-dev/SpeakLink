@@ -420,6 +420,19 @@ def running_pid() -> int | None:
     return pid
 
 
+def stop_process_hint(pid: int) -> str:
+    """How to stop a process THIS launcher will not stop for you.
+
+    Platform-guarded because the advice is otherwise wrong half the time: a
+    message telling a Linux operator to run a Windows-only command is not a
+    smaller problem than no message: it wastes the reader's time and teaches
+    them the tool does not work on their machine.
+    """
+    if platform.system() == "Windows":
+        return f"taskkill /PID {pid} /T /F"
+    return f"kill {pid}"
+
+
 def port_owner(port: int) -> int | None:
     """The pid listening on this port, or None.
 
@@ -488,7 +501,53 @@ def foreign_port_holder(config: "Config") -> int | None:
     if holder is None:
         return None
     ours = running_pid()
-    return None if holder == ours else holder
+    if ours is None:
+        return holder
+    # A DESCENDANT of the process we started is ours.
+    #
+    # This check used to compare pids directly, and that made it cry wolf on
+    # every healthy server: the launcher starts a shell or a Python parent,
+    # which starts uvicorn, and it is UVICORN that holds the port. So a
+    # perfectly normal server was reported as "NOT the process this repository
+    # started", with an instruction to kill it - and following that advice
+    # stops a working HQ for no reason. A warning that is wrong every time is
+    # worse than no warning, because the one time it is right nobody believes
+    # it.
+    return None if _is_descendant_of(holder, ours) else holder
+
+
+def _parent_of(pid: int) -> int | None:
+    if platform.system() == "Windows":
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}')"
+             ".ParentProcessId"],
+            capture_output=True, text=True)
+    else:
+        result = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                                capture_output=True, text=True)
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _is_descendant_of(pid: int, ancestor: int, *, limit: int = 8) -> bool:
+    """Walk up the parent chain. Bounded, because a pid table can be
+    inconsistent while processes are exiting and an unbounded walk there is a
+    launcher that hangs instead of answering."""
+    seen = set()
+    current = pid
+    for _ in range(limit):
+        if current == ancestor:
+            return True
+        if current in seen or current in (0, 1, None):
+            return False
+        seen.add(current)
+        current = _parent_of(current)
+        if current is None:
+            return False
+    return False
 
 
 def clear_runtime_files() -> None:
@@ -603,7 +662,7 @@ def command_start(config: Config) -> int:
             "Starting now would add a second copy that cannot bind, and the "
             "one already running would keep answering - with whatever code it "
             "loaded when IT started. Stop that process first "
-            f"(taskkill /PID {intruder} /T /F), then start again.")
+            f"({stop_process_hint(intruder)}), then start again.")
 
     """Background. Convenience, mainly for a Windows operator."""
     existing = running_pid()
@@ -714,7 +773,7 @@ def warn_if_port_still_served(config: Config) -> None:
           "which this repository did not start:")
     print(f"    {describe_process(holder)}")
     print("Anything you change in the backend will NOT take effect until that "
-          f"process is stopped (taskkill /PID {holder} /T /F).")
+          f"process is stopped ({stop_process_hint(holder)}).")
 
 
 def command_restart(config: Config) -> int:
@@ -751,7 +810,11 @@ def command_status(config: Config) -> int:
     # alive and the api answering, and both were true - of two different
     # processes.
     holder = port_owner(config.port)
-    if holder is not None and holder != pid:
+    # A descendant of our pid IS us: the launcher starts a parent which starts
+    # uvicorn, and uvicorn is what holds the port. Comparing pids directly
+    # reported every healthy server as foreign and told the operator to kill
+    # it - advice that stops a working HQ, and that somebody did follow.
+    if holder is not None and not _is_descendant_of(holder, pid):
         print(f"  serving    : pid {holder}  <-- NOT the process this "
               "repository started")
         print(f"               {describe_process(holder)}")

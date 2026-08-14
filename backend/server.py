@@ -249,6 +249,7 @@ import web_chat
 import announcements
 import announcement_service
 import announcement_protocol
+import receiver_output_device
 import store_kits
 from receiver_index_repair import repair_receiver_indexes
 from receiver_auth_reasons import DeviceEnrolmentBlocked
@@ -671,6 +672,8 @@ def startup_event():
         # Recorded announcements. Four additive tables; see announcements.py
         # for why they are not a broadcast with a file attached.
         announcements.ensure_announcement_schema(engine)
+        # Which speaker each Store plays through, and what it reported it has.
+        receiver_output_device.ensure_output_device_schema(engine)
         # Anything left mid-flight by a crash is resolved BEFORE the first
         # request can read it. An unfinished .part is never promoted to
         # AVAILABLE: HQ stopping mid-announcement is exactly when a recording
@@ -5894,6 +5897,19 @@ async def ws_receiver(websocket: WebSocket):
                 data = json.loads(msg)
                 if not isinstance(data, dict):
                     raise ValueError("receiver acknowledgement must be an object")
+
+                # Speaker reports are handled BEFORE the session contract
+                # parser, deliberately.
+                #
+                # They are not acknowledgements of anything: they carry no
+                # session, no command id and no sequence, and they arrive when
+                # no broadcast is running at all - which is most of the time.
+                # Pushing them through a parser built for session
+                # acknowledgements would mean either inventing a fake session
+                # for them or loosening a validator that exists to be strict.
+                if data.get("type") in ("output_devices", "output_device_result"):
+                    _handle_output_device_report(store_id, data)
+                    continue
                 is_standby_ack = connection_manager.is_registered_standby(
                     identity.device_id
                 )
@@ -7389,6 +7405,134 @@ async def supervised_set_auto_approve(
 
 
 # Include routes
+def _handle_output_device_report(store_id: int, data: dict) -> None:
+    """What a Store says about its speakers.
+
+    Never raises: a malformed report from one Store must not drop that Store's
+    connection, because the connection is also carrying its broadcast audio.
+    """
+    try:
+        if data.get("type") == "output_devices":
+            devices = data.get("devices")
+            if not isinstance(devices, list):
+                return
+            # Trimmed to the fields HQ shows. A Store is free to send more,
+            # and storing whatever arrives would mean HQ's table growing a
+            # column every time the Receiver changes.
+            trimmed = [
+                {
+                    "index": device.get("index"),
+                    "name": str(device.get("name") or "")[:200],
+                    "selector": str(device.get("selector") or "")[:255],
+                    "verified_selector": str(
+                        device.get("verified_selector") or "")[:255],
+                    "is_default": bool(device.get("is_default")),
+                    "looks_wireless": bool(device.get("looks_wireless")),
+                }
+                for device in devices if isinstance(device, dict)
+            ]
+            receiver_output_device.record_reported_devices(
+                engine, store_id=store_id, devices=trimmed)
+            return
+
+        result = data.get("result")
+        if result not in receiver_output_device.RESULTS:
+            return
+        receiver_output_device.record_result(
+            engine, store_id=store_id, result=result,
+            applied_selector=data.get("applied_selector"),
+            applied_device_name=data.get("applied_device_name"),
+            error=data.get("error"))
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not record the speaker report from Store %s",
+                         store_id)
+
+
+# ================ REMOTE SPEAKER SELECTION ================
+#
+# See receiver_output_device.py for why this is shaped around the fact that
+# nobody at HQ can hear the result.
+
+@api.get("/stores/{store_id}/audio-output")
+def get_store_audio_output(
+    store_id: int,
+    user: HQUser = Depends(require("menu.receivers.view")),
+):
+    """Which speakers this Store has, and which one it is playing through."""
+    state = receiver_output_device.get_state(engine, store_id=store_id)
+    state["summary"] = receiver_output_device.describe(state)
+    state["online"] = store_id in manager.receivers
+    return state
+
+
+@api.post("/stores/{store_id}/audio-output/refresh")
+async def refresh_store_audio_output(
+    store_id: int,
+    user: HQUser = Depends(require("receiver.set_output_device")),
+):
+    """Ask the Store to enumerate its speakers again.
+
+    Needed because the list HQ holds is a snapshot of another computer at a
+    moment. A speaker plugged in five minutes ago is not on it, and offering a
+    stale list is how somebody selects an endpoint that no longer exists.
+    """
+    if store_id not in manager.receivers:
+        raise HTTPException(
+            status_code=409,
+            detail="That Store is offline, so it cannot be asked what "
+                   "speakers it has. The list below is from the last time it "
+                   "was connected.")
+    await manager.send_to_receiver(store_id, {"type": "list_output_devices"})
+    return {"ok": True, "store_id": store_id}
+
+
+@api.post("/stores/{store_id}/audio-output")
+async def set_store_audio_output(
+    store_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("receiver.set_output_device")),
+):
+    """Change which speaker a Store plays through.
+
+    Its own permission, not part of managing Devices: this was only ever
+    possible standing at the Store PC, where the person who could get it wrong
+    could also hear the result. From here, nobody can.
+    """
+    state = receiver_output_device.get_state(engine, store_id=store_id)
+    try:
+        device = receiver_output_device.validate_selector_is_one_the_store_offered(
+            state, payload.get("selector"))
+    except receiver_output_device.OutputDeviceRefused as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+
+    if store_id not in manager.receivers:
+        raise HTTPException(
+            status_code=409,
+            detail="That Store is offline. Changing its speaker while it "
+                   "cannot answer would leave HQ claiming a change nobody has "
+                   "confirmed.")
+
+    selector = device.get("verified_selector") or device.get("selector")
+    receiver_output_device.record_request(engine, store_id=store_id,
+                                          selector=selector, actor_id=user.id)
+    await manager.send_to_receiver(store_id, {
+        "type": "set_output_device", "selector": selector})
+    _write_log(db, "warn",
+               f"store_output_device_requested store={store_id} "
+               f"device={device.get('name')!r} by={user.username}")
+
+    result = receiver_output_device.get_state(engine, store_id=store_id)
+    result["summary"] = receiver_output_device.describe(result)
+    # Deliberately not "changed". Nothing has changed in the shop until the
+    # Store answers, and a message saying otherwise is the one an operator
+    # would believe instead of checking.
+    result["note"] = ("Sent. The Store will confirm which speaker it ended up "
+                      "on - nobody at HQ can hear the result, so check the "
+                      "confirmation before you consider this done.")
+    return result
+
+
 # ================ RECORDED ANNOUNCEMENTS ================
 
 async def _dispatch_announcement(store_id: int, row: dict) -> None:
@@ -7441,43 +7585,21 @@ async def _dispatch_announcement(store_id: int, row: dict) -> None:
                          store_id)
 
 
-def _dispatch_announcement_volume_soon(store_id: int, volume_percent: int) -> None:
+async def _dispatch_announcement_volume(store_id: int, volume_percent: int) -> None:
     """Volume on its own, without restating what is playing.
 
     Sending a play command to change the level would restart the recording
     from the beginning - the shop would hear the jingle jump back to its first
     word every time somebody nudged the slider.
     """
-    async def send():
-        try:
-            await manager.send_to_receiver(
-                store_id,
-                announcement_protocol.set_volume_command(
-                    volume_percent=volume_percent))
-        except Exception:  # noqa: BLE001
-            logger.exception("Could not set the announcement volume for Store %s",
-                             store_id)
     try:
-        asyncio.get_running_loop().create_task(send())
-    except RuntimeError:
-        pass
-
-
-def _dispatch_announcement_soon(store_id: int, row: dict) -> None:
-    """Schedule the command from a synchronous route.
-
-    The announcement routes are ordinary `def` handlers - they do database
-    work, not I/O - so they cannot await. Scheduling keeps them that way
-    without making the Receiver wait on the HTTP response, or the HTTP
-    response wait on the Receiver.
-    """
-    try:
-        asyncio.get_running_loop().create_task(_dispatch_announcement(store_id, row))
-    except RuntimeError:
-        # No loop: a test calling the service directly, or a synchronous
-        # script. The state is still recorded, which is what the Receiver
-        # reconciles against when it next connects.
-        pass
+        await manager.send_to_receiver(
+            store_id,
+            announcement_protocol.set_volume_command(
+                volume_percent=volume_percent))
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not set the announcement volume for Store %s",
+                         store_id)
 
 
 @api.get("/receiver/announcements/{audio_id}/download")
@@ -7760,7 +7882,7 @@ def announcement_status(
 
 
 @api.post("/announcements/templates/{template_id}/play")
-def play_announcement_template(
+async def play_announcement_template(
     template_id: int,
     payload: Optional[dict] = None,
     db: Session = Depends(get_db),
@@ -7804,7 +7926,7 @@ def play_announcement_template(
         row = announcement_service.set_state(
             engine, store_id=store_id, state=state, template_id=template_id,
             audio_id=first_audio, actor_id=user.id)
-        _dispatch_announcement_soon(store_id, row)
+        await _dispatch_announcement(store_id, row)
         started.append(store_id)
     _write_log(db, "info",
                f"announcement_play template={template_id} started={len(started)} "
@@ -7813,7 +7935,7 @@ def play_announcement_template(
 
 
 @api.post("/announcements/stores/{store_id}/pause")
-def pause_announcement_in_store(
+async def pause_announcement_in_store(
     store_id: int,
     db: Session = Depends(get_db),
     user: HQUser = Depends(require("announcements.control")),
@@ -7828,14 +7950,14 @@ def pause_announcement_in_store(
     state = announcements.next_state_for_pause(current["state"])
     row = announcement_service.set_state(engine, store_id=store_id, state=state,
                                          ducked_from=None, actor_id=user.id)
-    _dispatch_announcement_soon(store_id, row)
+    await _dispatch_announcement(store_id, row)
     _write_log(db, "info",
                f"announcement_paused store={store_id} by={user.username}")
     return row
 
 
 @api.post("/announcements/stores/{store_id}/play")
-def play_announcement_in_store(
+async def play_announcement_in_store(
     store_id: int,
     db: Session = Depends(get_db),
     user: HQUser = Depends(require("announcements.control")),
@@ -7852,14 +7974,14 @@ def play_announcement_in_store(
         raise HTTPException(status_code=409, detail=str(refusal))
     row = announcement_service.set_state(engine, store_id=store_id, state=state,
                                          actor_id=user.id)
-    _dispatch_announcement_soon(store_id, row)
+    await _dispatch_announcement(store_id, row)
     _write_log(db, "info",
                f"announcement_resumed store={store_id} by={user.username}")
     return row
 
 
 @api.post("/announcements/pause-all")
-def pause_all_announcements(
+async def pause_all_announcements(
     db: Session = Depends(get_db),
     user: HQUser = Depends(require("announcements.control_all")),
 ):
@@ -7878,7 +8000,7 @@ def pause_all_announcements(
         updated = announcement_service.set_state(
             engine, store_id=row["store_id"], state=state, ducked_from=None,
             actor_id=user.id)
-        _dispatch_announcement_soon(row["store_id"], updated)
+        await _dispatch_announcement(row["store_id"], updated)
         paused.append(row["store_id"])
     _write_log(db, "warn",
                f"announcement_pause_all stores={len(paused)} by={user.username}")
@@ -7886,7 +8008,7 @@ def pause_all_announcements(
 
 
 @api.post("/announcements/play-all")
-def play_all_announcements(
+async def play_all_announcements(
     db: Session = Depends(get_db),
     user: HQUser = Depends(require("announcements.control_all")),
 ):
@@ -7910,7 +8032,7 @@ def play_all_announcements(
             continue
         updated = announcement_service.set_state(
             engine, store_id=row["store_id"], state=state, actor_id=user.id)
-        _dispatch_announcement_soon(row["store_id"], updated)
+        await _dispatch_announcement(row["store_id"], updated)
         started.append(row["store_id"])
     _write_log(db, "info",
                f"announcement_play_all started={len(started)} "
@@ -7919,7 +8041,7 @@ def play_all_announcements(
 
 
 @api.post("/announcements/stores/{store_id}/volume")
-def set_announcement_volume(
+async def set_announcement_volume(
     store_id: int,
     payload: dict,
     db: Session = Depends(get_db),
@@ -7936,7 +8058,7 @@ def set_announcement_volume(
     # The level reaches the shop immediately, whatever the announcement is
     # doing - a volume change that only took effect on the next play would be
     # a slider that appears broken.
-    _dispatch_announcement_volume_soon(store_id, row["volume_percent"])
+    await _dispatch_announcement_volume(store_id, row["volume_percent"])
     _write_log(db, "info",
                f"announcement_volume store={store_id} "
                f"value={row['volume_percent']} by={user.username}")

@@ -15,6 +15,10 @@ test("every top-level nav route names its menu permission", () => {
     // An ordinary Broadcaster holds menu.broadcast.view and must not reach
     // the page that lists every other operator's broadcast.
     "/active-broadcasts": "broadcast.active_view",
+    // Its own menu permission. Looking at what is playing is not the same
+    // capability as running a broadcast, and a VIEWER holds the first
+    // without the second.
+    "/announcements": "menu.announcements.view",
     "/stores": "menu.stores.view",
     "/history": "menu.history.view",
     "/receivers": "menu.receivers.view",

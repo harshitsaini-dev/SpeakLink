@@ -35,6 +35,7 @@ import hashlib
 import logging
 import os
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -151,11 +152,12 @@ class AnnouncementPlayback:
     """
 
     def __init__(self, *, path: Path, sink, loop: bool = True,
-                 spawn=subprocess.Popen) -> None:
+                 volume_percent: int = 80, spawn=subprocess.Popen) -> None:
         self._path = path
         self._sink = sink
         self._loop = loop
         self._spawn = spawn
+        self._volume_percent = max(0, min(100, int(volume_percent)))
         self._process = None
         self._thread = None
         self._playing = threading.Event()
@@ -193,6 +195,45 @@ class AnnouncementPlayback:
                 pass
         self._finished.set()
 
+    def set_volume(self, percent: int) -> None:
+        """Change the level of THIS announcement, from the next chunk on.
+
+        Scaled here, on the announcement's own samples, and deliberately NOT
+        on the sink. The sink is shared with the broadcast: turning a jingle
+        down there would turn the person speaking down with it, and turning
+        the jingle back up after a broadcast would raise the broadcast too.
+
+        Nor is it the Windows endpoint master, which is the whole computer -
+        an announcement must be able to be quiet without silencing everything
+        else that computer plays.
+        """
+        self._volume_percent = max(0, min(100, int(percent)))
+
+    def _at_volume(self, pcm: bytes) -> bytes:
+        """Scale 16-bit little-endian samples.
+
+        Unity is returned unchanged rather than multiplied by 1.0: the common
+        case does no arithmetic at all, and identical bytes cannot be
+        distorted by rounding.
+        """
+        percent = self._volume_percent
+        if percent >= 100:
+            return pcm
+        if percent <= 0:
+            return bytes(len(pcm))
+        import array
+
+        samples = array.array("h")
+        # An odd trailing byte cannot be half a sample. Dropping it is better
+        # than raising, which would end the announcement over one byte.
+        samples.frombytes(pcm[:len(pcm) - (len(pcm) % 2)])
+        scale = percent / 100.0
+        for index, value in enumerate(samples):
+            samples[index] = int(value * scale)
+        if sys.byteorder != "little":
+            samples.byteswap()
+        return samples.tobytes()
+
     def _pump(self) -> None:
         while not self._stopping:
             try:
@@ -217,7 +258,7 @@ class AnnouncementPlayback:
                     chunk = self._process.stdout.read(CHUNK_BYTES)
                     if not chunk:
                         break
-                    self._sink.write(chunk)
+                    self._sink.write(self._at_volume(chunk))
             finally:
                 try:
                     self._process.kill()

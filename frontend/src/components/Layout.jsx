@@ -1,6 +1,6 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { LayoutDashboard, Store as StoreIcon, History, Radar, HardDrive, ScrollText, Users, KeyRound, LogOut, Menu, X, Signal } from "lucide-react";
+import { LayoutDashboard, Store as StoreIcon, History, Radar, HardDrive, ScrollText, Users, KeyRound, LogOut, Menu, X, Signal, Megaphone } from "lucide-react";
 import SpeakLinkMark from "@/components/SpeakLinkMark";
 import { useAuth } from "@/contexts/AuthContext";
 import { MENU_PERMISSION_BY_PATH } from "@/lib/menuPermissions";
@@ -15,6 +15,12 @@ const NAV = [
   // held - and ProtectedRoute blocks the URL independently, because a hidden
   // link is presentation and never a boundary.
   { to: "/active-broadcasts", label: "Active Broadcasts", icon: Signal, testid: "nav-active-broadcasts" },
+  // Its own menu, not a tab inside the Broadcast Console. A recorded
+  // announcement runs for days without anybody present; a broadcast is
+  // somebody holding a microphone. Putting them on one screen would mean the
+  // controls for the thing running right now sit next to controls for
+  // something that has not started.
+  { to: "/announcements", label: "Announcements", icon: Megaphone, testid: "nav-announcements" },
   { to: "/stores", label: "Store Management", icon: StoreIcon, testid: "nav-stores" },
   { to: "/history", label: "Broadcast History", icon: History, testid: "nav-history" },
   { to: "/receivers", label: "Receiver Status", icon: Radar, testid: "nav-receivers" },

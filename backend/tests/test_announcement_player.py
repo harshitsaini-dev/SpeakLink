@@ -172,8 +172,10 @@ class FakeProcess:
 
 def test_playing_writes_the_decoded_audio_into_the_shared_sink():
     sink = FakeSink()
+    # At unity, so this test is about the audio reaching the sink and not
+    # about the scaling - which has its own tests below.
     playback = AnnouncementPlayback(
-        path=Path("x.mp3"), sink=sink, loop=False,
+        path=Path("x.mp3"), sink=sink, loop=False, volume_percent=100,
         spawn=lambda *args, **kwargs: FakeProcess(b"PCMDATA" * 100))
     playback.start()
     playback._thread.join(timeout=5)
@@ -235,3 +237,68 @@ def test_a_missing_ffmpeg_is_reported_rather_than_hung():
     playback._thread.join(timeout=5)
     assert not playback.is_playing
     assert sink.written == b""
+
+
+# ===========================================================================
+# Volume
+#
+# Scaled on the announcement's own samples, and deliberately NOT on the sink.
+# The sink is shared with the broadcast: turning a jingle down there would
+# turn the person speaking down with it.
+# ===========================================================================
+
+def test_the_volume_scales_the_announcement_and_not_the_sink():
+    sink = FakeSink()
+    loud = b"\x00\x40" * 512          # +16384 in every sample
+    playback = AnnouncementPlayback(
+        path=Path("x.mp3"), sink=sink, loop=False, volume_percent=50,
+        spawn=lambda *args, **kwargs: FakeProcess(loud))
+    playback.start()
+    playback._thread.join(timeout=5)
+
+    import array
+    written = array.array("h")
+    written.frombytes(bytes(sink.written))
+    assert written, "nothing was written"
+    assert all(value == 8192 for value in written), (
+        "the announcement was not scaled to half")
+    assert not hasattr(sink, "volume_percent"), (
+        "the level was pushed onto the shared sink, which would take the "
+        "broadcast down with it")
+
+
+def test_unity_passes_the_samples_through_untouched():
+    """The common case does no arithmetic at all, so identical bytes cannot be
+    distorted by rounding."""
+    sink = FakeSink()
+    original = bytes(range(256)) * 4
+    playback = AnnouncementPlayback(
+        path=Path("x.mp3"), sink=sink, loop=False, volume_percent=100,
+        spawn=lambda *args, **kwargs: FakeProcess(original))
+    playback.start()
+    playback._thread.join(timeout=5)
+    assert bytes(sink.written) == original
+
+
+def test_zero_percent_is_silence_not_a_stop():
+    """Silent and stopped are different: a jingle turned to zero must still be
+    running, so turning it back up resumes where it is rather than restarting."""
+    sink = FakeSink()
+    playback = AnnouncementPlayback(
+        path=Path("x.mp3"), sink=sink, loop=False, volume_percent=0,
+        spawn=lambda *args, **kwargs: FakeProcess(b"\x00\x40" * 512))
+    playback.start()
+    playback._thread.join(timeout=5)
+    assert bytes(sink.written) == bytes(1024)
+    assert len(sink.written) == 1024, "silence must still be written"
+
+
+def test_an_odd_trailing_byte_does_not_end_the_announcement():
+    """Dropping half a sample is better than raising over one byte."""
+    sink = FakeSink()
+    playback = AnnouncementPlayback(
+        path=Path("x.mp3"), sink=sink, loop=False, volume_percent=50,
+        spawn=lambda *args, **kwargs: FakeProcess(b"\x00\x40" * 4 + b"\x01"))
+    playback.start()
+    playback._thread.join(timeout=5)
+    assert len(sink.written) == 8

@@ -195,9 +195,27 @@ def test_stop_never_searches_for_processes_to_kill(launcher):
     # /IM kills BY IMAGE NAME - every python.exe on the machine. /PID with a
     # pid this launcher recorded and validated is the safe form, and is what
     # command_stop uses.
-    for forbidden in ("pkill", "killall", "/IM", "netstat",
-                      "Get-NetTCPConnection", "Get-Process -Name"):
+    for forbidden in ("pkill", "killall", "/IM", "Get-Process -Name"):
         assert forbidden not in SOURCE, f"{forbidden} appears in the launcher"
+
+    # netstat is no longer banned outright, and the reason is worth stating.
+    #
+    # The rule is "never kill a process you went looking for", not "never look".
+    # Looking is exactly what was missing while a stale server answered every
+    # request for hours: the launcher knew its own pid, the pid was alive, the
+    # API answered - and all of that was true of two different processes.
+    #
+    # So a search is allowed and a kill from one is not. What follows checks
+    # that boundary rather than the presence of a word.
+    assert "port_owner" in SOURCE, "the launcher no longer looks at the port"
+    for line in SOURCE.splitlines():
+        if "port_owner(" in line and ("kill" in line or "terminate" in line):
+            raise AssertionError(
+                f"a pid found by searching is being killed: {line.strip()}")
+
+    # And the one place a discovered pid appears in an action is a MESSAGE
+    # telling the operator to stop it themselves.
+    assert "stop_process_hint" in SOURCE
 
 
 def test_a_recorded_pid_is_only_believed_for_this_repository(launcher, tmp_path,
@@ -252,6 +270,20 @@ def test_every_windows_specific_call_is_behind_a_platform_guard():
         assert 'platform.system() == "Windows"' in window, (
             f"line {index + 1} uses a Windows-only call with no platform "
             f"guard above it: {line.strip()}")
+
+
+def test_the_advice_for_stopping_a_foreign_process_fits_the_platform(launcher):
+    """A message telling a Linux operator to run `taskkill` is not a smaller
+    problem than no message: it wastes the reader's time and teaches them the
+    tool is Windows-only."""
+    import platform as platform_module
+
+    hint = launcher.stop_process_hint(4321)
+    assert "4321" in hint
+    if platform_module.system() == "Windows":
+        assert hint.startswith("taskkill")
+    else:
+        assert hint.startswith("kill")
 
 
 def test_the_launcher_imports_on_any_platform(launcher):
