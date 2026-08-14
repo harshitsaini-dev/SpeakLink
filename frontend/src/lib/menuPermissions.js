@@ -18,6 +18,11 @@ export const MENU_PERMISSION_BY_PATH = {
   // hour ago is the same subject as whether it is playing now, and a second
   // right would only create a way to see one and not the other.
   "/announcement-history": "menu.announcements.view",
+  // Same subject again. A separate right here would let somebody see what is
+  // playing and not what was planned, which is a distinction nobody could
+  // explain.
+  "/announcement-templates": "menu.announcements.view",
+  "/announcement-recordings": "menu.announcements.view",
   "/stores": "menu.stores.view",
   "/history": "menu.history.view",
   "/receivers": "menu.receivers.view",

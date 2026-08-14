@@ -12,6 +12,8 @@ import BroadcastConsole from "@/pages/BroadcastConsole";
 import ActiveBroadcasts from "@/pages/ActiveBroadcasts";
 import Announcements from "@/pages/Announcements";
 import AnnouncementHistory from "@/pages/AnnouncementHistory";
+import AnnouncementTemplates from "@/pages/AnnouncementTemplates";
+import AnnouncementRecordings from "@/pages/AnnouncementRecordings";
 import StoreManagement from "@/pages/StoreManagement";
 import BroadcastHistory from "@/pages/BroadcastHistory";
 import ReceiverStatus from "@/pages/ReceiverStatus";
@@ -68,6 +70,8 @@ export default function App() {
                 sidebar link being hidden is presentation, never a boundary. */}
             <Route path="/announcements" element={<Announcements />} />
             <Route path="/announcement-history" element={<AnnouncementHistory />} />
+            <Route path="/announcement-templates" element={<AnnouncementTemplates />} />
+            <Route path="/announcement-recordings" element={<AnnouncementRecordings />} />
             <Route path="/stores" element={<StoreManagement />} />
             {/* The Store id is in the path, never a credential. Both secrets
                 this page can show - an enrolment code and a rotated credential -

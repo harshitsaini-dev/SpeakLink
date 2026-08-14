@@ -22,6 +22,8 @@ test("every top-level nav route names its menu permission", () => {
     // Same subject as the live page, so the same permission: a second right
     // would only create a way to see one and not the other.
     "/announcement-history": "menu.announcements.view",
+    "/announcement-templates": "menu.announcements.view",
+    "/announcement-recordings": "menu.announcements.view",
     "/stores": "menu.stores.view",
     "/history": "menu.history.view",
     "/receivers": "menu.receivers.view",

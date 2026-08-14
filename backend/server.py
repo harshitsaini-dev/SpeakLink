@@ -23,7 +23,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.staticfiles import StaticFiles
-from sqlalchemy import func, text
+from sqlalchemy import bindparam, func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field, ValidationError
@@ -8071,21 +8071,63 @@ def create_announcement_template(
     return _template_or_404(template_id)
 
 
+async def _stop_stores_running_template(template_id: int, *, actor_id=None) -> list[int]:
+    """Stop every Store pointed at this template, and forget the pointer.
+
+    Clearing template_id and audio_id is the half that was missing. A Store row
+    still naming a template nobody can open reads, on the console, as a shop
+    playing something - and there is no way to act on it from there. "Nothing
+    chosen" is both true and actionable.
+    """
+    stopped = []
+    for row in announcement_service.live_status(engine):
+        if row.get("template_id") != template_id:
+            continue
+        updated = announcement_service.set_state(
+            engine, store_id=row["store_id"],
+            state=announcements.STATE_STOPPED, actor_id=actor_id)
+        await _dispatch_announcement(row["store_id"], updated)
+        stopped.append(row["store_id"])
+    if stopped:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE " + announcements.PLAYBACK_TABLE +
+                " SET template_id = NULL, audio_id = NULL "
+                "WHERE template_id = :template_id"), {"template_id": template_id})
+    return stopped
+
+
 @api.delete("/announcements/templates/{template_id}")
-def archive_announcement_template(
+async def archive_announcement_template(
     template_id: int,
     db: Session = Depends(get_db),
     user: HQUser = Depends(require("announcements.templates.manage")),
 ):
+    """Withdraw the plan - which means the shops running it stop.
+
+    They did not, and a Store showed it: a template was archived, vanished
+    from the list, and Krishna Nagar went on reporting it as the thing it was
+    playing. There was no row left to press Pause on, so the only way to
+    silence that shop was to know its Store page.
+
+    Archiving a plan and leaving shops running it is not a smaller version of
+    withdrawing it. It is the plan being gone from everywhere except the one
+    place it is actually happening.
+    """
     _template_or_404(template_id)
     with engine.begin() as connection:
         connection.execute(text(
             "UPDATE " + announcements.TEMPLATE_TABLE +
             " SET status = 'archived', updated_at = :now WHERE id = :id"),
             {"id": template_id, "now": announcements.utcnow().isoformat()})
+
+    stopped = await _stop_stores_running_template(template_id, actor_id=user.id)
     _write_log(db, "info",
-               f"announcement_template_archived id={template_id} by={user.username}")
-    return {"ok": True, "id": template_id}
+               f"announcement_template_archived id={template_id} "
+               f"stopped={len(stopped)} by={user.username}")
+    return {"ok": True, "id": template_id, "stopped_stores": stopped,
+            "note": (f"Archived. {len(stopped)} Store(s) were playing it and "
+                     "have been stopped.") if stopped else "Archived."}
 
 
 
@@ -8213,16 +8255,7 @@ async def delete_announcement_template_permanently(
 
     template = _template_or_404(template_id)
 
-    playing = [row for row in announcement_service.live_status(engine)
-               if row.get("template_id") == template_id
-               and row.get("state") in (announcements.STATE_PLAYING,
-                                        announcements.STATE_PAUSED,
-                                        announcements.STATE_DUCKED)]
-    for row in playing:
-        updated = announcement_service.set_state(
-            engine, store_id=row["store_id"],
-            state=announcements.STATE_STOPPED, actor_id=user.id)
-        await _dispatch_announcement(row["store_id"], updated)
+    playing = await _stop_stores_running_template(template_id, actor_id=user.id)
 
     with engine.begin() as connection:
         connection.execute(text(
@@ -8237,9 +8270,282 @@ async def delete_announcement_template_permanently(
                f"name={template['name']!r} stopped={len(playing)} "
                f"by={user.username}")
     return {"ok": True, "id": template_id, "name": template["name"],
-            "stopped_stores": [row["store_id"] for row in playing],
+            "stopped_stores": playing,
             "note": (f"Deleted. {len(playing)} Store(s) were playing it and "
                      "have been stopped.") if playing else "Deleted."}
+
+
+
+
+def _announcement_history_ids_matching(filters, _db=None) -> list[int]:
+    """Every id the CURRENT filters select, not just the page on screen.
+
+    This is what makes "Select All Filtered (184)" mean what it says. Resolving
+    it on the server rather than in the browser is the point: the browser only
+    ever holds one page, so a selection built there could only ever act on
+    fifty rows while claiming to act on all of them.
+    """
+    rows = announcement_service.list_history(
+        engine,
+        search=(filters or {}).get("q") or "",
+        zone=(filters or {}).get("zone") or "",
+        reason=(filters or {}).get("reason") or "",
+        since=(filters or {}).get("since") or "",
+        until=(filters or {}).get("until") or "",
+        include_archived=str((filters or {}).get("include_archived")).lower()
+                         in ("1", "true", "yes"),
+    )
+    return [row["id"] for row in rows]
+
+
+@api.post("/announcements/history/archive")
+def archive_announcement_history_bulk(
+    payload: BulkIdsRequest,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.templates.manage")),
+):
+    ids, matched = _resolve_bulk(payload, _announcement_history_ids_matching)
+    if not ids:
+        return {"requested": 0, "affected": 0, "matched": matched}
+    with engine.begin() as connection:
+        result = connection.execute(text(
+            "UPDATE " + announcements.HISTORY_TABLE +
+            " SET archived_at = :now WHERE id IN :ids AND archived_at IS NULL"
+        ).bindparams(bindparam("ids", expanding=True)),
+            {"ids": ids, "now": announcements.utcnow().isoformat()})
+    _write_log(db, "info",
+               f"announcement_history_archived count={result.rowcount} "
+               f"by={user.username}")
+    return {"requested": len(ids), "affected": result.rowcount, "matched": matched}
+
+
+@api.post("/announcements/history/unarchive")
+def unarchive_announcement_history_bulk(
+    payload: BulkIdsRequest,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.templates.manage")),
+):
+    ids, matched = _resolve_bulk(payload, _announcement_history_ids_matching)
+    if not ids:
+        return {"requested": 0, "affected": 0, "matched": matched}
+    with engine.begin() as connection:
+        result = connection.execute(text(
+            "UPDATE " + announcements.HISTORY_TABLE +
+            " SET archived_at = NULL WHERE id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True)), {"ids": ids})
+    _write_log(db, "info",
+               f"announcement_history_unarchived count={result.rowcount} "
+               f"by={user.username}")
+    return {"requested": len(ids), "affected": result.rowcount, "matched": matched}
+
+
+@api.post("/announcements/history/delete")
+def delete_announcement_history_bulk(
+    payload: BulkIdsRequest,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.delete_permanently")),
+):
+    """Permanent, for many rows at once.
+
+    The typed word is still required, and it is required ONCE for the whole
+    selection rather than once per row. Asking two hundred times is not two
+    hundred times the protection - it is a person clicking through a dialog
+    without reading it, which is less protection than asking once and saying
+    how many rows are about to go.
+    """
+    if str(payload.confirm or "").strip().upper() != "DELETE":
+        raise HTTPException(
+            status_code=400,
+            detail="Type DELETE to confirm. This removes the record of what "
+                   "played and cannot be undone.")
+    ids, matched = _resolve_bulk(payload, _announcement_history_ids_matching)
+    if not ids:
+        return {"requested": 0, "affected": 0, "matched": matched}
+    with engine.begin() as connection:
+        result = connection.execute(text(
+            "DELETE FROM " + announcements.HISTORY_TABLE + " WHERE id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True)), {"ids": ids})
+    _write_log(db, "warn",
+               f"announcement_history_deleted count={result.rowcount} "
+               f"by={user.username}")
+    return {"requested": len(ids), "affected": result.rowcount, "matched": matched}
+
+
+
+
+# ---- Bulk actions on recordings and templates ---------------------------
+#
+# The same two-mode selection the History and System Logs pages use: explicit
+# ids for "this page", or the current filters resolved on the SERVER for "all
+# filtered". The browser holds one page, so a selection built there could only
+# ever act on one page while a button claimed otherwise.
+
+def _audio_ids_matching(filters, _db=None) -> list[int]:
+    return [row["id"] for row in announcement_service.list_audio(
+        engine, search=(filters or {}).get("q") or "",
+        status=(filters or {}).get("status") or "active")]
+
+
+def _template_ids_matching(filters, _db=None) -> list[int]:
+    return [row["id"] for row in announcement_service.list_templates(
+        engine, search=(filters or {}).get("q") or "",
+        status=(filters or {}).get("status") or "active",
+        zone=(filters or {}).get("zone") or "")]
+
+
+@api.post("/announcements/audio/archive")
+def archive_announcement_audio_bulk(
+    payload: BulkIdsRequest,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.upload")),
+):
+    ids, matched = _resolve_bulk(payload, _audio_ids_matching)
+    if not ids:
+        return {"requested": 0, "affected": 0, "matched": matched}
+    with engine.begin() as connection:
+        result = connection.execute(text(
+            "UPDATE " + announcements.AUDIO_TABLE +
+            " SET status = 'archived' WHERE id IN :ids AND status = 'active'"
+        ).bindparams(bindparam("ids", expanding=True)), {"ids": ids})
+    _write_log(db, "info",
+               f"announcement_audio_archived count={result.rowcount} by={user.username}")
+    return {"requested": len(ids), "affected": result.rowcount, "matched": matched}
+
+
+@api.post("/announcements/audio/delete")
+def delete_announcement_audio_bulk(
+    payload: BulkIdsRequest,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.delete_permanently")),
+):
+    """Permanent, for several recordings at once.
+
+    Recordings still used by a template are SKIPPED rather than failing the
+    whole call, and the answer names them. Failing everything because one of
+    forty is in use would leave the operator selecting the other thirty-nine
+    by hand; silently deleting it would leave a template that plays nothing
+    and cannot say why.
+    """
+    if str(payload.confirm or "").strip().upper() != "DELETE":
+        raise HTTPException(
+            status_code=400,
+            detail="Type DELETE to confirm. This removes the recordings and "
+                   "their files permanently and cannot be undone.")
+    ids, matched = _resolve_bulk(payload, _audio_ids_matching)
+    if not ids:
+        return {"requested": 0, "affected": 0, "matched": matched, "skipped": []}
+
+    in_use = {}
+    for template in announcement_service.list_templates(engine, status="all"):
+        for item in template.get("items") or []:
+            if item.get("audio_id") in ids:
+                in_use.setdefault(item["audio_id"], template["name"])
+
+    deletable = [audio_id for audio_id in ids if audio_id not in in_use]
+    rows = {row["id"]: row for row in announcement_service.list_audio(
+        engine, status="all")}
+    removed = 0
+    for audio_id in deletable:
+        row = rows.get(audio_id)
+        if row is None:
+            continue
+        path = announcements.audio_directory() / row["storage_name"]
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            # Reported through the count, not raised: one locked file must not
+            # abandon the other thirty-nine half-way through.
+            continue
+        with engine.begin() as connection:
+            connection.execute(text(
+                "DELETE FROM " + announcements.AUDIO_TABLE + " WHERE id = :id"),
+                {"id": audio_id})
+        removed += 1
+
+    _write_log(db, "warn",
+               f"announcement_audio_deleted count={removed} "
+               f"skipped={len(in_use)} by={user.username}")
+    return {
+        "requested": len(ids), "affected": removed, "matched": matched,
+        "skipped": [{"id": audio_id, "used_by": name}
+                    for audio_id, name in in_use.items()],
+        "note": (f"{removed} deleted. {len(in_use)} kept because a template "
+                 "still uses them.") if in_use else f"{removed} deleted.",
+    }
+
+
+@api.post("/announcements/templates/archive")
+def archive_announcement_templates_bulk(
+    payload: BulkIdsRequest,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.templates.manage")),
+):
+    ids, matched = _resolve_bulk(payload, _template_ids_matching)
+    if not ids:
+        return {"requested": 0, "affected": 0, "matched": matched}
+    with engine.begin() as connection:
+        result = connection.execute(text(
+            "UPDATE " + announcements.TEMPLATE_TABLE +
+            " SET status = 'archived', updated_at = :now "
+            "WHERE id IN :ids AND status = 'active'"
+        ).bindparams(bindparam("ids", expanding=True)),
+            {"ids": ids, "now": announcements.utcnow().isoformat()})
+    _write_log(db, "info",
+               f"announcement_templates_archived count={result.rowcount} "
+               f"by={user.username}")
+    return {"requested": len(ids), "affected": result.rowcount, "matched": matched}
+
+
+@api.post("/announcements/templates/delete")
+async def delete_announcement_templates_bulk(
+    payload: BulkIdsRequest,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.delete_permanently")),
+):
+    """Permanent, for several templates at once.
+
+    Every shop still playing one of them is STOPPED first and the answer says
+    how many - deleting a plan while shops run it leaves them playing
+    something with no name, and no row in the list to press Pause on.
+    """
+    if str(payload.confirm or "").strip().upper() != "DELETE":
+        raise HTTPException(
+            status_code=400,
+            detail="Type DELETE to confirm. This removes the templates and "
+                   "their lines permanently and cannot be undone.")
+    ids, matched = _resolve_bulk(payload, _template_ids_matching)
+    if not ids:
+        return {"requested": 0, "affected": 0, "matched": matched}
+
+    playing = [row for row in announcement_service.live_status(engine)
+               if row.get("template_id") in ids
+               and row.get("state") != announcements.STATE_STOPPED]
+    for row in playing:
+        updated = announcement_service.set_state(
+            engine, store_id=row["store_id"],
+            state=announcements.STATE_STOPPED, actor_id=user.id)
+        await _dispatch_announcement(row["store_id"], updated)
+
+    with engine.begin() as connection:
+        connection.execute(text(
+            "DELETE FROM " + announcements.ITEM_TABLE +
+            " WHERE template_id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True)), {"ids": ids})
+        result = connection.execute(text(
+            "DELETE FROM " + announcements.TEMPLATE_TABLE + " WHERE id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True)), {"ids": ids})
+
+    _write_log(db, "warn",
+               f"announcement_templates_deleted count={result.rowcount} "
+               f"stopped={len(playing)} by={user.username}")
+    return {
+        "requested": len(ids), "affected": result.rowcount, "matched": matched,
+        "stopped_stores": [row["store_id"] for row in playing],
+        "note": (f"{result.rowcount} deleted. {len(playing)} Store(s) were "
+                 "playing them and have been stopped.") if playing
+                else f"{result.rowcount} deleted.",
+    }
 
 
 # ---- Playing and pausing ------------------------------------------------

@@ -35,8 +35,38 @@ export default function AnnouncementHistory() {
   });
   const [busy, setBusy] = React.useState("");
   const [error, setError] = React.useState("");
-  const [deleting, setDeleting] = React.useState(null);
+  const [deleting, setDeleting] = React.useState(false);
   const [word, setWord] = React.useState("");
+  //: Explicit ids, or "everything the current filters match".
+  //:
+  //: Two modes rather than one because the browser only ever holds one page:
+  //: a selection built there could act on fifty rows while the button claimed
+  //: it was acting on all 184. "All filtered" is resolved on the server, from
+  //: the same filters this page is showing.
+  const [selected, setSelected] = React.useState(() => new Set());
+  const [allFiltered, setAllFiltered] = React.useState(false);
+
+  const chosenCount = allFiltered ? list.total : selected.size;
+  const clearSelection = () => { setSelected(new Set()); setAllFiltered(false); };
+
+  const toggle = (id) => {
+    setAllFiltered(false);
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const bulkBody = () => (allFiltered
+    ? { mode: "filtered", filters: list.filters }
+    : { mode: "ids", ids: Array.from(selected) });
+
+  // A page or filter change invalidates a selection built on rows that were
+  // there before it. Keeping it would act on rows the operator can no longer
+  // see, which is the shape of every "it deleted the wrong things" report.
+  React.useEffect(() => { setSelected(new Set()); setAllFiltered(false); },
+                  [list.page, list.filters]);
 
   const mayTidy = can("announcements.templates.manage");
   const mayDelete = can("announcements.delete_permanently");
@@ -121,10 +151,59 @@ export default function AnnouncementHistory() {
         </label>
       </FilterBar>
 
+      {(mayTidy || mayDelete) && (
+        <div className="flex flex-wrap items-center gap-2 border border-slate-200 rounded-md bg-white px-3 py-2"
+             data-testid="announcement-history-bulk-bar">
+          <button data-testid="announcement-history-select-page"
+                  onClick={() => { setAllFiltered(false);
+                                   setSelected(new Set(list.items.map((r) => r.id))); }}
+                  className="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-50">
+            Select Page ({list.items.length})
+          </button>
+          <button data-testid="announcement-history-select-all"
+                  onClick={() => { setSelected(new Set()); setAllFiltered(true); }}
+                  className="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-50">
+            Select All Filtered ({list.total})
+          </button>
+          {chosenCount > 0 && (
+            <>
+              <span className="text-sm text-slate-600"
+                    data-testid="announcement-history-chosen">
+                {chosenCount} selected
+              </span>
+              <button data-testid="announcement-history-clear-selection"
+                      onClick={clearSelection}
+                      className="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-50">
+                Clear
+              </button>
+              {mayTidy && (
+                <button data-testid="announcement-history-bulk-archive"
+                        disabled={busy !== ""}
+                        onClick={() => act("Archive", async () => {
+                          await api.post("/announcements/history/archive", bulkBody());
+                          clearSelection();
+                        })}
+                        className="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-50">
+                  Archive selected
+                </button>
+              )}
+              {mayDelete && (
+                <button data-testid="announcement-history-bulk-delete"
+                        onClick={() => { setDeleting(true); setWord(""); }}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded border border-rose-300 text-sm text-rose-700 hover:bg-rose-50">
+                  <Trash2 className="w-4 h-4" /> Delete selected
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
             <tr>
+              {(mayTidy || mayDelete) && <th className="px-3 py-2 w-8"></th>}
               <th className="px-3 py-2">Store</th>
               <th className="px-3 py-2">Zone</th>
               <th className="px-3 py-2">Played</th>
@@ -136,12 +215,20 @@ export default function AnnouncementHistory() {
           </thead>
           <tbody>
             <ListState loading={list.loading} error={list.error}
-                       empty={!list.items.length} colSpan={7}
+                       empty={!list.items.length} colSpan={8}
                        onRetry={list.reload}
                        emptyText="Nothing has played in the period these filters cover." />
             {!list.loading && !list.error && list.items.map((row) => (
               <tr key={row.id} data-testid={`announcement-history-${row.id}`}
                   className="border-b border-slate-100 even:bg-slate-50/50">
+                {(mayTidy || mayDelete) && (
+                  <td className="px-3 py-2">
+                    <input type="checkbox"
+                           data-testid={`announcement-history-select-${row.id}`}
+                           checked={allFiltered || selected.has(row.id)}
+                           onChange={() => toggle(row.id)} />
+                  </td>
+                )}
                 <td className="px-3 py-2">
                   <div className="font-medium">{row.store_name}</div>
                   <div className="text-xs text-slate-500 font-mono">{row.store_code}</div>
@@ -158,8 +245,19 @@ export default function AnnouncementHistory() {
                     : <span className="text-emerald-700">still playing</span>}
                 </td>
                 <td className="px-3 py-2 text-xs text-slate-600">
-                  {row.ended_reason ? (REASON_LABEL[row.ended_reason]
-                                       || row.ended_reason) : "-"}
+                  {/* Named, not "a person". The whole reason this column
+                      exists is to answer "who did that", and an id would only
+                      move the question. */}
+                  {row.ended_reason ? (
+                    <>
+                      {REASON_LABEL[row.ended_reason] || row.ended_reason}
+                      {row.ended_by_username && (
+                        <span className="block text-slate-400">
+                          {row.ended_by_name || row.ended_by_username}
+                        </span>
+                      )}
+                    </>
+                  ) : "-"}
                 </td>
                 {(mayTidy || mayDelete) && (
                   <td className="px-3 py-2 text-right whitespace-nowrap">
@@ -174,7 +272,9 @@ export default function AnnouncementHistory() {
                     )}
                     {mayDelete && (
                       <button data-testid={`announcement-history-delete-${row.id}`}
-                              onClick={() => { setDeleting(row); setWord(""); }}
+                              onClick={() => { setSelected(new Set([row.id]));
+                                               setAllFiltered(false);
+                                               setDeleting(true); setWord(""); }}
                               className="px-2 py-1 rounded border border-rose-300 text-xs text-rose-700 hover:bg-rose-50">
                         <Trash2 className="w-3.5 h-3.5 inline" />
                       </button>
@@ -193,10 +293,11 @@ export default function AnnouncementHistory() {
         <div className="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 space-y-2"
              data-testid="announcement-history-delete-confirm">
           <p className="text-sm text-rose-900">
-            Delete the record of <strong>{deleting.audio_title}</strong> in{" "}
-            <strong>{deleting.store_name}</strong>? Unlike a recording there is
-            nothing to re-upload - this destroys the answer to "what was that
-            shop playing" for a moment that has already passed.
+            Delete <strong>{chosenCount}</strong> history{" "}
+            {chosenCount === 1 ? "entry" : "entries"} permanently? Unlike a
+            recording there is nothing to re-upload - this destroys the answer
+            to "what was that shop playing" for moments that have already
+            passed.
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <label className="text-sm text-rose-900">Type DELETE to confirm:</label>
@@ -206,15 +307,15 @@ export default function AnnouncementHistory() {
             <button data-testid="announcement-history-delete-confirm-btn"
                     disabled={word.trim().toUpperCase() !== "DELETE"}
                     onClick={() => act("Delete", async () => {
-                      await api.post(
-                        `/announcements/history/${deleting.id}/delete-permanently`,
-                        { confirmation: word });
-                      setDeleting(null);
+                      await api.post("/announcements/history/delete",
+                                     { ...bulkBody(), confirm: word });
+                      setDeleting(false);
+                      clearSelection();
                     })}
                     className="px-3 py-2 rounded-md text-sm text-white bg-rose-700 hover:bg-rose-800 disabled:opacity-40">
               Delete permanently
             </button>
-            <button onClick={() => setDeleting(null)}
+            <button onClick={() => setDeleting(false)}
                     data-testid="announcement-history-delete-cancel"
                     className="px-3 py-2 rounded-md text-sm border border-slate-300 hover:bg-white">
               Cancel

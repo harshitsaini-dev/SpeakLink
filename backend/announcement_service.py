@@ -453,9 +453,23 @@ def list_history(engine: Engine, *, search: str = "", zone: str = "",
                  since: str = "", until: str = "",
                  include_archived: bool = False) -> list[dict]:
     with engine.connect() as connection:
+        # The account names, joined here rather than resolved in the browser.
+        #
+        # "Paused by a person" was true and useless: the whole reason the
+        # column exists is to answer "who did that", and an id would only move
+        # the question. A LEFT JOIN because an account can be deleted and the
+        # row must still say what it can - "paused by a deleted account" is a
+        # worse answer than a name, and a better one than nothing.
         rows = _rows(connection,
-                     f"SELECT * FROM {announcements.HISTORY_TABLE} "
-                     "ORDER BY started_at DESC, id DESC")
+                     f"SELECT h.*, "
+                     "       s.username AS started_by_username, "
+                     "       s.display_name AS started_by_name, "
+                     "       e.username AS ended_by_username, "
+                     "       e.display_name AS ended_by_name "
+                     f"FROM {announcements.HISTORY_TABLE} h "
+                     "LEFT JOIN hq_users s ON s.id = h.started_by "
+                     "LEFT JOIN hq_users e ON e.id = h.ended_by "
+                     "ORDER BY h.started_at DESC, h.id DESC")
     if not include_archived:
         rows = [row for row in rows if not row.get("archived_at")]
     needle = (search or "").strip().lower()

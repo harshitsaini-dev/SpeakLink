@@ -1,6 +1,6 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { LayoutDashboard, Store as StoreIcon, History, Radar, HardDrive, ScrollText, Users, KeyRound, LogOut, Menu, X, Signal, Megaphone } from "lucide-react";
+import { LayoutDashboard, Store as StoreIcon, History, Radar, HardDrive, ScrollText, Users, KeyRound, LogOut, Menu, X, Signal, Megaphone, ClipboardList, Music } from "lucide-react";
 import SpeakLinkMark from "@/components/SpeakLinkMark";
 import { useAuth } from "@/contexts/AuthContext";
 import { MENU_PERMISSION_BY_PATH } from "@/lib/menuPermissions";
@@ -34,6 +34,12 @@ const NAV_GROUPS = [
       // runs for days with nobody present; a broadcast is somebody holding a
       // microphone.
       { to: "/announcements", label: "Announcements", icon: Megaphone, testid: "nav-announcements" },
+      // The plan and the recordings, each with the search, filters and
+      // pagination a section on the console could not have had.
+      { to: "/announcement-templates", label: "Templates", icon: ClipboardList,
+        testid: "nav-announcement-templates" },
+      { to: "/announcement-recordings", label: "Recordings", icon: Music,
+        testid: "nav-announcement-recordings" },
     ],
   },
   {

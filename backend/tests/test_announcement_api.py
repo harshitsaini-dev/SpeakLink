@@ -765,3 +765,185 @@ def test_deleting_a_template_needs_the_word_and_the_right(client):
         f"/api/announcements/templates/{template['id']}/delete-permanently",
         headers=sign_in(client, "editor"),
         json={"confirmation": "DELETE"}).status_code == 403
+
+
+# ===========================================================================
+# Bulk selection
+#
+# Deleting one row at a time is not a safety feature when there are two
+# hundred of them - it is a person clicking through the same dialog until
+# they stop reading it.
+# ===========================================================================
+
+def played_rows(client, headers, count=3):
+    make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    for _ in range(count):
+        client.post(f"/api/announcements/templates/{template['id']}/play",
+                    headers=headers)
+        client.post("/api/announcements/pause-all", headers=headers)
+    return client.get("/api/announcements/history?page_size=100",
+                      headers=headers).json()["items"]
+
+
+def test_selected_rows_can_be_archived_together(client):
+    headers = sign_in(client)
+    rows = played_rows(client, headers)
+    ids = [row["id"] for row in rows[:2]]
+
+    response = client.post("/api/announcements/history/archive", headers=headers,
+                           json={"mode": "ids", "ids": ids})
+    assert response.status_code == 200, response.text
+    assert response.json()["affected"] == 2
+    assert client.get("/api/announcements/history?page_size=100",
+                      headers=headers).json()["total"] == len(rows) - 2
+
+
+def test_select_all_filtered_means_every_match_not_just_the_page(client):
+    """The browser only ever holds one page, so a selection built there could
+    act on fifty rows while claiming to act on all of them."""
+    headers = sign_in(client)
+    played_rows(client, headers, count=5)
+
+    response = client.post("/api/announcements/history/archive", headers=headers,
+                           json={"mode": "filtered", "filters": {"zone": "NORTH"}})
+    assert response.status_code == 200, response.text
+    assert response.json()["affected"] == 5
+    assert client.get("/api/announcements/history",
+                      headers=headers).json()["total"] == 0
+
+
+def test_a_filtered_bulk_action_touches_only_what_the_filter_matched(client):
+    headers = sign_in(client)
+    played_rows(client, headers, count=2)
+    make_store(client, headers, "SA", region="SOUTH")
+    audio = client.get("/api/announcements/audio", headers=headers).json()["items"][0]
+    southern = make_template(client, headers, audio_id=audio["id"], name="South",
+                             items=[{"audio_id": audio["id"], "zone": "SOUTH"}])
+    client.post(f"/api/announcements/templates/{southern['id']}/play",
+                headers=headers)
+
+    client.post("/api/announcements/history/archive", headers=headers,
+                json={"mode": "filtered", "filters": {"zone": "NORTH"}})
+    remaining = client.get("/api/announcements/history", headers=headers).json()
+    assert [row["zone"] for row in remaining["items"]] == ["SOUTH"]
+
+
+def test_bulk_deletion_asks_for_the_word_once_for_the_whole_selection(client):
+    """Asking two hundred times is not two hundred times the protection."""
+    headers = sign_in(client)
+    rows = played_rows(client, headers)
+    ids = [row["id"] for row in rows]
+
+    refused = client.post("/api/announcements/history/delete", headers=headers,
+                          json={"mode": "ids", "ids": ids})
+    assert refused.status_code == 400
+    assert client.get("/api/announcements/history?page_size=100",
+                      headers=headers).json()["total"] == len(rows)
+
+    done = client.post("/api/announcements/history/delete", headers=headers,
+                       json={"mode": "ids", "ids": ids, "confirm": "DELETE"})
+    assert done.status_code == 200, done.text
+    assert done.json()["affected"] == len(rows)
+
+
+def test_bulk_deletion_is_not_granted_by_the_tidy_up_right(client):
+    headers = sign_in(client)
+    rows = played_rows(client, headers)
+    make_user(client, headers, "editor", "ADMIN")
+    admin = sign_in(client, "editor")
+
+    assert client.post("/api/announcements/history/archive", headers=admin,
+                       json={"mode": "ids", "ids": [rows[0]["id"]]}
+                       ).status_code == 200
+    assert client.post("/api/announcements/history/delete", headers=admin,
+                       json={"mode": "ids", "ids": [rows[0]["id"]],
+                             "confirm": "DELETE"}).status_code == 403
+
+
+def test_history_names_the_account_rather_than_saying_a_person(client):
+    """"Paused by a person" was true and useless: the whole reason the column
+    exists is to answer "who did that"."""
+    headers = sign_in(client)
+    rows = played_rows(client, headers, count=1)
+    assert rows[0]["started_by_username"] == "founder"
+    assert rows[0]["ended_by_username"] == "founder"
+
+
+def test_archiving_a_template_stops_the_shops_running_it(client):
+    """A template was archived, vanished from the list, and a Store went on
+    reporting it as the thing it was playing - with no row left to press Pause
+    on. Archiving a plan and leaving shops running it is not a smaller version
+    of withdrawing it."""
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    archived = client.delete(f"/api/announcements/templates/{template['id']}",
+                             headers=headers)
+    assert archived.status_code == 200, archived.text
+    assert archived.json()["stopped_stores"] == [store_id]
+
+    rows = client.get("/api/announcements/status?q=NA", headers=headers).json()
+    row = next(r for r in rows["items"] if r["store_id"] == store_id)
+    assert row["state"] == "STOPPED"
+    assert row["template_name"] is None, (
+        "the Store still names a template nobody can open")
+    assert row["audio_title"] is None
+
+
+def test_recordings_can_be_archived_and_deleted_in_bulk(client):
+    headers = sign_in(client)
+    first = upload(client, headers, title="One")
+    second = upload(client, headers, title="Two")
+
+    archived = client.post("/api/announcements/audio/archive", headers=headers,
+                           json={"mode": "ids", "ids": [first["id"]]})
+    assert archived.json()["affected"] == 1
+
+    deleted = client.post("/api/announcements/audio/delete", headers=headers,
+                          json={"mode": "ids", "ids": [second["id"]],
+                                "confirm": "DELETE"})
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["affected"] == 1
+
+
+def test_a_bulk_recording_delete_skips_the_ones_in_use_and_names_them(client):
+    """Failing everything because one of forty is in use would leave the
+    operator selecting the other thirty-nine by hand."""
+    headers = sign_in(client)
+    make_store(client, headers, "NA", region="NORTH")
+    used = upload(client, headers, title="Used")
+    spare = upload(client, headers, title="Spare")
+    make_template(client, headers, audio_id=used["id"], name="Festival")
+
+    response = client.post("/api/announcements/audio/delete", headers=headers,
+                           json={"mode": "ids", "ids": [used["id"], spare["id"]],
+                                 "confirm": "DELETE"})
+    assert response.status_code == 200, response.text
+    assert response.json()["affected"] == 1
+    assert response.json()["skipped"] == [{"id": used["id"], "used_by": "Festival"}]
+    assert "still uses them" in response.json()["note"]
+
+
+def test_templates_can_be_deleted_in_bulk_and_the_shops_stop(client):
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    first = make_template(client, headers, audio_id=audio["id"], name="One")
+    second = make_template(client, headers, audio_id=audio["id"], name="Two")
+    client.post(f"/api/announcements/templates/{first['id']}/play", headers=headers)
+
+    response = client.post("/api/announcements/templates/delete", headers=headers,
+                           json={"mode": "ids",
+                                 "ids": [first["id"], second["id"]],
+                                 "confirm": "DELETE"})
+    assert response.status_code == 200, response.text
+    assert response.json()["affected"] == 2
+    assert response.json()["stopped_stores"] == [store_id]
+    assert client.get("/api/announcements/templates?status=all",
+                      headers=headers).json()["items"] == []
