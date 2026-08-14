@@ -12,7 +12,7 @@
  */
 import React from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { FilterSelect } from "./AdminFilters";
+import { FilterSelect, SearchableSelect } from "./AdminFilters";
 
 function manyStores(count) {
   return Array.from({ length: count }, (_, index) => ({
@@ -33,10 +33,13 @@ function Harness({ options, initial = "", multiple = true }) {
   );
 }
 
-test("a short list has no search box, because it does not need one", () => {
-  render(<Harness options={manyStores(4)} />);
+test("every filter has a search box, however short its list", () => {
+  // Gating this on length was wrong: whoever opens a filter does not know how
+  // long the list is until it is open, and a control that SOMETIMES has a
+  // search box teaches nobody where to type.
+  render(<Harness options={manyStores(3)} />);
   fireEvent.click(screen.getByTestId("filter"));
-  expect(screen.queryByTestId("filter-search")).toBeNull();
+  expect(screen.getByTestId("filter-search")).toBeTruthy();
 });
 
 test("a long list can be searched", () => {
@@ -119,4 +122,51 @@ test("a single-value filter is still a plain dropdown", () => {
   expect(control.tagName).toBe("SELECT");
   fireEvent.change(control, { target: { value: "2" } });
   expect(screen.getByTestId("value").textContent).toBe("2");
+});
+
+
+// ===========================================================================
+// The single-value picker for long lists
+//
+// A plain <select> is fine for four fixed options and useless for two hundred
+// Stores: it can only be scrolled, and it gets slower to use the more there is
+// to use it on. Zone, City and Store pickers behave the same way everywhere
+// now, whether they take one value or several - one gesture to learn, not two.
+// ===========================================================================
+
+function SingleHarness({ options, initial = "" }) {
+  const [value, setValue] = React.useState(initial);
+  return (
+    <>
+      <SearchableSelect label="Store" testId="one" placeholder="Select a Store"
+                        value={value} onChange={setValue} options={options} />
+      <output data-testid="value">{value}</output>
+    </>
+  );
+}
+
+test("a searchable single picker takes one value and can be searched", () => {
+  render(<SingleHarness options={manyStores(40)} />);
+  fireEvent.click(screen.getByTestId("one"));
+
+  fireEvent.change(screen.getByTestId("one-search"), { target: { value: "012" } });
+  fireEvent.click(screen.getByTestId("one-option-12"));
+  expect(screen.getByTestId("value").textContent).toBe("12");
+  expect(screen.getByTestId("one").textContent).toContain("Store 012");
+});
+
+test("choosing a second value REPLACES the first", () => {
+  // Exclusive on purpose: a scope entry, a target zone and a Store picker each
+  // name exactly one thing, and "two zones" there would have to mean something
+  // the rest of the screen cannot express.
+  render(<SingleHarness options={manyStores(10)} initial="2" />);
+  fireEvent.click(screen.getByTestId("one"));
+  fireEvent.click(screen.getByTestId("one-option-5"));
+
+  expect(screen.getByTestId("value").textContent).toBe("5");
+});
+
+test("its placeholder is shown when nothing is chosen", () => {
+  render(<SingleHarness options={manyStores(4)} />);
+  expect(screen.getByTestId("one").textContent).toContain("Select a Store");
 });

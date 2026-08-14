@@ -334,8 +334,10 @@ test("choosing a Zone enables the actions and sends the selector", async () => {
   await renderConsole();
 
   await act(async () => {
-    fireEvent.change(screen.getByTestId("zone-action-region"),
-                     { target: { value: "NORTH" } });
+    fireEvent.click(screen.getByTestId("zone-action-region"));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("zone-action-region-option-NORTH"));
   });
   await act(async () => { fireEvent.click(screen.getByTestId("zone-pause")); });
 
@@ -359,9 +361,9 @@ test("the refusals are listed by Store, and the successes are not", async () => 
   goLive([target(101), target(102)]);
   await renderConsole();
 
+  await act(async () => { fireEvent.click(screen.getByTestId("zone-action-city")); });
   await act(async () => {
-    fireEvent.change(screen.getByTestId("zone-action-city"),
-                     { target: { value: "DELHI" } });
+    fireEvent.click(screen.getByTestId("zone-action-city-option-DELHI"));
   });
   await act(async () => { fireEvent.click(screen.getByTestId("zone-pause")); });
 

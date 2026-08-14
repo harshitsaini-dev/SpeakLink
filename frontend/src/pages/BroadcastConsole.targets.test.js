@@ -122,9 +122,10 @@ test("region options come from the scoped target response", async () => {
   // region they hold no Store in. Scoped to the TARGET selector: the Store
   // picker now has its own Zone FILTER, which offers the same names for an
   // entirely different purpose.
-  const zoneSelect = screen.getByTestId("region-select");
-  expect(Array.from(zoneSelect.querySelectorAll("option")).map((o) => o.value))
-    .toContain("NORTH");
+  // The picker is a searchable panel now rather than a <select>: it is the
+  // same list, opened rather than scrolled.
+  await act(async () => { fireEvent.click(screen.getByTestId("region-select")); });
+  expect(screen.getByTestId("region-select-option-NORTH")).toBeTruthy();
 });
 
 

@@ -88,7 +88,8 @@ export function SearchInput({ value, onChange, placeholder = "Search…", testId
  * other four.
  */
 export function FilterSelect({ label, value, onChange, options, testId,
-                               allLabel = "All", multiple = true }) {
+                               allLabel = "All", multiple = true,
+                               disabled = false, selectedSummary = null }) {
   const [open, setOpen] = React.useState(false);
   //: Searching WITHIN a filter.
   //:
@@ -149,7 +150,9 @@ export function FilterSelect({ label, value, onChange, options, testId,
     onChange(next.join(","));
   };
 
-  const summary = chosen.length === 0
+  const summary = selectedSummary !== null
+    ? selectedSummary
+    : chosen.length === 0
     ? allLabel
     : chosen.length === 1
       ? (normalised.find((option) => option.value === chosen[0])?.label || chosen[0])
@@ -158,19 +161,24 @@ export function FilterSelect({ label, value, onChange, options, testId,
   return (
     <div className="flex flex-col gap-1 relative" ref={holder}>
       <span className="text-[10px] uppercase tracking-widest text-slate-500">{label}</span>
-      <button type="button" data-testid={testId} onClick={() => setOpen((was) => !was)}
-              className="px-2 py-1.5 text-sm border border-slate-300 rounded-md bg-white min-w-[140px] text-left">
+      <button type="button" data-testid={testId} disabled={disabled}
+              onClick={() => setOpen((was) => !was)}
+              className="px-2 py-1.5 text-sm border border-slate-300 rounded-md bg-white min-w-[140px] text-left disabled:opacity-50">
         {summary}
       </button>
       {open && (
         <div data-testid={`${testId}-panel`}
              className="absolute z-20 top-full mt-1 w-56 max-h-64 overflow-y-auto
                         border border-slate-300 rounded-md bg-white shadow-lg p-2">
-          {normalised.length > 8 && (
-            <input value={needle} onChange={(event) => setNeedle(event.target.value)}
-                   data-testid={`${testId}-search`} placeholder="Search…"
-                   className="w-full mb-1 px-2 py-1 text-sm border border-slate-300 rounded" />
-          )}
+          {/* Always, not only on long lists.
+              I gated this on the list being long and the reasoning was wrong:
+              the person opening a filter does not know how long the list is
+              until it is open, and a control that sometimes has a search box
+              teaches nobody where to type. A field above four options costs a
+              line; a missing one costs a hunt through two hundred. */}
+          <input value={needle} onChange={(event) => setNeedle(event.target.value)}
+                 data-testid={`${testId}-search`} placeholder="Search…"
+                 className="w-full mb-1 px-2 py-1 text-sm border border-slate-300 rounded" />
           <button type="button" data-testid={`${testId}-clear`}
                   onClick={() => onChange("")}
                   className="w-full text-left px-2 py-1 text-sm rounded hover:bg-slate-50 text-slate-600">
@@ -197,6 +205,36 @@ export function FilterSelect({ label, value, onChange, options, testId,
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * One value, chosen from a list that may be long.
+ *
+ * A plain <select> is fine for four fixed options and useless for two hundred
+ * Stores: it can only be scrolled, and it gets slower to use the more there is
+ * to use it on. This is the same panel the multi-value filter uses, with the
+ * choosing part made exclusive - so "Zone", "City" and "Store" pickers behave
+ * the same way everywhere, whether they take one value or several.
+ */
+export function SearchableSelect({ label, value, onChange, options, testId,
+                                   placeholder = "— select —", disabled }) {
+  const normalised = options.map((option) => (
+    typeof option === "string" ? { value: option, label: option } : option));
+  const chosen = normalised.find((option) => String(option.value) === String(value ?? ""));
+  return (
+    <FilterSelect label={label} testId={testId} allLabel={placeholder}
+                  value={value ?? ""} options={normalised} disabled={disabled}
+                  // Exclusive: choosing replaces rather than adds. The panel
+                  // and its search are identical, which is the point - one
+                  // gesture to learn, not two.
+                  onChange={(next) => {
+                    const values = String(next).split(",").map((v) => v.trim())
+                      .filter(Boolean);
+                    const added = values.find((v) => v !== String(value ?? ""));
+                    onChange(added ?? "");
+                  }}
+                  selectedSummary={chosen ? chosen.label : placeholder} />
   );
 }
 

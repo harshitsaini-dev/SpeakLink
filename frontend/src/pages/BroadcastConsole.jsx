@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { Mic, MicOff, Play, Square, AlertOctagon, Search, RefreshCcw, Users, Wifi, WifiOff, Radio } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
-import { FilterSelect } from "@/components/AdminFilters";
+import { FilterSelect, SearchableSelect } from "@/components/AdminFilters";
 import { useBroadcast } from "@/contexts/BroadcastContext";
 import { elapsedSeconds } from "@/lib/time";
 import StatusBadge from "@/components/StatusBadge";
@@ -751,21 +751,20 @@ export default function BroadcastConsole() {
             {targetMode === "region" && (
               <div>
                 <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Zone</label>
-                <select data-testid="region-select" value={region} onChange={(e) => setRegion(e.target.value)}
-                        className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm bg-white" disabled={isLive}>
-                  <option value="">— select —</option>
-                  {meta.regions.map((r) => <option key={r} value={r}>{r}</option>)}
-                </select>
+                {/* Searchable, because this list is exactly as long as the
+                    estate's zone count and a plain dropdown can only be
+                    scrolled. */}
+                <SearchableSelect testId="region-select" value={region}
+                                  onChange={setRegion} options={meta.regions}
+                                  disabled={isLive} />
               </div>
             )}
             {targetMode === "city" && (
               <div>
                 <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">City</label>
-                <select data-testid="city-select" value={city} onChange={(e) => setCity(e.target.value)}
-                        className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm bg-white" disabled={isLive}>
-                  <option value="">— select —</option>
-                  {meta.cities.map((c) => <option key={c} value={c}>{c}</option>)}
-                </select>
+                <SearchableSelect testId="city-select" value={city}
+                                  onChange={setCity} options={meta.cities}
+                                  disabled={isLive} />
               </div>
             )}
           </div>
@@ -885,25 +884,17 @@ export default function BroadcastConsole() {
               Zone Actions
             </div>
             <label htmlFor="zone-action-region" className="sr-only">Zone</label>
-            <select id="zone-action-region" data-testid="zone-action-region"
-                    value={zoneScope.region} disabled={zoneBusy}
-                    onChange={(e) => setZoneScope((was) => ({ ...was, region: e.target.value }))}
-                    className="rounded border border-slate-300 bg-white px-2 py-1 text-sm">
-              <option value="">Any Zone</option>
-              {(meta.regions || []).map((zone) => (
-                <option key={zone} value={zone}>{zone}</option>
-              ))}
-            </select>
+            <SearchableSelect testId="zone-action-region" placeholder="Any Zone"
+                              value={zoneScope.region} disabled={zoneBusy}
+                              options={meta.regions || []}
+                              onChange={(value) => setZoneScope(
+                                (was) => ({ ...was, region: value }))} />
             <label htmlFor="zone-action-city" className="sr-only">City</label>
-            <select id="zone-action-city" data-testid="zone-action-city"
-                    value={zoneScope.city} disabled={zoneBusy}
-                    onChange={(e) => setZoneScope((was) => ({ ...was, city: e.target.value }))}
-                    className="rounded border border-slate-300 bg-white px-2 py-1 text-sm">
-              <option value="">Any City</option>
-              {(meta.cities || []).map((city) => (
-                <option key={city} value={city}>{city}</option>
-              ))}
-            </select>
+            <SearchableSelect testId="zone-action-city" placeholder="Any City"
+                              value={zoneScope.city} disabled={zoneBusy}
+                              options={meta.cities || []}
+                              onChange={(value) => setZoneScope(
+                                (was) => ({ ...was, city: value }))} />
 
             <div className="ml-auto flex flex-wrap gap-2">
               {[

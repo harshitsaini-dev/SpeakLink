@@ -23,7 +23,8 @@ import {
 } from "lucide-react";
 import { useAdminList } from "@/lib/adminList";
 import {
-  FilterBar, SearchInput, FilterSelect, ListState, Pager, DestructiveModal,
+  FilterBar, SearchInput, FilterSelect, SearchableSelect, ListState, Pager,
+  DestructiveModal,
 } from "@/components/AdminFilters";
 
 const ROLES = ["OWNER", "ADMIN", "BROADCASTER", "VIEWER"];
@@ -1180,24 +1181,21 @@ function ScopeEditor({ user, onCancel, onSaved }) {
                     <option value="REGION">Zone</option>
                   </select>
                   {draftType === "STORE" ? (
-                    <select className="flex-1 border rounded px-2 py-1 text-sm bg-white"
-                            value={draftStoreId} data-testid="scope-add-store"
-                            onChange={(e) => setDraftStoreId(e.target.value)}>
-                      {stores.map((s) => (
-                        <option key={s.id} value={s.id}>{s.store_name} ({s.store_code})</option>
-                      ))}
-                    </select>
+                    /* Searchable: this list is every Store in the estate,
+                       and scrolling two hundred of them to grant one scope is
+                       the slowest thing on this page. */
+                    <SearchableSelect testId="scope-add-store" value={draftStoreId}
+                                      onChange={setDraftStoreId}
+                                      placeholder="Select a Store"
+                                      options={stores.map((s) => ({
+                                        value: String(s.id),
+                                        label: `${s.store_name} (${s.store_code})` }))} />
                   ) : (
-                    <select className="flex-1 border rounded px-2 py-1 text-sm bg-white" value={draftValue}
-                            data-testid="scope-add-value"
-                            onChange={(e) => setDraftValue(e.target.value)}>
-                      <option value="" disabled>
-                        {draftType === "CITY" ? "Select a City" : "Select a Zone"}
-                      </option>
-                      {(draftType === "CITY" ? cities : regions).map((value) => (
-                        <option key={value} value={value}>{value}</option>
-                      ))}
-                    </select>
+                    <SearchableSelect testId="scope-add-value" value={draftValue}
+                                      onChange={setDraftValue}
+                                      placeholder={draftType === "CITY"
+                                        ? "Select a City" : "Select a Zone"}
+                                      options={(draftType === "CITY" ? cities : regions)} />
                   )}
                   <button type="button" onClick={addEntry}
                           className="rounded border px-3 py-1 text-sm" data-testid="scope-add-btn">
