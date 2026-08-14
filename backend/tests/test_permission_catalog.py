@@ -152,11 +152,30 @@ def test_broadcaster_default_permissions_are_exactly_broadcast_and_read_only():
     # already take the estate live keeps that ability across the upgrade. It
     # exists to be REMOVED deliberately, creating a link-only broadcaster, not
     # to demote every operator who has physical delivery today.
+    # The announcement codes are included because starting a broadcast DUCKS
+    # every announcement in those Stores - a broadcaster interrupts them by
+    # definition, so being able to see and settle them is part of the same
+    # job, and a broadcaster who can silence a shop but cannot see why it is
+    # talking has been given the confusing half of it.
+    #
+    # announcements.upload and announcements.templates.manage are NOT here.
+    # Deciding what recording exists, and which shops play it for the next
+    # fortnight, is an estate-wide decision that outlives the broadcast; it
+    # stays with OWNER and ADMIN. announcements.control_all is not here either,
+    # for the same reason broadcast.emergency_stop is not: it reaches every
+    # Store at once.
     assert broadcaster == {
         "menu.broadcast.view", "broadcast.start", "broadcast.stop",
         "menu.history.view", "menu.receivers.view", "menu.stores.view",
         "store_audio.control", "broadcast.store_delivery",
+        "menu.announcements.view", "announcements.control",
+        "announcements.volume", "broadcast.group_join",
     }
+    assert "announcements.upload" not in broadcaster
+    assert "announcements.templates.manage" not in broadcaster
+    assert "announcements.control_all" not in broadcaster
+    assert "broadcast.group_host" not in broadcaster, (
+        "opening a broadcast to other voices is not the same as joining one")
     # No Store modification, no Device security changes, no User management.
     assert not any(code.startswith("stores.") for code in broadcaster)
     assert not any(code.startswith("devices.") and code != "menu.receivers.view"
@@ -167,10 +186,15 @@ def test_broadcaster_default_permissions_are_exactly_broadcast_and_read_only():
 
 def test_viewer_default_permissions_are_read_only_and_exclude_users():
     viewer = DEFAULT_ROLE_PERMISSIONS[Role.VIEWER]
+    # menu.announcements.view is included and nothing else from that group.
+    # Looking at what is playing changes nothing, and a VIEWER who cannot see
+    # it cannot answer the question a shop actually rings up to ask.
     assert viewer == {
         "menu.broadcast.view", "menu.stores.view", "menu.receivers.view",
-        "menu.history.view", "menu.logs.view",
+        "menu.history.view", "menu.logs.view", "menu.announcements.view",
     }
+    assert "announcements.control" not in viewer
+    assert "announcements.volume" not in viewer
     assert "menu.users.view" not in viewer
     assert not any(code.endswith((".create", ".update", ".archive", ".disable",
                                   ".revoke", ".rotate", ".assign", ".manage"))

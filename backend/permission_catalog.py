@@ -162,6 +162,60 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
     PermissionDefinition("store_kit.manage", "Receivers",
                         "Upload and Remove Store Kits"),
 
+    # -----------------------------------------------------------------
+    # Recorded announcements
+    #
+    # Deliberately FOUR codes rather than one "announcements" right, because
+    # the four questions have genuinely different answers in a real shop:
+    #
+    #   who may look at what is playing            announcements.view
+    #   who may press play and pause               announcements.control
+    #   who may decide what plays and where        announcements.templates.manage
+    #   who may put new audio on the estate        announcements.upload
+    #
+    # A duty manager who should be able to silence a jingle that is annoying
+    # customers must not thereby be able to upload a recording that every
+    # Store in the country then plays. Bundling them would make the useful
+    # grant impossible to give without the dangerous one.
+    # -----------------------------------------------------------------
+    PermissionDefinition("menu.announcements.view", "Announcements",
+                        "View Announcements"),
+    PermissionDefinition("announcements.control", "Announcements",
+                        "Play / Pause Announcements"),
+    #: Play All and Pause All, across the estate in one action.
+    #:
+    #: Separate from announcements.control on purpose. Pausing one Store is a
+    #: local decision anybody running that shop can make; pausing every Store
+    #: at once is an estate-wide action with the same reach as an emergency
+    #: stop, and it should be possible to grant the first without the second.
+    PermissionDefinition("announcements.control_all", "Announcements",
+                        "Play All / Pause All"),
+    PermissionDefinition("announcements.volume", "Announcements",
+                        "Set Announcement Volume"),
+    PermissionDefinition("announcements.templates.manage", "Announcements",
+                        "Create and Edit Templates"),
+    PermissionDefinition("announcements.upload", "Announcements",
+                        "Upload Recordings"),
+    PermissionDefinition("announcements.delete_permanently", "Announcements",
+                        "Permanently Delete Recordings"),
+
+    #: Changing which speaker a Store plays through, from HQ.
+    #:
+    #: This was only ever possible standing at the Store PC, and that was a
+    #: real protection: getting it wrong makes a shop silent, and the person
+    #: who could get it wrong was also the person who could hear the result.
+    #: Done remotely, nobody at HQ can hear anything - so it is its own
+    #: permission rather than part of managing Devices.
+    PermissionDefinition("receiver.set_output_device", "Receivers",
+                        "Change a Store's Speaker Remotely"),
+
+    #: Joining a broadcast somebody else started, as a second voice.
+    PermissionDefinition("broadcast.group_join", "Broadcast",
+                        "Join a Group Broadcast"),
+    #: Opening a broadcast to other broadcasters in the first place.
+    PermissionDefinition("broadcast.group_host", "Broadcast",
+                        "Host a Group Broadcast"),
+
     PermissionDefinition("menu.logs.view", "Logs", "View System Logs"),
     PermissionDefinition("system_logs.archive", "Logs", "Archive System Logs"),
     PermissionDefinition("system_logs.delete_permanently", "Logs",
@@ -187,6 +241,7 @@ DESTRUCTIVE_CODES: frozenset[str] = frozenset({
     "users.delete_permanently",
     "broadcast_history.delete_permanently",
     "system_logs.delete_permanently",
+    "announcements.delete_permanently",
 })
 
 PERMISSION_CODES: frozenset[str] = frozenset(p.code for p in PERMISSION_DEFINITIONS)
@@ -234,10 +289,19 @@ _ALL_CODES = frozenset(PERMISSION_CODES)
 _BROADCAST_CODES = frozenset({
     "menu.broadcast.view", "broadcast.start", "broadcast.stop",
     "store_audio.control", "broadcast.store_delivery",
+    # A broadcaster interrupts announcements by definition - starting a
+    # broadcast ducks them - so being able to see and settle them is part of
+    # the same job. Deciding what exists is not: uploading a recording and
+    # writing a template stay with OWNER and ADMIN.
+    "menu.announcements.view", "announcements.control", "announcements.volume",
+    "broadcast.group_join",
 })
 _VIEW_ONLY_CODES = frozenset({
     "menu.broadcast.view", "menu.stores.view", "menu.receivers.view",
     "menu.history.view", "menu.logs.view",
+    # Looking at what is playing changes nothing, and a VIEWER who cannot see
+    # it cannot answer the question a shop actually rings up to ask.
+    "menu.announcements.view",
 })
 
 #: The default role matrix. This is the ONE place a role's fine-grained rights

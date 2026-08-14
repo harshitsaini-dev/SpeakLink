@@ -16,7 +16,7 @@ import json
 from datetime import datetime, timezone
 from typing import List, Optional, Set
 
-from fastapi import (FastAPI, APIRouter, Depends, File, Form, HTTPException, Query,
+from fastapi import (FastAPI, APIRouter, Depends, File, Form, Header, HTTPException, Query,
                      Request, Response, UploadFile, WebSocket, WebSocketDisconnect,
                      status)
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -246,6 +246,9 @@ import secrets
 import broadcast_recording
 import web_rooms
 import web_chat
+import announcements
+import announcement_service
+import announcement_protocol
 import store_kits
 from receiver_index_repair import repair_receiver_indexes
 from receiver_auth_reasons import DeviceEnrolmentBlocked
@@ -665,6 +668,9 @@ def startup_event():
         # ON DELETE CASCADE - so a broadcast deleted from history takes
         # its chat with it and there is no second cleanup to forget.
         web_chat.ensure_chat_schema(engine)
+        # Recorded announcements. Four additive tables; see announcements.py
+        # for why they are not a broadcast with a file attached.
+        announcements.ensure_announcement_schema(engine)
         # Anything left mid-flight by a crash is resolved BEFORE the first
         # request can read it. An unfinished .part is never promoted to
         # AVAILABLE: HQ stopping mid-announcement is exactly when a recording
@@ -2980,6 +2986,26 @@ async def start_session(sid: int, db: Session = Depends(get_db), user: HQUser = 
     db.commit()
     db.refresh(session)
 
+    # The announcements in these Stores step aside. DUCKED, not PAUSED: see
+    # announcements.py - a broadcast ending must resume only what the broadcast
+    # itself moved, and a Store somebody deliberately silenced must stay
+    # silent.
+    #
+    # Safe to duck the whole target list because a Store can only be in one
+    # live broadcast at a time - the broadcast_store_leases unique index
+    # claimed above is what guarantees it - so nothing here is standing aside
+    # for somebody else's session.
+    try:
+        for ducked_store in announcement_service.duck_stores(engine, target_store_ids):
+            await manager.send_to_receiver(
+                ducked_store,
+                announcement_protocol.pause_command(reason="broadcast"))
+    except Exception:  # noqa: BLE001
+        # A broadcast must go live even if the announcement bookkeeping fails.
+        # The worst case is a jingle playing under a broadcast, which is
+        # audible and fixable; refusing to broadcast is neither.
+        logger.exception("Could not duck announcements for session %s", session.id)
+
     await manager.start_live_session(session.id, target_store_ids,
                                      owner_user_id=session.started_by)
     # Live output-volume state for this session's Stores, at the product
@@ -3065,6 +3091,22 @@ async def _end_session(db: Session, session: BroadcastSession, final_status: str
     # concurrent sessions would mean stopping whichever Stores the most recent
     # broadcast happened to list - silencing somebody else's announcement.
     stop_ids = {t.store_id for t in targets}
+    # The announcements come back - in THIS session's Stores only.
+    #
+    # Deliberately computed before the emergency widening below. An emergency
+    # stop tells every connected Receiver to stop whatever it is doing, and
+    # resuming announcements across that wider set would start a jingle in a
+    # shop that is standing aside for a DIFFERENT broadcast still on air.
+    # Only what this broadcast ducked is restored, and only if it is still
+    # DUCKED - a Store an operator paused during the broadcast stays paused.
+    try:
+        for resumed_store in announcement_service.unduck_stores(engine, stop_ids):
+            await _dispatch_announcement(
+                resumed_store,
+                announcement_service.get_playback(engine, store_id=resumed_store))
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not resume announcements after session %s",
+                         session.id)
     if broadcast_to_all:
         # Emergency safety net: tell every connected Receiver to stop, whatever
         # it was doing. Deliberately wider than this session.
@@ -7347,6 +7389,560 @@ async def supervised_set_auto_approve(
 
 
 # Include routes
+# ================ RECORDED ANNOUNCEMENTS ================
+
+async def _dispatch_announcement(store_id: int, row: dict) -> None:
+    """Tell one Store Receiver what its announcement should be doing now.
+
+    Called after every state change, from the one place that made it, so the
+    database and the shop cannot disagree about what is playing. A Store that
+    is offline is skipped silently: the state is recorded, and the Receiver
+    asks for it when it reconnects - which is the same way broadcast targets
+    already behave.
+
+    Never raises. A Receiver that cannot be reached must not fail the HQ
+    request that changed the state: the operator would see an error for an
+    action that did take effect, and would press it again.
+    """
+    try:
+        state = row.get("state")
+        if state == announcements.STATE_PLAYING:
+            audio_id = row.get("audio_id")
+            if audio_id is None:
+                return
+            audio = None
+            for candidate in announcement_service.list_audio(engine, status="all"):
+                if candidate["id"] == audio_id:
+                    audio = candidate
+                    break
+            if audio is None:
+                return
+            message = announcement_protocol.play_command(
+                audio_id=audio_id,
+                sha256=audio["sha256"],
+                download_path=announcement_protocol.download_path(audio_id),
+                content_type=audio.get("content_type") or "audio/mpeg",
+                volume_percent=row.get("volume_percent",
+                                       announcements.DEFAULT_VOLUME),
+                template_id=row.get("template_id"),
+            )
+        elif state == announcements.STATE_PAUSED:
+            message = announcement_protocol.pause_command(reason="hq")
+        elif state == announcements.STATE_DUCKED:
+            # Identical at the speaker, distinguishable in the Store's log.
+            # A log that cannot tell a person pausing from a broadcast
+            # arriving cannot answer "why did it go quiet at 4pm".
+            message = announcement_protocol.pause_command(reason="broadcast")
+        else:
+            message = announcement_protocol.stop_command()
+        await manager.send_to_receiver(store_id, message)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not send the announcement command to Store %s",
+                         store_id)
+
+
+def _dispatch_announcement_volume_soon(store_id: int, volume_percent: int) -> None:
+    """Volume on its own, without restating what is playing.
+
+    Sending a play command to change the level would restart the recording
+    from the beginning - the shop would hear the jingle jump back to its first
+    word every time somebody nudged the slider.
+    """
+    async def send():
+        try:
+            await manager.send_to_receiver(
+                store_id,
+                announcement_protocol.set_volume_command(
+                    volume_percent=volume_percent))
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not set the announcement volume for Store %s",
+                             store_id)
+    try:
+        asyncio.get_running_loop().create_task(send())
+    except RuntimeError:
+        pass
+
+
+def _dispatch_announcement_soon(store_id: int, row: dict) -> None:
+    """Schedule the command from a synchronous route.
+
+    The announcement routes are ordinary `def` handlers - they do database
+    work, not I/O - so they cannot await. Scheduling keeps them that way
+    without making the Receiver wait on the HTTP response, or the HTTP
+    response wait on the Receiver.
+    """
+    try:
+        asyncio.get_running_loop().create_task(_dispatch_announcement(store_id, row))
+    except RuntimeError:
+        # No loop: a test calling the service directly, or a synchronous
+        # script. The state is still recorded, which is what the Receiver
+        # reconciles against when it next connects.
+        pass
+
+
+@api.get("/receiver/announcements/{audio_id}/download")
+def download_announcement_for_receiver(
+    audio_id: int,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """A Store fetching the recording it was told to play.
+
+    Authenticated with the Receiver's OWN credential, through the same
+    authenticator the audio socket uses - not with an HQ account, and not with
+    a shared secret in the command. A download link that worked without a
+    credential would let anybody who saw one command pull every recording the
+    estate plays.
+    """
+    presented = (authorization or "").removeprefix("Bearer ").strip()
+    if not presented:
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+    authenticator = getattr(app.state, "receiver_runtime_authenticator", None) \
+        or default_receiver_runtime_authenticator
+    try:
+        authenticator.authenticate(presented_token=presented,
+                                   authenticated_at=datetime.now(timezone.utc))
+    except Exception:  # noqa: BLE001 - one refusal shape, deliberately
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+
+    for row in announcement_service.list_audio(engine, status="all"):
+        if row["id"] == audio_id:
+            path = announcements.audio_directory() / row["storage_name"]
+            if not path.is_file():
+                raise HTTPException(status_code=404,
+                                    detail="That recording is not on this HQ.")
+            return FileResponse(str(path),
+                                media_type=row["content_type"] or "audio/mpeg",
+                                headers={"X-SpeakLink-SHA256": row["sha256"]})
+    raise HTTPException(status_code=404, detail="No such recording.")
+
+
+
+#
+# The permission on each route is the whole authorization story - there is no
+# second check in the frontend that matters. Four separate codes because the
+# four questions have different answers in a real shop: see permission_catalog.
+
+
+def _announcement_or_404(audio_id: int) -> dict:
+    for row in announcement_service.list_audio(engine, status="all"):
+        if row["id"] == audio_id:
+            return row
+    raise HTTPException(status_code=404, detail="No such recording.")
+
+
+def _template_or_404(template_id: int) -> dict:
+    for row in announcement_service.list_templates(engine, status="all"):
+        if row["id"] == template_id:
+            return row
+    raise HTTPException(status_code=404, detail="No such template.")
+
+
+@api.get("/announcements/audio")
+def list_announcement_audio(
+    q: Optional[str] = None,
+    status: str = "active",
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    user: HQUser = Depends(require("menu.announcements.view")),
+):
+    page, page_size = normalize_paging(page, page_size)
+    rows = announcement_service.list_audio(engine, search=q or "", status=status)
+    offset = (page - 1) * page_size
+    return Page(items=rows[offset:offset + page_size], total=len(rows),
+                page=page, page_size=page_size).as_dict()
+
+
+@api.post("/announcements/audio", status_code=201)
+async def upload_announcement_audio(
+    file: UploadFile = File(...),
+    title: str = Form(""),
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.upload")),
+):
+    """Put a new recording on HQ.
+
+    Refused before a byte is written, and stored under a name this program
+    chose. The uploaded filename is kept only to show back to the person who
+    uploaded it: it is the one part of an upload a stranger picks, so it
+    decides nothing about where the bytes land.
+    """
+    raw = await file.read()
+    try:
+        extension = announcements.validate_upload(
+            raw, file.content_type or "", file.filename or "")
+    except announcements.AnnouncementRefused as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+
+    storage_name = announcements.new_storage_name(extension)
+    destination = announcements.audio_directory() / storage_name
+    destination.write_bytes(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+
+    with engine.begin() as connection:
+        result = connection.execute(text(
+            "INSERT INTO " + announcements.AUDIO_TABLE +
+            " (title, original_filename, storage_name, content_type,"
+            "  byte_size, sha256, uploaded_by, uploaded_at, status)"
+            " VALUES (:title, :original, :storage, :content_type, :size,"
+            "         :digest, :uploaded_by, :uploaded_at, 'active')"), {
+            "title": (title or file.filename or "Untitled").strip()[:200],
+            "original": (file.filename or "")[:255],
+            "storage": storage_name,
+            "content_type": (file.content_type or "").split(";", 1)[0],
+            "size": len(raw), "digest": digest,
+            "uploaded_by": user.id,
+            "uploaded_at": announcements.utcnow().isoformat(),
+        })
+        new_id = result.lastrowid
+    _write_log(db, "info",
+               f"announcement_uploaded id={new_id} bytes={len(raw)} by={user.username}")
+    return _announcement_or_404(new_id)
+
+
+@api.get("/announcements/audio/{audio_id}/stream")
+def stream_announcement_audio(
+    audio_id: int,
+    user: HQUser = Depends(require("menu.announcements.view")),
+):
+    """Play the recording back at HQ, so somebody can hear what they are about
+    to send to a shop before they send it."""
+    row = _announcement_or_404(audio_id)
+    path = announcements.audio_directory() / row["storage_name"]
+    if not path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="The recording is listed but its file is missing from this "
+                   "HQ. Upload it again.")
+    return FileResponse(str(path), media_type=row["content_type"] or "audio/mpeg")
+
+
+@api.delete("/announcements/audio/{audio_id}")
+def archive_announcement_audio(
+    audio_id: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.upload")),
+):
+    """Archive, not delete. A template may still name this recording and the
+    history of what played must stay readable; permanent deletion is its own
+    permission and its own route."""
+    row = _announcement_or_404(audio_id)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE " + announcements.AUDIO_TABLE +
+            " SET status = 'archived' WHERE id = :id"), {"id": audio_id})
+    _write_log(db, "info",
+               f"announcement_archived id={audio_id} by={user.username}")
+    return {"ok": True, "id": audio_id, "title": row["title"]}
+
+
+# ---- Templates ----------------------------------------------------------
+
+@api.get("/announcements/templates")
+def list_announcement_templates(
+    q: Optional[str] = None,
+    status: str = "active",
+    zone: Optional[str] = None,
+    store_id: Optional[int] = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    user: HQUser = Depends(require("menu.announcements.view")),
+):
+    page, page_size = normalize_paging(page, page_size)
+    rows = announcement_service.list_templates(
+        engine, search=q or "", status=status, zone=zone or "", store_id=store_id)
+    offset = (page - 1) * page_size
+    return Page(items=rows[offset:offset + page_size], total=len(rows),
+                page=page, page_size=page_size).as_dict()
+
+
+@api.post("/announcements/templates", status_code=201)
+def create_announcement_template(
+    payload: dict,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.templates.manage")),
+):
+    """The point of the whole feature: decide once what plays where and until
+    when, then never choose again - only press play and pause."""
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="A template needs a name.")
+    items = payload.get("items") or []
+    if not items:
+        raise HTTPException(
+            status_code=400,
+            detail="A template with no lines plays nothing. Add at least one "
+                   "recording and the Store or zone it plays in.")
+    for item in items:
+        try:
+            announcements.item_targets_exactly_one(item.get("store_id"),
+                                                   item.get("zone"))
+            announcements.validate_volume(item.get("volume_percent",
+                                                   announcements.DEFAULT_VOLUME))
+        except announcements.AnnouncementRefused as refusal:
+            raise HTTPException(status_code=400, detail=str(refusal))
+
+    now = announcements.utcnow().isoformat()
+    with engine.begin() as connection:
+        result = connection.execute(text(
+            "INSERT INTO " + announcements.TEMPLATE_TABLE +
+            " (name, description, created_by, created_at, updated_at,"
+            "  starts_at, expires_at, status)"
+            " VALUES (:name, :description, :created_by, :now, :now,"
+            "         :starts_at, :expires_at, 'active')"), {
+            "name": name[:120],
+            "description": (payload.get("description") or "")[:500],
+            "created_by": user.id, "now": now,
+            "starts_at": payload.get("starts_at") or None,
+            "expires_at": payload.get("expires_at") or None,
+        })
+        template_id = result.lastrowid
+        for position, item in enumerate(items):
+            connection.execute(text(
+                "INSERT INTO " + announcements.ITEM_TABLE +
+                " (template_id, audio_id, store_id, zone, position,"
+                "  volume_percent)"
+                " VALUES (:template_id, :audio_id, :store_id, :zone, :position,"
+                "         :volume)"), {
+                "template_id": template_id, "audio_id": item.get("audio_id"),
+                "store_id": item.get("store_id"), "zone": item.get("zone"),
+                "position": position,
+                "volume": announcements.validate_volume(
+                    item.get("volume_percent", announcements.DEFAULT_VOLUME)),
+            })
+    _write_log(db, "info",
+               f"announcement_template_created id={template_id} "
+               f"lines={len(items)} by={user.username}")
+    return _template_or_404(template_id)
+
+
+@api.delete("/announcements/templates/{template_id}")
+def archive_announcement_template(
+    template_id: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.templates.manage")),
+):
+    _template_or_404(template_id)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE " + announcements.TEMPLATE_TABLE +
+            " SET status = 'archived', updated_at = :now WHERE id = :id"),
+            {"id": template_id, "now": announcements.utcnow().isoformat()})
+    _write_log(db, "info",
+               f"announcement_template_archived id={template_id} by={user.username}")
+    return {"ok": True, "id": template_id}
+
+
+# ---- Playing and pausing ------------------------------------------------
+
+@api.get("/announcements/status")
+def announcement_status(
+    q: Optional[str] = None,
+    zone: Optional[str] = None,
+    state: Optional[str] = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    user: HQUser = Depends(require("menu.announcements.view")),
+):
+    """What every Store is doing right now.
+
+    Every active Store appears, including the ones that have never played
+    anything. Listing only Stores with a playback row would hide exactly the
+    shops somebody is looking for when they ask why a campaign is not running
+    everywhere.
+    """
+    page, page_size = normalize_paging(page, page_size)
+    rows = announcement_service.live_status(
+        engine, search=q or "", zone=zone or "", state=state or "")
+    offset = (page - 1) * page_size
+    return Page(items=rows[offset:offset + page_size], total=len(rows),
+                page=page, page_size=page_size).as_dict()
+
+
+@api.post("/announcements/templates/{template_id}/play")
+def play_announcement_template(
+    template_id: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.control")),
+):
+    """Start a template in the Stores it names - or in a subset of them.
+
+    One user can run several templates in several places at once. Nothing here
+    is owned by a session or a person: pressing play records who did it and
+    moves on, so a colleague can pause it without needing the first person's
+    account.
+    """
+    template = _template_or_404(template_id)
+    if not announcement_service.template_is_live(template):
+        window = announcement_service.describe_template_window(template)
+        raise HTTPException(
+            status_code=400,
+            detail=f"That template is {window}, so it will not play. Change "
+                   "its dates or use another one.")
+
+    wanted = (payload or {}).get("store_ids")
+    reachable = announcement_service.stores_for_template(engine,
+                                                         template_id=template_id)
+    targets = [s for s in reachable if s in set(wanted)] if wanted else reachable
+    if not targets:
+        raise HTTPException(
+            status_code=400,
+            detail="That template reaches no active Store. Its Stores may have "
+                   "been archived, or its zone may now be empty.")
+
+    first_audio = (template["items"][0].get("audio_id")
+                   if template.get("items") else None)
+    started, refused = [], []
+    for store_id in targets:
+        current = announcement_service.get_playback(engine, store_id=store_id)
+        try:
+            state = announcements.next_state_for_play(current["state"])
+        except announcements.AnnouncementRefused as refusal:
+            refused.append({"store_id": store_id, "reason": str(refusal)})
+            continue
+        row = announcement_service.set_state(
+            engine, store_id=store_id, state=state, template_id=template_id,
+            audio_id=first_audio, actor_id=user.id)
+        _dispatch_announcement_soon(store_id, row)
+        started.append(store_id)
+    _write_log(db, "info",
+               f"announcement_play template={template_id} started={len(started)} "
+               f"refused={len(refused)} by={user.username}")
+    return {"template_id": template_id, "started": started, "refused": refused}
+
+
+@api.post("/announcements/stores/{store_id}/pause")
+def pause_announcement_in_store(
+    store_id: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.control")),
+):
+    """Pause one Store.
+
+    Pausing a Store that is standing aside for a broadcast is meaningful and is
+    honoured: it says "do not come back when the broadcast ends". That is
+    exactly what keeps auto-resume from starting something somebody silenced.
+    """
+    current = announcement_service.get_playback(engine, store_id=store_id)
+    state = announcements.next_state_for_pause(current["state"])
+    row = announcement_service.set_state(engine, store_id=store_id, state=state,
+                                         ducked_from=None, actor_id=user.id)
+    _dispatch_announcement_soon(store_id, row)
+    _write_log(db, "info",
+               f"announcement_paused store={store_id} by={user.username}")
+    return row
+
+
+@api.post("/announcements/stores/{store_id}/play")
+def play_announcement_in_store(
+    store_id: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.control")),
+):
+    current = announcement_service.get_playback(engine, store_id=store_id)
+    if current.get("template_id") is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing has been chosen for this Store yet. Start a "
+                   "template first, then this button resumes it.")
+    try:
+        state = announcements.next_state_for_play(current["state"])
+    except announcements.AnnouncementRefused as refusal:
+        raise HTTPException(status_code=409, detail=str(refusal))
+    row = announcement_service.set_state(engine, store_id=store_id, state=state,
+                                         actor_id=user.id)
+    _dispatch_announcement_soon(store_id, row)
+    _write_log(db, "info",
+               f"announcement_resumed store={store_id} by={user.username}")
+    return row
+
+
+@api.post("/announcements/pause-all")
+def pause_all_announcements(
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.control_all")),
+):
+    """Every Store at once.
+
+    Its own permission, not announcements.control. Pausing one shop is a local
+    decision; reaching every shop in the estate in one action has the same
+    reach as an emergency stop and should be grantable separately.
+    """
+    rows = announcement_service.live_status(engine)
+    paused = []
+    for row in rows:
+        state = announcements.next_state_for_pause(row["state"])
+        if state == row["state"]:
+            continue
+        updated = announcement_service.set_state(
+            engine, store_id=row["store_id"], state=state, ducked_from=None,
+            actor_id=user.id)
+        _dispatch_announcement_soon(row["store_id"], updated)
+        paused.append(row["store_id"])
+    _write_log(db, "warn",
+               f"announcement_pause_all stores={len(paused)} by={user.username}")
+    return {"paused": paused, "count": len(paused)}
+
+
+@api.post("/announcements/play-all")
+def play_all_announcements(
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.control_all")),
+):
+    """Resume every Store that has something chosen and is not standing aside
+    for a broadcast.
+
+    A Store with no template is skipped rather than failing the whole call: an
+    estate always has a shop that was added yesterday, and one of those must
+    not stop the other two hundred from resuming.
+    """
+    rows = announcement_service.live_status(engine)
+    started, skipped = [], []
+    for row in rows:
+        if row.get("template_id") is None:
+            skipped.append(row["store_id"])
+            continue
+        try:
+            state = announcements.next_state_for_play(row["state"])
+        except announcements.AnnouncementRefused:
+            skipped.append(row["store_id"])
+            continue
+        updated = announcement_service.set_state(
+            engine, store_id=row["store_id"], state=state, actor_id=user.id)
+        _dispatch_announcement_soon(row["store_id"], updated)
+        started.append(row["store_id"])
+    _write_log(db, "info",
+               f"announcement_play_all started={len(started)} "
+               f"skipped={len(skipped)} by={user.username}")
+    return {"started": started, "skipped": skipped, "count": len(started)}
+
+
+@api.post("/announcements/stores/{store_id}/volume")
+def set_announcement_volume(
+    store_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.volume")),
+):
+    """Volume alone. Turning a jingle down must not start it and must not stop
+    it, which is why this is not a field on the play call."""
+    try:
+        row = announcement_service.set_volume(
+            engine, store_id=store_id,
+            volume_percent=payload.get("volume_percent"), actor_id=user.id)
+    except announcements.AnnouncementRefused as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+    # The level reaches the shop immediately, whatever the announcement is
+    # doing - a volume change that only took effect on the next play would be
+    # a slider that appears broken.
+    _dispatch_announcement_volume_soon(store_id, row["volume_percent"])
+    _write_log(db, "info",
+               f"announcement_volume store={store_id} "
+               f"value={row['volume_percent']} by={user.username}")
+    return row
+
+
 app.include_router(api)
 
 

@@ -76,14 +76,29 @@ def test_a_read_only_account_is_not_granted_physical_delivery():
 
 
 def test_the_new_permission_grants_nothing_else():
-    """A boundary that also widened something would be a different change."""
+    """A boundary that also widened something would be a different change.
+
+    Stated as "no supervision or estate-wide code appeared" rather than as an
+    exact copy of the whole default set. The exact set is pinned once, in
+    test_permission_catalog, and a second copy of it here only ever meant that
+    an unrelated addition failed in two places while proving nothing twice.
+    What THIS test is about is the delivery boundary.
+    """
     broadcaster = DEFAULT_ROLE_PERMISSIONS[Role.BROADCASTER]
-    expected = {
-        "menu.broadcast.view", "broadcast.start", "broadcast.stop",
-        "store_audio.control", CODE,
-        "menu.history.view", "menu.receivers.view", "menu.stores.view",
-    }
-    assert broadcaster == frozenset(expected)
+    assert CODE in broadcaster
+
+    # Nothing that reaches another operator's broadcast, the whole estate at
+    # once, or the configuration of either.
+    for forbidden in ("broadcast.emergency_stop", "broadcast.view_ownership",
+                      "broadcast.stop_any", "broadcast.active_view",
+                      "announcements.control_all", "announcements.upload",
+                      "announcements.templates.manage", "broadcast.group_host",
+                      "users.permissions.manage"):
+        assert forbidden not in broadcaster, f"{forbidden} was granted as well"
+
+    # And nothing that edits a Store, a Device or a User.
+    assert not any(code.startswith(("stores.", "devices.", "users."))
+                   for code in broadcaster)
 
 
 def test_seeding_the_catalog_twice_changes_nothing():
