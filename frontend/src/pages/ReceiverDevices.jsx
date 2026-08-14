@@ -1,6 +1,7 @@
 import React from "react";
 import { useParams, Link } from "react-router-dom";
 import { api } from "@/lib/api";
+import StoreOutputDevice from "@/components/StoreOutputDevice";
 import { useAuth } from "@/contexts/AuthContext";
 import { RefreshCw, Plus, KeyRound, Star, Ban, Trash2, ArrowLeft, Archive, ArchiveRestore } from "lucide-react";
 
@@ -494,6 +495,11 @@ export default function ReceiverDevices() {
           )}
         </div>
       </div>
+
+      {/* Which speaker this Store plays through. Placed above the Devices
+          list because it is the question a shop reporting silence produces,
+          and reaching it should not require scrolling past every Device. */}
+      <StoreOutputDevice storeId={storeId} />
 
       {error && (
         <div

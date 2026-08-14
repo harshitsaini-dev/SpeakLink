@@ -9,33 +9,64 @@ import EmergencyStopControl from "@/components/EmergencyStopControl";
 import { useRecordingPlayback } from "@/contexts/RecordingPlaybackContext";
 import { formatIstClock } from "@/lib/time";
 
-const NAV = [
-  { to: "/console", label: "Broadcast Console", icon: LayoutDashboard, testid: "nav-console" },
-  // Supervision, not broadcasting. Hidden unless broadcast.active_view is
-  // held - and ProtectedRoute blocks the URL independently, because a hidden
-  // link is presentation and never a boundary.
-  { to: "/active-broadcasts", label: "Active Broadcasts", icon: Signal, testid: "nav-active-broadcasts" },
-  // Its own menu, not a tab inside the Broadcast Console. A recorded
-  // announcement runs for days without anybody present; a broadcast is
-  // somebody holding a microphone. Putting them on one screen would mean the
-  // controls for the thing running right now sit next to controls for
-  // something that has not started.
-  { to: "/announcements", label: "Announcements", icon: Megaphone, testid: "nav-announcements" },
-  { to: "/stores", label: "Store Management", icon: StoreIcon, testid: "nav-stores" },
-  { to: "/history", label: "Broadcast History", icon: History, testid: "nav-history" },
-  { to: "/receivers", label: "Receiver Status", icon: Radar, testid: "nav-receivers" },
-  { to: "/devices", label: "Receiver Devices", icon: HardDrive, testid: "nav-devices" },
-  { to: "/logs", label: "System Logs", icon: ScrollText, testid: "nav-logs" },
-  // Shown only to accounts holding menu.users.view (OWNER/ADMIN by default,
-  // and per-user overrides can change that). This is presentation, not
-  // protection - the backend answers 403 to the request either way, and a
-  // navigation link is not a permission check. ProtectedRoute enforces the
-  // same MENU_PERMISSION_BY_PATH map against a direct URL visit.
-  { to: "/users", label: "User Management", icon: Users, testid: "nav-users" },
-  // Everybody, deliberately: read-only does not mean unable to secure your own
-  // account.
-  { to: "/account/password", label: "Change Password", icon: KeyRound, testid: "nav-password" },
+//: The sidebar, grouped by what a person is trying to DO.
+//:
+//: A flat list of nine links made the reader scan all nine every time, and it
+//: put "Broadcast Console" - opened many times a day - next to "System Logs",
+//: opened when something has already gone wrong. Grouping is not decoration:
+//: it lets somebody find the thing they came for without reading the things
+//: they did not.
+//:
+//: The order of the groups is the order of the day: what is on air now, then
+//: the estate it plays to, then the records, then the settings. Groups whose
+//: every link is hidden by permission do not render at all - a heading over
+//: nothing tells a reader they are missing something without saying what.
+const NAV_GROUPS = [
+  {
+    title: "Live",
+    items: [
+      { to: "/console", label: "Broadcast Console", icon: LayoutDashboard, testid: "nav-console" },
+      // Supervision, not broadcasting. Hidden unless broadcast.active_view is
+      // held - and ProtectedRoute blocks the URL independently, because a
+      // hidden link is presentation and never a boundary.
+      { to: "/active-broadcasts", label: "Active Broadcasts", icon: Signal, testid: "nav-active-broadcasts" },
+      // Its own menu, not a tab inside the Console. A recorded announcement
+      // runs for days with nobody present; a broadcast is somebody holding a
+      // microphone.
+      { to: "/announcements", label: "Announcements", icon: Megaphone, testid: "nav-announcements" },
+    ],
+  },
+  {
+    title: "Estate",
+    items: [
+      { to: "/stores", label: "Store Management", icon: StoreIcon, testid: "nav-stores" },
+      { to: "/receivers", label: "Receiver Status", icon: Radar, testid: "nav-receivers" },
+      { to: "/devices", label: "Receiver Devices", icon: HardDrive, testid: "nav-devices" },
+    ],
+  },
+  {
+    title: "Records",
+    items: [
+      { to: "/history", label: "Broadcast History", icon: History, testid: "nav-history" },
+      { to: "/logs", label: "System Logs", icon: ScrollText, testid: "nav-logs" },
+    ],
+  },
+  {
+    title: "Administration",
+    items: [
+      // Shown only to accounts holding menu.users.view. Presentation, not
+      // protection - the backend answers 403 either way, and ProtectedRoute
+      // enforces the same map against a direct URL visit.
+      { to: "/users", label: "User Management", icon: Users, testid: "nav-users" },
+      // Everybody, deliberately: read-only does not mean unable to secure
+      // your own account.
+      { to: "/account/password", label: "Change Password", icon: KeyRound, testid: "nav-password" },
+    ],
+  },
 ];
+
+//: Flat, for anything that needs "every link" rather than the grouping.
+const NAV = NAV_GROUPS.flatMap((group) => group.items);
 
 export default function Layout() {
   const { user, logout, can } = useAuth();
@@ -53,10 +84,16 @@ export default function Layout() {
   }, []);
 
   const handleLogout = () => { logout(); navigate("/login"); };
-  const visibleNav = NAV.filter((n) => {
-    const permission = MENU_PERMISSION_BY_PATH[n.to];
+  const allowed = (item) => {
+    const permission = MENU_PERMISSION_BY_PATH[item.to];
     return !permission || can(permission);
-  });
+  };
+  // A group with nothing visible in it is dropped entirely. A heading over an
+  // empty space tells a reader something is missing without telling them what,
+  // which is worse than the group simply not existing for that account.
+  const visibleGroups = NAV_GROUPS
+    .map((group) => ({ ...group, items: group.items.filter(allowed) }))
+    .filter((group) => group.items.length > 0);
 
   return (
     // The shell is exactly one viewport tall and never scrolls itself, so the
@@ -83,22 +120,31 @@ export default function Layout() {
             <div className="text-[10px] uppercase tracking-[0.2em] text-slate-400 mt-0.5">Live Broadcast</div>
           </div>
         </div>
-        <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-4 space-y-1">
-          {visibleNav.map((n) => (
-            <NavLink
-              key={n.to}
-              to={n.to}
-              data-testid={n.testid}
-              onClick={() => setOpen(false)}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
-                  isActive ? "bg-blue-700 text-white" : "text-slate-300 hover:bg-slate-800 hover:text-white"
-                }`
-              }
-            >
-              <n.icon size={18} />
-              {n.label}
-            </NavLink>
+        <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-4 space-y-4">
+          {visibleGroups.map((group) => (
+            <div key={group.title} data-testid={`nav-group-${group.title.toLowerCase()}`}>
+              <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                {group.title}
+              </div>
+              <div className="space-y-1">
+                {group.items.map((n) => (
+                  <NavLink
+                    key={n.to}
+                    to={n.to}
+                    data-testid={n.testid}
+                    onClick={() => setOpen(false)}
+                    className={({ isActive }) =>
+                      `flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
+                        isActive ? "bg-blue-700 text-white" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                      }`
+                    }
+                  >
+                    <n.icon size={18} />
+                    {n.label}
+                  </NavLink>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
         <div className="shrink-0 p-3 border-t border-slate-800">

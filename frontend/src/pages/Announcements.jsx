@@ -53,6 +53,14 @@ export default function Announcements() {
   const status = useAdminList("/announcements/status", { q: "", zone: "", state: "" });
   const [templates, setTemplates] = React.useState([]);
   const [audio, setAudio] = React.useState([]);
+  // Two jobs, kept apart on purpose.
+  //
+  // The Console is what somebody opens twenty times a day, usually in a hurry,
+  // to answer "why is that shop talking". Setup is what somebody does once a
+  // fortnight when a campaign changes. On one screen the second buries the
+  // first: the operator scrolls past a recordings list to reach a Pause button
+  // for a shop that is annoying customers right now.
+  const [tab, setTab] = React.useState("console");
   const [busy, setBusy] = React.useState("");
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");
@@ -147,6 +155,22 @@ export default function Announcements() {
         </div>
       )}
 
+      <nav className="flex gap-1 border-b border-slate-200" data-testid="announcements-tabs">
+        {[["console", "Play console"], ["setup", "Templates & recordings"]].map(
+          ([key, label]) => (
+            <button key={key} onClick={() => setTab(key)}
+                    data-testid={`announcements-tab-${key}`}
+                    aria-current={tab === key ? "page" : undefined}
+                    className={`px-4 py-2 text-sm border-b-2 -mb-px ${
+                      tab === key
+                        ? "border-slate-900 text-slate-900 font-medium"
+                        : "border-transparent text-slate-500 hover:text-slate-800"}`}>
+              {label}
+            </button>
+          ))}
+      </nav>
+
+      {tab === "console" && (<>
       {/* ---- What is playing right now ---- */}
       <section className="bg-white rounded-lg border border-slate-200">
         <div className="px-4 py-3 border-b border-slate-200">
@@ -250,6 +274,9 @@ export default function Announcements() {
                hasMore={status.hasMore} onPage={status.setPage} />
       </section>
 
+      </>)}
+
+      {tab === "setup" && (<>
       {/* ---- Templates ---- */}
       <section className="bg-white rounded-lg border border-slate-200">
         <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
@@ -376,6 +403,7 @@ export default function Announcements() {
           ))}
         </ul>
       </section>
+      </>)}
     </div>
   );
 }
@@ -452,9 +480,22 @@ function UploadRecording({ onUploaded }) {
              onChange={(event) => setTitle(event.target.value)}
              data-testid="recording-title"
              className="px-3 py-2 border border-slate-300 rounded-md text-sm" />
-      <input type="file" accept="audio/*" data-testid="recording-file"
-             onChange={(event) => setFile(event.target.files?.[0] || null)}
-             className="text-sm" />
+      {/* The browser's native file button is the one control on this page
+          that looks like it belongs to a different decade, and it also gives
+          no room to show WHICH file is chosen. Hidden, and driven by a label
+          styled like every other button here - the input is still a real file
+          input, so keyboard and screen-reader behaviour is unchanged. */}
+      <label className="inline-flex items-center gap-2 px-3 py-2 border border-slate-300
+                        rounded-md text-sm cursor-pointer hover:bg-slate-50">
+        <input type="file" accept="audio/*" data-testid="recording-file"
+               onChange={(event) => setFile(event.target.files?.[0] || null)}
+               className="sr-only" />
+        <Upload className="w-4 h-4" />
+        Choose a recording
+      </label>
+      <span className="text-sm text-slate-600" data-testid="recording-chosen">
+        {file ? file.name : "No file chosen yet"}
+      </span>
       <button type="submit" disabled={busy || !file} data-testid="recording-upload"
               className="inline-flex items-center gap-1 px-3 py-2 rounded-md text-sm text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-50">
         <Upload className="w-4 h-4" /> {busy ? "Uploading…" : "Upload"}

@@ -22,3 +22,4 @@ test("the Windows 11 / Local Server / SQLite environment banner is gone", () => 
   expect(SOURCE).not.toContain("Local Server");
   expect(SOURCE).not.toMatch(/text-slate-500 hidden sm:block[^<]*SQLite/);
 });
+
