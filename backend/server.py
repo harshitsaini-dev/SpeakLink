@@ -5582,6 +5582,8 @@ def search_logs(
     device_public_id: Optional[str] = None,
     include_archived: bool = False,
     archived_only: bool = False,
+    sort: Optional[str] = None,
+    dir: str = "asc",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     db: Session = Depends(get_db),
@@ -5651,6 +5653,8 @@ def search_broadcast_history(
     region: Optional[str] = None,
     include_archived: bool = False,
     archived_only: bool = False,
+    sort: Optional[str] = None,
+    dir: str = "asc",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     db: Session = Depends(get_db),
@@ -5717,7 +5721,26 @@ def search_broadcast_history(
               .exists())
 
     total = query.count()
-    rows = apply_paging(query.order_by(BroadcastSession.id.desc()), page, page_size).all()
+    # ORDER BY from an allowlist. The default stays newest-first, which is what
+    # a history is for; a named column replaces it rather than adding to it.
+    orderable = {
+        "campaign_name": BroadcastSession.campaign_name,
+        "started_at": BroadcastSession.started_at,
+        "ended_at": BroadcastSession.ended_at,
+        "status": BroadcastSession.status,
+        "started_by": BroadcastSession.started_by_display_name,
+    }
+    if sort in orderable:
+        column = orderable[sort]
+        # Case-insensitive on the text columns, for the same reason as
+        # everywhere else: sorted by raw bytes a list looks broken to the
+        # person reading it.
+        key = (func.lower(column)
+               if sort in ("campaign_name", "status", "started_by") else column)
+        ordering = key.desc() if str(dir).lower() == "desc" else key.asc()
+    else:
+        ordering = BroadcastSession.id.desc()
+    rows = apply_paging(query.order_by(ordering), page, page_size).all()
     # The SAME recording attachment the unpaginated /broadcast/history applies.
     #
     # This is the bug this route had: History in the browser reads THIS
@@ -7885,6 +7908,16 @@ EXPORTS = {
                     ("created_at", "Created"), ("last_login_at", "Last sign-in")],
         "sorts": "USER_SORTS",
     },
+    "broadcast-history": {
+        "permission": "menu.history.view",
+        "columns": [("campaign_name", "Campaign"),
+                    ("started_by_display_name", "Broadcaster"),
+                    ("started_at", "Started"), ("ended_at", "Ended"),
+                    ("status", "Status"),
+                    ("online_store_count", "Stores reached"),
+                    ("offline_store_count", "Stores offline")],
+        "sorts": "BROADCAST_HISTORY_SORTS",
+    },
     "system-logs": {
         "permission": "menu.logs.view",
         "columns": [("created_at", "Time"), ("level", "Level"),
@@ -7909,6 +7942,14 @@ STORE_SORTS = {
     "region": lambda row: row.get("region"),
     "status": lambda row: row.get("status"),
     "lifecycle": lambda row: row.get("lifecycle_state"),
+}
+BROADCAST_HISTORY_SORTS = {
+    "campaign_name": lambda row: row.get("campaign_name"),
+    "started_at": lambda row: row.get("started_at"),
+    "ended_at": lambda row: row.get("ended_at"),
+    "status": lambda row: row.get("status"),
+    "started_by": lambda row: row.get("started_by_display_name")
+                              or row.get("started_by_username"),
 }
 SYSTEM_LOG_SORTS = {
     "created_at": lambda row: row.get("created_at"),
@@ -7973,6 +8014,19 @@ def _export_rows(dataset: str, params: dict, user: HQUser, db: Session) -> list[
             scope_region=params.get("scope_region"),
             sort=params.get("sort"), dir=params.get("dir", "asc"),
             page=1, page_size=MAX_EXPORT_ROWS, user=user)["items"]
+    if dataset == "broadcast-history":
+        return search_broadcast_history(
+            q=params.get("q"), status_f=params.get("status"),
+            date_from=params.get("date_from"), date_to=params.get("date_to"),
+            started_by=_as_int(params.get("started_by")),
+            store_id=_as_int(params.get("store_id")),
+            city=params.get("city"), region=params.get("region"),
+            include_archived=str(params.get("include_archived", "")).lower()
+                             in ("1", "true", "yes"),
+            archived_only=str(params.get("archived_only", "")).lower()
+                          in ("1", "true", "yes"),
+            sort=params.get("sort"), dir=params.get("dir", "asc"),
+            page=1, page_size=MAX_EXPORT_ROWS, db=db, user=user)["items"]
     if dataset == "system-logs":
         return search_logs(
             q=params.get("q"), level=params.get("level"),

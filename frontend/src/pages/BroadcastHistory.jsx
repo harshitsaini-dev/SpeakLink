@@ -10,6 +10,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useAdminList, useBulkSelection } from "@/lib/adminList";
 import {
   FilterBar, SearchInput, FilterSelect, FilterDate, ListState, Pager,
+  SortableTh, ExportButton,
   BulkBar, DestructiveModal,
 } from "@/components/AdminFilters";
 
@@ -28,6 +29,7 @@ export default function BroadcastHistory() {
   // says WHICH recording to play, and asks for it to start.
   const { active, playRecording, forgetRecording } = useRecordingPlayback();
   const list = useAdminList("/broadcast/history/search", {
+    sort: "", dir: "asc",
     q: "", status: "", date_from: "", date_to: "", started_by: "",
     store_id: "", city: "", region: "",
     include_archived: false, archived_only: false,
@@ -106,6 +108,7 @@ export default function BroadcastHistory() {
     <div className="space-y-4" data-testid="history-page">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight text-slate-900">Broadcast History</h1>
+        <ExportButton dataset="broadcast-history" list={list} testId="history-export" />
         <button data-testid="history-refresh-btn" onClick={list.reload}
                 className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
           <RefreshCw size={14} /> Refresh
@@ -192,12 +195,12 @@ export default function BroadcastHistory() {
             <tr>
               <th className="px-3 py-2 w-8"></th>
               <th className="px-3 py-2">#</th>
-              <th className="px-3 py-2">Campaign</th>
+              <SortableTh column="campaign_name" label="Campaign" list={list} />
               <th className="px-3 py-2">Mode</th>
               <th className="px-3 py-2">Targets</th>
-              <th className="px-3 py-2">Started</th>
+              <SortableTh column="started_at" label="Started" list={list} />
               <th className="px-3 py-2">Duration</th>
-              <th className="px-3 py-2">Status</th>
+              <SortableTh column="status" label="Status" list={list} />
               <th className="px-3 py-2">Recording</th>
             </tr>
           </thead>
