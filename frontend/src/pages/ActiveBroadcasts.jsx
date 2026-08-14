@@ -21,7 +21,7 @@ import React from "react";
 import { Search, RefreshCcw, Square, X } from "lucide-react";
 import SpeakLinkMark from "@/components/SpeakLinkMark";
 import { api } from "@/lib/api";
-import { SearchableSelect, ExportButton } from "@/components/AdminFilters";
+import { SearchableSelect, ExportButton, SortableTh } from "@/components/AdminFilters";
 import SupervisedWebAudience from "@/components/SupervisedWebAudience";
 import { useAdminList } from "@/lib/adminList";
 
@@ -269,13 +269,16 @@ export default function ActiveBroadcasts() {
         <table className="w-full text-sm">
           <thead className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200 bg-slate-50">
             <tr>
-              <th className="px-3 py-2">Status</th>
+              <SortableTh column="status" label="Status" list={list} />
               {/* Absent, not hidden: without view_ownership the response
                   carries no owner field for another operator's broadcast. */}
-              {mayViewOwnership && <th className="px-3 py-2" data-testid="col-broadcaster">Broadcaster</th>}
-              <th className="px-3 py-2">Broadcast</th>
-              <th className="px-3 py-2">Started</th>
-              <th className="px-3 py-2">Stores</th>
+              {mayViewOwnership && (
+                <SortableTh column="started_by" label="Broadcaster" list={list}
+                            thTestId="col-broadcaster" />
+              )}
+              <SortableTh column="campaign_name" label="Broadcast" list={list} />
+              <SortableTh column="started_at" label="Started" list={list} />
+              <SortableTh column="target_store_count" label="Stores" list={list} />
               <th className="px-3 py-2 text-right">Actions</th>
             </tr>
           </thead>

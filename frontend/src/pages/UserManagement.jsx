@@ -87,6 +87,7 @@ function Badge({ text, styles }) {
 export default function UserManagement() {
   const { user: me, can } = useAuth();
   const list = useAdminList("/users/search", {
+    sort: "", dir: "asc",
     q: "", role: "", state: "",
     scope_store_id: "", scope_city: "", scope_region: "",
   });
@@ -240,10 +241,10 @@ export default function UserManagement() {
         <table className="w-full text-sm" data-testid="users-table">
           <thead className="text-left text-slate-500">
             <tr>
-              <th className="py-2 px-3">Name</th>
-              <th className="px-3">Username</th>
-              <th className="px-3">Role</th>
-              <th className="px-3">Status</th>
+              <SortableTh column="display_name" label="Name" list={list} />
+              <SortableTh column="username" label="Username" list={list} />
+              <SortableTh column="role" label="Role" list={list} />
+              <SortableTh column="state" label="Status" list={list} />
               <th className="px-3 text-right">Actions</th>
             </tr>
           </thead>

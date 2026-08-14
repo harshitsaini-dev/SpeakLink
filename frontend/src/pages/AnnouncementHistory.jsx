@@ -99,12 +99,14 @@ export default function AnnouncementHistory() {
             What each shop played, and why it stopped.
           </p>
         </div>
-        <ExportButton dataset="announcement-history" list={list}
-                      testId="announcement-history-export" />
-        <button data-testid="announcement-history-refresh" onClick={list.reload}
+        <div className="flex items-center gap-2">
+          <ExportButton dataset="announcement-history" list={list}
+                        testId="announcement-history-export" />
+          <button data-testid="announcement-history-refresh" onClick={list.reload}
                 className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
           <RefreshCw size={14} /> Refresh
         </button>
+        </div>
       </div>
 
       {error && (

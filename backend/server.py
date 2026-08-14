@@ -3690,6 +3690,7 @@ def active_management_list(
     owner_user_id: int | None = None,
     store_id: int | None = None,
     sort: str = abm.SORT_NEWEST,
+    dir: str = "asc",
     page: int = 1,
     page_size: int = abm.DEFAULT_PAGE_SIZE,
     db: Session = Depends(get_db),
@@ -3727,11 +3728,18 @@ def active_management_list(
         raise HTTPException(status_code=403,
                             detail="You do not have permission to filter by Store.")
 
+    # Column sorting, applied to the whole filtered set before pagination.
+    # abm.filter_and_sort already ordered by newest/oldest; a named column
+    # REPLACES that rather than adding to it, so there is always a way back to
+    # the reading the page opens with.
+    serialized = [row.serialize(visibility) for row in rows]
+    if sort not in abm.SORTS:
+        serialized = sort_rows(serialized, sort, dir, ACTIVE_BROADCAST_SORTS)
     window, total, resolved_page, resolved_size = abm.paginate(
-        rows, page=page, page_size=page_size)
+        serialized, page=page, page_size=page_size)
     pages = (total + resolved_size - 1) // resolved_size if resolved_size else 0
     return {
-        "items": [row.serialize(visibility) for row in window],
+        "items": window,
         "total": total,
         "page": resolved_page,
         "page_size": resolved_size,
@@ -5525,7 +5533,8 @@ def search_stores(
     # ORDER BY from an allowlist, never from the parameter.
     orderable = {"store_code": Store.store_code, "store_name": Store.store_name,
                  "city": Store.city, "region": Store.region,
-                 "status": Store.status, "lifecycle": Store.lifecycle_state}
+                 "status": Store.status, "lifecycle": Store.lifecycle_state,
+                 "type": Store.is_online_store}
     column = orderable.get(sort or "", Store.store_code)
     # Case-insensitive, because a reader does not think in ASCII. Sorted by
     # raw bytes, "NIT Faridabad" lands before "Nangal Raya" and the list looks
@@ -5534,7 +5543,8 @@ def search_stores(
     # lower() rather than COLLATE NOCASE: the same expression works on SQLite
     # and PostgreSQL, and a collation that exists on one and not the other is
     # a page that sorts differently depending on where it is deployed.
-    key = func.lower(column) if column is not Store.status else column
+    key = (column if column in (Store.status, Store.is_online_store)
+           else func.lower(column))
     ordered = key.desc() if str(dir).lower() == "desc" else key.asc()
     rows = apply_paging(query.order_by(ordered, Store.store_code),
                         page, page_size).all()
@@ -5724,7 +5734,14 @@ def search_broadcast_history(
     # ORDER BY from an allowlist. The default stays newest-first, which is what
     # a history is for; a named column replaces it rather than adding to it.
     orderable = {
+        "id": BroadcastSession.id,
         "campaign_name": BroadcastSession.campaign_name,
+        "target_mode": BroadcastSession.target_mode,
+        # "Targets" is the count the row displays, and "Duration" is derived
+        # from the two timestamps - so both are sorted by what they are made
+        # of rather than by a column that does not exist.
+        "targets": BroadcastSession.online_store_count,
+        "duration": BroadcastSession.ended_at,
         "started_at": BroadcastSession.started_at,
         "ended_at": BroadcastSession.ended_at,
         "status": BroadcastSession.status,
@@ -5736,7 +5753,8 @@ def search_broadcast_history(
         # everywhere else: sorted by raw bytes a list looks broken to the
         # person reading it.
         key = (func.lower(column)
-               if sort in ("campaign_name", "status", "started_by") else column)
+               if sort in ("campaign_name", "status", "started_by",
+                           "target_mode") else column)
         ordering = key.desc() if str(dir).lower() == "desc" else key.asc()
     else:
         ordering = BroadcastSession.id.desc()
@@ -7959,9 +7977,11 @@ STORE_SORTS = {
     "region": lambda row: row.get("region"),
     "status": lambda row: row.get("status"),
     "lifecycle": lambda row: row.get("lifecycle_state"),
+    "type": lambda row: row.get("is_online_store"),
 }
 BROADCAST_HISTORY_SORTS = {
     "campaign_name": lambda row: row.get("campaign_name"),
+    "target_mode": lambda row: row.get("target_mode"),
     "started_at": lambda row: row.get("started_at"),
     "ended_at": lambda row: row.get("ended_at"),
     "status": lambda row: row.get("status"),
@@ -7969,6 +7989,8 @@ BROADCAST_HISTORY_SORTS = {
                               or row.get("started_by_username"),
 }
 RECEIVER_DEVICE_SORTS = {
+    "role": lambda row: row.get("is_primary"),
+    "lifecycle": lambda row: row.get("lifecycle"),
     "display_name": lambda row: row.get("display_name"),
     "public_id": lambda row: row.get("public_id"),
     "store_name": lambda row: row.get("store_name"),
@@ -7982,6 +8004,9 @@ ACTIVE_BROADCAST_SORTS = {
     "target_mode": lambda row: row.get("target_mode"),
     "started_at": lambda row: row.get("started_at"),
     "target_store_count": lambda row: row.get("target_store_count"),
+    "status": lambda row: row.get("status"),
+    "started_by": lambda row: row.get("started_by_display_name")
+                              or row.get("started_by_username"),
 }
 SYSTEM_LOG_SORTS = {
     "created_at": lambda row: row.get("created_at"),

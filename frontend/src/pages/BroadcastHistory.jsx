@@ -113,11 +113,14 @@ export default function BroadcastHistory() {
     <div className="space-y-4" data-testid="history-page">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight text-slate-900">Broadcast History</h1>
-        <ExportButton dataset="broadcast-history" list={list} testId="history-export" />
-        <button data-testid="history-refresh-btn" onClick={list.reload}
+        <div className="flex items-center gap-2">
+          <ExportButton dataset="broadcast-history" list={list}
+                        testId="history-export" />
+          <button data-testid="history-refresh-btn" onClick={list.reload}
                 className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
           <RefreshCw size={14} /> Refresh
         </button>
+        </div>
       </div>
 
       <FilterBar onClear={list.clearFilters} activeCount={list.activeCount}
@@ -199,12 +202,12 @@ export default function BroadcastHistory() {
           <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
             <tr>
               <th className="px-3 py-2 w-8"></th>
-              <th className="px-3 py-2">#</th>
+              <SortableTh column="id" label="#" list={list} />
               <SortableTh column="campaign_name" label="Campaign" list={list} />
-              <th className="px-3 py-2">Mode</th>
-              <th className="px-3 py-2">Targets</th>
+              <SortableTh column="target_mode" label="Mode" list={list} />
+              <SortableTh column="targets" label="Targets" list={list} />
               <SortableTh column="started_at" label="Started" list={list} />
-              <th className="px-3 py-2">Duration</th>
+              <SortableTh column="duration" label="Duration" list={list} />
               <SortableTh column="status" label="Status" list={list} />
               <th className="px-3 py-2">Recording</th>
             </tr>

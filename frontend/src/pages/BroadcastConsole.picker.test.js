@@ -523,3 +523,42 @@ test("a selection survives a filter change", async () => {
 
   expect(screen.getByTestId(`store-checkbox-${firstCode}`).checked).toBe(true);
 });
+
+
+// ===========================================================================
+// Sorting the picker
+//
+// Deliberately in the browser, unlike everywhere else. The other tables hold
+// one page of a longer list, so sorting locally would order fifty rows while
+// claiming to order three hundred. This one holds every Store the account can
+// see, already in memory - so ordering it here orders all of it.
+// ===========================================================================
+
+test("the picker can be sorted by a column, and back again", async () => {
+  await renderConsole();
+  const codesBefore = visibleCodes();
+
+  await act(async () => { fireEvent.click(screen.getByTestId("picker-sort-store_name")); });
+  const ascending = visibleCodes();
+
+  await act(async () => { fireEvent.click(screen.getByTestId("picker-sort-store_name")); });
+  const descending = visibleCodes();
+  expect(descending).not.toEqual(ascending);
+
+  // Third click restores the list's own order, so there is a way back.
+  await act(async () => { fireEvent.click(screen.getByTestId("picker-sort-store_name")); });
+  expect(visibleCodes()).toEqual(codesBefore);
+});
+
+test("sorting does not disturb what is selected", async () => {
+  // The selection belongs to the broadcast, not to the order the table
+  // happens to be in.
+  await renderConsole();
+  const first = visibleCodes()[0];
+  await act(async () => {
+    fireEvent.click(screen.getByTestId(`store-checkbox-${first}`));
+  });
+
+  await act(async () => { fireEvent.click(screen.getByTestId("picker-sort-store_name")); });
+  expect(screen.getByTestId(`store-checkbox-${first}`).checked).toBe(true);
+});

@@ -69,11 +69,14 @@ export default function ReceiverDeviceFleet() {
             enrol, rotate or promote.
           </p>
         </div>
-        <ExportButton dataset="receiver-devices" list={list} testId="fleet-export" />
-        <button data-testid="fleet-refresh-btn" onClick={list.reload}
+        <div className="flex items-center gap-2">
+          <ExportButton dataset="receiver-devices" list={list}
+                        testId="fleet-export" />
+          <button data-testid="fleet-refresh-btn" onClick={list.reload}
                 className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
           <RefreshCw size={14} /> Refresh
         </button>
+        </div>
       </div>
 
       {/* The kit lives on this page because this is where somebody stands when
@@ -142,9 +145,9 @@ export default function ReceiverDeviceFleet() {
               <SortableTh column="store_name" label="Store" list={list} />
               <SortableTh column="city" label="City" list={list} />
               <SortableTh column="region" label="Zone" list={list} />
-              <th scope="col" className="px-3 py-2">Role</th>
+              <SortableTh column="role" label="Role" list={list} />
               <SortableTh column="status" label="Status" list={list} />
-              <th scope="col" className="px-3 py-2">Lifecycle</th>
+              <SortableTh column="lifecycle" label="Lifecycle" list={list} />
               <th scope="col" className="px-3 py-2 text-right">Actions</th>
             </tr>
           </thead>

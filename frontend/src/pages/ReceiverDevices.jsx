@@ -2,6 +2,7 @@ import React from "react";
 import { useParams, Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import StoreOutputDevice from "@/components/StoreOutputDevice";
+import { ExportButton } from "@/components/AdminFilters";
 import { useAuth } from "@/contexts/AuthContext";
 import { RefreshCw, Plus, KeyRound, Star, Ban, Trash2, ArrowLeft, Archive, ArchiveRestore } from "lucide-react";
 
@@ -476,6 +477,13 @@ export default function ReceiverDevices() {
             />
             Show Archived {archivedDevices.length > 0 && `(${archivedDevices.length})`}
           </label>
+          {/* Scoped to THIS Store. The dataset is the fleet's, narrowed by a
+              filter, so the file cannot contain a Device from a shop the
+              reader did not open. */}
+          <ExportButton dataset="receiver-devices"
+                        list={{ filters: { store_id: storeId,
+                                           include_archived: showArchived } }}
+                        testId="devices-export" />
           <button
             data-testid="devices-refresh-btn"
             onClick={load}

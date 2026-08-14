@@ -15,6 +15,7 @@ const LEVEL_COLOR = { info: "text-slate-700", warn: "text-amber-700", error: "te
 export default function SystemLogs() {
   const { can } = useAuth();
   const list = useAdminList("/logs/search", {
+    sort: "", dir: "asc",
     q: "", level: "", date_from: "", date_to: "",
     actor_user_id: "", store_id: "", device_public_id: "",
     include_archived: false, archived_only: false,
@@ -59,11 +60,14 @@ export default function SystemLogs() {
     <div className="space-y-4" data-testid="logs-page">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight text-slate-900">System Logs</h1>
-        <ExportButton dataset="system-logs" list={list} testId="logs-export" />
-          <button data-testid="logs-refresh-btn" onClick={list.reload}
+          <div className="flex items-center gap-2">
+            <ExportButton dataset="system-logs" list={list}
+                          testId="logs-export" />
+            <button data-testid="logs-refresh-btn" onClick={list.reload}
                 className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
           <RefreshCw size={14} /> Refresh
         </button>
+          </div>
       </div>
 
       <FilterBar onClear={list.clearFilters} activeCount={list.activeCount}
@@ -140,9 +144,11 @@ export default function SystemLogs() {
           <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
             <tr>
               <th className="px-3 py-2 w-8"></th>
-              <th className="px-3 py-2 w-40">Time</th>
-              <th className="px-3 py-2 w-24">Level</th>
-              <th className="px-3 py-2">Message</th>
+              <SortableTh column="created_at" label="Time" list={list}
+                          className="w-40" />
+              <SortableTh column="level" label="Level" list={list}
+                          className="w-24" />
+              <SortableTh column="message" label="Message" list={list} />
             </tr>
           </thead>
           <tbody className="font-mono text-xs">

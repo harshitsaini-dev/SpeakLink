@@ -99,6 +99,14 @@ export default function BroadcastConsole() {
   const [filterZone, setFilterZone] = React.useState("");
   const [filterCity, setFilterCity] = React.useState("");
   const [filterStatus, setFilterStatus] = React.useState("all");
+  //: Sorting the PICKER, in the browser.
+  //:
+  //: Everywhere else sorting goes to the server, because the browser holds one
+  //: page and sorting it would order fifty rows while claiming to order three
+  //: hundred. Here the opposite is true: this table is fed from the Stores
+  //: this account can already see, all of them, held in memory - so sorting
+  //: them here orders the whole thing, and a round trip would buy nothing.
+  const [storeSort, setStoreSort] = React.useState({ column: "", dir: "asc" });
   const [storePage, setStorePage] = React.useState(1);
   const [storePageSize, setStorePageSize] = React.useState(STORE_PAGE_SIZES[0]);
   const [selectedIds, setSelectedIds] = React.useState(new Set());
@@ -232,7 +240,7 @@ export default function BroadcastConsole() {
 
   const filteredStores = React.useMemo(() => {
     const ql = q.trim().toLowerCase();
-    return stores.filter((store) => {
+    const kept = stores.filter((store) => {
       // Code, name, city and Zone: an operator searching "UN ZONE" or
       // "Dwarka" means the same kind of thing as searching "BP".
       const matchesSearch = !ql
@@ -254,7 +262,31 @@ export default function BroadcastConsole() {
         || (statuses.includes("offline") && !isReceiverOnline(store));
       return matchesSearch && matchesZone && matchesCity && matchesStatus;
     });
-  }, [stores, q, filterZone, filterCity, filterStatus]);
+
+    const ordered = [...kept];
+    if (storeSort.column) {
+      const read = {
+        store_code: (row) => row.store_code,
+        store_name: (row) => row.store_name,
+        city: (row) => `${row.city} ${row.region}`,
+        status: (row) => (isReceiverOnline(row) ? "online" : "offline"),
+        // What the Store is doing in THIS broadcast, which is a different
+        // question from whether it is connected.
+        //
+        // Read from `current` rather than from the targetsById map: that map
+        // is built further down the component, and reaching it from here
+        // would be a use-before-define that throws on the first render.
+        play_status: (row) => ((current?.targets || [])
+          .find((target) => target.store_id === row.id)?.play_status || ""),
+      }[storeSort.column];
+      ordered.sort((left, right) => {
+        const a = String(read(left) ?? "").toLowerCase();
+        const b = String(read(right) ?? "").toLowerCase();
+        return storeSort.dir === "desc" ? b.localeCompare(a) : a.localeCompare(b);
+      });
+    }
+    return ordered;
+  }, [stores, q, filterZone, filterCity, filterStatus, storeSort, current]);
 
   // Filtering changes what "page 3" means, so staying on it would show an empty
   // table. The SELECTION is untouched: it belongs to the broadcast, not to
@@ -1052,11 +1084,16 @@ export default function BroadcastConsole() {
             <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
               <tr>
                 {targetMode === "selected" && <th className="px-3 py-2 w-10"></th>}
-                <th className="px-3 py-2">Code</th>
-                <th className="px-3 py-2">Name</th>
-                <th className="px-3 py-2">City / Zone</th>
-                <th className="px-3 py-2">Status</th>
-                <th className="px-3 py-2">Play Status</th>
+                <PickerTh column="store_code" label="Code" sort={storeSort}
+                          onSort={setStoreSort} />
+                <PickerTh column="store_name" label="Name" sort={storeSort}
+                          onSort={setStoreSort} />
+                <PickerTh column="city" label="City / Zone" sort={storeSort}
+                          onSort={setStoreSort} />
+                <PickerTh column="status" label="Status" sort={storeSort}
+                          onSort={setStoreSort} />
+                <PickerTh column="play_status" label="Play Status"
+                          sort={storeSort} onSort={setStoreSort} />
                 {isLive && (
                   <th className="px-3 py-2" title="Add or remove this Store without interrupting the rest of the broadcast.">
                     In Broadcast
@@ -1340,5 +1377,36 @@ function StatCard({ label, value, testid, icon, color }) {
       <div className="text-[10px] uppercase tracking-widest text-slate-500 flex items-center gap-1">{icon}{label}</div>
       <div className={`text-xl font-bold ${textColor} font-mono`}>{value}</div>
     </div>
+  );
+}
+
+/**
+ * A sortable heading for the Store picker.
+ *
+ * Deliberately not the shared SortableTh: that one drives a SERVER query,
+ * because those tables hold one page of a longer list. This table holds every
+ * Store the account can see, already in memory - so ordering it here orders
+ * all of it, and a round trip would buy nothing.
+ */
+function PickerTh({ column, label, sort, onSort }) {
+  const active = sort.column === column;
+  const toggle = () => {
+    if (!active) return onSort({ column, dir: "asc" });
+    if (sort.dir === "asc") return onSort({ column, dir: "desc" });
+    // Third click restores the list's own order, so there is a way back.
+    return onSort({ column: "", dir: "asc" });
+  };
+  return (
+    <th className="px-3 py-2"
+        aria-sort={active ? (sort.dir === "desc" ? "descending" : "ascending")
+                          : "none"}>
+      <button type="button" onClick={toggle} data-testid={`picker-sort-${column}`}
+              className="inline-flex items-center gap-1 hover:text-slate-900">
+        {label}
+        <span aria-hidden="true" className={active ? "text-slate-900" : "text-slate-300"}>
+          {active ? (sort.dir === "desc" ? "↓" : "↑") : "⇅"}
+        </span>
+      </button>
+    </th>
   );
 }

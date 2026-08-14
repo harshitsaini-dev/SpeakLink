@@ -261,7 +261,7 @@ export function SearchableSelect({ label, value, onChange, options = [], testId,
  * whole set before paginating it.
  */
 export function SortableTh({ column, label, list, className = "",
-                             align = "left" }) {
+                             align = "left", thTestId = null }) {
   const active = list.filters.sort === column;
   const direction = active ? (list.filters.dir || "asc") : null;
 
@@ -283,6 +283,10 @@ export function SortableTh({ column, label, list, className = "",
 
   return (
     <th className={`px-3 py-2 ${className}`}
+        // Kept when a caller asks for it: a column that exists only for
+        // accounts holding a permission is tested by that id, and losing it
+        // would quietly retire the test that proves the column is hidden.
+        data-testid={thTestId || undefined}
         style={{ textAlign: align }}
         aria-sort={active ? (direction === "desc" ? "descending" : "ascending")
                           : "none"}>
