@@ -751,20 +751,22 @@ export default function BroadcastConsole() {
             {targetMode === "region" && (
               <div>
                 <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Zone</label>
-                {/* Searchable, because this list is exactly as long as the
-                    estate's zone count and a plain dropdown can only be
-                    scrolled. */}
-                <SearchableSelect testId="region-select" value={region}
-                                  onChange={setRegion} options={meta.regions}
-                                  disabled={isLive} />
+                {/* Several zones, not one. A campaign is almost never one
+                    zone, and with a single-value picker "the North and the
+                    South" meant either two broadcasts - two microphones, two
+                    sets of leases, two things to remember to stop - or
+                    picking every shop by hand. */}
+                <FilterSelect testId="region-select" allLabel="— select —"
+                              value={region} onChange={setRegion}
+                              options={meta.regions} disabled={isLive} />
               </div>
             )}
             {targetMode === "city" && (
               <div>
                 <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">City</label>
-                <SearchableSelect testId="city-select" value={city}
-                                  onChange={setCity} options={meta.cities}
-                                  disabled={isLive} />
+                <FilterSelect testId="city-select" allLabel="— select —"
+                              value={city} onChange={setCity}
+                              options={meta.cities} disabled={isLive} />
               </div>
             )}
           </div>

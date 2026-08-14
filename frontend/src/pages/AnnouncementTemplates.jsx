@@ -2,7 +2,7 @@ import React from "react";
 import { api } from "@/lib/api";
 import { Play, RefreshCw, Plus, X, Volume2 } from "lucide-react";
 import { useAdminList } from "@/lib/adminList";
-import { FilterBar, SearchInput, FilterSelect, ListState, Pager } from "@/components/AdminFilters";
+import { FilterBar, SearchInput, FilterSelect, ListState, Pager, SortableTh, ExportButton } from "@/components/AdminFilters";
 import { BulkBar, BulkDeleteConfirm, useBulkSelection } from "@/components/BulkBar";
 import { useAuth } from "@/contexts/AuthContext";
 
@@ -18,7 +18,7 @@ import { useAuth } from "@/contexts/AuthContext";
 export default function AnnouncementTemplates() {
   const { can } = useAuth();
   const list = useAdminList("/announcements/templates", {
-    q: "", status: "active", zone: "", window: "", store_id: "",
+    q: "", status: "active", zone: "", window: "", store_id: "", sort: "", dir: "asc",
   });
   const bulk = useBulkSelection(list);
   const [audio, setAudio] = React.useState([]);
@@ -81,6 +81,7 @@ export default function AnnouncementTemplates() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <ExportButton dataset="announcement-templates" list={list} testId="templates-export" />
           <button data-testid="templates-refresh" onClick={list.reload}
                   className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
             <RefreshCw size={14} /> Refresh
@@ -184,9 +185,9 @@ export default function AnnouncementTemplates() {
           <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
             <tr>
               {(mayManage || mayDelete) && <th className="px-3 py-2 w-8"></th>}
-              <th className="px-3 py-2">Template</th>
+              <SortableTh column="name" label="Template" list={list} />
               <th className="px-3 py-2">Plays in</th>
-              <th className="px-3 py-2">Window</th>
+              <SortableTh column="window" label="Window" list={list} />
               <th className="px-3 py-2 text-right">Actions</th>
             </tr>
           </thead>

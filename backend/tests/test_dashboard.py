@@ -300,3 +300,185 @@ def test_the_store_report_respects_the_same_filters(client):
 
     northern = summary(client, headers, zone="NORTH")
     assert [row["store_code"] for row in northern["by_store"]] == ["NA"]
+
+
+# ===========================================================================
+# Export
+#
+# The whole FILTERED set, not the page on screen. An export giving fifty rows
+# while the table said 184 would be read as the answer and acted on, and
+# nobody would know to check.
+# ===========================================================================
+
+def test_an_export_returns_every_filtered_row_not_one_page(client):
+    headers = sign_in(client)
+    for index in range(60):
+        make_store(client, headers, f"S{index:02d}", region="NORTH")
+
+    response = client.get("/api/export/announcement-status?zone=NORTH",
+                          headers=headers)
+    assert response.status_code == 200, response.text
+    lines = [line for line in response.text.splitlines() if line.strip()]
+    assert len(lines) == 61, "a header plus every matching row"
+
+
+def test_an_export_honours_the_filters_it_was_given(client):
+    headers = sign_in(client)
+    make_store(client, headers, "NA", region="NORTH")
+    make_store(client, headers, "SA", region="SOUTH")
+
+    northern = client.get("/api/export/announcement-status?zone=NORTH",
+                          headers=headers).text
+    assert "NA" in northern
+    assert "SA" not in northern
+
+
+def test_an_export_is_named_and_typed_so_a_spreadsheet_opens_it(client):
+    headers = sign_in(client)
+    make_store(client, headers, "NA")
+    response = client.get("/api/export/announcement-status", headers=headers)
+
+    assert "text/csv" in response.headers["content-type"]
+    assert "attachment" in response.headers["content-disposition"]
+    assert ".csv" in response.headers["content-disposition"]
+    # The byte-order mark is what makes Excel read it as UTF-8; without it
+    # every non-ASCII Store name arrives mangled.
+    assert response.text.startswith("﻿")
+
+
+def test_a_value_that_looks_like_a_formula_is_not_one(client):
+    """A cell beginning = + - or @ executes when a spreadsheet opens it. Not
+    malicious in this product, but a bad habit to leave lying around."""
+    headers = sign_in(client)
+    response = client.post("/api/stores", headers=headers, json={
+        "store_code": "EQ", "store_name": "=SUM(A1)", "city": "DELHI",
+        "region": "NORTH"})
+    assert response.status_code == 201, response.text
+
+    body = client.get("/api/export/announcement-status", headers=headers).text
+    assert "'=SUM(A1)" in body
+    assert ",=SUM(A1)" not in body
+
+
+def test_an_export_needs_the_permission_the_page_needs(client):
+    """A download URL is the easiest thing in a product to share by accident."""
+    headers = sign_in(client)
+    make_store(client, headers, "NA")
+    client.post("/api/users", headers=headers, json={
+        "username": "outsider", "password": PASSWORD, "display_name": "o",
+        "role": "BROADCASTER"})
+    outsider = sign_in(client, "outsider")
+
+    # A BROADCASTER holds menu.announcements.view, so this one is allowed...
+    assert client.get("/api/export/announcement-status",
+                      headers=outsider).status_code == 200
+    # ...and an unknown dataset is refused rather than guessed at.
+    assert client.get("/api/export/nonsense", headers=headers).status_code == 404
+
+
+def test_an_unauthenticated_export_is_refused(client):
+    assert client.get("/api/export/announcement-status").status_code in (401, 403)
+
+
+# ===========================================================================
+# The dashboard's own rights
+#
+# Its own, rather than the Console's, because it answers a different kind of
+# question: the Console shows one broadcast, the dashboard shows the SHAPE of
+# everybody's work. An operator who may take the estate live is not
+# automatically somebody who should be reading a colleague's hours.
+# ===========================================================================
+
+def make_user(client, headers, username, role="BROADCASTER"):
+    response = client.post("/api/users", headers=headers, json={
+        "username": username, "password": PASSWORD, "display_name": username,
+        "role": role})
+    assert response.status_code in (200, 201), response.text
+    return response.json()
+
+
+def set_override(client, headers, user_id, code, effect):
+    response = client.put(f"/api/users/{user_id}/permissions", headers=headers,
+                          json={"changes": [{"code": code, "effect": effect}]})
+    assert response.status_code in (200, 204), response.text
+
+
+def test_figures_by_person_are_their_own_right(client):
+    """Without it the dashboard still answers "how much was the estate
+    interrupted"; it simply does not hand a shift manager a timesheet."""
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA")
+    run_broadcast(client, headers, [store_id])
+    make_user(client, headers, "shift")
+    shift = sign_in(client, "shift")
+
+    body = summary(client, shift)
+    assert body["broadcasts"]["total"] == 1, "the totals are still there"
+    assert body["by_user"] == []
+    assert body["may_view_by_user"] is False
+
+    # And with the right, the breakdown appears.
+    owner = make_user(client, headers, "manager")
+    set_override(client, headers, owner["id"], "dashboard.view_by_user", "ALLOW")
+    assert summary(client, sign_in(client, "manager"))["may_view_by_user"] is True
+
+
+def test_history_is_clamped_rather_than_refused(client):
+    """A caller who asks for a year gets the week they are allowed and is told
+    so - more useful than an error, and impossible to mistake for "nothing
+    happened"."""
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA")
+    old = run_broadcast(client, headers, [store_id], name="Old")
+    backdate(client, old, days=40)
+    run_broadcast(client, headers, [store_id], name="Recent")
+
+    make_user(client, headers, "shift")
+    limited = summary(client, sign_in(client, "shift"), days=365)
+    assert limited["broadcasts"]["total"] == 1, "only the recent one"
+    assert limited["horizon_days"] == 7, "the page must be able to say so"
+
+    # An account holding the right sees the whole period it asked for.
+    manager = make_user(client, headers, "manager")
+    set_override(client, headers, manager["id"], "dashboard.full_history", "ALLOW")
+    full = summary(client, sign_in(client, "manager"), days=365)
+    assert full["broadcasts"]["total"] == 2
+    assert full["horizon_days"] is None
+
+
+def test_a_scoped_account_sees_only_its_own_shops(client):
+    """A total that quietly included shops the reader may not open would be a
+    leak dressed as a statistic - "47 broadcasts" is itself information about
+    an estate you were not given."""
+    headers = sign_in(client)
+    mine = make_store(client, headers, "NA", region="NORTH")
+    theirs = make_store(client, headers, "SA", region="SOUTH")
+    run_broadcast(client, headers, [mine], name="Mine")
+    run_broadcast(client, headers, [theirs], name="Theirs")
+
+    scoped = make_user(client, headers, "northern")
+    response = client.put(f"/api/users/{scoped['id']}/scope", headers=headers,
+                          json={"entries": [{"type": "REGION", "value": "NORTH"}]})
+    if response.status_code not in (200, 204):
+        pytest.skip("this HQ exposes scope differently")
+
+    body = summary(client, sign_in(client, "northern"))
+    assert body["broadcasts"]["total"] == 1
+    assert [row["store_code"] for row in body["by_store"]] == ["NA"]
+
+
+def test_exporting_is_a_separate_right_from_reading(client):
+    """A file leaves the product: it gets emailed, copied to a laptop, and
+    outlives every permission change made afterwards."""
+    headers = sign_in(client)
+    make_store(client, headers, "NA")
+    watcher = make_user(client, headers, "watcher", role="VIEWER")
+
+    viewer = sign_in(client, "watcher")
+    assert client.get("/api/dashboard/summary", headers=viewer).status_code == 200
+    assert client.get("/api/export/announcement-status",
+                      headers=viewer).status_code == 403
+
+    set_override(client, headers, watcher["id"], "dashboard.export", "ALLOW")
+    assert client.get("/api/export/announcement-status",
+                      headers=sign_in(client, "watcher")).status_code == 200

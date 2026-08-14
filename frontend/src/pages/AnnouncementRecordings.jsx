@@ -2,7 +2,7 @@ import React from "react";
 import { api } from "@/lib/api";
 import { RefreshCw, Upload } from "lucide-react";
 import { useAdminList } from "@/lib/adminList";
-import { FilterBar, SearchInput, FilterSelect, ListState, Pager } from "@/components/AdminFilters";
+import { FilterBar, SearchInput, FilterSelect, ListState, Pager, SortableTh, ExportButton } from "@/components/AdminFilters";
 import { BulkBar, BulkDeleteConfirm, useBulkSelection } from "@/components/BulkBar";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatIst } from "@/lib/time";
@@ -17,7 +17,7 @@ import { formatIst } from "@/lib/time";
  */
 export default function AnnouncementRecordings() {
   const { can } = useAuth();
-  const list = useAdminList("/announcements/audio", { q: "", status: "active" });
+  const list = useAdminList("/announcements/audio", { q: "", status: "active", sort: "", dir: "asc" });
   const bulk = useBulkSelection(list);
   const [deleting, setDeleting] = React.useState(false);
   const [busy, setBusy] = React.useState("");
@@ -53,10 +53,14 @@ export default function AnnouncementRecordings() {
             hear what a Store is playing.
           </p>
         </div>
-        <button data-testid="recordings-refresh" onClick={list.reload}
-                className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
-          <RefreshCw size={14} /> Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <ExportButton dataset="announcement-recordings" list={list}
+                        testId="recordings-export" />
+          <button data-testid="recordings-refresh" onClick={list.reload}
+                  className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
+            <RefreshCw size={14} /> Refresh
+          </button>
+        </div>
       </div>
 
       {note && (
@@ -120,10 +124,10 @@ export default function AnnouncementRecordings() {
           <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
             <tr>
               {(mayUpload || mayDelete) && <th className="px-3 py-2 w-8"></th>}
-              <th className="px-3 py-2">Recording</th>
-              <th className="px-3 py-2">Size</th>
-              <th className="px-3 py-2">Uploaded</th>
-              <th className="px-3 py-2">Status</th>
+              <SortableTh column="title" label="Recording" list={list} />
+              <SortableTh column="byte_size" label="Size" list={list} />
+              <SortableTh column="uploaded_at" label="Uploaded" list={list} />
+              <SortableTh column="status" label="Status" list={list} />
               <th className="px-3 py-2 text-right">Actions</th>
             </tr>
           </thead>

@@ -2,7 +2,7 @@ import React from "react";
 import { api } from "@/lib/api";
 import { RefreshCw, Trash2 } from "lucide-react";
 import { useAdminList } from "@/lib/adminList";
-import { FilterBar, SearchInput, FilterSelect, ListState, Pager } from "@/components/AdminFilters";
+import { FilterBar, SearchInput, FilterSelect, ListState, Pager, SortableTh, ExportButton } from "@/components/AdminFilters";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatIst } from "@/lib/time";
 
@@ -31,7 +31,7 @@ const REASON_LABEL = {
 export default function AnnouncementHistory() {
   const { can } = useAuth();
   const list = useAdminList("/announcements/history", {
-    q: "", zone: "", reason: "", since: "", until: "",
+    q: "", zone: "", reason: "", since: "", until: "", sort: "", dir: "asc",
   });
   const [busy, setBusy] = React.useState("");
   const [error, setError] = React.useState("");
@@ -99,6 +99,8 @@ export default function AnnouncementHistory() {
             What each shop played, and why it stopped.
           </p>
         </div>
+        <ExportButton dataset="announcement-history" list={list}
+                      testId="announcement-history-export" />
         <button data-testid="announcement-history-refresh" onClick={list.reload}
                 className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
           <RefreshCw size={14} /> Refresh
@@ -204,12 +206,12 @@ export default function AnnouncementHistory() {
           <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
             <tr>
               {(mayTidy || mayDelete) && <th className="px-3 py-2 w-8"></th>}
-              <th className="px-3 py-2">Store</th>
-              <th className="px-3 py-2">Zone</th>
-              <th className="px-3 py-2">Played</th>
-              <th className="px-3 py-2">Started</th>
-              <th className="px-3 py-2">Ended</th>
-              <th className="px-3 py-2">Because</th>
+              <SortableTh column="store_name" label="Store" list={list} />
+              <SortableTh column="zone" label="Zone" list={list} />
+              <SortableTh column="audio_title" label="Played" list={list} />
+              <SortableTh column="started_at" label="Started" list={list} />
+              <SortableTh column="ended_at" label="Ended" list={list} />
+              <SortableTh column="ended_reason" label="Because" list={list} />
               {(mayTidy || mayDelete) && <th className="px-3 py-2"></th>}
             </tr>
           </thead>

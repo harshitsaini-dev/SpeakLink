@@ -2,7 +2,7 @@ import React from "react";
 import { api } from "@/lib/api";
 import { Play, Pause, RefreshCw, Volume2, Upload, Trash2, Plus, X } from "lucide-react";
 import { useAdminList } from "@/lib/adminList";
-import { FilterBar, SearchInput, FilterSelect, ListState, Pager } from "@/components/AdminFilters";
+import { FilterBar, SearchInput, FilterSelect, ListState, Pager, SortableTh, ExportButton } from "@/components/AdminFilters";
 import { useAuth } from "@/contexts/AuthContext";
 
 /**
@@ -50,7 +50,7 @@ function StateBadge({ state }) {
 
 export default function Announcements() {
   const { can } = useAuth();
-  const status = useAdminList("/announcements/status", { q: "", zone: "", state: "" });
+  const status = useAdminList("/announcements/status", { q: "", zone: "", state: "", sort: "", dir: "asc" });
   const [busy, setBusy] = React.useState("");
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");
@@ -168,11 +168,11 @@ export default function Announcements() {
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-slate-600">
               <tr>
-                <th className="text-left px-4 py-2">Store</th>
-                <th className="text-left px-4 py-2">Zone</th>
-                <th className="text-left px-4 py-2">State</th>
-                <th className="text-left px-4 py-2">Playing</th>
-                <th className="text-left px-4 py-2">Volume</th>
+                <SortableTh column="store_name" label="Store" list={status} />
+                <SortableTh column="zone" label="Zone" list={status} />
+                <SortableTh column="state" label="State" list={status} />
+                <SortableTh column="audio_title" label="Playing" list={status} />
+                <SortableTh column="volume_percent" label="Volume" list={status} />
                 <th className="text-right px-4 py-2">Actions</th>
               </tr>
             </thead>

@@ -87,6 +87,7 @@ from permission_catalog import (
     describe_user_permissions,
     ensure_permission_schema,
     has_permission_code,
+    require_permission_code,
     resolve_effective_permissions,
     set_permission_overrides,
 )
@@ -138,6 +139,7 @@ from admin_search import (
     value_list,
     matches_any,
     int_list,
+    sort_rows,
     BulkSelectionError,
     DEFAULT_PAGE_SIZE,
     Page,
@@ -244,6 +246,8 @@ from receiver_runtime_auth import (
     LegacyStoreTokenRuntimeAuthenticator,
     MigrationAwareReceiverRuntimeAuthenticator,
 )
+import csv
+import io
 import hashlib
 import secrets
 import broadcast_recording
@@ -2744,13 +2748,20 @@ def _resolve_targets(db: Session, payload: SessionCreate, user: HQUser) -> List[
             raise HTTPException(status_code=400, detail="store_ids required for target_mode=selected")
         targets = q.filter(Store.id.in_(payload.store_ids)).all()
     elif mode == "region":
-        if not payload.region:
+        # Several zones, comma-separated. A campaign is almost never one zone,
+        # and "the North and the South" used to mean either two broadcasts -
+        # two microphones, two sets of leases, two things to remember to stop -
+        # or picking every shop by hand. One value is a list of one, so an
+        # existing single-zone request is unchanged.
+        zones = value_list(payload.region)
+        if not zones:
             raise HTTPException(status_code=400, detail="region required")
-        targets = q.filter(Store.region == payload.region).all()
+        targets = q.filter(Store.region.in_(zones)).all()
     elif mode == "city":
-        if not payload.city:
+        cities = value_list(payload.city)
+        if not cities:
             raise HTTPException(status_code=400, detail="city required")
-        targets = q.filter(Store.city == payload.city).all()
+        targets = q.filter(Store.city.in_(cities)).all()
     elif mode == "online_only":
         # CONNECTIVITY, not the Store's business classification.
         #
@@ -5263,6 +5274,8 @@ def search_receiver_status(
     store_id: Optional[str] = None,
     status_f: Optional[str] = Query(None, alias="status"),
     has_primary: Optional[bool] = None,
+    sort: Optional[str] = None,
+    dir: str = "asc",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     db: Session = Depends(get_db),
@@ -5295,13 +5308,22 @@ def search_receiver_status(
 
     total = db.execute(
         prepared(f"SELECT COUNT(*) FROM stores s WHERE {where}"), params).scalar_one()
+    # ORDER BY built from an ALLOWLIST, never from the parameter itself: a
+    # sort column interpolated into SQL is an injection, and the safe version
+    # is also the one that cannot fail a page over a typo.
+    orderable = {"store_code": "s.store_code", "store_name": "s.store_name",
+                 "city": "s.city", "region": "s.region", "status": "s.status",
+                 "device_count": "device_count", "has_primary": "has_primary"}
+    column = orderable.get(sort or "", "s.store_code")
+    descending = "DESC" if str(dir).lower() == "desc" else "ASC"
+
     rows = db.execute(prepared(
         "SELECT s.id, s.store_code, s.store_name, s.city, s.region, s.status, "
         "  EXISTS (SELECT 1 FROM receiver_store_primary_device p WHERE p.store_id = s.id) "
         "    AS has_primary, "
         "  (SELECT COUNT(*) FROM receiver_devices d WHERE d.store_id = s.id "
         "     AND d.deleted_at IS NULL) AS device_count "
-        f"FROM stores s WHERE {where} ORDER BY s.store_code "
+        f"FROM stores s WHERE {where} ORDER BY {column} {descending}, s.store_code "
         "LIMIT :limit OFFSET :offset"),
         {**params, "limit": page_size, "offset": (page - 1) * page_size}).all()
 
@@ -7748,7 +7770,175 @@ def leave_group_broadcast(
 
 
 
+
+
+# ================ EXPORT ================
+#
+# CSV, with a UTF-8 byte-order mark. Excel opens it directly and treats it as
+# a spreadsheet; without the mark it mangles every non-ASCII Store name, which
+# on this estate is most of them.
+#
+# Deliberately not .xlsx. That needs a new dependency on a live estate, and
+# these are flat tables of text and numbers - there is no formatting, formula
+# or sheet structure that CSV would lose. If a real workbook is ever wanted,
+# the dependency is the decision, not the code here.
+
+#: Which lists can be exported, and how. Each entry reuses the SAME function
+#: the page's own list route uses, so an export can never disagree with the
+#: table it came from - and can never widen what the caller may see, because
+#: the scope and permission live in that function.
+EXPORTS = {
+    "announcement-status": {
+        "permission": "menu.announcements.view",
+        "columns": [("store_code", "Store code"), ("store_name", "Store"),
+                    ("zone", "Zone"), ("state", "State"),
+                    ("template_name", "Template"), ("audio_title", "Recording"),
+                    ("volume_percent", "Volume %"), ("updated_at", "Updated")],
+        "sorts": "ANNOUNCEMENT_STATUS_SORTS",
+    },
+    "announcement-history": {
+        "permission": "menu.announcements.view",
+        "columns": [("store_code", "Store code"), ("store_name", "Store"),
+                    ("zone", "Zone"), ("audio_title", "Recording"),
+                    ("template_name", "Template"), ("started_at", "Started"),
+                    ("ended_at", "Ended"), ("ended_reason", "Because"),
+                    ("ended_by_username", "Ended by")],
+        "sorts": "ANNOUNCEMENT_HISTORY_SORTS",
+    },
+    "announcement-templates": {
+        "permission": "menu.announcements.view",
+        "columns": [("name", "Template"), ("description", "Description"),
+                    ("window", "Window"), ("status", "Status"),
+                    ("starts_at", "Starts"), ("expires_at", "Stops")],
+        "sorts": "ANNOUNCEMENT_TEMPLATE_SORTS",
+    },
+    "announcement-recordings": {
+        "permission": "menu.announcements.view",
+        "columns": [("title", "Title"), ("original_filename", "File"),
+                    ("byte_size", "Bytes"), ("uploaded_at", "Uploaded"),
+                    ("status", "Status")],
+        "sorts": "ANNOUNCEMENT_AUDIO_SORTS",
+    },
+}
+
+
+def _export_rows(dataset: str, params: dict, user: HQUser) -> list[dict]:
+    if dataset == "announcement-status":
+        return announcement_service.live_status(
+            engine, search=params.get("q") or "", zone=params.get("zone") or "",
+            state=params.get("state") or "", store_id=params.get("store_id"))
+    if dataset == "announcement-history":
+        return announcement_service.list_history(
+            engine, search=params.get("q") or "", zone=params.get("zone") or "",
+            reason=params.get("reason") or "", since=params.get("since") or "",
+            until=params.get("until") or "",
+            include_archived=str(params.get("include_archived", "")).lower()
+                             in ("1", "true", "yes"))
+    if dataset == "announcement-templates":
+        return announcement_service.list_templates(
+            engine, search=params.get("q") or "",
+            status=params.get("status") or "active",
+            zone=params.get("zone") or "", store_id=params.get("store_id"),
+            window=params.get("window") or "")
+    if dataset == "announcement-recordings":
+        return announcement_service.list_audio(
+            engine, search=params.get("q") or "",
+            status=params.get("status") or "active")
+    raise HTTPException(status_code=404, detail="There is no such export.")
+
+
+@api.get("/export/{dataset}")
+def export_dataset(
+    dataset: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(get_current_user),
+):
+    """Everything the CURRENT filters select, as a spreadsheet.
+
+    Not the page on screen - the whole filtered set. An export that gave
+    fifty rows while the table said 184 would be read as the answer and acted
+    on, and nobody would know to check.
+
+    The permission is the same one the page needs. It is checked here rather
+    than trusted from the caller, because a download URL is the easiest thing
+    in a product to share by accident.
+    """
+    definition = EXPORTS.get(dataset)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="There is no such export.")
+    # The fine-grained codes, through the same resolver every route dependency
+    # uses. Converted to a 403 here: PermissionDenied is raised for the
+    # dependency wrapper to translate, and reaching an ordinary route body it
+    # would surface as a 500 - an unexplained failure for a refusal that has a
+    # perfectly good explanation.
+    permissions = resolve_effective_permissions(engine, user)
+    if definition["permission"] not in permissions:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to read that list.")
+    # And the right to take a COPY away, which is not the right to look. A
+    # file gets emailed, copied to a laptop, and outlives every permission
+    # change made after it.
+    if "dashboard.export" not in permissions:
+        raise HTTPException(
+            status_code=403,
+            detail="You may read this list but not export it. Exporting is a "
+                   "separate right, because a file outlives the permissions "
+                   "that produced it.")
+
+    params = dict(request.query_params)
+    rows = _export_rows(dataset, params, user)
+    rows = sort_rows(rows, params.get("sort"), params.get("dir"),
+                     globals()[definition["sorts"]])
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow([heading for _, heading in definition["columns"]])
+    for row in rows:
+        writer.writerow([_export_cell(row.get(key)) for key, _ in definition["columns"]])
+
+    _write_log(db, "info",
+               f"export dataset={dataset} rows={len(rows)} by={user.username}")
+
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # The BOM is what makes Excel read this as UTF-8. Without it every
+    # non-ASCII Store name arrives mangled, and on this estate that is most of
+    # them.
+    body = "﻿" + buffer.getvalue()
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="speaklink-{dataset}-{stamp}.csv"'},
+    )
+
+
+def _export_cell(value):
+    """One value, rendered so a spreadsheet reads it as what it is.
+
+    A leading =, +, - or @ makes Excel treat a cell as a FORMULA. A Store
+    named "=SUM(A1)" is not malicious in this product, but a value that
+    executes when somebody opens the file is a bad habit to leave lying
+    around, so it is prefixed with a quote.
+    """
+    if value is None:
+        return ""
+    text_value = str(value)
+    if text_value[:1] in ("=", "+", "-", "@"):
+        return "'" + text_value
+    return text_value
+
+
 # ================ DASHBOARD ================
+
+#: How far back an account without dashboard.full_history may look.
+#:
+#: A week, because that is the operating question - "what happened this week" -
+#: and everything longer is comparison and trend, which is management
+#: information.
+DASHBOARD_LIMITED_DAYS = 7
+
 
 @api.get("/dashboard/summary")
 def dashboard_summary(
@@ -7760,7 +7950,7 @@ def dashboard_summary(
     store_id: Optional[str] = None,
     owner_user_id: Optional[str] = None,
     db: Session = Depends(get_db),
-    user: HQUser = Depends(require("menu.broadcast.view")),
+    user: HQUser = Depends(require("menu.dashboard.view")),
 ):
     """One screen's worth of numbers, computed in one place.
 
@@ -7809,6 +7999,21 @@ def dashboard_summary(
     if window_from is None:
         window_from = datetime.now(timezone.utc) - timedelta(
             days=max(1, min(days, 365)))
+
+    # How far back this account may look.
+    #
+    # A day-to-day operator answers "what happened this week"; a quarter of
+    # history is where trends and comparisons live, and that is a different
+    # kind of access. The window is CLAMPED rather than refused: a caller who
+    # asks for a year gets the week they are allowed and is told so, which is
+    # more useful than an error and cannot be mistaken for "nothing happened".
+    permissions = resolve_effective_permissions(engine, user)
+    horizon_days = None
+    if "dashboard.full_history" not in permissions:
+        horizon_days = DASHBOARD_LIMITED_DAYS
+        earliest = datetime.now(timezone.utc) - timedelta(days=horizon_days)
+        if window_from < earliest:
+            window_from = earliest
 
     scope = resolve_store_scope(engine, user)
 
@@ -7987,7 +8192,16 @@ def dashboard_summary(
             "longest_minutes": round(max((minutes(s) for s in sessions),
                                          default=0.0), 1),
         },
-        "by_user": broadcasters,
+        # Figures BY PERSON are their own right. Without it the dashboard
+        # still answers "how much was the estate interrupted"; it simply does
+        # not hand a shift manager a timesheet for their colleagues.
+        "by_user": (broadcasters
+                    if "dashboard.view_by_user" in permissions else []),
+        "may_view_by_user": "dashboard.view_by_user" in permissions,
+        "may_export": "dashboard.export" in permissions,
+        #: Set when the window was shortened, so the page can say so rather
+        #: than showing a quiet week and letting the reader draw a conclusion.
+        "horizon_days": horizon_days,
         "by_day": daily,
         "by_store": by_store,
         "by_zone": by_zone,
@@ -7999,6 +8213,52 @@ def dashboard_summary(
                    "offline": len(playback) - online},
     }
 
+
+
+
+#: What each list may be sorted by, and how to read the value out of a row.
+#:
+#: An allowlist rather than "sort by whatever name arrives": a parameter that
+#: can name any key is a way to probe what a row holds, and an unknown name
+#: would otherwise fail a whole page instead of being ignored.
+ANNOUNCEMENT_STATUS_SORTS = {
+    "store_code": lambda row: row.get("store_code"),
+    "store_name": lambda row: row.get("store_name"),
+    "zone": lambda row: row.get("zone"),
+    "state": lambda row: row.get("state"),
+    "template_name": lambda row: row.get("template_name"),
+    "audio_title": lambda row: row.get("audio_title"),
+    "volume_percent": lambda row: row.get("volume_percent"),
+    "updated_at": lambda row: row.get("updated_at"),
+}
+
+ANNOUNCEMENT_TEMPLATE_SORTS = {
+    "name": lambda row: row.get("name"),
+    "status": lambda row: row.get("status"),
+    "window": lambda row: row.get("window"),
+    "starts_at": lambda row: row.get("starts_at"),
+    "expires_at": lambda row: row.get("expires_at"),
+    "created_at": lambda row: row.get("created_at"),
+}
+
+ANNOUNCEMENT_AUDIO_SORTS = {
+    "title": lambda row: row.get("title"),
+    "original_filename": lambda row: row.get("original_filename"),
+    "byte_size": lambda row: row.get("byte_size"),
+    "uploaded_at": lambda row: row.get("uploaded_at"),
+    "status": lambda row: row.get("status"),
+}
+
+ANNOUNCEMENT_HISTORY_SORTS = {
+    "store_code": lambda row: row.get("store_code"),
+    "store_name": lambda row: row.get("store_name"),
+    "zone": lambda row: row.get("zone"),
+    "audio_title": lambda row: row.get("audio_title"),
+    "template_name": lambda row: row.get("template_name"),
+    "started_at": lambda row: row.get("started_at"),
+    "ended_at": lambda row: row.get("ended_at"),
+    "ended_reason": lambda row: row.get("ended_reason"),
+}
 
 # ================ RECORDED ANNOUNCEMENTS ================
 
@@ -8131,12 +8391,15 @@ def _template_or_404(template_id: int) -> dict:
 def list_announcement_audio(
     q: Optional[str] = None,
     status: str = "active",
+    sort: Optional[str] = None,
+    dir: str = "asc",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     user: HQUser = Depends(require("menu.announcements.view")),
 ):
     page, page_size = normalize_paging(page, page_size)
     rows = announcement_service.list_audio(engine, search=q or "", status=status)
+    rows = sort_rows(rows, sort, dir, ANNOUNCEMENT_AUDIO_SORTS)
     offset = (page - 1) * page_size
     return Page(items=rows[offset:offset + page_size], total=len(rows),
                 page=page, page_size=page_size).as_dict()
@@ -8303,6 +8566,8 @@ def list_announcement_templates(
     zone: Optional[str] = None,
     store_id: Optional[str] = None,
     window: Optional[str] = None,
+    sort: Optional[str] = None,
+    dir: str = "asc",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     user: HQUser = Depends(require("menu.announcements.view")),
@@ -8311,6 +8576,7 @@ def list_announcement_templates(
     rows = announcement_service.list_templates(
         engine, search=q or "", status=status, zone=zone or "",
         store_id=store_id, window=window or "")
+    rows = sort_rows(rows, sort, dir, ANNOUNCEMENT_TEMPLATE_SORTS)
     offset = (page - 1) * page_size
     return Page(items=rows[offset:offset + page_size], total=len(rows),
                 page=page, page_size=page_size).as_dict()
@@ -8447,6 +8713,8 @@ def announcement_history(
     since: Optional[str] = None,
     until: Optional[str] = None,
     include_archived: bool = False,
+    sort: Optional[str] = None,
+    dir: str = "asc",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     user: HQUser = Depends(require("menu.announcements.view")),
@@ -8468,6 +8736,7 @@ def announcement_history(
         store_id=store_id, template_id=template_id,
         since=since or "", until=until or "",
         include_archived=include_archived)
+    rows = sort_rows(rows, sort, dir, ANNOUNCEMENT_HISTORY_SORTS)
     offset = (page - 1) * page_size
     return Page(items=rows[offset:offset + page_size], total=len(rows),
                 page=page, page_size=page_size).as_dict()
@@ -8861,6 +9130,8 @@ def announcement_status(
     zone: Optional[str] = None,
     state: Optional[str] = None,
     store_id: Optional[str] = None,
+    sort: Optional[str] = None,
+    dir: str = "asc",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     user: HQUser = Depends(require("menu.announcements.view")),
@@ -8876,6 +9147,7 @@ def announcement_status(
     rows = announcement_service.live_status(
         engine, search=q or "", zone=zone or "", state=state or "",
         store_id=store_id)
+    rows = sort_rows(rows, sort, dir, ANNOUNCEMENT_STATUS_SORTS)
     offset = (page - 1) * page_size
     return Page(items=rows[offset:offset + page_size], total=len(rows),
                 page=page, page_size=page_size).as_dict()

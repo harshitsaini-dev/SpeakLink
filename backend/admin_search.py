@@ -118,6 +118,7 @@ __all__ = [
     "BULK_MODES",
     "BulkSelectionError",
     "DEFAULT_PAGE_SIZE",
+    "sort_rows",
     "value_list",
     "matches_any",
     "int_list",
@@ -229,4 +230,43 @@ def int_list(raw) -> list[int]:
         except ValueError:
             continue
     return found
+
+# ===========================================================================
+# Sorting
+#
+# Sorting happens on the SERVER, before pagination, and that is the whole
+# point. Sorting the rows the browser happens to be holding would order one
+# page of fifty and leave the other three hundred where they were - a table
+# that claims to be sorted and is not, which is worse than an unsorted one
+# because the reader stops checking.
+# ===========================================================================
+
+def sort_rows(rows: list, sort: str | None, direction: str | None,
+              allowed: dict) -> list:
+    """Order rows by a NAMED, allowed column.
+
+    ``allowed`` maps the name a caller may send to a function that reads the
+    value out of a row. An allowlist rather than getattr on whatever arrives:
+    a sort parameter that can name any attribute is a way to probe what a row
+    holds, and an unknown name would otherwise fail a whole page.
+
+    An unknown or absent name leaves the order exactly as it was, which is the
+    order the caller's own query already chose.
+    """
+    if not sort or sort not in allowed:
+        return rows
+    read = allowed[sort]
+    descending = str(direction or "asc").lower() == "desc"
+
+    def key(row):
+        value = read(row)
+        # None sorts last in both directions. It usually means "not recorded
+        # yet", and burying those at the end is what somebody scanning for the
+        # biggest or the smallest actually wants.
+        missing = value is None or value == ""
+        if isinstance(value, str):
+            value = value.lower()
+        return (missing, value if not missing else "")
+
+    return sorted(rows, key=key, reverse=descending)
 

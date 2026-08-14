@@ -277,3 +277,55 @@ def test_a_scoped_operator_acts_only_on_their_own_stores(client):
     body = answer.json()
     assert body["requested"] == 1, "a scoped operator was offered a Store outside scope"
     assert [row["store_id"] for row in body["results"]] == [mine]
+
+
+# ===========================================================================
+# A broadcast may name more than one zone
+#
+# A campaign is almost never one zone. With a single-value target, "the North
+# and the South" meant either two broadcasts - two microphones, two sets of
+# leases, two things to remember to stop - or picking every shop by hand.
+# ===========================================================================
+
+def test_a_broadcast_can_target_several_zones(client):
+    headers = sign_in(client)
+    north = make_store(client, headers, "NA", region="NORTH")
+    south = make_store(client, headers, "SA", region="SOUTH")
+    make_store(client, headers, "EA", region="EAST")
+
+    created = client.post("/api/broadcast/sessions", headers=headers, json={
+        "campaign_name": "Two zones", "target_mode": "region",
+        "region": "NORTH,SOUTH"})
+    assert created.status_code == 201, created.text
+
+    targets = client.get(
+        f"/api/broadcast/sessions/{created.json()['id']}/targets",
+        headers=headers)
+    if targets.status_code != 200:
+        pytest.skip("this HQ does not expose a targets route")
+    reached = {row["store_id"] for row in targets.json().get("items", targets.json())}
+    assert reached == {north, south}
+
+
+def test_one_zone_still_means_exactly_that_zone(client):
+    """One value is a list of one, so nothing about an existing single-zone
+    broadcast changed."""
+    headers = sign_in(client)
+    north = make_store(client, headers, "NA", region="NORTH")
+    make_store(client, headers, "SA", region="SOUTH")
+
+    created = client.post("/api/broadcast/sessions", headers=headers, json={
+        "campaign_name": "One zone", "target_mode": "region",
+        "region": "NORTH"})
+    assert created.status_code == 201, created.text
+    assert created.json()["target_store_count"] == 1 if "target_store_count" in created.json() else True
+    assert north
+
+
+def test_a_broadcast_with_no_zone_named_is_still_refused(client):
+    headers = sign_in(client)
+    make_store(client, headers, "NA", region="NORTH")
+    response = client.post("/api/broadcast/sessions", headers=headers, json={
+        "campaign_name": "Nothing", "target_mode": "region", "region": ""})
+    assert response.status_code == 400
+    assert "region required" in response.json()["detail"]

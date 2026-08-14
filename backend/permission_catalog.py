@@ -178,6 +178,40 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
     # Store in the country then plays. Bundling them would make the useful
     # grant impossible to give without the dangerous one.
     # -----------------------------------------------------------------
+    # -----------------------------------------------------------------
+    # Dashboard
+    #
+    # Its own rights rather than the Console's, because it answers a different
+    # kind of question. The Console shows one broadcast; the dashboard shows
+    # the SHAPE of everybody's work - who spoke, for how long, in which shops.
+    # That is management information, and an operator who may take the estate
+    # live is not automatically somebody who should be reading a colleague's
+    # hours.
+    # -----------------------------------------------------------------
+    PermissionDefinition("menu.dashboard.view", "Dashboard", "View Dashboard"),
+    #: Seeing figures broken down BY PERSON.
+    #:
+    #: Without it the dashboard still works - totals, days, zones, Stores -
+    #: and the broadcaster report is simply absent. That is the useful shape:
+    #: a shift manager can see how much the estate was interrupted without
+    #: being handed a timesheet for their colleagues.
+    PermissionDefinition("dashboard.view_by_user", "Dashboard",
+                        "See Figures by Broadcaster"),
+    #: Reading beyond the last 7 days.
+    #:
+    #: A day-to-day operator answers "what happened this week". A quarter of
+    #: history is a different thing - it is where trends and comparisons live -
+    #: and it is worth being able to grant the first without the second.
+    PermissionDefinition("dashboard.full_history", "Dashboard",
+                        "See More Than the Last 7 Days"),
+    #: Downloading a list as a spreadsheet.
+    #:
+    #: Separate from reading it on screen, deliberately. A file leaves the
+    #: product: it gets emailed, copied to a laptop, and outlives every
+    #: permission change made afterwards. Being able to look is not the same
+    #: as being able to take a copy away.
+    PermissionDefinition("dashboard.export", "Dashboard", "Export to a Spreadsheet"),
+
     PermissionDefinition("menu.announcements.view", "Announcements",
                         "View Announcements"),
     PermissionDefinition("announcements.control", "Announcements",
@@ -295,6 +329,10 @@ _BROADCAST_CODES = frozenset({
     # writing a template stay with OWNER and ADMIN.
     "menu.announcements.view", "announcements.control", "announcements.volume",
     "broadcast.group_join",
+    # The dashboard, but not a colleague's hours and not a quarter of
+    # history. Both of those are management questions rather than operating
+    # ones, and they are meant to be granted deliberately.
+    "menu.dashboard.view", "dashboard.export",
 })
 _VIEW_ONLY_CODES = frozenset({
     "menu.broadcast.view", "menu.stores.view", "menu.receivers.view",
@@ -302,6 +340,9 @@ _VIEW_ONLY_CODES = frozenset({
     # Looking at what is playing changes nothing, and a VIEWER who cannot see
     # it cannot answer the question a shop actually rings up to ask.
     "menu.announcements.view",
+    # Read-only means read: the dashboard is a view of things this account can
+    # already open one page at a time.
+    "menu.dashboard.view",
 })
 
 #: The default role matrix. This is the ONE place a role's fine-grained rights

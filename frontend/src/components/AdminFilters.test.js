@@ -12,7 +12,10 @@
  */
 import React from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { FilterSelect, SearchableSelect } from "./AdminFilters";
+import { FilterSelect, SearchableSelect, SortableTh, ExportButton } from "./AdminFilters";
+import { waitFor } from "@testing-library/react";
+
+jest.mock("@/lib/api", () => ({ api: { get: jest.fn() } }));
 
 function manyStores(count) {
   return Array.from({ length: count }, (_, index) => ({
@@ -169,4 +172,83 @@ test("choosing a second value REPLACES the first", () => {
 test("its placeholder is shown when nothing is chosen", () => {
   render(<SingleHarness options={manyStores(4)} />);
   expect(screen.getByTestId("one").textContent).toContain("Select a Store");
+});
+
+
+// ===========================================================================
+// Sorting, and taking a copy away
+// ===========================================================================
+
+function SortHarness() {
+  const [filters, setFilters] = React.useState({ sort: "", dir: "asc" });
+  const list = { filters, setFilters };
+  return (
+    <table>
+      <thead>
+        <tr>
+          <SortableTh column="store_name" label="Store" list={list} />
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td data-testid="state">{filters.sort}:{filters.dir}</td></tr>
+      </tbody>
+    </table>
+  );
+}
+
+test("a column cycles ascending, descending, then back to the list's own order", () => {
+  // The third click matters: without it there is no way back to the order the
+  // list itself chose, which for a history is "newest first" - the order
+  // somebody wants most of the time.
+  render(<SortHarness />);
+  const header = screen.getByTestId("sort-store_name");
+
+  fireEvent.click(header);
+  expect(screen.getByTestId("state").textContent).toBe("store_name:asc");
+  fireEvent.click(header);
+  expect(screen.getByTestId("state").textContent).toBe("store_name:desc");
+  fireEvent.click(header);
+  expect(screen.getByTestId("state").textContent).toBe(":asc");
+});
+
+test("the sorted column is announced to assistive technology", () => {
+  render(<SortHarness />);
+  const cell = screen.getByTestId("sort-store_name").closest("th");
+  expect(cell.getAttribute("aria-sort")).toBe("none");
+
+  fireEvent.click(screen.getByTestId("sort-store_name"));
+  expect(cell.getAttribute("aria-sort")).toBe("ascending");
+  fireEvent.click(screen.getByTestId("sort-store_name"));
+  expect(cell.getAttribute("aria-sort")).toBe("descending");
+});
+
+test("an export sends the CURRENT filters, not the page", async () => {
+  // The whole filtered set: an export giving fifty rows while the table said
+  // 184 would be read as the answer and acted on.
+  const { api } = require("@/lib/api");
+  api.get.mockResolvedValue({ data: new Blob(["a,b"]) });
+  global.URL.createObjectURL = jest.fn(() => "blob:x");
+  global.URL.revokeObjectURL = jest.fn();
+
+  const list = { filters: { q: "diwali", zone: "NORTH", page: 3, sort: "" } };
+  render(<ExportButton dataset="announcement-history" list={list} />);
+  fireEvent.click(screen.getByTestId("export-button"));
+
+  await waitFor(() => expect(api.get).toHaveBeenCalledWith(
+    "/export/announcement-history",
+    expect.objectContaining({
+      params: { q: "diwali", zone: "NORTH", page: 3 },
+      responseType: "blob",
+    })));
+});
+
+test("a refused export says so rather than silently never arriving", async () => {
+  const { api } = require("@/lib/api");
+  api.get.mockRejectedValue({ response: { status: 403 } });
+
+  render(<ExportButton dataset="announcement-history" list={{ filters: {} }} />);
+  fireEvent.click(screen.getByTestId("export-button"));
+
+  expect((await screen.findByTestId("export-button-error")).textContent)
+    .toMatch(/do not have permission/i);
 });

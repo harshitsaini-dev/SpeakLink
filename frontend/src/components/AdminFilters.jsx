@@ -1,5 +1,6 @@
 import React from "react";
-import { Search, X, Loader2 } from "lucide-react";
+import { Search, X, Loader2, Download } from "lucide-react";
+import { api } from "@/lib/api";
 
 /**
  * The shared controls every server-filtered admin list needs.
@@ -236,6 +237,122 @@ export function SearchableSelect({ label, value, onChange, options, testId,
                   }}
                   selectedSummary={chosen ? chosen.label : placeholder} />
   );
+}
+
+
+
+/**
+ * A sortable column heading.
+ *
+ * WHY SORTING GOES TO THE SERVER
+ *
+ * Sorting the rows the browser is holding would order one page of fifty and
+ * leave the other three hundred where they were - a table that claims to be
+ * sorted and is not. That is worse than an unsorted one, because the reader
+ * stops checking after the first time it looks right.
+ *
+ * So a click sets `sort` and `dir` on the query, and the server orders the
+ * whole set before paginating it.
+ */
+export function SortableTh({ column, label, list, className = "",
+                             align = "left" }) {
+  const active = list.filters.sort === column;
+  const direction = active ? (list.filters.dir || "asc") : null;
+
+  const toggle = () => {
+    if (!active) {
+      list.setFilters((current) => ({ ...current, sort: column, dir: "asc" }));
+      return;
+    }
+    // Third click clears the sort rather than cycling back to ascending.
+    // Without it there is no way back to the list's own order, which for a
+    // history is "newest first" - the order somebody actually wants most of
+    // the time.
+    if (direction === "asc") {
+      list.setFilters((current) => ({ ...current, dir: "desc" }));
+    } else {
+      list.setFilters((current) => ({ ...current, sort: "", dir: "asc" }));
+    }
+  };
+
+  return (
+    <th className={`px-3 py-2 ${className}`}
+        style={{ textAlign: align }}
+        aria-sort={active ? (direction === "desc" ? "descending" : "ascending")
+                          : "none"}>
+      <button type="button" onClick={toggle}
+              data-testid={`sort-${column}`}
+              className="inline-flex items-center gap-1 hover:text-slate-900">
+        {label}
+        <span aria-hidden="true" className={active ? "text-slate-900" : "text-slate-300"}>
+          {active ? (direction === "desc" ? "↓" : "↑") : "⇅"}
+        </span>
+      </button>
+    </th>
+  );
+}
+
+/**
+ * Download the CURRENT filters as a spreadsheet.
+ *
+ * The whole filtered set, not the page on screen: an export giving fifty rows
+ * while the table says 184 would be read as the answer and acted on, and
+ * nobody would know to check.
+ */
+export function ExportButton({ dataset, list, testId = "export-button",
+                               disabled = false }) {
+  const [busy, setBusy] = React.useState(false);
+  const [failure, setFailure] = React.useState("");
+
+  async function download() {
+    setBusy(true);
+    setFailure("");
+    try {
+      const response = await api.get(`/export/${dataset}`, {
+        params: { ...activeParams(list.filters) },
+        responseType: "blob",
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `speaklink-${dataset}.csv`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      // Said out loud rather than left as a download that silently never
+      // arrives - the most confusing failure a button like this can have.
+      setFailure(error?.response?.status === 403
+        ? "You do not have permission to export this list."
+        : "That export could not be produced. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <span className="inline-flex items-center gap-2">
+      <button type="button" onClick={download} disabled={busy || disabled}
+              data-testid={testId}
+              className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50 disabled:opacity-50">
+        <Download size={14} /> {busy ? "Preparing…" : "Export"}
+      </button>
+      {failure && (
+        <span className="text-xs text-rose-700" data-testid={`${testId}-error`}>
+          {failure}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function activeParams(filters) {
+  const params = {};
+  for (const [key, value] of Object.entries(filters || {})) {
+    if (value !== "" && value !== null && value !== undefined) params[key] = value;
+  }
+  return params;
 }
 
 export function FilterDate({ label, value, onChange, testId }) {

@@ -3,7 +3,7 @@ import { api } from "@/lib/api";
 import StatusBadge from "@/components/StatusBadge";
 import { RefreshCw } from "lucide-react";
 import { useAdminList } from "@/lib/adminList";
-import { FilterBar, SearchInput, FilterSelect, ListState, Pager } from "@/components/AdminFilters";
+import { FilterBar, SearchInput, FilterSelect, ListState, Pager, SortableTh } from "@/components/AdminFilters";
 
 /**
  * Receiver Status, filtered by the server.
@@ -21,6 +21,7 @@ import { FilterBar, SearchInput, FilterSelect, ListState, Pager } from "@/compon
 export default function ReceiverStatus() {
   const list = useAdminList("/receivers/search", {
     q: "", region: "", city: "", store_id: "", status: "", has_primary: "",
+    sort: "", dir: "asc",
   });
   const [options, setOptions] = React.useState({ regions: [], cities: [], stores: [] });
 
@@ -85,13 +86,13 @@ export default function ReceiverStatus() {
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
             <tr>
-              <th className="px-3 py-2">Code</th>
-              <th className="px-3 py-2">Store</th>
-              <th className="px-3 py-2">City</th>
-              <th className="px-3 py-2">Zone</th>
-              <th className="px-3 py-2">Devices</th>
-              <th className="px-3 py-2">Primary</th>
-              <th className="px-3 py-2">Status</th>
+              <SortableTh column="store_code" label="Code" list={list} />
+              <SortableTh column="store_name" label="Store" list={list} />
+              <SortableTh column="city" label="City" list={list} />
+              <SortableTh column="region" label="Zone" list={list} />
+              <SortableTh column="device_count" label="Devices" list={list} />
+              <SortableTh column="has_primary" label="Primary" list={list} />
+              <SortableTh column="status" label="Status" list={list} />
             </tr>
           </thead>
           <tbody>

@@ -170,7 +170,14 @@ def test_broadcaster_default_permissions_are_exactly_broadcast_and_read_only():
         "store_audio.control", "broadcast.store_delivery",
         "menu.announcements.view", "announcements.control",
         "announcements.volume", "broadcast.group_join",
+        # The dashboard and the ability to take a copy away, but NOT a
+        # colleague's hours and NOT a quarter of history: those are management
+        # questions rather than operating ones, and are meant to be granted
+        # deliberately.
+        "menu.dashboard.view", "dashboard.export",
     }
+    assert "dashboard.view_by_user" not in broadcaster
+    assert "dashboard.full_history" not in broadcaster
     assert "announcements.upload" not in broadcaster
     assert "announcements.templates.manage" not in broadcaster
     assert "announcements.control_all" not in broadcaster
@@ -192,7 +199,12 @@ def test_viewer_default_permissions_are_read_only_and_exclude_users():
     assert viewer == {
         "menu.broadcast.view", "menu.stores.view", "menu.receivers.view",
         "menu.history.view", "menu.logs.view", "menu.announcements.view",
+        # Read-only means read: the dashboard shows things this account can
+        # already open one page at a time.
+        "menu.dashboard.view",
     }
+    assert "dashboard.export" not in viewer, (
+        "a file outlives every permission change made after it was taken")
     assert "announcements.control" not in viewer
     assert "announcements.volume" not in viewer
     assert "menu.users.view" not in viewer
