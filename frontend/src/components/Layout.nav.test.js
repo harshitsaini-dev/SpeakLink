@@ -55,6 +55,18 @@ function renderLayout(codes = EVERYTHING) {
   return render(<Layout />);
 }
 
+test("the dashboard sits above the groups, in none of them", () => {
+  // It is where somebody starts, before they know which group they want.
+  renderLayout();
+  expect(screen.getByTestId("nav-top")).toBeTruthy();
+  expect(screen.getByTestId("nav-top").contains(screen.getByTestId("nav-dashboard")))
+    .toBe(true);
+  for (const group of ["live", "master", "records", "administration"]) {
+    expect(screen.getByTestId(`nav-group-${group}`)
+      .contains(screen.getByTestId("nav-dashboard"))).toBe(false);
+  }
+});
+
 test("the navigation is grouped, and the groups are in the order of the day", () => {
   renderLayout();
   const headings = Array.from(

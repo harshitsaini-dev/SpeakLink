@@ -7753,6 +7753,12 @@ def leave_group_broadcast(
 @api.get("/dashboard/summary")
 def dashboard_summary(
     days: int = 30,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    zone: Optional[str] = None,
+    city: Optional[str] = None,
+    store_id: Optional[str] = None,
+    owner_user_id: Optional[str] = None,
     db: Session = Depends(get_db),
     user: HQUser = Depends(require("menu.broadcast.view")),
 ):
@@ -7782,12 +7788,62 @@ def dashboard_summary(
     reads as reassurance, and reassurance is the one thing this product must
     not invent.
     """
-    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 365)))
+    # An explicit range wins over the day count.
+    #
+    # "Today" and "yesterday" are not day counts: yesterday is a window with
+    # BOTH ends, and expressing it as "last 1 day" would silently include this
+    # morning. A caller that names dates gets exactly those dates.
+    def parse_day(value, *, end_of_day=False):
+        try:
+            moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        if end_of_day and len(str(value)) <= 10:
+            moment = moment + timedelta(days=1) - timedelta(microseconds=1)
+        return moment
+
+    window_from = parse_day(since)
+    window_to = parse_day(until, end_of_day=True)
+    if window_from is None:
+        window_from = datetime.now(timezone.utc) - timedelta(
+            days=max(1, min(days, 365)))
+
     scope = resolve_store_scope(engine, user)
 
-    sessions = db.query(BroadcastSession).filter(
+    query = db.query(BroadcastSession).filter(
         BroadcastSession.started_at.isnot(None),
-        BroadcastSession.started_at >= since).all()
+        BroadcastSession.started_at >= window_from)
+    if window_to is not None:
+        query = query.filter(BroadcastSession.started_at <= window_to)
+    owners = int_list(owner_user_id)
+    if owners:
+        query = query.filter(BroadcastSession.started_by.in_(owners))
+    sessions = query.all()
+
+    # Zone, city and Store narrow by what a broadcast REACHED, not by anything
+    # about the session itself. "What happened in the North" is a question
+    # about shops, and a session's own row knows nothing about shops.
+    wanted_zones, wanted_cities = value_list(zone), value_list(city)
+    wanted_stores = int_list(store_id)
+    if wanted_zones or wanted_cities or wanted_stores:
+        store_query = db.query(Store.id).filter(Store.is_active.is_(True))
+        if wanted_zones:
+            store_query = store_query.filter(Store.region.in_(wanted_zones))
+        if wanted_cities:
+            store_query = store_query.filter(Store.city.in_(wanted_cities))
+        if wanted_stores:
+            store_query = store_query.filter(Store.id.in_(wanted_stores))
+        matching = {row[0] for row in store_query.all()}
+        target_rows = db.query(BroadcastTarget).filter(
+            BroadcastTarget.session_id.in_([s.id for s in sessions] or [0])).all()
+        reached = {}
+        for row in target_rows:
+            reached.setdefault(row.session_id, set()).add(row.store_id)
+        sessions = [s for s in sessions if reached.get(s.id, set()) & matching]
+    else:
+        matching = None
 
     if scope is not None:
         # A session counts if it reached at least one Store this account may
@@ -7819,10 +7875,20 @@ def dashboard_summary(
     # thirty-second interruptions and one five-minute campaign are not the
     # same working day, and a single "broadcasts" number cannot tell them
     # apart.
+    #: Names for the accounts that appear, resolved once. The denormalised
+    #: columns on BroadcastSession are empty on older rows, and labelling every
+    #: one of them "unknown" makes the chart useless precisely where the
+    #: history is longest.
+    account_ids = {s.started_by for s in sessions if s.started_by}
+    accounts = {row.id: (row.display_name or row.username)
+                for row in db.query(HQUser).filter(
+                    HQUser.id.in_(account_ids or [0])).all()}
+
     per_user: dict[str, dict] = {}
     for session in sessions:
         name = (session.started_by_display_name or session.started_by_username
-                or "unknown")
+                or accounts.get(session.started_by)
+                or "no longer recorded")
         entry = per_user.setdefault(name, {"user": name, "broadcasts": 0,
                                            "minutes": 0.0})
         entry["broadcasts"] += 1
@@ -7844,10 +7910,62 @@ def dashboard_summary(
     for row in daily:
         row["minutes"] = round(row["minutes"], 1)
 
+    # ---- Per Store and per zone ----------------------------------------
+    #
+    # Built from the TARGET rows, because "how much did this shop hear" is not
+    # a fact about a session - a five-minute broadcast to forty shops is five
+    # minutes each, not five minutes divided by forty. Summing per Store is
+    # the only reading that answers "which shops get interrupted most", which
+    # is the question a district manager actually brings.
+    session_by_id = {session.id: session for session in sessions}
+    target_rows = db.query(BroadcastTarget).filter(
+        BroadcastTarget.session_id.in_(list(session_by_id) or [0])).all()
+    store_rows = {row.id: row for row in db.query(Store).filter(
+        Store.id.in_({t.store_id for t in target_rows} or {0})).all()}
+
+    per_store: dict[int, dict] = {}
+    per_zone: dict[str, dict] = {}
+    for target in target_rows:
+        session = session_by_id.get(target.session_id)
+        store = store_rows.get(target.store_id)
+        if session is None or store is None:
+            continue
+        if scope is not None and store.id not in set(scope):
+            continue
+        if matching is not None and store.id not in matching:
+            continue
+        length = minutes(session)
+
+        entry = per_store.setdefault(store.id, {
+            "store_id": store.id, "store_code": store.store_code,
+            "store_name": store.store_name, "zone": store.region,
+            "city": store.city, "broadcasts": 0, "minutes": 0.0})
+        entry["broadcasts"] += 1
+        entry["minutes"] += length
+
+        zone_entry = per_zone.setdefault(store.region or "unassigned", {
+            "zone": store.region or "unassigned", "broadcasts": 0,
+            "minutes": 0.0, "stores": set()})
+        zone_entry["broadcasts"] += 1
+        zone_entry["minutes"] += length
+        zone_entry["stores"].add(store.id)
+
+    by_store = sorted(per_store.values(), key=lambda row: row["minutes"],
+                      reverse=True)
+    for row in by_store:
+        row["minutes"] = round(row["minutes"], 1)
+    by_zone = sorted(per_zone.values(), key=lambda row: row["minutes"],
+                     reverse=True)
+    for row in by_zone:
+        row["minutes"] = round(row["minutes"], 1)
+        row["stores"] = len(row["stores"])
+
     # ---- Announcements, right now --------------------------------------
     playback = announcement_service.live_status(engine)
     if scope is not None:
         playback = [row for row in playback if row["store_id"] in set(scope)]
+    if matching is not None:
+        playback = [row for row in playback if row["store_id"] in matching]
     states = {"PLAYING": 0, "PAUSED": 0, "DUCKED": 0, "STOPPED": 0}
     for row in playback:
         states[row["state"]] = states.get(row["state"], 0) + 1
@@ -7856,7 +7974,8 @@ def dashboard_summary(
     online = sum(1 for row in playback if row.get("store_status") == "online")
 
     return {
-        "since": since.isoformat(),
+        "since": window_from.isoformat(),
+        "until": window_to.isoformat() if window_to else None,
         "days": days,
         "broadcasts": {
             "total": len(sessions),
@@ -7870,6 +7989,8 @@ def dashboard_summary(
         },
         "by_user": broadcasters,
         "by_day": daily,
+        "by_store": by_store,
+        "by_zone": by_zone,
         "announcements": {
             "states": states,
             "stores": len(playback),
