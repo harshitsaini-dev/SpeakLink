@@ -232,6 +232,14 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
                         "Upload Recordings"),
     PermissionDefinition("announcements.delete_permanently", "Announcements",
                         "Permanently Delete Recordings"),
+    #: Opening and withdrawing a LISTENING LINK for an announcement.
+    #:
+    #: Its own right because a link leaves the building. Anybody holding it can
+    #: hear the campaign without an account, from anywhere, until somebody
+    #: closes it - which is a different kind of decision from pressing play in
+    #: a shop, and belongs with the people who decide what the campaign is.
+    PermissionDefinition("announcements.rooms.manage", "Announcements",
+                        "Open and Close Listening Links"),
 
     #: Changing which speaker a Store plays through, from HQ.
     #:

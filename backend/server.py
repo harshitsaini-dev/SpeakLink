@@ -257,6 +257,7 @@ import announcements
 import announcement_service
 import announcement_protocol
 import receiver_output_device
+import announcement_rooms
 import broadcast_group
 import store_kits
 from receiver_index_repair import repair_receiver_indexes
@@ -693,6 +694,9 @@ def startup_event():
             logger.exception("Could not reconcile announcement playback")
         # Which speaker each Store plays through, and what it reported it has.
         receiver_output_device.ensure_output_device_schema(engine)
+        # Listening links for announcements. Their own room with their own
+        # life; see announcement_rooms.py for why they are not broadcast rooms.
+        announcement_rooms.ensure_announcement_room_schema(engine)
         # More than one voice on one broadcast; see broadcast_group.py.
         broadcast_group.ensure_group_schema(engine)
         # Anything left mid-flight by a crash is resolved BEFORE the first
@@ -8203,6 +8207,228 @@ def _export_cell(value):
     if text_value[:1] in ("=", "+", "-", "@"):
         return "'" + text_value
     return text_value
+
+
+
+
+# ================ ANNOUNCEMENT LISTENING LINKS ================
+#
+# A separate link, with its own ID and password, created from HQ. See
+# announcement_rooms.py for why this is not the broadcast room.
+
+
+@api.post("/announcements/templates/{template_id}/room", status_code=201)
+def create_announcement_room(
+    template_id: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.rooms.manage")),
+):
+    """Open a listening link for this template.
+
+    The password is returned ONCE and never stored in a form anything can read
+    back. A page that could show it again would make "who has this link"
+    unanswerable; the honest answer to "I lost it" is a new link, which is why
+    closing and reopening costs nothing.
+    """
+    template = _template_or_404(template_id)
+    room, password = announcement_rooms.create_room(
+        engine, template_id=template_id,
+        label=(payload or {}).get("label") or template["name"],
+        created_by=user.id, hash_password=hash_password)
+    _write_log(db, "info",
+               f"announcement_room_opened template={template_id} "
+               f"code={room['public_code']} by={user.username}")
+    return {
+        "room": _room_out(room),
+        # Once. Named plainly so the UI cannot mistake it for something it can
+        # fetch again later.
+        "password_shown_once": password,
+    }
+
+
+@api.get("/announcements/rooms")
+def list_announcement_rooms(
+    template_id: Optional[int] = None,
+    user: HQUser = Depends(require("menu.announcements.view")),
+):
+    rooms = announcement_rooms.list_rooms(engine, template_id=template_id)
+    return {"items": [_room_out(row) for row in rooms], "total": len(rooms)}
+
+
+@api.post("/announcements/rooms/{room_id}/close")
+def close_announcement_room(
+    room_id: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.rooms.manage")),
+):
+    """Withdraw the link, and turn away everybody already using it.
+
+    A closed room whose existing listeners kept playing would be a link that
+    cannot actually be withdrawn - which is the only thing this button is for.
+    """
+    if announcement_rooms.get_room(engine, room_id=room_id) is None:
+        raise HTTPException(status_code=404, detail="No such listening link.")
+    room = announcement_rooms.close_room(engine, room_id=room_id,
+                                         closed_by=user.id)
+    _write_log(db, "warn",
+               f"announcement_room_closed id={room_id} by={user.username}")
+    return _room_out(room)
+
+
+def _room_out(room: dict) -> dict:
+    """The wire shape. Never the password hash, and never the plaintext."""
+    if room is None:
+        return {}
+    return {
+        "id": room["id"],
+        "template_id": room["template_id"],
+        "template_name": room.get("template_name"),
+        "public_code": room["public_code"],
+        "label": room.get("label") or "",
+        "status": room["status"],
+        "created_at": room.get("created_at"),
+        "closed_at": room.get("closed_at"),
+        "listener_count": room.get("listener_count", 0),
+        # A ready-made link, because the alternative is somebody assembling it
+        # by hand and getting the host wrong.
+        "listen_path": f"/announce?id={room['public_code']}",
+    }
+
+
+# ---- The listener's own surface, unauthenticated by design ---------------
+
+@api.post("/announce/join")
+def join_announcement_room(payload: dict, db: Session = Depends(get_db)):
+    """A listener presenting an ID and a password.
+
+    No HQ account is involved: whoever holds the link is not a user of this
+    product and must never need to be. What they get is a token scoped to one
+    room, which stops working the moment that room is closed.
+    """
+    try:
+        room, token = announcement_rooms.admit(
+            engine,
+            code=(payload or {}).get("id") or (payload or {}).get("code") or "",
+            password=(payload or {}).get("password") or "",
+            display_name=(payload or {}).get("name") or "",
+            verify_password=verify_password)
+    except announcement_rooms.RoomRefused as refusal:
+        # One refusal for a wrong ID and a wrong password: telling a stranger
+        # that an ID exists but the password is wrong tells them which half to
+        # keep guessing at.
+        raise HTTPException(status_code=401, detail=str(refusal))
+    _write_log(db, "info",
+               f"announcement_room_joined code={room['public_code']}")
+    return {"token": token, "room": {"public_code": room["public_code"],
+                                     "label": room.get("label") or ""}}
+
+
+@api.get("/announce/state")
+def announcement_room_state(authorization: Optional[str] = Header(None)):
+    """What this link should be playing, right now.
+
+    Deliberately a poll rather than a socket. The state changes when somebody
+    at HQ presses play or pause - minutes apart, not milliseconds - and a
+    socket per listener would be a connection held open for a page that needs
+    a sentence every few seconds.
+
+    The page follows WHETHER the announcement is running, not where a
+    particular shop's speaker has got to. Two people opening the link a minute
+    apart are a minute apart in the audio, and the page says so rather than
+    implying a sync it cannot deliver.
+    """
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    listener = announcement_rooms.listener_for_token(engine, token=token)
+    if listener is None:
+        raise HTTPException(
+            status_code=401,
+            detail="This listening link is no longer open. Ask for a new one.")
+
+    template = None
+    for row in announcement_service.list_templates(engine, status="all"):
+        if row["id"] == listener["template_id"]:
+            template = row
+            break
+    if template is None:
+        return {"playing": False, "reason": "That announcement no longer exists.",
+                "audio": None}
+
+    live = announcement_service.template_is_live(template)
+    first = (template.get("items") or [None])[0]
+    audio_id = first.get("audio_id") if first else None
+
+    # Whether ANY Store is actually running it. A link that kept playing a
+    # campaign HQ had stopped is the one failure that would embarrass somebody
+    # in front of a customer.
+    running = any(row.get("template_id") == template["id"]
+                  and row.get("state") == announcements.STATE_PLAYING
+                  for row in announcement_service.live_status(engine))
+
+    return {
+        "label": listener.get("label") or template["name"],
+        "template_name": template["name"],
+        "playing": bool(live and running),
+        "reason": ("" if live and running
+                   else ("This announcement is paused right now."
+                         if live else
+                         f"This announcement is {announcement_service.describe_template_window(template)}.")),
+        "audio": ({"id": audio_id,
+                   "url": f"/api/announce/audio/{audio_id}",
+                   "volume_percent": (first or {}).get("volume_percent", 80)}
+                  if audio_id else None),
+        "window": template["window"],
+    }
+
+
+@api.get("/announce/audio/{audio_id}")
+def announcement_room_audio(audio_id: int,
+                            authorization: Optional[str] = Header(None),
+                            token: Optional[str] = None):
+    """The recording itself, for an admitted listener.
+
+    The token may arrive as a header OR as a query parameter, because an
+    <audio> element cannot send headers. That is a real limitation of the
+    element rather than a shortcut: the token is single-room, revocable by
+    closing the link, and carries no account.
+    """
+    presented = ((authorization or "").removeprefix("Bearer ").strip()
+                 or (token or "").strip())
+    listener = announcement_rooms.listener_for_token(engine, token=presented)
+    if listener is None:
+        raise HTTPException(status_code=401,
+                            detail="This listening link is no longer open.")
+
+    # And only the recording THIS room's template plays. A room token that
+    # could fetch any recording by number would be a link to one campaign that
+    # opened every campaign.
+    template = None
+    for row in announcement_service.list_templates(engine, status="all"):
+        if row["id"] == listener["template_id"]:
+            template = row
+            break
+    allowed = {item.get("audio_id") for item in (template or {}).get("items", [])}
+    if audio_id not in allowed:
+        raise HTTPException(
+            status_code=404,
+            detail="That recording is not part of this announcement.")
+
+    for row in announcement_service.list_audio(engine, status="all"):
+        if row["id"] == audio_id:
+            path = announcements.audio_directory() / row["storage_name"]
+            if not path.is_file():
+                raise HTTPException(status_code=404,
+                                    detail="That recording is not on this HQ.")
+            return FileResponse(str(path),
+                                media_type=row["content_type"] or "audio/mpeg")
+    raise HTTPException(status_code=404, detail="No such recording.")
+
+
+@api.post("/announce/leave")
+def leave_announcement_room(authorization: Optional[str] = Header(None)):
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    announcement_rooms.leave(engine, token=token)
+    return {"ok": True}
 
 
 # ================ DASHBOARD ================

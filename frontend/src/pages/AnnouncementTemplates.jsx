@@ -5,6 +5,7 @@ import { useAdminList } from "@/lib/adminList";
 import { FilterBar, SearchInput, FilterSelect, ListState, Pager, SortableTh, ExportButton } from "@/components/AdminFilters";
 import { BulkBar, BulkDeleteConfirm, useBulkSelection } from "@/components/BulkBar";
 import { useAuth } from "@/contexts/AuthContext";
+import AnnouncementRooms from "@/components/AnnouncementRooms";
 
 /**
  * Templates: the plan for what plays where, and until when.
@@ -26,6 +27,7 @@ export default function AnnouncementTemplates() {
   const [zones, setZones] = React.useState([]);
   const [building, setBuilding] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
+  const [linksFor, setLinksFor] = React.useState(null);
   const [busy, setBusy] = React.useState("");
   const [note, setNote] = React.useState("");
   const [error, setError] = React.useState("");
@@ -180,6 +182,10 @@ export default function AnnouncementTemplates() {
           })} />
       )}
 
+      {linksFor && (
+        <AnnouncementRooms templateId={linksFor.id} templateName={linksFor.name} />
+      )}
+
       <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
@@ -246,6 +252,12 @@ export default function AnnouncementTemplates() {
                       Archive
                     </button>
                   )}
+                  <button data-testid={`template-links-${template.id}`}
+                          onClick={() => setLinksFor(
+                            linksFor === template.id ? null : template)}
+                          className="px-2 py-1 rounded border border-slate-300 text-sm hover:bg-slate-50 mr-1">
+                    Links
+                  </button>
                   {mayDelete && (
                     <button data-testid={`template-delete-${template.id}`}
                             onClick={() => { bulk.chooseOnly(template.id);

@@ -12,6 +12,7 @@ import BroadcastConsole from "@/pages/BroadcastConsole";
 import ActiveBroadcasts from "@/pages/ActiveBroadcasts";
 import Dashboard from "@/pages/Dashboard";
 import Announcements from "@/pages/Announcements";
+import AnnounceListen from "@/pages/AnnounceListen";
 import AnnouncementHistory from "@/pages/AnnouncementHistory";
 import AnnouncementTemplates from "@/pages/AnnouncementTemplates";
 import AnnouncementRecordings from "@/pages/AnnouncementRecordings";
@@ -37,6 +38,10 @@ export default function App() {
               or an operator. */}
           <Route path="/listen" element={<Listen />} />
           <Route path="/listen/:publicCode" element={<Listen />} />
+          {/* The announcement link, outside the signed-in shell for the same
+              reason: whoever holds it is not a user of this product and must
+              never need to be. */}
+          <Route path="/announce" element={<AnnounceListen />} />
           {/* /receiver is deliberately not routed. The page connected to
               /ws/receiver/{token}, a backend route that does not exist, and
               reaching it required a Store credential in the URL. A Receiver
