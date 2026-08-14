@@ -90,11 +90,26 @@ export function SearchInput({ value, onChange, placeholder = "Search…", testId
 export function FilterSelect({ label, value, onChange, options, testId,
                                allLabel = "All", multiple = true }) {
   const [open, setOpen] = React.useState(false);
+  //: Searching WITHIN a filter.
+  //:
+  //: Forty Stores is a scroll; two hundred is a hunt. The list a filter offers
+  //: is exactly as long as the estate, so a control that can only be scrolled
+  //: gets slower to use the more there is to use it on - which is backwards.
+  const [needle, setNeedle] = React.useState("");
   const holder = React.useRef(null);
 
   const normalised = options.map((option) => (
     typeof option === "string" ? { value: option, label: option } : option));
   const chosen = String(value ?? "").split(",").map((v) => v.trim()).filter(Boolean);
+  const term = needle.trim().toLowerCase();
+  // Chosen values stay visible whatever is typed. Filtering them out would
+  // hide what is already in effect, and somebody would untick something they
+  // could no longer see.
+  const shown = term
+    ? normalised.filter((option) =>
+        String(option.label).toLowerCase().includes(term)
+        || chosen.includes(String(option.value)))
+    : normalised;
 
   // Closing on an outside click, because a panel that only closes via its own
   // button is a panel that covers the table while somebody reads it.
@@ -106,6 +121,10 @@ export function FilterSelect({ label, value, onChange, options, testId,
     document.addEventListener("mousedown", away);
     return () => document.removeEventListener("mousedown", away);
   }, [open]);
+
+  // A stale search term inside a closed panel is a filter that looks empty
+  // when it is not.
+  React.useEffect(() => { if (!open) setNeedle(""); }, [open]);
 
   if (!multiple) {
     return (
@@ -147,12 +166,17 @@ export function FilterSelect({ label, value, onChange, options, testId,
         <div data-testid={`${testId}-panel`}
              className="absolute z-20 top-full mt-1 w-56 max-h-64 overflow-y-auto
                         border border-slate-300 rounded-md bg-white shadow-lg p-2">
+          {normalised.length > 8 && (
+            <input value={needle} onChange={(event) => setNeedle(event.target.value)}
+                   data-testid={`${testId}-search`} placeholder="Search…"
+                   className="w-full mb-1 px-2 py-1 text-sm border border-slate-300 rounded" />
+          )}
           <button type="button" data-testid={`${testId}-clear`}
                   onClick={() => onChange("")}
                   className="w-full text-left px-2 py-1 text-sm rounded hover:bg-slate-50 text-slate-600">
             {allLabel}
           </button>
-          {normalised.map((option) => (
+          {shown.map((option) => (
             <label key={option.value}
                    className="flex items-center gap-2 px-2 py-1 text-sm rounded hover:bg-slate-50 cursor-pointer">
               <input type="checkbox" checked={chosen.includes(String(option.value))}
@@ -163,6 +187,12 @@ export function FilterSelect({ label, value, onChange, options, testId,
           ))}
           {normalised.length === 0 && (
             <p className="px-2 py-1 text-xs text-slate-500">Nothing to choose from yet.</p>
+          )}
+          {normalised.length > 0 && shown.length === 0 && (
+            <p className="px-2 py-1 text-xs text-slate-500"
+               data-testid={`${testId}-no-match`}>
+              Nothing here matches “{needle}”.
+            </p>
           )}
         </div>
       )}
