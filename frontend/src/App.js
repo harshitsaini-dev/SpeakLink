@@ -10,6 +10,7 @@ import Login from "@/pages/Login";
 import Listen from "@/pages/Listen";
 import BroadcastConsole from "@/pages/BroadcastConsole";
 import ActiveBroadcasts from "@/pages/ActiveBroadcasts";
+import Dashboard from "@/pages/Dashboard";
 import Announcements from "@/pages/Announcements";
 import AnnouncementHistory from "@/pages/AnnouncementHistory";
 import AnnouncementTemplates from "@/pages/AnnouncementTemplates";
@@ -60,6 +61,7 @@ export default function App() {
             }
           >
             <Route index element={<Navigate to="/console" replace />} />
+            <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/console" element={<BroadcastConsole />} />
             {/* Supervision, gated by broadcast.active_view in
                 MENU_PERMISSION_BY_PATH - which ProtectedRoute enforces on a

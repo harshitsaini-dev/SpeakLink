@@ -230,3 +230,94 @@ test("the panel says what Listening does not prove", async () => {
   expect(screen.getByTestId("supervised-audience-modal").textContent)
     .toMatch(/can.?t confirm their device volume/i);
 });
+
+
+// ===========================================================================
+// Finding one person in an audience
+//
+// Nine listeners fit on a screen and two hundred do not - and the second is
+// exactly when somebody needs to find one person: the one who reported no
+// sound, the one who should not be in the room. Scrolling for a name is the
+// slowest possible answer to "is Priya hearing this".
+// ===========================================================================
+
+test("the audience can be searched by name, across both lists", async () => {
+  await show(panel({
+    waiting: [{ id: 1, display_name: "Priya" }, { id: 2, display_name: "Rahul" }],
+    listeners: [{ id: 3, display_name: "Priyanka", playback_state: "LISTENING",
+                  admitted_by: "password" },
+                { id: 4, display_name: "Sunil", playback_state: "LISTENING",
+                  admitted_by: "approval" }],
+  }));
+
+  fireEvent.change(await screen.findByTestId("supervised-audience-search"),
+                   { target: { value: "priy" } });
+
+  expect(screen.getByTestId("supervised-waiting-1")).toBeTruthy();
+  expect(screen.queryByTestId("supervised-waiting-2")).toBeNull();
+  expect(screen.getByTestId("supervised-listener-3")).toBeTruthy();
+  expect(screen.queryByTestId("supervised-listener-4")).toBeNull();
+});
+
+test("the counts say how much is hidden", async () => {
+  await show(panel({
+    waiting: [],
+    listeners: [{ id: 3, display_name: "Priya", playback_state: "LISTENING",
+                  admitted_by: "password" },
+                { id: 4, display_name: "Sunil", playback_state: "LISTENING",
+                  admitted_by: "approval" }],
+  }));
+
+  fireEvent.change(await screen.findByTestId("supervised-audience-search"),
+                   { target: { value: "priya" } });
+  expect(screen.getByTestId("supervised-listener-count").textContent)
+    .toContain("showing 1 of 2");
+});
+
+test("a join request does not vanish when filtering by playback state", async () => {
+  // A pending person has not played anything. Hiding them under a playback
+  // filter would read as the request having been answered.
+  await show(panel({
+    waiting: [{ id: 1, display_name: "Priya" }],
+    listeners: [{ id: 3, display_name: "Sunil", playback_state: "PAUSED",
+                  admitted_by: "approval" }],
+  }));
+
+  fireEvent.click(await screen.findByTestId("supervised-audience-state"));
+  fireEvent.click(screen.getByTestId("supervised-audience-state-option-LISTENING"));
+
+  expect(screen.getByTestId("supervised-waiting-1")).toBeTruthy();
+  expect(screen.queryByTestId("supervised-listener-3")).toBeNull();
+});
+
+test("filters can name several values at once", async () => {
+  await show(panel({
+    waiting: [],
+    listeners: [{ id: 3, display_name: "A", playback_state: "LISTENING",
+                  admitted_by: "password" },
+                { id: 4, display_name: "B", playback_state: "PAUSED",
+                  admitted_by: "approval" },
+                { id: 5, display_name: "C", playback_state: "STOPPED",
+                  admitted_by: "approval" }],
+  }));
+
+  fireEvent.click(await screen.findByTestId("supervised-audience-state"));
+  fireEvent.click(screen.getByTestId("supervised-audience-state-option-LISTENING"));
+  fireEvent.click(screen.getByTestId("supervised-audience-state-option-PAUSED"));
+
+  expect(screen.getByTestId("supervised-listener-3")).toBeTruthy();
+  expect(screen.getByTestId("supervised-listener-4")).toBeTruthy();
+  expect(screen.queryByTestId("supervised-listener-5")).toBeNull();
+});
+
+test("a filter matching nobody says so rather than looking empty", async () => {
+  await show(panel({
+    waiting: [],
+    listeners: [{ id: 3, display_name: "A", playback_state: "LISTENING",
+                  admitted_by: "password" }],
+  }));
+
+  fireEvent.change(await screen.findByTestId("supervised-audience-search"),
+                   { target: { value: "nobody" } });
+  expect(screen.getByTestId("supervised-listeners-no-match")).toBeTruthy();
+});

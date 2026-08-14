@@ -13,7 +13,7 @@ import uuid
 import logging
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Set
 
 from fastapi import (FastAPI, APIRouter, Depends, File, Form, Header, HTTPException, Query,
@@ -23,7 +23,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.staticfiles import StaticFiles
-from sqlalchemy import bindparam, func, text
+from sqlalchemy import bindparam, func, or_, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field, ValidationError
@@ -5377,26 +5377,42 @@ def _store_admin_query(db: Session, user: HQUser, *, q=None, city=None, region=N
     query = query.filter(
         (Store.lifecycle_state.is_(None)) | (Store.lifecycle_state != "deleted"))
 
-    # Each selection is exclusive. Choosing one REPLACES the last, rather than
-    # widening what is already shown.
-    if lifecycle == "active":
-        # A legacy row with no lifecycle_state is active exactly when
-        # is_active says so - that is the pairing store_lifecycle keeps.
-        query = query.filter(
-            (Store.lifecycle_state == "active")
-            | (Store.lifecycle_state.is_(None) & Store.is_active.is_(True)))
-    elif lifecycle == "disabled":
-        query = query.filter(
-            (Store.lifecycle_state == "disabled")
-            | (Store.lifecycle_state.is_(None) & Store.is_active.is_(False)))
-    elif lifecycle == "archived":
-        query = query.filter(Store.lifecycle_state == "archived")
-    # 'all_current' adds nothing beyond the not-deleted filter above.
+    # A selection may now name SEVERAL states - "active and archived" is a real
+    # question, and answering it used to mean running the search twice.
+    #
+    # The old comment here said each selection REPLACES the last, and that was
+    # about a bug: the previous choice used to stay in effect invisibly. With
+    # checkboxes the choice is visible, so widening is something the reader
+    # asked for rather than something that happened to them.
+    wanted_states = value_list(lifecycle)
+    if "all_current" in wanted_states:
+        # Named rather than implied by an empty value, so the control has no
+        # meaning nobody chose. It widens to everything not deleted, so any
+        # other value alongside it adds nothing.
+        wanted_states = []
+    if wanted_states:
+        conditions = []
+        if "active" in wanted_states:
+            # A legacy row with no lifecycle_state is active exactly when
+            # is_active says so - the pairing store_lifecycle keeps.
+            conditions.append(
+                (Store.lifecycle_state == "active")
+                | (Store.lifecycle_state.is_(None) & Store.is_active.is_(True)))
+        if "disabled" in wanted_states:
+            conditions.append(
+                (Store.lifecycle_state == "disabled")
+                | (Store.lifecycle_state.is_(None) & Store.is_active.is_(False)))
+        if "archived" in wanted_states:
+            conditions.append(Store.lifecycle_state == "archived")
+        if conditions:
+            query = query.filter(or_(*conditions))
 
-    if city:
-        query = query.filter(Store.city == city)
-    if region:
-        query = query.filter(Store.region == region)
+    cities = value_list(city)
+    if cities:
+        query = query.filter(Store.city.in_(cities))
+    regions = value_list(region)
+    if regions:
+        query = query.filter(Store.region.in_(regions))
 
     term = like_term(q)
     if term:
@@ -7728,6 +7744,139 @@ def leave_group_broadcast(
     _write_log(db, "info",
                f"group_broadcast_left session={sid} user={user.username}")
     return participant
+
+
+
+
+# ================ DASHBOARD ================
+
+@api.get("/dashboard/summary")
+def dashboard_summary(
+    days: int = 30,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("menu.broadcast.view")),
+):
+    """One screen's worth of numbers, computed in one place.
+
+    WHY THE SERVER COMPUTES THESE
+
+    Every one of these figures is an aggregate over the whole estate and its
+    whole history. Sending the rows to the browser to add up would mean
+    shipping thousands of them to draw six shapes - and, worse, it would mean
+    the totals depended on which page happened to be loaded. A dashboard that
+    disagrees with the list it summarises is a dashboard nobody trusts twice.
+
+    SCOPE IS APPLIED, NOT ASSUMED
+
+    A scoped operator sees their own Stores' figures. A total that quietly
+    included shops the reader may not open would be a leak dressed as a
+    statistic - "47 broadcasts" is itself information about an estate you were
+    not given.
+
+    WHAT IS DELIBERATELY ABSENT
+
+    No "uptime", no "delivery rate", no health score. Every number here is
+    something the database actually recorded: sessions started, minutes
+    broadcast, which account did it, what an announcement did. A percentage
+    that averages a Store nobody has heard from with a Store that is fine
+    reads as reassurance, and reassurance is the one thing this product must
+    not invent.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 365)))
+    scope = resolve_store_scope(engine, user)
+
+    sessions = db.query(BroadcastSession).filter(
+        BroadcastSession.started_at.isnot(None),
+        BroadcastSession.started_at >= since).all()
+
+    if scope is not None:
+        # A session counts if it reached at least one Store this account may
+        # see. Counting by ownership instead would hide a colleague's
+        # broadcast into shops this reader is responsible for.
+        reachable = set(scope)
+        target_rows = db.query(BroadcastTarget).filter(
+            BroadcastTarget.session_id.in_([s.id for s in sessions] or [0])).all()
+        by_session = {}
+        for row in target_rows:
+            by_session.setdefault(row.session_id, set()).add(row.store_id)
+        sessions = [s for s in sessions
+                    if by_session.get(s.id, set()) & reachable]
+
+    def minutes(session) -> float:
+        if not session.started_at:
+            return 0.0
+        end = session.ended_at or datetime.now(timezone.utc)
+        start = session.started_at
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        return max(0.0, (end - start).total_seconds() / 60.0)
+
+    # ---- Per broadcaster ----------------------------------------------
+    #
+    # Counted AND timed, because they answer different questions. Ten
+    # thirty-second interruptions and one five-minute campaign are not the
+    # same working day, and a single "broadcasts" number cannot tell them
+    # apart.
+    per_user: dict[str, dict] = {}
+    for session in sessions:
+        name = (session.started_by_display_name or session.started_by_username
+                or "unknown")
+        entry = per_user.setdefault(name, {"user": name, "broadcasts": 0,
+                                           "minutes": 0.0})
+        entry["broadcasts"] += 1
+        entry["minutes"] += minutes(session)
+    broadcasters = sorted(per_user.values(),
+                          key=lambda row: row["minutes"], reverse=True)
+    for row in broadcasters:
+        row["minutes"] = round(row["minutes"], 1)
+
+    # ---- Per day -------------------------------------------------------
+    per_day: dict[str, dict] = {}
+    for session in sessions:
+        day = session.started_at.strftime("%Y-%m-%d")
+        entry = per_day.setdefault(day, {"day": day, "broadcasts": 0,
+                                         "minutes": 0.0})
+        entry["broadcasts"] += 1
+        entry["minutes"] += minutes(session)
+    daily = sorted(per_day.values(), key=lambda row: row["day"])
+    for row in daily:
+        row["minutes"] = round(row["minutes"], 1)
+
+    # ---- Announcements, right now --------------------------------------
+    playback = announcement_service.live_status(engine)
+    if scope is not None:
+        playback = [row for row in playback if row["store_id"] in set(scope)]
+    states = {"PLAYING": 0, "PAUSED": 0, "DUCKED": 0, "STOPPED": 0}
+    for row in playback:
+        states[row["state"]] = states.get(row["state"], 0) + 1
+
+    # ---- Stores, right now ---------------------------------------------
+    online = sum(1 for row in playback if row.get("store_status") == "online")
+
+    return {
+        "since": since.isoformat(),
+        "days": days,
+        "broadcasts": {
+            "total": len(sessions),
+            "minutes": round(sum(minutes(s) for s in sessions), 1),
+            "live_now": sum(1 for s in sessions if s.status == "live"),
+            # The longest one is worth its own number: a broadcast nobody
+            # stopped is the failure this figure exists to surface, and an
+            # average hides it by construction.
+            "longest_minutes": round(max((minutes(s) for s in sessions),
+                                         default=0.0), 1),
+        },
+        "by_user": broadcasters,
+        "by_day": daily,
+        "announcements": {
+            "states": states,
+            "stores": len(playback),
+        },
+        "stores": {"total": len(playback), "online": online,
+                   "offline": len(playback) - online},
+    }
 
 
 # ================ RECORDED ANNOUNCEMENTS ================

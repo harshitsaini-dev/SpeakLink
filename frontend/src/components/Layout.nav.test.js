@@ -82,7 +82,7 @@ test("a group whose every link is hidden does not render its heading", () => {
 
 test("every link still reaches its page after the regrouping", () => {
   renderLayout();
-  for (const testid of ["nav-console", "nav-active-broadcasts", "nav-announcements",
+  for (const testid of ["nav-dashboard", "nav-console", "nav-active-broadcasts", "nav-announcements",
                         "nav-stores", "nav-receivers", "nav-devices",
                         "nav-announcement-templates", "nav-announcement-recordings",
                         "nav-history", "nav-logs", "nav-users", "nav-password"]) {

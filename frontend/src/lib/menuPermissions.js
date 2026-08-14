@@ -8,6 +8,10 @@
  * to secure your own account.
  */
 export const MENU_PERMISSION_BY_PATH = {
+  // The same permission as the Console. The dashboard summarises what the
+  // Console does; a separate right would let somebody read the totals for
+  // work they cannot see.
+  "/dashboard": "menu.broadcast.view",
   "/console": "menu.broadcast.view",
   // Its own permission, not menu.broadcast.view: supervising everybody's
   // broadcasts is a different capability from running your own, and an
@@ -36,7 +40,10 @@ export const MENU_PERMISSION_BY_PATH = {
 
 /** The route a signed-in account should land on if its current one is denied. */
 export const FIRST_ALLOWED_ROUTE = [
-  "/console", "/active-broadcasts", "/announcements", "/stores", "/history", "/receivers", "/logs", "/users",
+  // /console first, not /dashboard. This list answers "where does somebody
+  // land when the page they asked for is denied", and landing a broadcaster
+  // on a summary of work adds a click before they can do the work.
+  "/console", "/dashboard", "/active-broadcasts", "/announcements", "/stores", "/history", "/receivers", "/logs", "/users",
 ];
 
 export function firstAllowedRoute(can) {

@@ -1,6 +1,7 @@
 import React from "react";
 import { X, UserCheck, UserX, LogOut, Copy, KeyRound } from "lucide-react";
 import { api } from "@/lib/api";
+import { FilterSelect } from "@/components/AdminFilters";
 import { PLAYBACK_LABEL, listenerLink } from "@/components/WebAudiencePanel";
 
 /**
@@ -25,6 +26,38 @@ export default function SupervisedWebAudience({ sessionId, campaignName, onClose
   const [state, setState] = React.useState(null);
   const [error, setError] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  const [audienceQuery, setAudienceQuery] = React.useState("");
+  const [audienceState, setAudienceState] = React.useState("");
+  const [audienceAdmitted, setAudienceAdmitted] = React.useState("");
+
+  // Applied to both lists by the same rule, so a name typed once narrows the
+  // requests AND the listeners. Somebody looking for a person does not know
+  // which of the two they are in - that is usually the question.
+  const matches = React.useCallback((person, { withState } = {}) => {
+    const needle = audienceQuery.trim().toLowerCase();
+    if (needle && !String(person.display_name || "").toLowerCase().includes(needle)) {
+      return false;
+    }
+    const named = (raw) => String(raw || "").split(",").map((v) => v.trim())
+      .filter(Boolean);
+    const states = named(audienceState);
+    if (withState && states.length && !states.includes(person.playback_state)) {
+      return false;
+    }
+    const admitted = named(audienceAdmitted);
+    if (withState && admitted.length && !admitted.includes(person.admitted_by)) {
+      return false;
+    }
+    return true;
+  }, [audienceQuery, audienceState, audienceAdmitted]);
+
+  // A join request has not played anything and was admitted by nobody yet, so
+  // those two filters do not apply to it. Applying them anyway would make a
+  // pending person vanish the moment somebody filtered by "Playing", which
+  // reads as the request having been answered.
+  const waiting = (state?.waiting || []).filter((person) => matches(person));
+  const listeners = (state?.listeners || []).filter(
+    (person) => matches(person, { withState: true }));
   const [copied, setCopied] = React.useState(null);
 
   const load = React.useCallback(async () => {
@@ -175,14 +208,56 @@ export default function SupervisedWebAudience({ sessionId, campaignName, onClose
                 </label>
               )}
 
+              {/* Search and filter, over BOTH lists.
+                  Nine listeners fit on a screen; two hundred do not, and the
+                  second is exactly when somebody needs to find one person -
+                  the one who reported no sound, the one who should not be in
+                  the room. Filtered in the browser deliberately: this panel
+                  already holds the whole audience, so a round trip would add
+                  latency to a list that is already here. */}
+              <div className="flex flex-wrap items-end gap-2"
+                   data-testid="supervised-audience-filters">
+                <label className="flex-1 min-w-[180px]">
+                  <span className="sr-only">Search the audience</span>
+                  <input value={audienceQuery} data-testid="supervised-audience-search"
+                         onChange={(event) => setAudienceQuery(event.target.value)}
+                         placeholder="Search by name…"
+                         className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" />
+                </label>
+                <FilterSelect label="Playback" testId="supervised-audience-state"
+                              allLabel="Any state" value={audienceState}
+                              onChange={setAudienceState}
+                              options={Object.entries(PLAYBACK_LABEL).map(
+                                ([value, label]) => ({ value, label }))} />
+                <FilterSelect label="Admitted by" testId="supervised-audience-admitted"
+                              allLabel="Any way" value={audienceAdmitted}
+                              onChange={setAudienceAdmitted}
+                              options={[{ value: "password", label: "Password" },
+                                        { value: "approved", label: "Approved" }]} />
+                {(audienceQuery || audienceState || audienceAdmitted) && (
+                  <button data-testid="supervised-audience-clear"
+                          onClick={() => { setAudienceQuery(""); setAudienceState("");
+                                           setAudienceAdmitted(""); }}
+                          className="rounded border border-slate-300 px-2 py-1.5 text-sm hover:bg-slate-50">
+                    Clear
+                  </button>
+                )}
+              </div>
+
               {/* ---- pending ---- */}
               {(state.waiting || []).length > 0 && (
                 <div data-testid="supervised-waiting-list">
                   <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-2">
                     Join Requests
+                    {waiting.length !== (state.waiting || []).length && (
+                      <span className="ml-2 font-normal normal-case tracking-normal text-slate-400"
+                            data-testid="supervised-waiting-count">
+                        showing {waiting.length} of {(state.waiting || []).length}
+                      </span>
+                    )}
                   </p>
                   <ul className="divide-y divide-slate-200 rounded border border-slate-200">
-                    {state.waiting.map((person) => (
+                    {waiting.map((person) => (
                       <li key={person.id}
                           data-testid={`supervised-waiting-${person.id}`}
                           className="flex items-center gap-3 px-3 py-2 text-sm">
@@ -216,15 +291,26 @@ export default function SupervisedWebAudience({ sessionId, campaignName, onClose
               <div data-testid="supervised-listener-list">
                 <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-2">
                   Web Listeners
+                  {listeners.length !== (state.listeners || []).length && (
+                    <span className="ml-2 font-normal normal-case tracking-normal text-slate-400"
+                          data-testid="supervised-listener-count">
+                      showing {listeners.length} of {(state.listeners || []).length}
+                    </span>
+                  )}
                 </p>
                 {(state.listeners || []).length === 0 ? (
                   <p className="text-sm text-slate-500"
                      data-testid="supervised-listeners-empty">
                     Nobody has joined this Broadcast.
                   </p>
+                ) : listeners.length === 0 ? (
+                  <p className="text-sm text-slate-500"
+                     data-testid="supervised-listeners-no-match">
+                    No listener matches those filters.
+                  </p>
                 ) : (
                   <ul className="divide-y divide-slate-200 rounded border border-slate-200">
-                    {state.listeners.map((person) => (
+                    {listeners.map((person) => (
                       <li key={person.id}
                           data-testid={`supervised-listener-${person.id}`}
                           className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm">

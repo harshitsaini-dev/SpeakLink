@@ -1,6 +1,6 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { LayoutDashboard, Store as StoreIcon, History, Radar, HardDrive, ScrollText, Users, KeyRound, LogOut, Menu, X, Signal, Megaphone, ClipboardList, Music } from "lucide-react";
+import { LayoutDashboard, Store as StoreIcon, History, Radar, HardDrive, ScrollText, Users, KeyRound, LogOut, Menu, X, Signal, Megaphone, ClipboardList, Music, Gauge } from "lucide-react";
 import SpeakLinkMark from "@/components/SpeakLinkMark";
 import { useAuth } from "@/contexts/AuthContext";
 import { MENU_PERMISSION_BY_PATH } from "@/lib/menuPermissions";
@@ -25,6 +25,9 @@ const NAV_GROUPS = [
   {
     title: "Live",
     items: [
+      // First, because it answers "what is going on" - the question somebody
+      // has before they know which page they want.
+      { to: "/dashboard", label: "Dashboard", icon: Gauge, testid: "nav-dashboard" },
       { to: "/console", label: "Broadcast Console", icon: LayoutDashboard, testid: "nav-console" },
       // Supervision, not broadcasting. Hidden unless broadcast.active_view is
       // held - and ProtectedRoute blocks the URL independently, because a

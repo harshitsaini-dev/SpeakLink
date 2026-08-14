@@ -10,6 +10,7 @@ import { MENU_PERMISSION_BY_PATH, firstAllowedRoute } from "./menuPermissions";
 
 test("every top-level nav route names its menu permission", () => {
   expect(MENU_PERMISSION_BY_PATH).toEqual({
+    "/dashboard": "menu.broadcast.view",
     "/console": "menu.broadcast.view",
     // Supervision has its OWN permission rather than sharing the Console's.
     // An ordinary Broadcaster holds menu.broadcast.view and must not reach

@@ -21,6 +21,7 @@ import React from "react";
 import { Search, RefreshCcw, Square, X } from "lucide-react";
 import SpeakLinkMark from "@/components/SpeakLinkMark";
 import { api } from "@/lib/api";
+import { SearchableSelect } from "@/components/AdminFilters";
 import SupervisedWebAudience from "@/components/SupervisedWebAudience";
 import { useAdminList } from "@/lib/adminList";
 
@@ -40,10 +41,37 @@ export default function ActiveBroadcasts() {
   const [pageSize, setPageSize] = React.useState(20);
   const list = useAdminList(
     "/broadcast/active-management",
-    { q: "", owner: "all", sort: "newest" },
+    { q: "", owner: "all", sort: "newest", owner_user_id: "", store_id: "" },
     { pageSize },
   );
   const { filters, setFilter, page, setPage, items, total, pages, loading, error, meta, reload } = list;
+
+  // The option lists for the two permission-gated filters. Fetched once, and
+  // only what this account may already see: /receivers/filter-options is the
+  // same scoped endpoint the other admin pages use, and the broadcaster list
+  // is built from the rows already on screen - which are exactly the sessions
+  // this account is allowed to know about.
+  const [stores, setStores] = React.useState([]);
+  React.useEffect(() => {
+    if (!meta?.may_view_targets) return;
+    api.get("/receivers/filter-options")
+      .then(({ data }) => setStores((data.stores || []).map((store) => ({
+        value: String(store.id),
+        label: `${store.store_name} (${store.store_code})` }))))
+      .catch(() => { /* the list's own error state already reports failures */ });
+  }, [meta?.may_view_targets]);
+
+  const broadcasters = React.useMemo(() => {
+    const seen = new Map();
+    for (const row of items) {
+      if (row.started_by_user_id && !seen.has(row.started_by_user_id)) {
+        seen.set(String(row.started_by_user_id),
+                 row.started_by_display_name || row.started_by_username
+                 || `user ${row.started_by_user_id}`);
+      }
+    }
+    return Array.from(seen, ([value, label]) => ({ value, label }));
+  }, [items]);
 
   const mayViewOwnership = Boolean(meta?.may_view_ownership);
   const mayViewTargets = Boolean(meta?.may_view_targets);
@@ -179,6 +207,24 @@ export default function ActiveBroadcasts() {
             </button>
           ))}
         </div>
+
+        {/* Only for accounts that may see whose broadcast is whose. Offering
+            the control to somebody without the right would produce a 403 they
+            could not act on - and the server refuses the filter rather than
+            ignoring it, precisely so a silently-dropped filter cannot read as
+            "these are Priya's broadcasts". */}
+        {meta?.may_view_ownership && (
+          <SearchableSelect testId="active-broadcaster" placeholder="Any broadcaster"
+                            value={filters.owner_user_id || ""}
+                            onChange={(value) => setFilter("owner_user_id", value)}
+                            options={broadcasters} />
+        )}
+        {meta?.may_view_targets && (
+          <SearchableSelect testId="active-store" placeholder="Any Store"
+                            value={filters.store_id || ""}
+                            onChange={(value) => setFilter("store_id", value)}
+                            options={stores} />
+        )}
 
         <select
           data-testid="active-sort"

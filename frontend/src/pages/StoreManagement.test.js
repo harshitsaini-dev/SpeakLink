@@ -113,8 +113,11 @@ test("Store Management defaults to the Active lifecycle", async () => {
 test("there is exactly one lifecycle control, with no duplicate or deleted option", async () => {
   respond();
   await renderPage();
-  const lifecycle = screen.getByTestId("stores-lifecycle");
-  const labels = [...lifecycle.querySelectorAll("option")].map((o) => o.textContent);
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-lifecycle")); });
+  const panel = screen.getByTestId("stores-lifecycle-panel");
+  const labels = [...panel.querySelectorAll("button, label")]
+    .map((node) => node.textContent.trim())
+    .filter((text) => text.length);
   expect(labels).toEqual(["All Current", "Active", "Disabled", "Archived"]);
   // No "Permanent Deleted", and no empty placeholder that would mean the
   // same as one of the real states.
@@ -122,23 +125,32 @@ test("there is exactly one lifecycle control, with no duplicate or deleted optio
   expect(new Set(labels).size).toBe(labels.length);
 });
 
-test("selecting a lifecycle REPLACES the previous one", async () => {
+test("a lifecycle stays in effect only while it is ticked", async () => {
+  // The original bug was a previous selection staying in effect INVISIBLY.
+  // The filter takes several states now - "active and archived" is an
+  // ordinary question - so what protects against that bug is no longer
+  // exclusivity but the fact that every chosen value is on screen. Unticking
+  // one has to actually remove it.
   respond();
   await renderPage();
 
+  // The page opens on Active, so that one is already ticked.
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-lifecycle")); });
   await act(async () => {
-    fireEvent.change(screen.getByTestId("stores-lifecycle"), { target: { value: "archived" } });
+    fireEvent.click(screen.getByTestId("stores-lifecycle-option-archived"));
   });
-  await waitFor(() => expect(searchCalls().at(-1)[1].params.lifecycle).toBe("archived"));
+  await waitFor(() => expect(searchCalls().at(-1)[1].params.lifecycle)
+    .toBe("active,archived"));
 
+  // Unticking one has to actually remove it - that is what the original bug
+  // was about, and it is the property that survives the change to checkboxes.
   await act(async () => {
-    fireEvent.change(screen.getByTestId("stores-lifecycle"), { target: { value: "active" } });
+    fireEvent.click(screen.getByTestId("stores-lifecycle-option-active"));
   });
   await waitFor(() => {
     const params = searchCalls().at(-1)[1].params;
-    expect(params.lifecycle).toBe("active");
-    // The reported bug: the previous selection must not still be in effect.
-    expect(JSON.stringify(params)).not.toContain("archived");
+    expect(params.lifecycle).toBe("archived");
+    expect(JSON.stringify(params)).not.toContain("active");
   });
 });
 

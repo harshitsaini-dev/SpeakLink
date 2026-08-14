@@ -150,18 +150,23 @@ export default function StoreManagement() {
         <FilterSelect label="City" testId="stores-city" allLabel="All Cities"
                       value={list.filters.city} options={options.cities}
                       onChange={(v) => list.setFilter("city", v)} />
-        {/* No "all" placeholder: every selection here is a real, exclusive
-            state, so an empty option would be a fifth meaning nobody chose.
-            Single-value for the same reason - a Store is in ONE lifecycle
-            state, and "archived and active" is not a question anybody has. */}
-        <FilterSelect label="Lifecycle" testId="stores-lifecycle" allLabel={null}
-                      multiple={false}
+        {/* Multi-value, like every other filter.
+            I argued this one should stay single because a Store is in exactly
+            one lifecycle state - which is true of a STORE and irrelevant to a
+            FILTER. "Active and archived" is a perfectly ordinary question and
+            answering it used to mean running the search twice.
+            The bug the old exclusive behaviour was protecting against - a
+            previous choice staying in effect invisibly - cannot happen with
+            checkboxes, where what is chosen is on screen. */}
+        <FilterSelect label="Lifecycle" testId="stores-lifecycle" allLabel="All Current"
                       value={list.filters.lifecycle}
-                      options={[{ value: "all_current", label: "All Current" },
-                                { value: "active", label: "Active" },
+                      // No explicit "All Current" option: the panel's clear
+                      // entry already says it, and two controls with the same
+                      // words doing the same thing is one of them being noise.
+                      options={[{ value: "active", label: "Active" },
                                 { value: "disabled", label: "Disabled" },
                                 { value: "archived", label: "Archived" }]}
-                      onChange={(v) => list.setFilter("lifecycle", v || "active")} />
+                      onChange={(v) => list.setFilter("lifecycle", v || "all_current")} />
       </FilterBar>
 
       <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
