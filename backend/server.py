@@ -8180,6 +8180,68 @@ def delete_announcement_history_permanently(
     return {"ok": True, "id": entry_id}
 
 
+
+
+@api.post("/announcements/templates/{template_id}/delete-permanently")
+async def delete_announcement_template_permanently(
+    template_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.delete_permanently")),
+):
+    """Really gone: the template and its lines.
+
+    Archiving was the only option here too, and it had the same problem the
+    recordings had - the row left the list and stayed in the database, so
+    "delete" meant "hide". Both actions exist now and are named for what they
+    do.
+
+    Any Store still playing this template is STOPPED first, and told. Deleting
+    the plan while shops are running it would leave them playing something
+    with no name, which nobody could then pause from the templates list
+    because the list no longer has a row to press.
+
+    The history is deliberately untouched: it carries its own copy of the
+    template's name, so what a shop played last week remains readable after
+    the plan itself is gone.
+    """
+    if str((payload or {}).get("confirmation", "")).strip().upper() != "DELETE":
+        raise HTTPException(
+            status_code=400,
+            detail="Type DELETE to confirm. This removes the template and its "
+                   "lines permanently and cannot be undone.")
+
+    template = _template_or_404(template_id)
+
+    playing = [row for row in announcement_service.live_status(engine)
+               if row.get("template_id") == template_id
+               and row.get("state") in (announcements.STATE_PLAYING,
+                                        announcements.STATE_PAUSED,
+                                        announcements.STATE_DUCKED)]
+    for row in playing:
+        updated = announcement_service.set_state(
+            engine, store_id=row["store_id"],
+            state=announcements.STATE_STOPPED, actor_id=user.id)
+        await _dispatch_announcement(row["store_id"], updated)
+
+    with engine.begin() as connection:
+        connection.execute(text(
+            "DELETE FROM " + announcements.ITEM_TABLE +
+            " WHERE template_id = :id"), {"id": template_id})
+        connection.execute(text(
+            "DELETE FROM " + announcements.TEMPLATE_TABLE + " WHERE id = :id"),
+            {"id": template_id})
+
+    _write_log(db, "warn",
+               f"announcement_template_deleted_permanently id={template_id} "
+               f"name={template['name']!r} stopped={len(playing)} "
+               f"by={user.username}")
+    return {"ok": True, "id": template_id, "name": template["name"],
+            "stopped_stores": [row["store_id"] for row in playing],
+            "note": (f"Deleted. {len(playing)} Store(s) were playing it and "
+                     "have been stopped.") if playing else "Deleted."}
+
+
 # ---- Playing and pausing ------------------------------------------------
 
 @api.get("/announcements/status")

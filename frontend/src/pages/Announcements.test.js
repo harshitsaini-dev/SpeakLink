@@ -23,7 +23,8 @@ jest.mock("@/lib/api", () => ({
 const permissions = {
   current: ["menu.announcements.view", "announcements.control",
             "announcements.control_all", "announcements.volume",
-            "announcements.upload", "announcements.templates.manage"],
+            "announcements.upload", "announcements.templates.manage",
+            "announcements.delete_permanently"],
 };
 jest.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ can: (code) => permissions.current.includes(code) }),
@@ -42,7 +43,8 @@ function listResponse(items) {
 beforeEach(() => {
   permissions.current = ["menu.announcements.view", "announcements.control",
                          "announcements.control_all", "announcements.volume",
-                         "announcements.upload", "announcements.templates.manage"];
+                         "announcements.upload", "announcements.templates.manage",
+            "announcements.delete_permanently"];
   api.get.mockReset();
   api.post.mockReset();
   api.delete.mockReset();
@@ -280,4 +282,34 @@ test("a line can name several Stores, and each becomes its own line", async () =
     { audio_id: 7, volume_percent: 80, store_id: 4 },
     { audio_id: 7, volume_percent: 80, store_id: 6 },
   ]);
+});
+
+
+test("a template offers Archive and Delete as two named actions", async () => {
+  const template = { id: 3, name: "Festival", description: "", items: [],
+                     is_live: true, window: "live - no end date" };
+  api.get.mockImplementation((path) => {
+    if (path.startsWith("/announcements/status")) return Promise.resolve(listResponse([STORE]));
+    if (path.startsWith("/announcements/templates")) return Promise.resolve(listResponse([template]));
+    return Promise.resolve(listResponse([]));
+  });
+  api.post.mockResolvedValue({ data: { ok: true, note: "Deleted." } });
+
+  render(<Announcements />);
+  await screen.findByTestId("announcement-row-4");
+  fireEvent.click(screen.getByTestId("announcements-tab-setup"));
+
+  expect(await screen.findByTestId("template-archive-3")).toBeTruthy();
+  fireEvent.click(screen.getByTestId("template-delete-3"));
+
+  // Nothing happens until the word is typed - the same gate as every other
+  // permanent delete here.
+  const confirm = await screen.findByTestId("recording-delete-confirm-btn");
+  expect(confirm.disabled).toBe(true);
+  fireEvent.change(screen.getByTestId("recording-delete-word"),
+                   { target: { value: "DELETE" } });
+  fireEvent.click(screen.getByTestId("recording-delete-confirm-btn"));
+
+  await waitFor(() => expect(api.post).toHaveBeenCalledWith(
+    "/announcements/templates/3/delete-permanently", { confirmation: "DELETE" }));
 });

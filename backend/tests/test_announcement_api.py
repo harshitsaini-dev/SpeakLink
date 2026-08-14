@@ -695,3 +695,73 @@ def test_deleting_a_history_entry_needs_the_word_and_the_right(client):
                        ).status_code == 200
     assert client.get("/api/announcements/history?include_archived=true",
                       headers=headers).json()["total"] == 0
+
+
+def test_a_template_can_be_deleted_permanently(client):
+    headers = sign_in(client)
+    make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+
+    response = client.post(
+        f"/api/announcements/templates/{template['id']}/delete-permanently",
+        headers=headers, json={"confirmation": "DELETE"})
+    assert response.status_code == 200, response.text
+    assert client.get("/api/announcements/templates?status=all",
+                      headers=headers).json()["items"] == []
+
+
+def test_deleting_a_template_stops_the_shops_playing_it_and_says_so(client):
+    """Deleting the plan while shops run it would leave them playing something
+    with no name - and no row in the list to press Pause on."""
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    response = client.post(
+        f"/api/announcements/templates/{template['id']}/delete-permanently",
+        headers=headers, json={"confirmation": "DELETE"})
+    assert response.status_code == 200, response.text
+    assert response.json()["stopped_stores"] == [store_id]
+    assert "have been stopped" in response.json()["note"]
+
+    rows = client.get("/api/announcements/status?q=NA", headers=headers).json()
+    row = next(r for r in rows["items"] if r["store_id"] == store_id)
+    assert row["state"] == "STOPPED"
+
+
+def test_deleting_a_template_leaves_the_history_readable(client):
+    """History carries its own copy of the name, so what a shop played last
+    week survives the plan being deleted."""
+    headers = sign_in(client)
+    make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    client.post(f"/api/announcements/templates/{template['id']}/delete-permanently",
+                headers=headers, json={"confirmation": "DELETE"})
+
+    history = client.get("/api/announcements/history", headers=headers).json()
+    assert history["items"][0]["template_name"] == "Festival"
+
+
+def test_deleting_a_template_needs_the_word_and_the_right(client):
+    headers = sign_in(client)
+    make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+
+    assert client.post(
+        f"/api/announcements/templates/{template['id']}/delete-permanently",
+        headers=headers, json={"confirmation": "sure"}).status_code == 400
+
+    make_user(client, headers, "editor", "ADMIN")
+    assert client.post(
+        f"/api/announcements/templates/{template['id']}/delete-permanently",
+        headers=sign_in(client, "editor"),
+        json={"confirmation": "DELETE"}).status_code == 403

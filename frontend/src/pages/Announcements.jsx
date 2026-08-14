@@ -64,6 +64,7 @@ export default function Announcements() {
   const [building, setBuilding] = React.useState(false);
   const [stores, setStores] = React.useState([]);
   const [deleting, setDeleting] = React.useState(null);
+  const [deletingTemplate, setDeletingTemplate] = React.useState(null);
   const [busy, setBusy] = React.useState("");
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");
@@ -360,6 +361,9 @@ export default function Announcements() {
                         <Play className="w-4 h-4" /> Play
                       </button>
                     )}
+                    {/* Named for what they do, like the recordings above.
+                        Archiving takes a template out of the list and keeps
+                        it; deleting removes it and every line under it. */}
                     {mayManageTemplates && (
                       <button data-testid={`template-archive-${template.id}`}
                               disabled={busy !== ""}
@@ -370,8 +374,15 @@ export default function Announcements() {
                                   loadSupporting();
                                   return response;
                                 })}
-                              className="p-1.5 rounded border border-slate-300 hover:bg-slate-50 disabled:opacity-50">
-                        <Trash2 className="w-4 h-4" />
+                              className="px-2 py-1 rounded border border-slate-300 text-sm hover:bg-slate-50 disabled:opacity-50">
+                        Archive
+                      </button>
+                    )}
+                    {mayDeletePermanently && (
+                      <button data-testid={`template-delete-${template.id}`}
+                              onClick={() => setDeletingTemplate(template)}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded border border-rose-300 text-sm text-rose-700 hover:bg-rose-50">
+                        <Trash2 className="w-4 h-4" /> Delete
                       </button>
                     )}
                   </div>
@@ -380,6 +391,30 @@ export default function Announcements() {
             ))}
           </tbody>
         </table>
+        {deletingTemplate && (
+          <div className="px-4 py-4 border-t border-rose-200 bg-rose-50 space-y-2"
+               data-testid="template-delete-confirm">
+            <p className="text-sm text-rose-900">
+              Delete <strong>{deletingTemplate.name}</strong> permanently? The
+              template and every line under it are removed. Any shop currently
+              playing it is stopped - a plan deleted while shops run it would
+              leave them playing something with no name, and no row here to
+              press Pause on. What already played stays in Announcement
+              History.
+            </p>
+            <DeleteConfirmation
+              onCancel={() => setDeletingTemplate(null)}
+              onConfirm={(word) => act(`Delete ${deletingTemplate.name}`,
+                async () => {
+                  const response = await api.post(
+                    `/announcements/templates/${deletingTemplate.id}/delete-permanently`,
+                    { confirmation: word });
+                  setDeletingTemplate(null);
+                  loadSupporting();
+                  return response;
+                })} />
+          </div>
+        )}
       </section>
 
       {/* ---- Recordings ---- */}
