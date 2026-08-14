@@ -89,6 +89,7 @@ export default function Dashboard() {
   const [storeId, setStoreId] = React.useState("");
   const [ownerId, setOwnerId] = React.useState("");
   const [report, setReport] = React.useState("by_day");
+  const [reportSort, setReportSort] = React.useState({ column: "", dir: "asc" });
   const [options, setOptions] = React.useState({ regions: [], cities: [], stores: [] });
   const [users, setUsers] = React.useState([]);
   const [data, setData] = React.useState(null);
@@ -134,7 +135,27 @@ export default function Dashboard() {
                                 value: count, state }));
 
   const activeReport = REPORTS.find((entry) => entry.key === report);
-  const rows = data?.[report] || [];
+  //: Sorted in the browser, deliberately.
+  //:
+  //: Everywhere else sorting goes to the server, because those tables hold one
+  //: page of a longer list. A report is the WHOLE answer already - the summary
+  //: returns every day, broadcaster, zone and Store in the period - so
+  //: ordering it here orders all of it, and a round trip would buy nothing.
+  const rows = React.useMemo(() => {
+    const source = data?.[report] || [];
+    if (!reportSort.column) return source;
+    const read = (row) => row[reportSort.column];
+    return [...source].sort((left, right) => {
+      const a = read(left);
+      const b = read(right);
+      const numeric = typeof a === "number" && typeof b === "number";
+      const comparison = numeric
+        ? a - b
+        : String(a ?? "").toLowerCase()
+            .localeCompare(String(b ?? "").toLowerCase());
+      return reportSort.dir === "desc" ? -comparison : comparison;
+    });
+  }, [data, report, reportSort]);
 
   return (
     <div className="space-y-4" data-testid="dashboard-page">
@@ -283,7 +304,9 @@ export default function Dashboard() {
             <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center gap-2">
               <h2 className="font-semibold text-slate-900 mr-auto">Reports</h2>
               {REPORTS.map((entry) => (
-                <button key={entry.key} onClick={() => setReport(entry.key)}
+                <button key={entry.key}
+                        onClick={() => { setReport(entry.key);
+                                         setReportSort({ column: "", dir: "asc" }); }}
                         data-testid={`report-tab-${entry.key}`}
                         aria-current={report === entry.key ? "true" : undefined}
                         className={`px-3 py-1.5 rounded-md text-sm border ${
@@ -320,11 +343,21 @@ export default function Dashboard() {
                 <table className="w-full text-sm" data-testid={`report-table-${report}`}>
                   <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 sticky top-0">
                     <tr>
-                      <th className="px-3 py-2">{activeReport.heading}</th>
-                      {report === "by_store" && <th className="px-3 py-2">Zone</th>}
-                      {report === "by_zone" && <th className="px-3 py-2">Stores</th>}
-                      <th className="px-3 py-2 text-right">Broadcasts</th>
-                      <th className="px-3 py-2 text-right">Minutes</th>
+                      <ReportTh column={activeReport.nameKey}
+                                label={activeReport.heading}
+                                sort={reportSort} onSort={setReportSort} />
+                      {report === "by_store" && (
+                        <ReportTh column="zone" label="Zone" sort={reportSort}
+                                  onSort={setReportSort} />
+                      )}
+                      {report === "by_zone" && (
+                        <ReportTh column="stores" label="Stores" sort={reportSort}
+                                  onSort={setReportSort} />
+                      )}
+                      <ReportTh column="broadcasts" label="Broadcasts" align="right"
+                                sort={reportSort} onSort={setReportSort} />
+                      <ReportTh column="minutes" label="Minutes" align="right"
+                                sort={reportSort} onSort={setReportSort} />
                     </tr>
                   </thead>
                   <tbody>
@@ -358,5 +391,37 @@ export default function Dashboard() {
         </>
       )}
     </div>
+  );
+}
+
+
+/**
+ * A sortable heading for a report.
+ *
+ * Not the shared SortableTh: that one drives a server query, because those
+ * tables hold one page of a longer list. A report is the whole answer
+ * already, so it is ordered here.
+ */
+function ReportTh({ column, label, sort, onSort, align = "left" }) {
+  const active = sort.column === column;
+  const toggle = () => {
+    if (!active) return onSort({ column, dir: "asc" });
+    if (sort.dir === "asc") return onSort({ column, dir: "desc" });
+    // Third click restores the order the report arrived in, which is already
+    // the useful one - biggest first.
+    return onSort({ column: "", dir: "asc" });
+  };
+  return (
+    <th className="px-3 py-2" style={{ textAlign: align }}
+        aria-sort={active ? (sort.dir === "desc" ? "descending" : "ascending")
+                          : "none"}>
+      <button type="button" onClick={toggle} data-testid={`report-sort-${column}`}
+              className="inline-flex items-center gap-1 hover:text-slate-900">
+        {label}
+        <span aria-hidden="true" className={active ? "text-slate-900" : "text-slate-300"}>
+          {active ? (sort.dir === "desc" ? "↓" : "↑") : "⇅"}
+        </span>
+      </button>
+    </th>
   );
 }

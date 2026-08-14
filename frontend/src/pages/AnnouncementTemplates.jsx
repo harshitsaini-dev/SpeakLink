@@ -186,7 +186,7 @@ export default function AnnouncementTemplates() {
             <tr>
               {(mayManage || mayDelete) && <th className="px-3 py-2 w-8"></th>}
               <SortableTh column="name" label="Template" list={list} />
-              <th className="px-3 py-2">Plays in</th>
+              <SortableTh column="plays_in" label="Plays in" list={list} />
               <SortableTh column="window" label="Window" list={list} />
               <th className="px-3 py-2 text-right">Actions</th>
             </tr>

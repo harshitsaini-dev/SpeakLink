@@ -283,6 +283,8 @@ export default function ReceiverDevices() {
   const { can } = useAuth();
   const [devices, setDevices] = React.useState([]);
   const [showArchived, setShowArchived] = React.useState(false);
+  const [deviceQuery, setDeviceQuery] = React.useState("");
+  const [deviceSort, setDeviceSort] = React.useState({ column: "", dir: "asc" });
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const [busy, setBusy] = React.useState("");
@@ -448,7 +450,36 @@ export default function ReceiverDevices() {
   const hasPrimary = devices.some((d) => d.role === "PRIMARY" && d.status === "active");
   const archivedDevices = devices.filter((d) => d.archived_at);
   const activeDevices = devices.filter((d) => !d.archived_at);
-  const visibleDevices = showArchived ? devices : activeDevices;
+  //: Searched and sorted in the browser.
+  //:
+  //: This page holds every Device in ONE Store - a handful, all of them
+  //: already here - so filtering and ordering locally covers the whole list.
+  //: The paginated pages sort on the server for the opposite reason: there,
+  //: local ordering would arrange one page and claim to have arranged the
+  //: rest.
+  const kept = (showArchived ? devices : activeDevices).filter((device) => {
+    const needle = deviceQuery.trim().toLowerCase();
+    if (!needle) return true;
+    return [device.display_name, device.public_id, device.hostname]
+      .some((value) => String(value || "").toLowerCase().includes(needle));
+  });
+  const visibleDevices = React.useMemo(() => {
+    if (!deviceSort.column) return kept;
+    const read = {
+      display_name: (row) => row.display_name,
+      public_id: (row) => row.public_id,
+      role: (row) => (row.is_primary ? "primary" : "standby"),
+      status: (row) => row.status,
+      enrolled_at: (row) => row.enrolled_at,
+      archived_at: (row) => row.archived_at,
+    }[deviceSort.column];
+    return [...kept].sort((left, right) => {
+      const a = String(read(left) ?? "").toLowerCase();
+      const b = String(read(right) ?? "").toLowerCase();
+      return deviceSort.dir === "desc" ? b.localeCompare(a) : a.localeCompare(b);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [devices, showArchived, deviceQuery, deviceSort]);
 
   return (
     <div className="space-y-4" data-testid="receiver-devices-page">
@@ -468,6 +499,10 @@ export default function ReceiverDevices() {
           </p>
         </div>
         <div className="flex gap-2">
+          <input value={deviceQuery} data-testid="devices-search"
+                 onChange={(event) => setDeviceQuery(event.target.value)}
+                 placeholder="Device name, id or hostname…"
+                 className="px-3 py-2 border border-slate-300 rounded-md text-sm min-w-[220px]" />
           <label className="inline-flex items-center gap-1.5 px-3 py-2 border border-slate-300 rounded-md text-sm">
             <input
               type="checkbox"
@@ -551,12 +586,18 @@ export default function ReceiverDevices() {
           <caption className="sr-only">Receiver Devices enrolled in this Store</caption>
           <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
             <tr>
-              <th scope="col" className="px-3 py-2">Device</th>
-              <th scope="col" className="px-3 py-2">Identifier</th>
-              <th scope="col" className="px-3 py-2">Role</th>
-              <th scope="col" className="px-3 py-2">Status</th>
-              <th scope="col" className="px-3 py-2">Enrolled</th>
-              <th scope="col" className="px-3 py-2">Archived</th>
+              <DeviceTh column="display_name" label="Device" sort={deviceSort}
+                        onSort={setDeviceSort} />
+              <DeviceTh column="public_id" label="Identifier" sort={deviceSort}
+                        onSort={setDeviceSort} />
+              <DeviceTh column="role" label="Role" sort={deviceSort}
+                        onSort={setDeviceSort} />
+              <DeviceTh column="status" label="Status" sort={deviceSort}
+                        onSort={setDeviceSort} />
+              <DeviceTh column="enrolled_at" label="Enrolled" sort={deviceSort}
+                        onSort={setDeviceSort} />
+              <DeviceTh column="archived_at" label="Archived" sort={deviceSort}
+                        onSort={setDeviceSort} />
               <th scope="col" className="px-3 py-2 text-right">Actions</th>
             </tr>
           </thead>
@@ -817,5 +858,35 @@ function DeleteDeviceDialog({ device, onCancel, onConfirm }) {
         </button>
       </div>
     </div>
+  );
+}
+
+
+/**
+ * A sortable heading for the per-Store Device table.
+ *
+ * Local, like the search beside it: this page holds every Device in ONE
+ * Store, so ordering here orders the whole list. The paginated pages sort on
+ * the server for the opposite reason.
+ */
+function DeviceTh({ column, label, sort, onSort }) {
+  const active = sort.column === column;
+  const toggle = () => {
+    if (!active) return onSort({ column, dir: "asc" });
+    if (sort.dir === "asc") return onSort({ column, dir: "desc" });
+    return onSort({ column: "", dir: "asc" });
+  };
+  return (
+    <th scope="col" className="px-3 py-2"
+        aria-sort={active ? (sort.dir === "desc" ? "descending" : "ascending")
+                          : "none"}>
+      <button type="button" onClick={toggle} data-testid={`device-sort-${column}`}
+              className="inline-flex items-center gap-1 hover:text-slate-900">
+        {label}
+        <span aria-hidden="true" className={active ? "text-slate-900" : "text-slate-300"}>
+          {active ? (sort.dir === "desc" ? "↓" : "↑") : "⇅"}
+        </span>
+      </button>
+    </th>
   );
 }

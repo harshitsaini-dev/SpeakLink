@@ -39,6 +39,36 @@ export default function BroadcastHistory() {
   });
 
   const [open, setOpen] = React.useState(null);
+  const [targetQuery, setTargetQuery] = React.useState("");
+  const [targetStatus, setTargetStatus] = React.useState("");
+  const [targetSort, setTargetSort] = React.useState({ column: "", dir: "asc" });
+
+  // Cleared when a different broadcast is opened: a filter left over from the
+  // last one would hide rows in this one, and the count would be the only
+  // hint - which nobody reads before drawing a conclusion.
+  React.useEffect(() => {
+    setTargetQuery("");
+    setTargetStatus("");
+    setTargetSort({ column: "", dir: "asc" });
+  }, [open?.id]);
+
+  const visibleTargets = React.useMemo(() => {
+    const needle = targetQuery.trim().toLowerCase();
+    const kept = (open?.targets || []).filter((target) => {
+      const matchesName = !needle
+        || String(target.store_name || "").toLowerCase().includes(needle)
+        || String(target.store_code || "").toLowerCase().includes(needle);
+      const matchesStatus = !targetStatus
+        || target.play_status === targetStatus;
+      return matchesName && matchesStatus;
+    });
+    if (!targetSort.column) return kept;
+    return [...kept].sort((left, right) => {
+      const a = String(left[targetSort.column] ?? "").toLowerCase();
+      const b = String(right[targetSort.column] ?? "").toLowerCase();
+      return targetSort.dir === "desc" ? b.localeCompare(a) : a.localeCompare(b);
+    });
+  }, [open, targetQuery, targetStatus, targetSort]);
   //: The chat transcript of the session being looked at. Loaded with the
   //: detail rather than on a second click: the conversation IS part of what
   //: happened, and a tab somebody has to find is a tab most people never do.
@@ -296,19 +326,49 @@ export default function BroadcastHistory() {
               <div><div className="text-[10px] uppercase text-slate-500">Status</div><StatusBadge status={open.status}/></div>
             </div>
             <div className="p-5 overflow-y-auto">
-              <div className="text-xs uppercase text-slate-500 mb-2">Targets ({open.targets?.length || 0})</div>
+              {/* Searched and sorted here, in the browser.
+                  I first excused this table as "a handful of rows", and that
+                  was wrong: a broadcast can target every shop in the estate,
+                  and this modal is where somebody looks to find the one that
+                  failed. The whole target list is already loaded, so ordering
+                  and filtering it here covers all of it. */}
+              <div className="flex flex-wrap items-center gap-2 mb-2">
+                <div className="text-xs uppercase text-slate-500 mr-auto">
+                  Targets ({visibleTargets.length}
+                  {visibleTargets.length !== (open.targets?.length || 0)
+                    && ` of ${open.targets?.length || 0}`})
+                </div>
+                <input value={targetQuery} data-testid="history-target-search"
+                       onChange={(event) => setTargetQuery(event.target.value)}
+                       placeholder="Store code or name…"
+                       className="rounded border border-slate-300 px-2 py-1 text-xs" />
+                <select value={targetStatus} data-testid="history-target-status"
+                        onChange={(event) => setTargetStatus(event.target.value)}
+                        className="rounded border border-slate-300 bg-white px-2 py-1 text-xs">
+                  <option value="">Any play status</option>
+                  <option value="playing">Playing</option>
+                  <option value="stopped">Stopped</option>
+                  <option value="failed">Failed</option>
+                  <option value="pending">Pending</option>
+                </select>
+              </div>
               <table className="w-full text-sm">
                 <thead className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
                   <tr>
-                    <th className="px-2 py-1.5">Store</th>
-                    <th className="px-2 py-1.5">Play Status</th>
-                    <th className="px-2 py-1.5">Started</th>
-                    <th className="px-2 py-1.5">Stopped</th>
-                    <th className="px-2 py-1.5">Error</th>
+                    <TargetTh column="store_name" label="Store" sort={targetSort}
+                              onSort={setTargetSort} />
+                    <TargetTh column="play_status" label="Play Status"
+                              sort={targetSort} onSort={setTargetSort} />
+                    <TargetTh column="started_playing_at" label="Started"
+                              sort={targetSort} onSort={setTargetSort} />
+                    <TargetTh column="stopped_at" label="Stopped"
+                              sort={targetSort} onSort={setTargetSort} />
+                    <TargetTh column="error_message" label="Error"
+                              sort={targetSort} onSort={setTargetSort} />
                   </tr>
                 </thead>
                 <tbody>
-                  {(open.targets || []).map((t) => (
+                  {visibleTargets.map((t) => (
                     <tr key={t.id} className="border-b border-slate-100" data-testid={`history-target-${t.store_id}`}>
                       <td className="px-2 py-1.5 text-xs">
                         {t.store_name ? (
@@ -487,5 +547,30 @@ function HistoryChatImage({ sessionId, messageId }) {
            alt="Sent in chat"
            className="mt-1 max-h-40 rounded border border-slate-200 object-contain" />
     </a>
+  );
+}
+
+
+/** A sortable heading inside the broadcast-detail modal. Local, because the
+ *  whole target list for one session is already loaded here. */
+function TargetTh({ column, label, sort, onSort }) {
+  const active = sort.column === column;
+  const toggle = () => {
+    if (!active) return onSort({ column, dir: "asc" });
+    if (sort.dir === "asc") return onSort({ column, dir: "desc" });
+    return onSort({ column: "", dir: "asc" });
+  };
+  return (
+    <th className="px-2 py-1.5"
+        aria-sort={active ? (sort.dir === "desc" ? "descending" : "ascending")
+                          : "none"}>
+      <button type="button" onClick={toggle} data-testid={`target-sort-${column}`}
+              className="inline-flex items-center gap-1 hover:text-slate-900">
+        {label}
+        <span aria-hidden="true" className={active ? "text-slate-900" : "text-slate-300"}>
+          {active ? (sort.dir === "desc" ? "↓" : "↑") : "⇅"}
+        </span>
+      </button>
+    </th>
   );
 }

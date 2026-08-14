@@ -8509,6 +8509,7 @@ ANNOUNCEMENT_STATUS_SORTS = {
 
 ANNOUNCEMENT_TEMPLATE_SORTS = {
     "name": lambda row: row.get("name"),
+    "plays_in": lambda row: row.get("plays_in"),
     "status": lambda row: row.get("status"),
     "window": lambda row: row.get("window"),
     "starts_at": lambda row: row.get("starts_at"),

@@ -326,6 +326,16 @@ def list_templates(engine: Engine, *, search: str = "", status: str = "active",
     for template in templates:
         template["items"] = by_template.get(template["id"], [])
         template["is_live"] = template_is_live(template, now=now)
+        # A readable label for the whole "plays in" column, so it can be
+        # sorted and exported as the thing the reader sees. Built from the
+        # first line: a template with several lines groups under the first
+        # place it plays, which is the order somebody scanning for "the North
+        # ones" actually wants.
+        first = (template["items"] or [None])[0]
+        template["plays_in"] = (
+            (first.get("zone") or first.get("store_name")
+             or (f"store {first.get('store_id')}" if first.get("store_id") else ""))
+            if first else "")
         template["window"] = describe_template_window(template, now=now)
         if (status and "all" not in value_list(status)
                 and not matches_any(template.get("status") or "active", status)):

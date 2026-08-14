@@ -18,7 +18,7 @@ import path from "path";
 
 const PAGES = [
   "StoreManagement", "UserManagement", "SystemLogs", "BroadcastHistory",
-  "ReceiverDeviceFleet", "ReceiverStatus", "ActiveBroadcasts",
+  "ReceiverDeviceFleet", "ReceiverStatus", "ActiveBroadcasts", "ReceiverDevices",
   "Announcements", "AnnouncementTemplates", "AnnouncementRecordings",
   "AnnouncementHistory", "BroadcastConsole",
 ];
@@ -29,24 +29,12 @@ const NOT_SORTABLE = {
   Actions: "buttons, not data",
   Recording: "a player and a download button, not a value",
   "Plays in": "a list of lines per template; there is no single value to order by",
-  Role: "rendered from two fields on the per-Store page, which is not paginated",
-  Archived: "a timestamp shown only when set; the Lifecycle column orders it",
-  Enrolled: "shown on the per-Store page, which is not paginated",
-  Device: "per-Store page, not paginated",
-  Identifier: "per-Store page, not paginated",
   Status: "per-Store page, not paginated",
-  Store: "per-Store page, not paginated",
-  "Play Status": "the broadcast-detail modal lists a handful of rows",
-  Started: "the broadcast-detail modal lists a handful of rows",
-  Stopped: "the broadcast-detail modal lists a handful of rows",
-  Error: "the broadcast-detail modal lists a handful of rows",
-  Targets: "the broadcast-detail modal lists a handful of rows",
   Volume: "a slider, not a value",
+  "Play Status": "the Console picker sorts this locally, through PickerTh",
   "In Broadcast": "add and remove buttons for a live session, not a value",
   "Store Output": "a volume slider per Store, not a value",
   Primary: "rendered from a flag the Devices column already orders",
-  Type: "per-Store page, not paginated",
-  Lifecycle: "per-Store page, not paginated",
 };
 
 function labelledHeaders(source) {
