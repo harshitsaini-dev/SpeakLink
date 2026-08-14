@@ -201,3 +201,61 @@ test("archiving reports what it did to the shops running it", async () => {
   const note = await screen.findByTestId("templates-note");
   expect(note.textContent).toMatch(/have been stopped/i);
 });
+
+
+// ===========================================================================
+// A filter may name more than one value
+//
+// One Store answers "what is scheduled for Nehru Place". It cannot answer
+// "what is scheduled for these six", which is the question people bring - a
+// zone with an exception in it is the normal case, and neither a zone filter
+// nor a single Store describes it.
+// ===========================================================================
+
+test("templates can be filtered by Store, and by several Stores", async () => {
+  render(<AnnouncementTemplates />);
+  await screen.findByTestId("template-row-3");
+
+  fireEvent.click(screen.getByTestId("templates-store"));
+  fireEvent.click(await screen.findByTestId("templates-store-option-4"));
+  await waitFor(() => expect(api.get).toHaveBeenCalledWith(
+    "/announcements/templates", expect.objectContaining({
+      params: expect.objectContaining({ store_id: "4" }) })));
+
+  fireEvent.click(screen.getByTestId("templates-store-option-5"));
+  await waitFor(() => expect(api.get).toHaveBeenCalledWith(
+    "/announcements/templates", expect.objectContaining({
+      params: expect.objectContaining({ store_id: "4,5" }) })));
+});
+
+test("choosing a second value adds to the first rather than replacing it", async () => {
+  render(<AnnouncementTemplates />);
+  await screen.findByTestId("template-row-3");
+
+  fireEvent.click(screen.getByTestId("templates-store"));
+  fireEvent.click(await screen.findByTestId("templates-store-option-4"));
+  fireEvent.click(screen.getByTestId("templates-store-option-5"));
+  expect(screen.getByTestId("templates-store").textContent).toContain("2 selected");
+
+  // And clicking a chosen one removes it.
+  fireEvent.click(screen.getByTestId("templates-store-option-4"));
+  await waitFor(() => expect(api.get).toHaveBeenCalledWith(
+    "/announcements/templates", expect.objectContaining({
+      params: expect.objectContaining({ store_id: "5" }) })));
+});
+
+test("the All option clears every chosen value", async () => {
+  render(<AnnouncementTemplates />);
+  await screen.findByTestId("template-row-3");
+
+  fireEvent.click(screen.getByTestId("templates-store"));
+  fireEvent.click(await screen.findByTestId("templates-store-option-4"));
+  fireEvent.click(screen.getByTestId("templates-store-clear"));
+
+  await waitFor(() => {
+    const last = api.get.mock.calls.filter(
+      ([path]) => path === "/announcements/templates").at(-1);
+    expect(last[1].params.store_id).toBeUndefined();
+  });
+  expect(screen.getByTestId("templates-store").textContent).toContain("All Stores");
+});

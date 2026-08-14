@@ -70,20 +70,103 @@ export function SearchInput({ value, onChange, placeholder = "Search…", testId
  * options you get two labels for one state. That is exactly what "Active
  * only" and "Active" were on the Receiver Devices screen.
  */
-export function FilterSelect({ label, value, onChange, options, testId, allLabel = "All" }) {
+/**
+ * One filter, which may name SEVERAL values.
+ *
+ * The single-value dropdown answered "how is Nehru Place doing" and could not
+ * answer "how are these six shops doing" - a zone with an exception in it, a
+ * handful in one market, the three that were complaining this morning. Running
+ * the search six times and comparing six screens is arithmetic done by the
+ * reader.
+ *
+ * The value on the wire stays a plain comma-separated string, so every
+ * existing link, bookmark and test keeps working: one value is a list of one.
+ *
+ * Checkboxes rather than a <select multiple>. That control needs Ctrl-click to
+ * take a second item, gives no sign that it does, and REPLACES the selection
+ * on a plain click - so choosing a fifth item looks like it deselected the
+ * other four.
+ */
+export function FilterSelect({ label, value, onChange, options, testId,
+                               allLabel = "All", multiple = true }) {
+  const [open, setOpen] = React.useState(false);
+  const holder = React.useRef(null);
+
+  const normalised = options.map((option) => (
+    typeof option === "string" ? { value: option, label: option } : option));
+  const chosen = String(value ?? "").split(",").map((v) => v.trim()).filter(Boolean);
+
+  // Closing on an outside click, because a panel that only closes via its own
+  // button is a panel that covers the table while somebody reads it.
+  React.useEffect(() => {
+    if (!open) return undefined;
+    const away = (event) => {
+      if (holder.current && !holder.current.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [open]);
+
+  if (!multiple) {
+    return (
+      <label className="flex flex-col gap-1">
+        <span className="text-[10px] uppercase tracking-widest text-slate-500">{label}</span>
+        <select data-testid={testId} value={value ?? ""}
+                onChange={(e) => onChange(e.target.value)}
+                className="px-2 py-1.5 text-sm border border-slate-300 rounded-md bg-white min-w-[120px]">
+          {allLabel !== null && <option value="">{allLabel}</option>}
+          {normalised.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      </label>
+    );
+  }
+
+  const toggle = (candidate) => {
+    const next = chosen.includes(candidate)
+      ? chosen.filter((entry) => entry !== candidate)
+      : [...chosen, candidate];
+    onChange(next.join(","));
+  };
+
+  const summary = chosen.length === 0
+    ? allLabel
+    : chosen.length === 1
+      ? (normalised.find((option) => option.value === chosen[0])?.label || chosen[0])
+      : `${chosen.length} selected`;
+
   return (
-    <label className="flex flex-col gap-1">
+    <div className="flex flex-col gap-1 relative" ref={holder}>
       <span className="text-[10px] uppercase tracking-widest text-slate-500">{label}</span>
-      <select data-testid={testId} value={value ?? ""} onChange={(e) => onChange(e.target.value)}
-              className="px-2 py-1.5 text-sm border border-slate-300 rounded-md bg-white min-w-[120px]">
-        {allLabel !== null && <option value="">{allLabel}</option>}
-        {options.map((option) => {
-          const key = typeof option === "string" ? option : option.value;
-          const text = typeof option === "string" ? option : option.label;
-          return <option key={key} value={key}>{text}</option>;
-        })}
-      </select>
-    </label>
+      <button type="button" data-testid={testId} onClick={() => setOpen((was) => !was)}
+              className="px-2 py-1.5 text-sm border border-slate-300 rounded-md bg-white min-w-[140px] text-left">
+        {summary}
+      </button>
+      {open && (
+        <div data-testid={`${testId}-panel`}
+             className="absolute z-20 top-full mt-1 w-56 max-h-64 overflow-y-auto
+                        border border-slate-300 rounded-md bg-white shadow-lg p-2">
+          <button type="button" data-testid={`${testId}-clear`}
+                  onClick={() => onChange("")}
+                  className="w-full text-left px-2 py-1 text-sm rounded hover:bg-slate-50 text-slate-600">
+            {allLabel}
+          </button>
+          {normalised.map((option) => (
+            <label key={option.value}
+                   className="flex items-center gap-2 px-2 py-1 text-sm rounded hover:bg-slate-50 cursor-pointer">
+              <input type="checkbox" checked={chosen.includes(String(option.value))}
+                     data-testid={`${testId}-option-${option.value}`}
+                     onChange={() => toggle(String(option.value))} />
+              {option.label}
+            </label>
+          ))}
+          {normalised.length === 0 && (
+            <p className="px-2 py-1 text-xs text-slate-500">Nothing to choose from yet.</p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

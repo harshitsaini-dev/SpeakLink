@@ -151,8 +151,11 @@ export default function StoreManagement() {
                       value={list.filters.city} options={options.cities}
                       onChange={(v) => list.setFilter("city", v)} />
         {/* No "all" placeholder: every selection here is a real, exclusive
-            state, so an empty option would be a fifth meaning nobody chose. */}
+            state, so an empty option would be a fifth meaning nobody chose.
+            Single-value for the same reason - a Store is in ONE lifecycle
+            state, and "archived and active" is not a question anybody has. */}
         <FilterSelect label="Lifecycle" testId="stores-lifecycle" allLabel={null}
+                      multiple={false}
                       value={list.filters.lifecycle}
                       options={[{ value: "all_current", label: "All Current" },
                                 { value: "active", label: "Active" },

@@ -1075,3 +1075,108 @@ def test_a_disabled_account_does_not_silence_what_it_started(client):
     rows = client.get("/api/announcements/status?q=NA", headers=headers).json()
     row = next(r for r in rows["items"] if r["store_id"] == store_id)
     assert row["state"] == "PLAYING"
+
+
+# ===========================================================================
+# A filter may name more than one value
+#
+# A dropdown that admits one Store answers "how is Nehru Place doing". It
+# cannot answer "how are these six shops doing", which is the question people
+# actually bring - a zone with an exception in it, a handful in one market,
+# the three that were complaining this morning. Running the search six times
+# and comparing six screens is arithmetic done by the reader.
+# ===========================================================================
+
+def test_the_status_page_can_be_filtered_to_several_zones(client):
+    headers = sign_in(client)
+    make_store(client, headers, "NA", region="NORTH")
+    make_store(client, headers, "SA", region="SOUTH")
+    make_store(client, headers, "EA", region="EAST")
+
+    both = client.get("/api/announcements/status?zone=NORTH,SOUTH",
+                      headers=headers).json()
+    assert sorted(row["store_code"] for row in both["items"]) == ["NA", "SA"]
+
+    # One value still means exactly what it always meant.
+    one = client.get("/api/announcements/status?zone=NORTH", headers=headers).json()
+    assert [row["store_code"] for row in one["items"]] == ["NA"]
+
+
+def test_the_status_page_can_be_filtered_to_several_stores(client):
+    headers = sign_in(client)
+    first = make_store(client, headers, "NA", region="NORTH")
+    make_store(client, headers, "NB", region="NORTH")
+    third = make_store(client, headers, "NC", region="NORTH")
+
+    chosen = client.get(f"/api/announcements/status?store_id={first},{third}",
+                        headers=headers).json()
+    assert sorted(row["store_code"] for row in chosen["items"]) == ["NA", "NC"]
+
+
+def test_templates_can_be_filtered_by_store_and_by_several_of_them(client):
+    headers = sign_in(client)
+    north = make_store(client, headers, "NA", region="NORTH")
+    south = make_store(client, headers, "SA", region="SOUTH")
+    other = make_store(client, headers, "EA", region="EAST")
+    audio = upload(client, headers)
+    make_template(client, headers, audio_id=audio["id"], name="North one",
+                  items=[{"audio_id": audio["id"], "store_id": north}])
+    make_template(client, headers, audio_id=audio["id"], name="South one",
+                  items=[{"audio_id": audio["id"], "store_id": south}])
+    make_template(client, headers, audio_id=audio["id"], name="Elsewhere",
+                  items=[{"audio_id": audio["id"], "store_id": other}])
+
+    one = client.get(f"/api/announcements/templates?store_id={north}",
+                     headers=headers).json()
+    assert [row["name"] for row in one["items"]] == ["North one"]
+
+    several = client.get(f"/api/announcements/templates?store_id={north},{south}",
+                         headers=headers).json()
+    assert sorted(row["name"] for row in several["items"]) == ["North one", "South one"]
+
+
+def test_a_template_matches_if_any_of_its_lines_matches(client):
+    """"Show me the templates touching these six shops" is the question.
+    Requiring every line to match would answer a different one nobody asks."""
+    headers = sign_in(client)
+    north = make_store(client, headers, "NA", region="NORTH")
+    south = make_store(client, headers, "SA", region="SOUTH")
+    audio = upload(client, headers)
+    make_template(client, headers, audio_id=audio["id"], name="Both",
+                  items=[{"audio_id": audio["id"], "store_id": north},
+                         {"audio_id": audio["id"], "store_id": south}])
+
+    found = client.get(f"/api/announcements/templates?store_id={north}",
+                       headers=headers).json()
+    assert [row["name"] for row in found["items"]] == ["Both"]
+
+
+def test_history_accepts_several_reasons_and_several_zones(client):
+    headers = sign_in(client)
+    make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+    client.post("/api/announcements/pause-all", headers=headers)
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    # "open" and "paused" together: still playing OR paused by a person.
+    both = client.get("/api/announcements/history?reason=open,paused",
+                      headers=headers).json()
+    assert both["total"] == 2
+
+    zoned = client.get("/api/announcements/history?zone=NORTH,SOUTH",
+                       headers=headers).json()
+    assert zoned["total"] == 2
+
+
+def test_an_empty_filter_still_means_everything(client):
+    """The alternative is that clearing a filter hides every row, which reads
+    as the page being broken."""
+    headers = sign_in(client)
+    make_store(client, headers, "NA", region="NORTH")
+    everything = client.get("/api/announcements/status?zone=&state=&store_id=",
+                            headers=headers).json()
+    assert everything["total"] >= 1

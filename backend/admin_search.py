@@ -118,6 +118,9 @@ __all__ = [
     "BULK_MODES",
     "BulkSelectionError",
     "DEFAULT_PAGE_SIZE",
+    "value_list",
+    "matches_any",
+    "int_list",
     "MAX_PAGE_SIZE",
     "Page",
     "apply_paging",
@@ -171,3 +174,59 @@ def resolve_bulk_selection(mode, ids, filters, *, resolver):
         return row_ids, len(row_ids)
     matched = resolver(filters or {})
     return list(matched), len(matched)
+
+# ===========================================================================
+# Filters that name more than one value
+#
+# A dropdown that admits one Store answers "how is Nehru Place doing". It
+# cannot answer "how are these six shops doing", which is the question people
+# actually bring - a zone with an exception in it, a handful of shops in one
+# market, the three that were complaining this morning. Repeating a search six
+# times and comparing six screens is not an answer, it is arithmetic done by
+# the reader.
+#
+# So every filter accepts a comma-separated list, and one value is simply a
+# list of one. That keeps every existing link, bookmark and test working
+# unchanged: `?zone=NORTH` still means what it always meant.
+# ===========================================================================
+
+def value_list(raw) -> list[str]:
+    """The values a filter parameter names, in order, without blanks.
+
+    Accepts a list (from repeated query parameters), a comma-separated string,
+    or a single value. Anything empty yields an empty list, which every caller
+    reads as "no filter" - so an accidental `?zone=` does not silently select
+    nothing.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        candidates = list(raw)
+    else:
+        candidates = str(raw).split(",")
+    return [str(value).strip() for value in candidates if str(value).strip()]
+
+
+def matches_any(value, raw) -> bool:
+    """Does this row's value match a filter that may name several?
+
+    An empty filter matches everything, deliberately: the alternative is that
+    clearing a filter hides every row, which reads as the page being broken.
+    """
+    wanted = value_list(raw)
+    if not wanted:
+        return True
+    return str(value if value is not None else "") in wanted
+
+
+def int_list(raw) -> list[int]:
+    """The same, for ids. Values that are not numbers are dropped rather than
+    raising: a filter is not a place to fail a whole page over one bad token."""
+    found = []
+    for value in value_list(raw):
+        try:
+            found.append(int(value))
+        except ValueError:
+            continue
+    return found
+

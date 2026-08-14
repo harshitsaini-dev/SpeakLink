@@ -23,6 +23,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Engine
 
 import announcements
+from admin_search import int_list, matches_any, value_list
 from announcements import (
     AUDIO_TABLE,
     ITEM_TABLE,
@@ -285,8 +286,9 @@ def list_audio(engine: Engine, *, search: str = "", status: str = "active"
     with engine.connect() as connection:
         rows = _rows(connection, f"SELECT * FROM {AUDIO_TABLE} ORDER BY id DESC")
     needle = (search or "").strip().lower()
-    if status and status != "all":
-        rows = [row for row in rows if (row.get("status") or "active") == status]
+    if status and "all" not in value_list(status):
+        rows = [row for row in rows
+                if matches_any(row.get("status") or "active", status)]
     if needle:
         rows = [row for row in rows
                 if needle in (row.get("title") or "").lower()
@@ -295,7 +297,7 @@ def list_audio(engine: Engine, *, search: str = "", status: str = "active"
 
 
 def list_templates(engine: Engine, *, search: str = "", status: str = "active",
-                   zone: str = "", store_id: int | None = None,
+                   zone: str = "", store_id=None,
                    window: str = "") -> list[dict[str, Any]]:
     """Templates with their lines attached and their window described.
 
@@ -325,34 +327,41 @@ def list_templates(engine: Engine, *, search: str = "", status: str = "active",
         template["items"] = by_template.get(template["id"], [])
         template["is_live"] = template_is_live(template, now=now)
         template["window"] = describe_template_window(template, now=now)
-        if status and status != "all" and (template.get("status") or "active") != status:
+        if (status and "all" not in value_list(status)
+                and not matches_any(template.get("status") or "active", status)):
             continue
         if needle and needle not in (template.get("name") or "").lower() \
                 and needle not in (template.get("description") or "").lower():
             continue
-        if zone and not any((item.get("zone") or "") == zone
+        # A template matches if ANY of its lines matches ANY of the values the
+        # filter names. "Show me the templates touching these six shops" is
+        # the question; requiring every line to match would answer a different
+        # one nobody asks.
+        if zone and not any(matches_any(item.get("zone") or "", zone)
                             for item in template["items"]):
             continue
-        if store_id is not None and not any(item.get("store_id") == store_id
-                                            for item in template["items"]):
+        wanted_stores = int_list(store_id)
+        if wanted_stores and not any(item.get("store_id") in wanted_stores
+                                     for item in template["items"]):
             continue
         # The window is the column people actually scan, so it is also the
         # filter they reach for: "which of these have already expired" is the
         # question behind most of the tidying that happens on this page.
-        if window:
+        windows = value_list(window)
+        if windows:
             described = template["window"]
-            if window == "live" and not template["is_live"]:
-                continue
-            if window == "scheduled" and not described.startswith("scheduled"):
-                continue
-            if window == "expired" and not described.startswith("expired"):
+            state = ("live" if template["is_live"]
+                     else "scheduled" if described.startswith("scheduled")
+                     else "expired" if described.startswith("expired")
+                     else "archived")
+            if state not in windows:
                 continue
         result.append(template)
     return result
 
 
 def live_status(engine: Engine, *, search: str = "", zone: str = "",
-                state: str = "") -> list[dict[str, Any]]:
+                state: str = "", store_id=None) -> list[dict[str, Any]]:
     """What every Store is doing right now, for the status table.
 
     A LEFT JOIN from stores, not from the playback table: a Store that has
@@ -385,9 +394,12 @@ def live_status(engine: Engine, *, search: str = "", zone: str = "",
                 or needle in (row.get("template_name") or "").lower()
                 or needle in (row.get("audio_title") or "").lower()]
     if zone:
-        rows = [row for row in rows if (row.get("zone") or "") == zone]
+        rows = [row for row in rows if matches_any(row.get("zone") or "", zone)]
     if state:
-        rows = [row for row in rows if row.get("state") == state]
+        rows = [row for row in rows if matches_any(row.get("state"), state)]
+    if store_id:
+        wanted = int_list(store_id)
+        rows = [row for row in rows if row["store_id"] in wanted]
     return rows
 
 
@@ -491,19 +503,21 @@ def list_history(engine: Engine, *, search: str = "", zone: str = "",
                 or needle in (row.get("template_name") or "").lower()
                 or needle in (row.get("audio_title") or "").lower()]
     if zone:
-        rows = [row for row in rows if (row.get("zone") or "") == zone]
+        rows = [row for row in rows if matches_any(row.get("zone") or "", zone)]
     if reason:
         # "still playing" is a filter people want and it is the ABSENCE of an
         # end, not a reason - so it is spelled here rather than left to
         # somebody constructing an empty-string query.
-        if reason == "open":
-            rows = [row for row in rows if not row.get("ended_at")]
-        else:
-            rows = [row for row in rows if row.get("ended_reason") == reason]
-    if store_id is not None:
-        rows = [row for row in rows if row.get("store_id") == store_id]
-    if template_id is not None:
-        rows = [row for row in rows if row.get("template_id") == template_id]
+        wanted = value_list(reason)
+        rows = [row for row in rows
+                if ("open" in wanted and not row.get("ended_at"))
+                or (row.get("ended_reason") in wanted)]
+    if store_id:
+        wanted_stores = int_list(store_id)
+        rows = [row for row in rows if row.get("store_id") in wanted_stores]
+    if template_id:
+        wanted_templates = int_list(template_id)
+        rows = [row for row in rows if row.get("template_id") in wanted_templates]
     if since:
         rows = [row for row in rows if (row.get("started_at") or "") >= since]
     if until:

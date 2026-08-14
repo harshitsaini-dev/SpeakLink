@@ -18,7 +18,7 @@ import { useAuth } from "@/contexts/AuthContext";
 export default function AnnouncementTemplates() {
   const { can } = useAuth();
   const list = useAdminList("/announcements/templates", {
-    q: "", status: "active", zone: "", window: "",
+    q: "", status: "active", zone: "", window: "", store_id: "",
   });
   const bulk = useBulkSelection(list);
   const [audio, setAudio] = React.useState([]);
@@ -124,6 +124,16 @@ export default function AnnouncementTemplates() {
                       value={list.filters.zone}
                       onChange={(value) => list.setFilter("zone", value)}
                       options={zones.map((zone) => ({ value: zone, label: zone }))} />
+        {/* Which shops a plan touches is the other way people look for one -
+            "what is scheduled for these six" rather than "what is in this
+            zone". Both, because a zone with an exception in it is the normal
+            case and neither filter alone describes it. */}
+        <FilterSelect label="Store" testId="templates-store" allLabel="All Stores"
+                      value={list.filters.store_id}
+                      onChange={(value) => list.setFilter("store_id", value)}
+                      options={stores.map((store) => ({
+                        value: String(store.id),
+                        label: `${store.store_name} (${store.store_code})` }))} />
         <FilterSelect label="Status" testId="templates-status" allLabel="All"
                       value={list.filters.status}
                       onChange={(value) => list.setFilter("status", value)}

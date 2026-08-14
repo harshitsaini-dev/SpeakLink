@@ -135,6 +135,9 @@ from store_permanent_delete import (
     purge_legacy_store_tombstones,
 )
 from admin_search import (
+    value_list,
+    matches_any,
+    int_list,
     BulkSelectionError,
     DEFAULT_PAGE_SIZE,
     Page,
@@ -5228,14 +5231,21 @@ def _receiver_status_where(user, *, q, city, region, store_id, status_f):
             "(s.store_code LIKE :term OR s.store_name LIKE :term OR s.id IN "
             "(SELECT d.store_id FROM receiver_devices d "
             " WHERE d.public_id LIKE :term OR d.display_name LIKE :term))")
-    if city:
-        params["city"] = city; where.append("s.city = :city")
-    if region:
-        params["region"] = region; where.append("s.region = :region")
-    if store_id is not None:
-        params["store_id"] = store_id; where.append("s.id = :store_id")
-    if status_f:
-        params["status_f"] = status_f; where.append("s.status = :status_f")
+    # IN rather than =, because a filter may name several values. One value is
+    # a list of one, so every existing link and bookmark still means what it
+    # meant: `?region=NORTH` is unchanged.
+    cities = value_list(city)
+    if cities:
+        params["cities"] = cities; where.append("s.city IN :cities")
+    regions = value_list(region)
+    if regions:
+        params["regions"] = regions; where.append("s.region IN :regions")
+    store_ids = int_list(store_id)
+    if store_ids:
+        params["store_ids"] = store_ids; where.append("s.id IN :store_ids")
+    statuses = value_list(status_f)
+    if statuses:
+        params["statuses"] = statuses; where.append("s.status IN :statuses")
     clause = " AND ".join(where)
     clause += _receiver_scope_clause(user, params)
     return clause, params
@@ -5244,9 +5254,13 @@ def _receiver_status_where(user, *, q, city, region, store_id, status_f):
 @api.get("/receivers/search")
 def search_receiver_status(
     q: Optional[str] = None,
+    # Comma-separated, because a filter may name several values. Typed as a
+    # string rather than an int for exactly that reason - `store_id=4,7` is a
+    # legitimate request and an int parameter would reject it with a 422 the
+    # operator cannot act on.
     city: Optional[str] = None,
     region: Optional[str] = None,
-    store_id: Optional[int] = None,
+    store_id: Optional[str] = None,
     status_f: Optional[str] = Query(None, alias="status"),
     has_primary: Optional[bool] = None,
     page: int = 1,
@@ -5271,9 +5285,17 @@ def search_receiver_status(
                   "WHERE p.store_id = s.id)")
         where += f" AND {'' if has_primary else 'NOT '}{exists}"
 
+    def prepared(sql: str):
+        """Bind the list parameters as expanding, so IN gets a real list."""
+        statement = text(sql)
+        for name in ("cities", "regions", "store_ids", "statuses"):
+            if name in params:
+                statement = statement.bindparams(bindparam(name, expanding=True))
+        return statement
+
     total = db.execute(
-        text(f"SELECT COUNT(*) FROM stores s WHERE {where}"), params).scalar_one()
-    rows = db.execute(text(
+        prepared(f"SELECT COUNT(*) FROM stores s WHERE {where}"), params).scalar_one()
+    rows = db.execute(prepared(
         "SELECT s.id, s.store_code, s.store_name, s.city, s.region, s.status, "
         "  EXISTS (SELECT 1 FROM receiver_store_primary_device p WHERE p.store_id = s.id) "
         "    AS has_primary, "
@@ -8009,7 +8031,7 @@ def list_announcement_templates(
     q: Optional[str] = None,
     status: str = "active",
     zone: Optional[str] = None,
-    store_id: Optional[int] = None,
+    store_id: Optional[str] = None,
     window: Optional[str] = None,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
@@ -8150,8 +8172,8 @@ def announcement_history(
     q: Optional[str] = None,
     zone: Optional[str] = None,
     reason: Optional[str] = None,
-    store_id: Optional[int] = None,
-    template_id: Optional[int] = None,
+    store_id: Optional[str] = None,
+    template_id: Optional[str] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
     include_archived: bool = False,
@@ -8568,6 +8590,7 @@ def announcement_status(
     q: Optional[str] = None,
     zone: Optional[str] = None,
     state: Optional[str] = None,
+    store_id: Optional[str] = None,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     user: HQUser = Depends(require("menu.announcements.view")),
@@ -8581,7 +8604,8 @@ def announcement_status(
     """
     page, page_size = normalize_paging(page, page_size)
     rows = announcement_service.live_status(
-        engine, search=q or "", zone=zone or "", state=state or "")
+        engine, search=q or "", zone=zone or "", state=state or "",
+        store_id=store_id)
     offset = (page - 1) * page_size
     return Page(items=rows[offset:offset + page_size], total=len(rows),
                 page=page, page_size=page_size).as_dict()

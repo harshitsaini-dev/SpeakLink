@@ -80,8 +80,9 @@ test("typing a search sends q to the server rather than filtering in React", asy
 test("choosing a Zone sends region to the server", async () => {
   respond();
   await renderPage();
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-zone")); });
   await act(async () => {
-    fireEvent.change(screen.getByTestId("stores-zone"), { target: { value: "TESTZONE" } });
+    fireEvent.click(screen.getByTestId("stores-zone-option-TESTZONE"));
   });
   await waitFor(() => {
     expect(searchCalls().at(-1)[1].params).toMatchObject({ region: "TESTZONE" });
@@ -91,8 +92,9 @@ test("choosing a Zone sends region to the server", async () => {
 test("choosing a City sends city to the server", async () => {
   respond();
   await renderPage();
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-city")); });
   await act(async () => {
-    fireEvent.change(screen.getByTestId("stores-city"), { target: { value: "TESTCITY" } });
+    fireEvent.click(screen.getByTestId("stores-city-option-TESTCITY"));
   });
   await waitFor(() => {
     expect(searchCalls().at(-1)[1].params).toMatchObject({ city: "TESTCITY" });
@@ -147,8 +149,9 @@ test("changing a filter returns to page 1", async () => {
   await act(async () => { fireEvent.click(screen.getByTestId("page-next")); });
   await waitFor(() => expect(searchCalls().at(-1)[1].params.page).toBe(2));
 
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-zone")); });
   await act(async () => {
-    fireEvent.change(screen.getByTestId("stores-zone"), { target: { value: "OTHERZONE" } });
+    fireEvent.click(screen.getByTestId("stores-zone-option-OTHERZONE"));
   });
   await waitFor(() => {
     const last = searchCalls().at(-1)[1].params;
@@ -195,8 +198,12 @@ test("the Zone and City options come from the server, not from the visible page"
   // Only one Zone is on screen, but the account may reach the other too.
   respond({ items: [STORES[0]], total: 1 });
   await renderPage();
-  expect(screen.getByTestId("stores-zone").textContent).toContain("OTHERZONE");
-  expect(screen.getByTestId("stores-city").textContent).toContain("OTHERCITY");
+  // The options live in the panel now, not in the button's own text - the
+  // button says what is CHOSEN, which is nothing yet.
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-zone")); });
+  expect(screen.getByTestId("stores-zone-option-OTHERZONE")).toBeTruthy();
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-city")); });
+  expect(screen.getByTestId("stores-city-option-OTHERCITY")).toBeTruthy();
 });
 
 test("no Receiver online/offline status is claimed on this screen", async () => {
