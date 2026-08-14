@@ -61,7 +61,7 @@ test("the navigation is grouped, and the groups are in the order of the day", ()
     document.querySelectorAll('[data-testid^="nav-group-"]'))
     .map((group) => group.getAttribute("data-testid"));
   expect(headings).toEqual([
-    "nav-group-live", "nav-group-estate", "nav-group-records",
+    "nav-group-live", "nav-group-master", "nav-group-records",
     "nav-group-administration",
   ]);
 });
@@ -72,7 +72,7 @@ test("a group whose every link is hidden does not render its heading", () => {
   renderLayout(["menu.broadcast.view"]);
 
   expect(screen.getByTestId("nav-group-live")).toBeTruthy();
-  expect(screen.queryByTestId("nav-group-estate")).toBeNull();
+  expect(screen.queryByTestId("nav-group-master")).toBeNull();
   expect(screen.queryByTestId("nav-group-records")).toBeNull();
   // Administration survives: Change Password needs no permission, because
   // read-only does not mean unable to secure your own account.
@@ -84,6 +84,7 @@ test("every link still reaches its page after the regrouping", () => {
   renderLayout();
   for (const testid of ["nav-console", "nav-active-broadcasts", "nav-announcements",
                         "nav-stores", "nav-receivers", "nav-devices",
+                        "nav-announcement-templates", "nav-announcement-recordings",
                         "nav-history", "nav-logs", "nav-users", "nav-password"]) {
     expect(screen.getByTestId(testid)).toBeTruthy();
   }

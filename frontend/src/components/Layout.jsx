@@ -34,20 +34,26 @@ const NAV_GROUPS = [
       // runs for days with nobody present; a broadcast is somebody holding a
       // microphone.
       { to: "/announcements", label: "Announcements", icon: Megaphone, testid: "nav-announcements" },
-      // The plan and the recordings, each with the search, filters and
-      // pagination a section on the console could not have had.
-      { to: "/announcement-templates", label: "Templates", icon: ClipboardList,
-        testid: "nav-announcement-templates" },
-      { to: "/announcement-recordings", label: "Recordings", icon: Music,
-        testid: "nav-announcement-recordings" },
     ],
   },
   {
-    title: "Estate",
+    // "Master" rather than "Estate": these are the records everything else
+    // refers to - the shops, the machines in them, the recordings and the
+    // plans that use both. Live is what is happening; this is what it is
+    // happening TO.
+    title: "Master",
     items: [
       { to: "/stores", label: "Store Management", icon: StoreIcon, testid: "nav-stores" },
       { to: "/receivers", label: "Receiver Status", icon: Radar, testid: "nav-receivers" },
       { to: "/devices", label: "Receiver Devices", icon: HardDrive, testid: "nav-devices" },
+      // The plan and the recordings sit here, not under Live. Neither of them
+      // is happening: they are what a broadcast or an announcement is made
+      // OUT of, and they are edited on the timescale of a campaign rather
+      // than of a shift.
+      { to: "/announcement-templates", label: "Templates", icon: ClipboardList,
+        testid: "nav-announcement-templates" },
+      { to: "/announcement-recordings", label: "Recordings", icon: Music,
+        testid: "nav-announcement-recordings" },
     ],
   },
   {

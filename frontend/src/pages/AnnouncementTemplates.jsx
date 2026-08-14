@@ -18,11 +18,12 @@ import { useAuth } from "@/contexts/AuthContext";
 export default function AnnouncementTemplates() {
   const { can } = useAuth();
   const list = useAdminList("/announcements/templates", {
-    q: "", status: "active", zone: "",
+    q: "", status: "active", zone: "", window: "",
   });
   const bulk = useBulkSelection(list);
   const [audio, setAudio] = React.useState([]);
   const [stores, setStores] = React.useState([]);
+  const [zones, setZones] = React.useState([]);
   const [building, setBuilding] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
   const [busy, setBusy] = React.useState("");
@@ -41,13 +42,17 @@ export default function AnnouncementTemplates() {
     // admin pages use - so a template can never be pointed at a shop its
     // author is not allowed to open.
     api.get("/receivers/filter-options")
-      .then(({ data }) => { setStores(data.stores || []); })
+      .then(({ data }) => {
+        setStores(data.stores || []);
+        // Zones come from the ESTATE, not from the rows on screen. Deriving
+        // them from the current page emptied the dropdown exactly when it was
+        // needed: filter to something that matches nothing and the control
+        // that would let you widen the filter has no options left.
+        setZones((data.regions || []).map((region) =>
+          typeof region === "string" ? region : region.value || region.label));
+      })
       .catch(() => {});
   }, []);
-
-  const zones = Array.from(new Set((list.items || [])
-    .flatMap((template) => (template.items || []).map((item) => item.zone))
-    .filter(Boolean)));
 
   async function act(label, request) {
     setBusy(label);
@@ -124,6 +129,15 @@ export default function AnnouncementTemplates() {
                       onChange={(value) => list.setFilter("status", value)}
                       options={[{ value: "active", label: "Active" },
                                 { value: "archived", label: "Archived" }]} />
+        {/* The window is the column people scan, so it is the filter they
+            reach for: "which of these have already expired" is the question
+            behind most of the tidying that happens on this page. */}
+        <FilterSelect label="Window" testId="templates-window" allLabel="Any"
+                      value={list.filters.window}
+                      onChange={(value) => list.setFilter("window", value)}
+                      options={[{ value: "live", label: "Running now" },
+                                { value: "scheduled", label: "Starts later" },
+                                { value: "expired", label: "Already expired" }]} />
       </FilterBar>
 
       {(mayManage || mayDelete) && (

@@ -673,6 +673,17 @@ def startup_event():
         # Recorded announcements. Four additive tables; see announcements.py
         # for why they are not a broadcast with a file attached.
         announcements.ensure_announcement_schema(engine)
+        # Shops left pointing at a template that no longer applies. Archiving
+        # used to leave them playing; that is fixed, but the rows it already
+        # produced are the ones an operator is looking at.
+        try:
+            stranded = announcement_service.reconcile_playback(engine)
+            if stranded:
+                logger.warning(
+                    "Stopped %d Store(s) that were still pointed at a template "
+                    "which is archived or gone: %s", len(stranded), stranded)
+        except Exception:  # noqa: BLE001 - never block a boot over tidying
+            logger.exception("Could not reconcile announcement playback")
         # Which speaker each Store plays through, and what it reported it has.
         receiver_output_device.ensure_output_device_schema(engine)
         # More than one voice on one broadcast; see broadcast_group.py.
@@ -7999,13 +8010,15 @@ def list_announcement_templates(
     status: str = "active",
     zone: Optional[str] = None,
     store_id: Optional[int] = None,
+    window: Optional[str] = None,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     user: HQUser = Depends(require("menu.announcements.view")),
 ):
     page, page_size = normalize_paging(page, page_size)
     rows = announcement_service.list_templates(
-        engine, search=q or "", status=status, zone=zone or "", store_id=store_id)
+        engine, search=q or "", status=status, zone=zone or "",
+        store_id=store_id, window=window or "")
     offset = (page - 1) * page_size
     return Page(items=rows[offset:offset + page_size], total=len(rows),
                 page=page, page_size=page_size).as_dict()

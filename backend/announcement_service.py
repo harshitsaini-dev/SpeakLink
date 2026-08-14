@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Engine
 
 import announcements
@@ -295,8 +295,8 @@ def list_audio(engine: Engine, *, search: str = "", status: str = "active"
 
 
 def list_templates(engine: Engine, *, search: str = "", status: str = "active",
-                   zone: str = "", store_id: int | None = None
-                   ) -> list[dict[str, Any]]:
+                   zone: str = "", store_id: int | None = None,
+                   window: str = "") -> list[dict[str, Any]]:
     """Templates with their lines attached and their window described.
 
     The lines are fetched in ONE query for all templates rather than one query
@@ -336,6 +336,17 @@ def list_templates(engine: Engine, *, search: str = "", status: str = "active",
         if store_id is not None and not any(item.get("store_id") == store_id
                                             for item in template["items"]):
             continue
+        # The window is the column people actually scan, so it is also the
+        # filter they reach for: "which of these have already expired" is the
+        # question behind most of the tidying that happens on this page.
+        if window:
+            described = template["window"]
+            if window == "live" and not template["is_live"]:
+                continue
+            if window == "scheduled" and not described.startswith("scheduled"):
+                continue
+            if window == "expired" and not described.startswith("expired"):
+                continue
         result.append(template)
     return result
 
@@ -498,3 +509,46 @@ def list_history(engine: Engine, *, search: str = "", zone: str = "",
     if until:
         rows = [row for row in rows if (row.get("started_at") or "") <= until]
     return rows
+
+
+def reconcile_playback(engine: Engine) -> list[int]:
+    """Stop any Store pointed at a template that no longer applies.
+
+    WHY THIS RUNS AT STARTUP
+
+    Archiving a template used to leave the shops running it exactly where they
+    were, and one estate carries the result: a Store still reporting a
+    template that cannot be opened, with no row in the list to press Pause on.
+    Fixing the archive path stops it happening again; it does nothing for the
+    rows already like that, and those are the ones an operator is looking at.
+
+    A missing template and an archived one are treated the same way here,
+    because they mean the same thing to a shop: nobody can act on this from
+    the templates list any more. The Store is stopped and its pointer cleared,
+    which reads as "nothing chosen" - true, and something an operator can do
+    something about.
+
+    Returns the Store ids it changed, so a boot that quietly fixed six shops
+    can say so rather than looking like it did nothing.
+    """
+    with engine.connect() as connection:
+        rows = _rows(connection, f"""
+            SELECT p.store_id, p.template_id, t.status AS template_status
+            FROM {PLAYBACK_TABLE} p
+            LEFT JOIN {TEMPLATE_TABLE} t ON t.id = p.template_id
+            WHERE p.template_id IS NOT NULL
+        """)
+    stranded = [row["store_id"] for row in rows
+                if row["template_status"] is None
+                or row["template_status"] != "active"]
+    if not stranded:
+        return []
+    now = _now()
+    with engine.begin() as connection:
+        connection.execute(text(
+            f"UPDATE {PLAYBACK_TABLE} SET state = :stopped, template_id = NULL, "
+            "audio_id = NULL, ducked_from = NULL, updated_at = :now "
+            "WHERE store_id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True)),
+            {"stopped": STATE_STOPPED, "now": now, "ids": stranded})
+    return stranded

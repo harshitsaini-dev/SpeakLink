@@ -947,3 +947,131 @@ def test_templates_can_be_deleted_in_bulk_and_the_shops_stop(client):
     assert response.json()["stopped_stores"] == [store_id]
     assert client.get("/api/announcements/templates?status=all",
                       headers=headers).json()["items"] == []
+
+
+def test_a_store_left_pointing_at_an_archived_template_is_reconciled(client):
+    """Archiving used to leave the shops running it exactly where they were,
+    and one estate carries the result: a Store still reporting a template that
+    cannot be opened, with no row in the list to press Pause on. Fixing the
+    archive path does nothing for the rows already like that."""
+    import announcement_service
+    engine = client.server_module.engine
+
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    # Exactly what the old archive path left behind: template archived, Store
+    # still PLAYING and still pointing at it.
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE announcement_templates SET status = 'archived' WHERE id = "
+            + str(template["id"]))
+
+    assert announcement_service.reconcile_playback(engine) == [store_id]
+
+    rows = client.get("/api/announcements/status?q=NA", headers=headers).json()
+    row = next(r for r in rows["items"] if r["store_id"] == store_id)
+    assert row["state"] == "STOPPED"
+    assert row["template_name"] is None
+
+
+def test_reconciliation_leaves_a_healthy_store_alone(client):
+    import announcement_service
+    engine = client.server_module.engine
+
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    assert announcement_service.reconcile_playback(engine) == []
+    rows = client.get("/api/announcements/status?q=NA", headers=headers).json()
+    row = next(r for r in rows["items"] if r["store_id"] == store_id)
+    assert row["state"] == "PLAYING"
+
+
+def test_reconciliation_is_safe_to_run_twice(client):
+    """It runs on every boot."""
+    import announcement_service
+    engine = client.server_module.engine
+    assert announcement_service.reconcile_playback(engine) == []
+    assert announcement_service.reconcile_playback(engine) == []
+
+
+# ===========================================================================
+# An announcement belongs to the estate, not to whoever pressed play
+#
+# Two properties, and they are the same property seen from two sides: nothing
+# about a playing announcement depends on the person who started it still
+# being there.
+# ===========================================================================
+
+def test_a_colleague_with_the_right_can_pause_what_somebody_else_started(client):
+    """A jingle annoying customers at 4pm must be stoppable by whoever is at a
+    desk, not only by the person who happened to start it that morning."""
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    make_user(client, headers, "colleague", "BROADCASTER")
+    colleague = sign_in(client, "colleague")
+
+    paused = client.post(f"/api/announcements/stores/{store_id}/pause",
+                         headers=colleague)
+    assert paused.status_code == 200, paused.text
+    assert paused.json()["state"] == "PAUSED"
+
+    # And can start it again.
+    resumed = client.post(f"/api/announcements/stores/{store_id}/play",
+                          headers=colleague)
+    assert resumed.json()["state"] == "PLAYING"
+
+
+def test_an_announcement_keeps_playing_after_the_starter_signs_out(client):
+    """The state lives in the estate's database and the Store's own player.
+    Nothing about it is attached to a session, so signing out - or a laptop
+    closing, or a token expiring - changes nothing in the shop."""
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    make_user(client, headers, "starter", "BROADCASTER")
+    starter = sign_in(client, "starter")
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=starter)
+
+    logout = client.post("/api/auth/logout", headers=starter)
+    assert logout.status_code in (200, 204, 404), logout.text
+
+    rows = client.get("/api/announcements/status?q=NA", headers=headers).json()
+    row = next(r for r in rows["items"] if r["store_id"] == store_id)
+    assert row["state"] == "PLAYING", (
+        "an announcement stopped because the person who started it signed out")
+
+
+def test_a_disabled_account_does_not_silence_what_it_started(client):
+    """Stronger than signing out: the account is gone entirely and the shop
+    carries on, because the shop was never depending on it."""
+    headers = sign_in(client)
+    store_id = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    starter = make_user(client, headers, "temp", "BROADCASTER")
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=sign_in(client, "temp"))
+
+    disabled = client.post(f"/api/users/{starter['id']}/disable", headers=headers)
+    assert disabled.status_code in (200, 204), disabled.text
+
+    rows = client.get("/api/announcements/status?q=NA", headers=headers).json()
+    row = next(r for r in rows["items"] if r["store_id"] == store_id)
+    assert row["state"] == "PLAYING"
