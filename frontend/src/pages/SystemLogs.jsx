@@ -6,6 +6,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useAdminList, useBulkSelection } from "@/lib/adminList";
 import {
   FilterBar, SearchInput, FilterSelect, FilterDate, ListState, Pager,
+  SortableTh, ExportButton,
   BulkBar, DestructiveModal,
 } from "@/components/AdminFilters";
 
@@ -58,7 +59,8 @@ export default function SystemLogs() {
     <div className="space-y-4" data-testid="logs-page">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight text-slate-900">System Logs</h1>
-        <button data-testid="logs-refresh-btn" onClick={list.reload}
+        <ExportButton dataset="system-logs" list={list} testId="logs-export" />
+          <button data-testid="logs-refresh-btn" onClick={list.reload}
                 className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
           <RefreshCw size={14} /> Refresh
         </button>

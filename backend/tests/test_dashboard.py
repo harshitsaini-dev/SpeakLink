@@ -482,3 +482,29 @@ def test_exporting_is_a_separate_right_from_reading(client):
     set_override(client, headers, watcher["id"], "dashboard.export", "ALLOW")
     assert client.get("/api/export/announcement-status",
                       headers=sign_in(client, "watcher")).status_code == 200
+
+
+def test_every_advertised_export_actually_produces_a_file(client):
+    """A dataset listed and not implemented is a button that fails only when
+    somebody presses it, which is the worst time to find out."""
+    import server as server_module
+    headers = sign_in(client)
+    make_store(client, headers, "NA")
+
+    for dataset in server_module.EXPORTS:
+        response = client.get(f"/api/export/{dataset}", headers=headers)
+        assert response.status_code == 200, f"{dataset}: {response.text}"
+        assert response.text.startswith("﻿"), dataset
+
+
+def test_an_export_reuses_the_page_s_own_query(client):
+    """Reimplementing the filters would be a second set to keep in step, and
+    the way that drifts is an export showing a row the page does not - or one
+    the reader is not allowed to see."""
+    import inspect
+    import server as server_module
+
+    body = inspect.getsource(server_module._export_rows)
+    for route in ("search_receiver_status", "search_stores", "search_users",
+                  "search_logs"):
+        assert route in body, f"{route} is not reused"

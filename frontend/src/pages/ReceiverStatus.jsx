@@ -47,6 +47,7 @@ export default function ReceiverStatus() {
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">Receiver Status</h1>
           <p className="text-sm text-slate-500">Live connection status of every store receiver.</p>
         </div>
+                <ExportButton dataset="receiver-status" list={list} testId="receivers-export" />
         <button data-testid="receivers-refresh-btn" onClick={list.reload}
                 className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
           <RefreshCw size={14} /> Refresh

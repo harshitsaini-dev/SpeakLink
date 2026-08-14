@@ -331,3 +331,59 @@ def test_the_existing_list_endpoint_still_returns_a_bare_array(client):
     owner = sign_in(client)
     body = client.get("/api/stores", headers=owner).json()
     assert isinstance(body, list)
+
+
+# ===========================================================================
+# A filter that names several values
+#
+# The lifecycle parameter was validated as a WHOLE against the allowed set,
+# and adding multi-value filters broke it for the one caller that matters: the
+# page sends "active,archived" the moment somebody ticks two boxes, and the
+# entire list came back as a 400 the operator could do nothing about.
+# ===========================================================================
+
+def test_two_lifecycles_can_be_asked_for_at_once(client):
+    owner = sign_in(client)
+    one = search(client, owner, page_size=1)["items"][0]
+    assert client.post(f"/api/stores/{one['id']}/archive", headers=owner
+                       ).status_code in (200, 204)
+
+    active_only = search(client, owner, lifecycle="active", page_size=200)
+    archived_only = search(client, owner, lifecycle="archived", page_size=200)
+    both = search(client, owner, lifecycle="active,archived", page_size=200)
+
+    assert both["total"] == active_only["total"] + archived_only["total"]
+    codes = {row["store_code"] for row in both["items"]}
+    assert one["store_code"] in codes
+
+
+def test_an_unknown_lifecycle_is_still_refused_by_name(client):
+    response = client.get("/api/stores/search?lifecycle=active,nonsense",
+                          headers=sign_in(client))
+    assert response.status_code == 400
+    assert "nonsense" in response.json()["detail"]
+
+
+def test_deleted_is_still_refused_even_beside_a_valid_value(client):
+    response = client.get("/api/stores/search?lifecycle=active,deleted",
+                          headers=sign_in(client))
+    assert response.status_code == 400
+    assert "deletion-event records" in response.json()["detail"]
+
+
+def test_stores_can_be_sorted_by_a_named_column(client):
+    owner = sign_in(client)
+    ascending = search(client, owner, sort="store_name", dir="asc",
+                       page_size=200)["items"]
+    names = [row["store_name"] for row in ascending]
+    assert names == sorted(names, key=str.lower)
+
+    descending = search(client, owner, sort="store_name", dir="desc",
+                        page_size=200)["items"]
+    assert [row["store_name"] for row in descending] == list(reversed(names))
+
+
+def test_an_unknown_sort_column_is_ignored_rather_than_failing_the_page(client):
+    """A typo in a sort parameter must not cost somebody the whole list."""
+    owner = sign_in(client)
+    assert search(client, owner, sort="nonsense")["total"] > 0

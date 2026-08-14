@@ -24,6 +24,7 @@ import {
 import { useAdminList } from "@/lib/adminList";
 import {
   FilterBar, SearchInput, FilterSelect, SearchableSelect, ListState, Pager,
+  SortableTh, ExportButton,
   DestructiveModal,
 } from "@/components/AdminFilters";
 
@@ -168,6 +169,7 @@ export default function UserManagement() {
           </p>
         </div>
         <div className="flex gap-2">
+          <ExportButton dataset="users" list={list} testId="users-export" />
           <button
             type="button" onClick={load} disabled={busy}
             className="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm"

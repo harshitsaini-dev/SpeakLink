@@ -1064,6 +1064,16 @@ def issue_websocket_ticket(
             "audience": payload.audience}
 
 
+#: What User Management may be sorted by.
+USER_SORTS = {
+    "username": lambda row: row.get("username"),
+    "display_name": lambda row: row.get("display_name"),
+    "role": lambda row: row.get("role"),
+    "state": lambda row: row.get("state"),
+    "created_at": lambda row: row.get("created_at"),
+    "last_login_at": lambda row: row.get("last_login_at"),
+}
+
 # ================ HQ USERS ================
 #
 # Every refusal below is enforced here, on the server. The frontend hides
@@ -1128,6 +1138,8 @@ def search_users(
     scope_store_id: Optional[int] = None,
     scope_city: Optional[str] = None,
     scope_region: Optional[str] = None,
+    sort: Optional[str] = None,
+    dir: str = "asc",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     user: HQUser = Depends(require("menu.users.view")),
@@ -1183,6 +1195,7 @@ def search_users(
         records = [r for r in records if r["id"] in matching_users]
 
     total = len(records)
+    records = sort_rows(records, sort, dir, USER_SORTS)
     offset = (page - 1) * page_size
     return Page(items=records[offset:offset + page_size], total=total,
                 page=page, page_size=page_size).as_dict()
@@ -5315,6 +5328,10 @@ def search_receiver_status(
                  "city": "s.city", "region": "s.region", "status": "s.status",
                  "device_count": "device_count", "has_primary": "has_primary"}
     column = orderable.get(sort or "", "s.store_code")
+    # LOWER() for the text columns: sorted by raw bytes, "NIT Faridabad" lands
+    # before "Nangal Raya" and the list looks broken to the person reading it.
+    if column in ("s.store_code", "s.store_name", "s.city", "s.region", "s.status"):
+        column = f"LOWER({column})"
     descending = "DESC" if str(dir).lower() == "desc" else "ASC"
 
     rows = db.execute(prepared(
@@ -5458,6 +5475,8 @@ def search_stores(
     city: Optional[str] = None,
     region: Optional[str] = None,
     lifecycle: str = "active",
+    sort: Optional[str] = None,
+    dir: str = "asc",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     db: Session = Depends(get_db),
@@ -5474,26 +5493,51 @@ def search_stores(
     that is Receiver Status's job, and it comes from live WebSocket state
     rather than from a Store row.
     """
-    if lifecycle == "deleted":
+    # Validated VALUE BY VALUE, because the filter may name several.
+    #
+    # This checked the whole parameter against the allowed set, and adding
+    # multi-value filters broke it silently for the one caller that matters:
+    # the page sends "active,archived" the moment somebody ticks two boxes,
+    # and the whole list came back as a 400 the operator could do nothing
+    # about.
+    selections = value_list(lifecycle)
+    if "deleted" in selections:
         # Refused rather than quietly returning nothing, so the caller learns
         # that this is not the surface for tombstones.
         raise HTTPException(
             status_code=400,
             detail="Permanently deleted Stores are not available here. Their "
                    "history is in the deletion-event records.")
-    if lifecycle not in STORE_LIFECYCLE_SELECTIONS:
+    unknown = [value for value in selections
+               if value not in STORE_LIFECYCLE_SELECTIONS]
+    if unknown:
         # Ignoring an unknown value would silently return the default set,
         # which reads as a filter that works and does nothing.
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown lifecycle {lifecycle!r}. Expected one of "
+            detail=f"Unknown lifecycle {unknown[0]!r}. Expected one of "
                    f"{', '.join(STORE_LIFECYCLE_SELECTIONS)}.")
 
     page, page_size = normalize_paging(page, page_size)
     query = _store_admin_query(db, user, q=q, city=city, region=region,
                                lifecycle=lifecycle)
     total = query.count()
-    rows = apply_paging(query.order_by(Store.store_code), page, page_size).all()
+    # ORDER BY from an allowlist, never from the parameter.
+    orderable = {"store_code": Store.store_code, "store_name": Store.store_name,
+                 "city": Store.city, "region": Store.region,
+                 "status": Store.status, "lifecycle": Store.lifecycle_state}
+    column = orderable.get(sort or "", Store.store_code)
+    # Case-insensitive, because a reader does not think in ASCII. Sorted by
+    # raw bytes, "NIT Faridabad" lands before "Nangal Raya" and the list looks
+    # broken - which is the only thing a sort order has to avoid.
+    #
+    # lower() rather than COLLATE NOCASE: the same expression works on SQLite
+    # and PostgreSQL, and a collation that exists on one and not the other is
+    # a page that sorts differently depending on where it is deployed.
+    key = func.lower(column) if column is not Store.status else column
+    ordered = key.desc() if str(dir).lower() == "desc" else key.asc()
+    rows = apply_paging(query.order_by(ordered, Store.store_code),
+                        page, page_size).all()
     return Page(items=rows, total=total, page=page, page_size=page_size).as_dict(
         lambda row: {
             "id": row.id,
@@ -7819,10 +7863,67 @@ EXPORTS = {
                     ("status", "Status")],
         "sorts": "ANNOUNCEMENT_AUDIO_SORTS",
     },
+    "receiver-status": {
+        "permission": "menu.receivers.view",
+        "columns": [("store_code", "Code"), ("store_name", "Store"),
+                    ("city", "City"), ("region", "Zone"),
+                    ("device_count", "Devices"), ("has_primary", "Primary"),
+                    ("status", "Status")],
+        "sorts": "RECEIVER_STATUS_SORTS",
+    },
+    "stores": {
+        "permission": "menu.stores.view",
+        "columns": [("store_code", "Code"), ("store_name", "Store"),
+                    ("city", "City"), ("region", "Zone"),
+                    ("lifecycle_state", "Lifecycle"), ("status", "Status")],
+        "sorts": "STORE_SORTS",
+    },
+    "users": {
+        "permission": "menu.users.view",
+        "columns": [("username", "Username"), ("display_name", "Name"),
+                    ("role", "Role"), ("state", "State"),
+                    ("created_at", "Created"), ("last_login_at", "Last sign-in")],
+        "sorts": "USER_SORTS",
+    },
+    "system-logs": {
+        "permission": "menu.logs.view",
+        "columns": [("created_at", "Time"), ("level", "Level"),
+                    ("message", "Message")],
+        "sorts": "SYSTEM_LOG_SORTS",
+    },
 }
 
+#: Sort allowlists for the lists that had none of their own.
+RECEIVER_STATUS_SORTS = {
+    "store_code": lambda row: row.get("store_code"),
+    "store_name": lambda row: row.get("store_name"),
+    "city": lambda row: row.get("city"),
+    "region": lambda row: row.get("region"),
+    "status": lambda row: row.get("status"),
+    "device_count": lambda row: row.get("device_count"),
+}
+STORE_SORTS = {
+    "store_code": lambda row: row.get("store_code"),
+    "store_name": lambda row: row.get("store_name"),
+    "city": lambda row: row.get("city"),
+    "region": lambda row: row.get("region"),
+    "status": lambda row: row.get("status"),
+    "lifecycle": lambda row: row.get("lifecycle_state"),
+}
+SYSTEM_LOG_SORTS = {
+    "created_at": lambda row: row.get("created_at"),
+    "level": lambda row: row.get("level"),
+    "message": lambda row: row.get("message"),
+}
 
-def _export_rows(dataset: str, params: dict, user: HQUser) -> list[dict]:
+#: A ceiling on one export, so a single request cannot try to render an
+#: estate's entire history into memory. Deliberately generous: the point is to
+#: stop a runaway, not to make somebody export twice.
+MAX_EXPORT_ROWS = 10000
+
+
+
+def _export_rows(dataset: str, params: dict, user: HQUser, db: Session) -> list[dict]:
     if dataset == "announcement-status":
         return announcement_service.live_status(
             engine, search=params.get("q") or "", zone=params.get("zone") or "",
@@ -7844,7 +7945,55 @@ def _export_rows(dataset: str, params: dict, user: HQUser) -> list[dict]:
         return announcement_service.list_audio(
             engine, search=params.get("q") or "",
             status=params.get("status") or "active")
+    # The remaining datasets reuse each page's OWN list route, called
+    # in-process with the same parameters. Reimplementing their queries here
+    # would be a second set of filters to keep in step with the first, and the
+    # way that drifts is an export quietly showing a row the page does not -
+    # or, worse, one the reader is not allowed to see.
+    if dataset == "receiver-status":
+        return search_receiver_status(
+            q=params.get("q"), city=params.get("city"),
+            region=params.get("region"), store_id=params.get("store_id"),
+            status_f=params.get("status"), has_primary=None,
+            sort=params.get("sort"), dir=params.get("dir", "asc"),
+            page=1, page_size=MAX_EXPORT_ROWS, db=db, user=user)["items"]
+    if dataset == "stores":
+        return search_stores(
+            q=params.get("q"), city=params.get("city"),
+            region=params.get("region"),
+            lifecycle=params.get("lifecycle") or "active",
+            sort=params.get("sort"), dir=params.get("dir", "asc"),
+            page=1, page_size=MAX_EXPORT_ROWS, db=db, user=user)["items"]
+    if dataset == "users":
+        return search_users(
+            q=params.get("q"), role=params.get("role"),
+            state=params.get("state"),
+            scope_store_id=_as_int(params.get("scope_store_id")),
+            scope_city=params.get("scope_city"),
+            scope_region=params.get("scope_region"),
+            sort=params.get("sort"), dir=params.get("dir", "asc"),
+            page=1, page_size=MAX_EXPORT_ROWS, user=user)["items"]
+    if dataset == "system-logs":
+        return search_logs(
+            q=params.get("q"), level=params.get("level"),
+            date_from=params.get("date_from"), date_to=params.get("date_to"),
+            actor_user_id=_as_int(params.get("actor_user_id")),
+            store_id=_as_int(params.get("store_id")),
+            device_public_id=params.get("device_public_id"),
+            include_archived=str(params.get("include_archived", "")).lower()
+                             in ("1", "true", "yes"),
+            archived_only=str(params.get("archived_only", "")).lower()
+                          in ("1", "true", "yes"),
+            page=1, page_size=MAX_EXPORT_ROWS, db=db, user=user)["items"]
     raise HTTPException(status_code=404, detail="There is no such export.")
+
+
+def _as_int(value):
+    """A filter that is not a number is no filter, not a failed page."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @api.get("/export/{dataset}")
@@ -7888,7 +8037,7 @@ def export_dataset(
                    "that produced it.")
 
     params = dict(request.query_params)
-    rows = _export_rows(dataset, params, user)
+    rows = _export_rows(dataset, params, user, db)
     rows = sort_rows(rows, params.get("sort"), params.get("dir"),
                      globals()[definition["sorts"]])
 

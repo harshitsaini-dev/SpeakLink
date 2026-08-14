@@ -4,7 +4,7 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { Plus, RefreshCw, KeyRound, MonitorSmartphone, Pencil, Power, Archive, ArchiveRestore, Trash2, ShieldAlert } from "lucide-react";
 import { useAdminList } from "@/lib/adminList";
-import { FilterBar, SearchInput, FilterSelect, ListState, Pager } from "@/components/AdminFilters";
+import { FilterBar, SearchInput, FilterSelect, ListState, Pager, SortableTh, ExportButton } from "@/components/AdminFilters";
 
 // Archive and Permanent Delete are different things and must stay different.
 //
@@ -131,6 +131,7 @@ export default function StoreManagement() {
           <p className="text-sm text-slate-500">Manage stores and rotate Receiver credentials. Credentials are never displayed or copied from this page.</p>
         </div>
         <div className="flex gap-2">
+          <ExportButton dataset="stores" list={list} testId="stores-export" />
           <button data-testid="stores-refresh-btn" onClick={load} className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50"><RefreshCw size={14}/> Refresh</button>
           {can("stores.create") && (
             <button data-testid="add-store-btn" onClick={() => setShowAdd(true)} className="inline-flex items-center gap-1 px-3 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-md text-sm font-medium"><Plus size={16}/> Add Store</button>
