@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { Mic, MicOff, Play, Square, AlertOctagon, Search, RefreshCcw, Users, Wifi, WifiOff, Radio } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
+import { FilterSelect } from "@/components/AdminFilters";
 import { useBroadcast } from "@/contexts/BroadcastContext";
 import { elapsedSeconds } from "@/lib/time";
 import StatusBadge from "@/components/StatusBadge";
@@ -239,11 +240,18 @@ export default function BroadcastConsole() {
         || (store.store_code || "").toLowerCase().includes(ql)
         || (store.city || "").toLowerCase().includes(ql)
         || (store.region || "").toLowerCase().includes(ql);
-      const matchesZone = !filterZone || store.region === filterZone;
-      const matchesCity = !filterCity || store.city === filterCity;
-      const matchesStatus = filterStatus === "all"
-        || (filterStatus === "online" ? isReceiverOnline(store)
-                                      : !isReceiverOnline(store));
+      // A filter may name several values now, comma-separated, exactly like
+      // every other filter on the site. One value is a list of one.
+      const named = (raw) => String(raw || "").split(",")
+        .map((entry) => entry.trim()).filter(Boolean);
+      const zones = named(filterZone);
+      const cities = named(filterCity);
+      const statuses = named(filterStatus === "all" ? "" : filterStatus);
+      const matchesZone = !zones.length || zones.includes(store.region);
+      const matchesCity = !cities.length || cities.includes(store.city);
+      const matchesStatus = !statuses.length
+        || (statuses.includes("online") && isReceiverOnline(store))
+        || (statuses.includes("offline") && !isReceiverOnline(store));
       return matchesSearch && matchesZone && matchesCity && matchesStatus;
     });
   }, [stores, q, filterZone, filterCity, filterStatus]);
@@ -972,29 +980,24 @@ export default function BroadcastConsole() {
             <input data-testid="stores-search" value={q} onChange={(e) => setQ(e.target.value)}
                    placeholder="Search stores…" className="pl-7 pr-3 py-2 text-sm border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"/>
           </div>
-          <select data-testid="stores-filter-zone" value={filterZone}
-                  onChange={(e) => setFilterZone(e.target.value)}
-                  className="px-2 py-2 text-sm border border-slate-300 rounded-md bg-white">
-            <option value="">All Zones</option>
-            {(meta.regions || []).map((zone) => (
-              <option key={zone} value={zone}>{zone}</option>
-            ))}
-          </select>
-          <select data-testid="stores-filter-city" value={filterCity}
-                  onChange={(e) => setFilterCity(e.target.value)}
-                  className="px-2 py-2 text-sm border border-slate-300 rounded-md bg-white">
-            <option value="">All Cities</option>
-            {(meta.cities || []).map((city) => (
-              <option key={city} value={city}>{city}</option>
-            ))}
-          </select>
-          <select data-testid="stores-filter-status" value={filterStatus}
-                  onChange={(e) => setFilterStatus(e.target.value)}
-                  className="px-2 py-2 text-sm border border-slate-300 rounded-md bg-white">
-            <option value="all">All Statuses</option>
-            <option value="online">Online</option>
-            <option value="offline">Offline</option>
-          </select>
+          {/* The same multi-value control the rest of the site uses.
+              Picking targets is where naming several zones matters MOST: a
+              campaign is almost never one zone, and with a single-value
+              filter the operator had to tick shops from one zone, change the
+              filter, and trust that the first lot were still selected. */}
+          <FilterSelect label="" testId="stores-filter-zone" allLabel="All Zones"
+                        value={filterZone} onChange={setFilterZone}
+                        options={(meta.regions || []).map((zone) => ({
+                          value: zone, label: zone }))} />
+          <FilterSelect label="" testId="stores-filter-city" allLabel="All Cities"
+                        value={filterCity} onChange={setFilterCity}
+                        options={(meta.cities || []).map((city) => ({
+                          value: city, label: city }))} />
+          <FilterSelect label="" testId="stores-filter-status" allLabel="All Statuses"
+                        value={filterStatus === "all" ? "" : filterStatus}
+                        onChange={(value) => setFilterStatus(value || "all")}
+                        options={[{ value: "online", label: "Online" },
+                                  { value: "offline", label: "Offline" }]} />
           <button data-testid="stores-clear-filters" onClick={clearStoreFilters}
                   className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">
             Clear filters

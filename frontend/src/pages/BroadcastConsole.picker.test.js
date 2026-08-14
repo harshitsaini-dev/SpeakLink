@@ -271,8 +271,9 @@ test("search matches code, name, city and Zone", async () => {
 
 test("the Zone filter narrows the rows", async () => {
   await renderConsole();
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-filter-zone")); });
   await act(async () => {
-    fireEvent.change(screen.getByTestId("stores-filter-zone"), { target: { value: "NORTH" } });
+    fireEvent.click(screen.getByTestId("stores-filter-zone-option-NORTH"));
   });
   const rows = visibleCodes();
   expect(rows.length).toBeGreaterThan(0);
@@ -284,8 +285,9 @@ test("the Zone filter narrows the rows", async () => {
 
 test("the City filter narrows the rows", async () => {
   await renderConsole();
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-filter-city")); });
   await act(async () => {
-    fireEvent.change(screen.getByTestId("stores-filter-city"), { target: { value: "MUMBAI" } });
+    fireEvent.click(screen.getByTestId("stores-filter-city-option-MUMBAI"));
   });
   expect(visibleCodes().length).toBeGreaterThan(0);
   expect(screen.getByTestId("stores-result-count").textContent).toContain("authorised");
@@ -293,13 +295,20 @@ test("the City filter narrows the rows", async () => {
 
 test("the Status filter separates connected from not", async () => {
   await renderConsole([BP, RG, WEB]);
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-filter-status")); });
   await act(async () => {
-    fireEvent.change(screen.getByTestId("stores-filter-status"), { target: { value: "online" } });
+    fireEvent.click(screen.getByTestId("stores-filter-status-option-online"));
   });
   expect(visibleCodes()).toEqual(["BP"]);
 
+  // The panel stays open, and the filter now ADDS rather than replaces - so
+  // moving from one value to the other means unticking the first. That is the
+  // behaviour: ticking both would legitimately show every Store.
   await act(async () => {
-    fireEvent.change(screen.getByTestId("stores-filter-status"), { target: { value: "offline" } });
+    fireEvent.click(screen.getByTestId("stores-filter-status-option-online"));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("stores-filter-status-option-offline"));
   });
   // WEB is flagged "Online" in Store Management but has no Receiver.
   expect(visibleCodes().sort()).toEqual(["RG", "WEB"]);
@@ -307,9 +316,13 @@ test("the Status filter separates connected from not", async () => {
 
 test("filters combine", async () => {
   await renderConsole();
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-filter-zone")); });
   await act(async () => {
-    fireEvent.change(screen.getByTestId("stores-filter-zone"), { target: { value: "NORTH" } });
-    fireEvent.change(screen.getByTestId("stores-filter-status"), { target: { value: "online" } });
+    fireEvent.click(screen.getByTestId("stores-filter-zone-option-NORTH"));
+  });
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-filter-status")); });
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("stores-filter-status-option-online"));
   });
   visibleCodes().forEach((code) => {
     const index = Number(code.slice(1)) - 1;
@@ -323,8 +336,9 @@ test("filtering returns to page one", async () => {
   await act(async () => { fireEvent.click(screen.getByTestId("stores-next-page")); });
   expect(screen.getByTestId("stores-page-info").textContent).toMatch(/Page 2/);
 
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-filter-zone")); });
   await act(async () => {
-    fireEvent.change(screen.getByTestId("stores-filter-zone"), { target: { value: "SOUTH" } });
+    fireEvent.click(screen.getByTestId("stores-filter-zone-option-SOUTH"));
   });
   // Staying on page 2 of a smaller result set would show an empty table.
   expect(screen.getByTestId("stores-page-info").textContent).toMatch(/Page 1/);
@@ -344,8 +358,9 @@ test("the Zone FILTER does not change targeting", async () => {
   // Zone TARGET MODE.
   await renderConsole();
   await act(async () => { fireEvent.click(screen.getByTestId("store-checkbox-S01")); });
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-filter-zone")); });
   await act(async () => {
-    fireEvent.change(screen.getByTestId("stores-filter-zone"), { target: { value: "NORTH" } });
+    fireEvent.click(screen.getByTestId("stores-filter-zone-option-NORTH"));
   });
   expect(screen.getByTestId("stat-selected").textContent).toContain("1");
   expect(screen.getByTestId("target-mode-select").value).toBe("selected");
@@ -414,8 +429,9 @@ test("Select all filtered takes every match across pages and says how many", asy
 
 test("Select all filtered respects the active filter", async () => {
   await renderConsole();
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-filter-zone")); });
   await act(async () => {
-    fireEvent.change(screen.getByTestId("stores-filter-zone"), { target: { value: "NORTH" } });
+    fireEvent.click(screen.getByTestId("stores-filter-zone-option-NORTH"));
   });
   const button = screen.getByTestId("select-all-filtered-btn");
   const expected = Number(button.textContent.match(/\d+/)[0]);
@@ -449,4 +465,61 @@ test("refreshing the inventory does not discard the selection", async () => {
   await act(async () => {});
 
   expect(screen.getByTestId("stat-selected").textContent).toContain("1");
+});
+
+
+// ===========================================================================
+// The target picker takes several zones at once
+//
+// This is where naming more than one matters most. A campaign is almost never
+// one zone, and with a single-value filter the operator had to tick shops from
+// one zone, change the filter, and trust that the first lot were still
+// selected - which is exactly the moment somebody stops trusting the screen.
+// ===========================================================================
+
+test("two zones can be filtered to at once", async () => {
+  await renderConsole();
+
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-filter-zone")); });
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("stores-filter-zone-option-NORTH"));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("stores-filter-zone-option-SOUTH"));
+  });
+
+  const zones = new Set(visibleCodes().map((code) => {
+    const index = Number(code.slice(1)) - 1;
+    return ZONES[index % ZONES.length];
+  }));
+  expect(zones).toEqual(new Set(["NORTH", "SOUTH"]));
+  expect(screen.getByTestId("stores-filter-zone").textContent)
+    .toContain("2 selected");
+});
+
+test("a selection survives a filter change", async () => {
+  // The reason the single-value filter was painful: tick shops in one zone,
+  // switch the filter, and the earlier ticks have to still be there.
+  await renderConsole();
+
+  await act(async () => { fireEvent.click(screen.getByTestId("stores-filter-zone")); });
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("stores-filter-zone-option-NORTH"));
+  });
+  const firstCode = visibleCodes()[0];
+  await act(async () => {
+    fireEvent.click(screen.getByTestId(`store-checkbox-${firstCode}`));
+  });
+
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("stores-filter-zone-option-NORTH"));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("stores-filter-zone-option-SOUTH"));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("stores-filter-zone-option-NORTH"));
+  });
+
+  expect(screen.getByTestId(`store-checkbox-${firstCode}`).checked).toBe(true);
 });
