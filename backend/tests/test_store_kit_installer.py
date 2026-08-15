@@ -718,7 +718,7 @@ def test_the_uninstaller_stops_the_task_too():
     stop_at = source.index("Stop-ScheduledTask")
     remove_at = source.index("Unregister-ScheduledTask")
     assert stop_at < remove_at
-    assert "schtasks.exe /Delete" in source
+    assert "& $schtasks /Delete" in source
 
 
 def test_schtasks_is_called_by_full_path():
@@ -787,3 +787,30 @@ def test_schtasks_stderr_does_not_kill_the_handler_that_reads_it():
     assert guard < call < restore, (
         "the schtasks call must sit inside the Continue guard, or its own "
         "error message terminates the script that was about to explain it")
+
+
+def test_the_uninstaller_does_not_claim_a_removal_it_did_not_make():
+    """It printed "scheduled task removed" unconditionally - directly under
+    the line explaining that it could not be removed.
+
+    An operator was told two contradictory things and the exit status did not
+    distinguish them either, so a task that survives an uninstall goes on
+    starting a Receiver that is no longer installed.
+    """
+    source = RECEIVER_UNINSTALLER.read_text(encoding="utf-8")
+    claim = source.index("Write-Output '  scheduled task removed'")
+    guard = source.index("if ($removed) {")
+    assert guard < claim, "the claim must sit inside the check"
+    assert "SPEAKLINK_STORE_RECEIVER_REMOVAL_INCOMPLETE" in source
+    assert "exit 3" in source
+
+
+def test_the_uninstaller_survives_schtasks_writing_to_stderr():
+    """The same trap the installer hit: under $ErrorActionPreference = 'Stop',
+    a native program writing to stderr becomes a terminating error - so
+    "ERROR: Access is denied." killed the line that handles exactly that."""
+    source = RECEIVER_UNINSTALLER.read_text(encoding="utf-8")
+    guard = source.index("$ErrorActionPreference = 'Continue'")
+    call = source.index("& $schtasks /Delete")
+    restore = source.index("finally { $ErrorActionPreference = $previous }")
+    assert guard < call < restore

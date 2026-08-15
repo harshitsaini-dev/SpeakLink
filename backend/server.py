@@ -367,6 +367,17 @@ WEB_JOIN_GUARD = LoginGuardConfig(max_attempts=8, window_seconds=300,
                                   max_failures=8, lockout_seconds=300)
 web_lookup_limiter = LoginRateLimiter(WEB_ROOM_LOOKUP_GUARD)
 web_join_limiter = LoginRateLimiter(WEB_JOIN_GUARD)
+#: The announcement listening link, which is the same shape of problem: a
+#: public endpoint where a correct password IS the authorisation.
+#:
+#: It had none. The RBAC matrix lists /api/announce/join among the deliberately
+#: unauthenticated routes and justifies that, in prose, with "each is rate
+#: limited" - and the code that would have made the sentence true was never
+#: written. An operator may choose a memorable ID (AN-DIWALI, by design) and a
+#: four-character password, so without a budget both are guessable at leisure.
+ANNOUNCE_JOIN_GUARD = LoginGuardConfig(max_attempts=8, window_seconds=300,
+                                       max_failures=8, lockout_seconds=300)
+announce_join_limiter = LoginRateLimiter(ANNOUNCE_JOIN_GUARD)
 
 # The enrolment endpoint is unauthenticated by design - the code IS the
 # credential - so it gets its own budget rather than sharing the login one.
@@ -8505,7 +8516,8 @@ def _room_out(room: dict) -> dict:
 # ---- The listener's own surface, unauthenticated by design ---------------
 
 @api.post("/announce/join")
-def join_announcement_room(payload: dict, db: Session = Depends(get_db)):
+def join_announcement_room(payload: dict, request: Request,
+                           db: Session = Depends(get_db)):
     """A listener presenting an ID and a password.
 
     No HQ account is involved: whoever holds the link is not a user of this
@@ -8516,6 +8528,10 @@ def join_announcement_room(payload: dict, db: Session = Depends(get_db)):
     # Remove button are worth nothing against a page of anonymous rows, and a
     # rule that lives only in the browser is a rule anybody can skip with a
     # curl command.
+    key = _client_key(request)
+    _refuse_if_limited(announce_join_limiter, key)
+    announce_join_limiter.record_attempt(key)
+
     listener_name = ((payload or {}).get("name") or "").strip()
     if len(listener_name) < 2:
         raise HTTPException(
@@ -8534,6 +8550,7 @@ def join_announcement_room(payload: dict, db: Session = Depends(get_db)):
         # that an ID exists but the password is wrong tells them which half to
         # keep guessing at.
         raise HTTPException(status_code=401, detail=str(refusal))
+    announce_join_limiter.forget(key)
     _write_log(db, "info",
                f"announcement_room_joined code={room['public_code']}")
     return {"token": token, "room": {"public_code": room["public_code"],
@@ -8577,9 +8594,15 @@ def announcement_room_state(authorization: Optional[str] = Header(None)):
     # Whether ANY Store is actually running it. A link that kept playing a
     # campaign HQ had stopped is the one failure that would embarrass somebody
     # in front of a customer.
+    # Told who is actually connected, like every other reader of this table.
+    # This one was left out - and it is the one place the claim is made to a
+    # member of the public, who hears the recording in their browser while no
+    # shop is playing anything at all.
     running = any(row.get("template_id") == template["id"]
                   and row.get("state") == announcements.STATE_PLAYING
-                  for row in announcement_service.live_status(engine))
+                  and row.get("reachable", True)
+                  for row in announcement_service.live_status(
+                      engine, connected_store_ids=manager.online_store_ids()))
 
     return {
         "label": listener.get("label") or template["name"],
@@ -9189,10 +9212,35 @@ def download_announcement_for_receiver(
     authenticator = getattr(app.state, "receiver_runtime_authenticator", None) \
         or default_receiver_runtime_authenticator
     try:
-        authenticator.authenticate(presented_token=presented,
-                                   authenticated_at=datetime.now(timezone.utc))
+        identity = authenticator.authenticate(
+            presented_token=presented,
+            authenticated_at=datetime.now(timezone.utc))
     except Exception:  # noqa: BLE001 - one refusal shape, deliberately
         raise HTTPException(status_code=401, detail="Not authenticated.")
+
+    # ONLY a recording this Store is actually told to play.
+    #
+    # The credential sits on a shop-floor desktop. Without this, one Receiver
+    # could walk the numbers and pull the estate's whole announcement library,
+    # including campaigns for regions it has no part in - while this route's
+    # own docstring claimed a narrower guarantee than the code delivered. The
+    # listener link at /api/announce/audio already scopes exactly this way.
+    #
+    # The Store comes from the AUTHENTICATED IDENTITY, never from the request:
+    # a caller who could name their own Store would be back where they started.
+    store_id = getattr(identity, "store_id", None)
+    if store_id is None:
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+    reachable = set()
+    for template in announcement_service.list_templates(engine, status="all"):
+        if store_id in announcement_service.stores_for_template(
+                engine, template_id=template["id"]):
+            reachable.update(item.get("audio_id")
+                             for item in (template.get("items") or []))
+    if audio_id not in reachable:
+        raise HTTPException(
+            status_code=404,
+            detail="That recording is not part of anything this Store plays.")
 
     for row in announcement_service.list_audio(engine, status="all"):
         if row["id"] == audio_id:

@@ -190,7 +190,11 @@ def test_the_registered_xml_is_re_read_and_rejected_if_it_carries_a_secret():
     body = _text(INSTALL)
     assert "Export-ScheduledTask" in body
     after = body[body.index("Export-ScheduledTask"):]
-    assert "Unregister-ScheduledTask" in after, (
+    # Removal goes through Remove-SpeakLinkTask now - one helper for every
+    # deletion, so none of them can skip stopping the task first or skip
+    # explaining a refusal. The PROPERTY is unchanged and is what this asserts:
+    # a task found to carry a secret is removed, not merely reported.
+    assert "Remove-SpeakLinkTask" in after, (
         "a task found to carry a secret must be removed, not merely reported")
 
 

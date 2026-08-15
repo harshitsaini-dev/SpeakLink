@@ -884,6 +884,76 @@ class AudioReceiverPilot:
             return Path(root)
         return Path(tempfile.gettempdir()) / "speaklink-receiver"
 
+    def _ensure_pcm_sink(self, user: str = "announcement"):
+        """The speaker, open, whether or not a broadcast is running.
+
+        THE BUG THIS ENDS
+
+        `pcm_sink` was opened when a BROADCAST was prepared and closed when it
+        stood down. An announcement arriving in between found it None, wrote
+        its decoded audio into nothing, and the Receiver then told HQ
+        "announcement_playing" - so the console showed a shop playing a
+        promotion that could not have made a sound. Every layer was honest
+        about what it had been told and nobody was holding the speaker.
+
+        A recorded announcement runs for days with nobody present; a broadcast
+        is somebody holding a microphone. The shop's speaker cannot belong
+        only to the second one.
+
+        Returns None in software/no-hardware modes, which is what the sink
+        already meant there.
+        """
+        users = self._sink_users()
+        if self.pcm_sink is not None:
+            users.add(user)
+            return self.pcm_sink
+        if not getattr(self.sink, "is_hardware", False):
+            # No hardware sink in this mode, and saying so is not the same as
+            # opening one. The caller decides what that means for it.
+            return None
+        opened = WindowsPcmSink(self.sink, backend=self._audio_backend)
+        opened.open()
+        self.pcm_sink = opened
+        users.add(user)
+        return opened
+
+    def _sink_users(self) -> set:
+        """Who is using the speaker right now.
+
+        A SET, not a flag. The first version remembered "the announcement
+        opened it" in a boolean, which cannot survive a broadcast opening a
+        second sink underneath it - and then named the wrong object when it
+        came time to close one.
+        """
+        current = getattr(self, "_pcm_sink_users", None)
+        if current is None:
+            current = set()
+            self._pcm_sink_users = current
+        return current
+
+    def _release_pcm_sink(self, user: str) -> None:
+        """Let go. The speaker closes when the last user does.
+
+        A Store with nothing to play must not hold an output device open -
+        that is what stops somebody else's application using it - but a
+        broadcast ending is not a reason to close a device an announcement is
+        still writing into.
+        """
+        users = self._sink_users()
+        users.discard(user)
+        if users:
+            return
+        if self.pcm_sink is not None:
+            try:
+                self.pcm_sink.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self.pcm_sink = None
+
+    def _release_announcement_sink(self) -> None:
+        """The announcement lets go of the speaker."""
+        self._release_pcm_sink("announcement")
+
     async def _on_announcement_play(self, connection, payload: dict) -> None:
         from tools import announcement_player
 
@@ -911,9 +981,42 @@ class AudioReceiverPilot:
 
         if self._announcement is not None:
             self._announcement.stop()
+            # Cleared, not merely stopped. Leaving the object behind after a
+            # failure below made every later broadcast teardown skip closing
+            # its sink, for the life of the process.
+            self._announcement = None
         self._announcement_volume_percent = volume
+
+        try:
+            # OFF the event loop. Opening a Windows audio endpoint blocks, and
+            # the switch path already runs it in a thread for that reason - on
+            # the loop it stalls this Receiver's socket, live broadcast audio
+            # and heartbeats included, so an announcement starting could get
+            # the Store marked offline.
+            sink = await asyncio.to_thread(self._ensure_pcm_sink, "announcement")
+        except Exception as failure:  # noqa: BLE001
+            # Said out loud rather than played into nothing. HQ can then show
+            # the shop as unheard instead of as playing.
+            await self._send(connection, {
+                "type": "announcement_failed",
+                "audio_id": payload.get("audio_id"),
+                "error": f"the speaker could not be opened: {failure}"[:500],
+            })
+            return
+
+        if sink is None:
+            # This Receiver has no audio output to write to. Saying "playing"
+            # here is the lie the whole of this feature has been chasing.
+            await self._send(connection, {
+                "type": "announcement_failed",
+                "audio_id": payload.get("audio_id"),
+                "error": "this Receiver has no audio output configured, so "
+                         "the recording cannot be played here.",
+            })
+            return
+
         self._announcement = announcement_player.AnnouncementPlayback(
-            path=path, sink=self.pcm_sink, volume_percent=volume)
+            path=path, sink=sink, volume_percent=volume)
         self._announcement.start()
         await self._send(connection, {
             "type": "announcement_playing",
@@ -933,6 +1036,10 @@ class AudioReceiverPilot:
         if self._announcement is not None:
             self._announcement.stop()
             self._announcement = None
+        # And let the speaker go, if the announcement is what opened it. A
+        # Store with nothing to play should not hold an output device open -
+        # that is what stops somebody else's application using it.
+        self._release_announcement_sink()
         await self._send(connection, {"type": "announcement_stopped"})
 
     async def _on_announcement_set_volume(self, connection, payload: dict) -> None:
@@ -1025,7 +1132,10 @@ class AudioReceiverPilot:
         """
         replacement = SinkConfiguration(sink_mode=SINK_MODE_WINDOWS,
                                         device=device)
-        opened = WindowsPcmSink(replacement)
+        # With this Receiver's audio backend, like every other sink here. It
+        # was the one call site that left it out, so a Store silently fell
+        # back to the default backend after a change made from HQ.
+        opened = WindowsPcmSink(replacement, backend=self._audio_backend)
         # `open()`, which is what this class has. It was `start()` - a method
         # that does not exist on it - so every remote speaker change failed at
         # the first line with an AttributeError, and HQ reported it, correctly
@@ -1040,14 +1150,18 @@ class AudioReceiverPilot:
         previous = self.pcm_sink
         self.sink = replacement
         self.pcm_sink = opened
+        # POINTED AT THE NEW SPEAKER BEFORE THE OLD ONE CLOSES.
+        #
+        # The playback holds its sink directly, so closing first left its pump
+        # writing into a closed device: the announcement went silent, nothing
+        # was reported, and HQ went on showing it as playing.
+        if self._announcement is not None:
+            self._announcement._sink = opened
         if previous is not None:
             try:
                 previous.close()
             except Exception:  # noqa: BLE001
                 pass
-        if self._announcement is not None:
-            # The announcement keeps playing, through the new speaker.
-            self._announcement._sink = opened
 
         self._remember_output_device(device)
 
@@ -1103,8 +1217,10 @@ class AudioReceiverPilot:
         pcm_sink = None
         if self.sink.is_hardware:
             try:
-                pcm_sink = WindowsPcmSink(self.sink, backend=self._audio_backend)
-                pcm_sink.open()
+                # THE SAME speaker the announcement uses, through the same
+                # register. Opening a second one here left the first orphaned
+                # with a pump still writing into it.
+                pcm_sink = self._ensure_pcm_sink("broadcast")
             except SinkConfigurationError:
                 await self._send(connection, {
                     **self._envelope("device_error"),
@@ -1122,7 +1238,6 @@ class AudioReceiverPilot:
         self.stood_down = False
         self.queue = StoreAudioQueue(store_id=prepare.target_store_id,
                                      capacity=self.queue_capacity)
-        self.pcm_sink = pcm_sink
         self.decoder = FfmpegDecoder(sink_mode=self.sink.sink_mode, pcm_sink=pcm_sink)
         self.decoder.start()
 
@@ -1568,9 +1683,10 @@ class AudioReceiverPilot:
             returncode = await asyncio.to_thread(self.decoder.close)
             self.report["ffmpeg_returncode"] = returncode
             self.decoder = None
-        if self.pcm_sink is not None:
-            self.pcm_sink.close()
-            self.pcm_sink = None
+        # The broadcast lets go. The speaker closes only if nothing else is
+        # using it - a broadcast ending is not a reason for the shop's
+        # promotion to stop, which is the whole point of ducking.
+        self._release_pcm_sink("broadcast")
         if self.queue is not None:
             self.queue.close()
             self.queue = None

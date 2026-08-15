@@ -46,16 +46,39 @@ if ($task) {
         # Stopped first, then removed: Windows will not delete a task whose
         # action is still running, which on an uninstall it always is.
         try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } catch { }
+        $removed = $false
         try {
             Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+            $removed = -not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
         } catch {
-            & schtasks.exe /Delete /TN $TaskName /F 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) {
+            # $ErrorActionPreference is 'Stop' for this script, and under Stop
+            # a native program writing to stderr becomes a TERMINATING error -
+            # so schtasks printing "ERROR: Access is denied." would kill the
+            # uninstall at the line handling that very case. The installer hit
+            # this exact trap; the same guard, for the same reason.
+            $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
+            if (-not (Test-Path $schtasks)) { $schtasks = 'schtasks.exe' }
+            $previous = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                & $schtasks /Delete /TN $TaskName /F 2>&1 | Out-Null
+            } finally { $ErrorActionPreference = $previous }
+            $removed = ($LASTEXITCODE -eq 0) -and
+                       -not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
+            if (-not $removed) {
                 Write-Output "  could not remove the task '$TaskName' - it belongs to another account."
                 Write-Output "  Sign in as that account, or run: schtasks /Delete /TN `"$TaskName`" /F"
             }
         }
-        Write-Output '  scheduled task removed'
+        # SAID ONLY IF IT IS TRUE. This printed "scheduled task removed"
+        # unconditionally - directly under the line explaining that it could
+        # not be removed - so an operator was told two contradictory things
+        # and the exit status did not distinguish them either.
+        if ($removed) {
+            Write-Output '  scheduled task removed'
+        } else {
+            $script:UninstallIncomplete = $true
+        }
     }
 } else {
     Write-Output "  no scheduled task named '$TaskName'"
@@ -184,4 +207,13 @@ if ($RemoveCredential -and (Test-Path $credentialPath)) {
 }
 
 Write-Output ''
+# The marker every caller greps for is the claim "this Store is clean". It is
+# not printed when something was left behind: a scheduled task that survives
+# an uninstall will start a Receiver that is no longer there, and the operator
+# who saw REMOVED has no reason to look for it.
+if ($script:UninstallIncomplete) {
+    Write-Output 'SPEAKLINK_STORE_RECEIVER_REMOVAL_INCOMPLETE'
+    Write-Output 'The software was removed. The scheduled task was NOT - see above.'
+    exit 3
+}
 Write-Output 'SPEAKLINK_STORE_RECEIVER_REMOVED'

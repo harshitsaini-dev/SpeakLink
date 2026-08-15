@@ -544,3 +544,46 @@ def test_reading_stores_is_not_a_device_permission():
     """
     _, endpoint = _endpoints()["list_stores"]
     assert _guard_of(endpoint) == "menu.stores.view"
+
+
+def test_every_publicly_reachable_route_is_actually_rate_limited():
+    """DELIBERATELY_UNAUTHENTICATED justifies itself, in prose, with "each is
+    rate limited". This asserts it.
+
+    An audit found /api/announce/join listed there with no limiter at all -
+    the sentence had been true when it was written about the other routes and
+    was simply never checked for the new one. A safety argument that lives in
+    a comment the test does not read is an argument that keeps passing after
+    the property it names has gone.
+    """
+    import inspect
+    import server as server_module
+
+    # Routes where the credential IS the request: a password, a code, or a
+    # token presented by somebody with no account. Health probes and the
+    # Receiver's own credentialled routes are not in this class.
+    guessable = {
+        "login": "login_limiter",
+        "public_room_lookup": "web_lookup_limiter",
+        "join_web_room": "web_join_limiter",
+        "request_web_room_access": "web_join_limiter",
+        "enroll_receiver": "enrollment_limiter",
+        "join_announcement_room": "announce_join_limiter",
+    }
+
+    missing = []
+    for name, limiter in guessable.items():
+        route = getattr(server_module, name, None)
+        if route is None:
+            continue                     # renamed or removed; other tests cover that
+        source = inspect.getsource(route)
+        # Either through the shared helper or by asking the limiter directly -
+        # login and enrolment do the latter because they answer with their own
+        # wording. What is asserted is that the route CONSULTS its budget, not
+        # which spelling it uses.
+        consults = limiter in source and (
+            "_refuse_if_limited" in source or "retry_after" in source)
+        if not consults:
+            missing.append(f"{name} (expected {limiter})")
+    assert not missing, (
+        "these public routes can be guessed at without limit: " + ", ".join(missing))

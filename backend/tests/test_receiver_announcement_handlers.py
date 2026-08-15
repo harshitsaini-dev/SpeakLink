@@ -210,8 +210,12 @@ def test_a_successful_switch_names_the_speaker_it_ended_up_on(
         def __init__(self, configuration, **kwargs):
             self.configuration = configuration
 
-        def start(self):
-            pass
+        def open(self):
+            """`open()`, which is what WindowsPcmSink actually has.
+
+            These doubles said `start()`, so they agreed with a call that
+            fails on the real class - and the AttributeError reached a Store
+            instead of this file."""
 
         def close(self):
             pass
@@ -248,8 +252,12 @@ def test_the_new_speaker_is_saved_so_a_restart_does_not_undo_it(
         def __init__(self, configuration, **kwargs):
             self.configuration = configuration
 
-        def start(self):
-            pass
+        def open(self):
+            """`open()`, which is what WindowsPcmSink actually has.
+
+            These doubles said `start()`, so they agreed with a call that
+            fails on the real class - and the AttributeError reached a Store
+            instead of this file."""
 
         def close(self):
             pass
@@ -274,8 +282,12 @@ def test_a_store_with_no_config_still_switches_rather_than_failing(
         def __init__(self, configuration, **kwargs):
             self.configuration = configuration
 
-        def start(self):
-            pass
+        def open(self):
+            """`open()`, which is what WindowsPcmSink actually has.
+
+            These doubles said `start()`, so they agreed with a call that
+            fails on the real class - and the AttributeError reached a Store
+            instead of this file."""
 
         def close(self):
             pass
@@ -283,3 +295,208 @@ def test_a_store_with_no_config_still_switches_rather_than_failing(
     monkeypatch.setattr("tools.audio_receiver_pilot.WindowsPcmSink", OpenedSink)
     run(pilot._on_set_output_device(connection, {"selector": "index:3"}))
     assert connection.sent[-1]["result"] == "applied"
+
+
+# ===========================================================================
+# The speaker an announcement writes to
+# ===========================================================================
+
+def test_an_announcement_opens_the_speaker_when_no_broadcast_is_running():
+    """THE BUG THIS ENDS.
+
+    `pcm_sink` was opened when a BROADCAST was prepared and closed when it
+    stood down. An announcement arriving in between found it None, wrote its
+    decoded audio into nothing, and the Receiver then told HQ
+    "announcement_playing" - so the console showed a shop playing a promotion
+    that could not have made a sound. Every layer was honest about what it had
+    been told, and nobody was holding the speaker.
+    """
+    import asyncio
+    from unittest.mock import create_autospec
+    from tools import audio_receiver_pilot as pilot
+
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver.pcm_sink = None
+    receiver.decoder = None
+    receiver.session_id = None
+    receiver._announcement = None
+    receiver._audio_backend = None
+    receiver.sink = type("Config", (), {"is_hardware": True})()
+
+    opened = create_autospec(pilot.WindowsPcmSink, instance=True)
+    original = pilot.WindowsPcmSink
+    pilot.WindowsPcmSink = lambda *a, **k: opened
+    try:
+        sink = receiver._ensure_pcm_sink()
+    finally:
+        pilot.WindowsPcmSink = original
+
+    assert sink is opened
+    opened.open.assert_called_once_with()
+    assert receiver.pcm_sink is opened
+
+
+def test_ending_a_broadcast_does_not_close_a_speaker_an_announcement_is_using():
+    """A broadcast ending is not a reason for the shop's promotion to stop -
+    that is the whole point of ducking, and closing the device here would have
+    made the announcement resume into a closed speaker."""
+    import asyncio
+    from unittest.mock import create_autospec
+    from tools import audio_receiver_pilot as pilot
+
+    sink = create_autospec(pilot.WindowsPcmSink, instance=True)
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver.pcm_sink = sink
+    receiver.decoder = None
+    receiver.queue = None
+    receiver.session_id = 7
+    receiver._announcement = object()          # still playing
+    # The register is the mechanism: both are using this speaker.
+    receiver._pcm_sink_users = {"broadcast", "announcement"}
+    receiver.report = {}
+    receiver.stood_down = False
+    receiver.restore_windows_endpoint = lambda: None
+    # The acknowledgement envelope needs these; the test is about the speaker,
+    # not about the message, so they are the smallest true values.
+    receiver._sequence = 0
+    receiver._states = []
+    receiver.device_public_id = "dev-test"
+    receiver.store_id = 1
+
+    class Silent:
+        async def send(self, _message):
+            return None
+
+    asyncio.run(receiver._on_stand_down(Silent(), {}))
+
+    sink.close.assert_not_called()
+    assert receiver.pcm_sink is sink
+
+
+def test_stopping_the_announcement_releases_a_speaker_it_opened():
+    """A Store with nothing to play should not hold an output device open -
+    that is what stops somebody else's application using it."""
+    from unittest.mock import create_autospec
+    from tools import audio_receiver_pilot as pilot
+
+    sink = create_autospec(pilot.WindowsPcmSink, instance=True)
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver.pcm_sink = sink
+    receiver.decoder = None
+    receiver.session_id = None
+    receiver._announcement = None
+    receiver._pcm_sink_users = {"announcement"}
+
+    receiver._release_announcement_sink()
+
+    sink.close.assert_called_once_with()
+    assert receiver.pcm_sink is None
+
+
+def test_a_speaker_a_broadcast_owns_is_not_closed_by_an_announcement():
+    from unittest.mock import create_autospec
+    from tools import audio_receiver_pilot as pilot
+
+    sink = create_autospec(pilot.WindowsPcmSink, instance=True)
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver.pcm_sink = sink
+    receiver.decoder = object()                # a broadcast is decoding
+    receiver.session_id = 7
+    receiver._announcement = None
+    receiver._pcm_sink_users = {"broadcast", "announcement"}
+
+    receiver._release_announcement_sink()
+
+    sink.close.assert_not_called()
+    assert receiver.pcm_sink is sink
+
+
+def test_a_broadcast_and_an_announcement_share_one_speaker():
+    """The audit found the interaction, not the units.
+
+    Each half was tested on its own and each half was right. Together, a
+    broadcast prepared while an announcement was playing opened a SECOND sink
+    and left the first orphaned with a pump still writing into it - and the
+    flag that was meant to remember who owned what then named the wrong
+    object, so stopping the announcement closed the broadcast's device.
+    """
+    from unittest.mock import create_autospec
+    from tools import audio_receiver_pilot as pilot
+
+    opened = []
+    # Captured BEFORE the patch: once pilot.WindowsPcmSink is the stand-in,
+    # autospec would be describing the stand-in rather than the real class.
+    real_class = pilot.WindowsPcmSink
+
+    def one_sink(*_args, **_kwargs):
+        sink = create_autospec(real_class, instance=True)
+        opened.append(sink)
+        return sink
+
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver.pcm_sink = None
+    receiver._audio_backend = None
+    receiver.sink = type("Config", (), {"is_hardware": True})()
+
+    original = pilot.WindowsPcmSink
+    pilot.WindowsPcmSink = one_sink
+    try:
+        first = receiver._ensure_pcm_sink("announcement")
+        second = receiver._ensure_pcm_sink("broadcast")
+    finally:
+        pilot.WindowsPcmSink = original
+
+    assert first is second, "a second speaker was opened underneath the first"
+    assert len(opened) == 1
+
+    # The broadcast ends. The announcement is still playing, so the speaker
+    # stays open - and stays the SAME object.
+    receiver._release_pcm_sink("broadcast")
+    assert receiver.pcm_sink is first
+    first.close.assert_not_called()
+
+    # The announcement ends. Now nobody is using it, and it closes once.
+    receiver._release_pcm_sink("announcement")
+    first.close.assert_called_once_with()
+    assert receiver.pcm_sink is None
+
+
+def test_a_receiver_with_no_audio_output_says_so_rather_than_claiming_to_play():
+    """`_ensure_pcm_sink` returns None where there is no hardware sink. The
+    first version built a playback around that None, started it, and sent
+    announcement_playing - which is the exact lie this whole feature has been
+    chasing."""
+    import asyncio
+    from tools import audio_receiver_pilot as pilot
+
+    sent = []
+
+    class Connection:
+        async def send(self, message):
+            sent.append(message)
+
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver.pcm_sink = None
+    receiver._announcement = None
+    receiver._audio_backend = None
+    receiver.sink = type("Config", (), {"is_hardware": False})()
+    receiver.state_root = None
+    receiver._announcement_volume_percent = 80
+    receiver._send = lambda connection, payload: connection.send(payload)
+    receiver._announcement_state_root = lambda: __import__("pathlib").Path(".")
+    receiver._announcement_backend_url = lambda: "http://hq"
+    receiver._announcement_credential = lambda: "cred"
+
+    import tools.announcement_player as player
+    original = player.fetch_if_absent
+    player.fetch_if_absent = lambda **_kwargs: __import__("pathlib").Path("promo.mp3")
+    try:
+        asyncio.run(receiver._on_announcement_play(
+            Connection(), {"audio_id": 3, "sha256": "a" * 64,
+                           "download_path": "/api/receiver/announcements/3/download"}))
+    finally:
+        player.fetch_if_absent = original
+
+    assert sent, "nothing was reported at all"
+    assert sent[0]["type"] == "announcement_failed"
+    assert "no audio output" in sent[0]["error"]

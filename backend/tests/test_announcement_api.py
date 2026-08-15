@@ -1629,3 +1629,43 @@ def test_the_clock_does_put_away_its_own(client):
     scheduler_tick(client, "2026-08-14 12:00")
     rows = client.get("/api/announcements/status", headers=headers).json()["items"]
     assert [r for r in rows if r["store_id"] == store][0]["state"] == "STOPPED"
+
+
+def test_a_receiver_cannot_download_a_recording_its_store_never_plays(client):
+    """The credential sits on a shop-floor desktop.
+
+    Without a scope check one Receiver could walk the numbers and pull the
+    estate's whole announcement library, including campaigns for regions it
+    has no part in - while the route's own docstring claimed a narrower
+    guarantee than the code delivered. Found by an audit, not by a test.
+    """
+    headers = sign_in(client)
+    ours = make_store(client, headers, "NA", region="NORTH")
+    make_store(client, headers, "SB", region="SOUTH")
+    mine = upload(client, headers, title="North promo")
+    theirs = upload(client, headers, title="South promo")
+    make_template(client, headers, audio_id=mine["id"], name="North",
+                  items=[{"audio_id": mine["id"], "zone": "NORTH"}])
+    make_template(client, headers, audio_id=theirs["id"], name="South",
+                  items=[{"audio_id": theirs["id"], "zone": "SOUTH"}])
+
+    class Identity:
+        store_id = ours
+        device_public_id = "dev-north"
+
+    class Authenticator:
+        def authenticate(self, **_kwargs):
+            return Identity()
+
+    client.server_module.app.state.receiver_runtime_authenticator = Authenticator()
+    try:
+        allowed = client.get(f"/api/receiver/announcements/{mine['id']}/download",
+                             headers={"Authorization": "Bearer device-credential"})
+        assert allowed.status_code == 200, allowed.text
+
+        refused = client.get(f"/api/receiver/announcements/{theirs['id']}/download",
+                             headers={"Authorization": "Bearer device-credential"})
+        assert refused.status_code == 404
+        assert "not part of anything this Store plays" in refused.json()["detail"]
+    finally:
+        client.server_module.app.state.receiver_runtime_authenticator = None

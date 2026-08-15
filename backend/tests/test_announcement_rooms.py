@@ -53,6 +53,7 @@ def client(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     import server as server_module
     server_module.manager.receivers.clear()
+    server_module.manager.receiver_snapshots.clear()
     with TestClient(server_module.app) as made:
         made.server_module = server_module
         yield made
@@ -65,12 +66,36 @@ def sign_in(client, username="founder", password=PASSWORD):
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
-def make_store(client, headers, code="NA", region="NORTH"):
+def make_store(client, headers, code="NA", region="NORTH", connected=True):
+    """A Store, and by default one with its Receiver connected.
+
+    The listening page reports `playing` only for a shop HQ is actually
+    connected to - it is the one place that claim is made to a member of the
+    public, who hears the recording in their browser and would otherwise be
+    told a silent estate is playing. So a test about what the page says has to
+    say whether anybody is listening at the other end.
+    """
     response = client.post("/api/stores", headers=headers, json={
         "store_code": code, "store_name": f"Store {code}",
         "city": "DELHI", "region": region})
     assert response.status_code == 201, response.text
-    return response.json()["id"]
+    store_id = response.json()["id"]
+    if connected:
+        from datetime import datetime, timezone
+        from receiver_contract import ReceiverSnapshot, mark_connected
+
+        class SilentSocket:
+            async def send_text(self, _message):
+                return None
+
+            async def send_json(self, _message):
+                return None
+
+        manager = client.server_module.manager
+        manager.receivers[store_id] = SilentSocket()
+        manager.receiver_snapshots[store_id] = mark_connected(
+            ReceiverSnapshot(), datetime.now(timezone.utc))
+    return store_id
 
 
 def upload(client, headers, title="Diwali Offer"):
@@ -494,3 +519,29 @@ def test_a_listener_has_to_say_who_they_are(client):
         "password": opened["password_shown_once"]})
     assert nameless.status_code == 400
     assert "your name" in nameless.json()["detail"].lower()
+
+
+def test_guessing_at_a_listening_password_runs_out_of_attempts(client):
+    """A public endpoint where a correct password IS the authorisation.
+
+    The RBAC matrix lists this route among the deliberately unauthenticated
+    ones and justifies it, in prose, with "each is rate limited" - and the
+    code that would have made that sentence true had never been written. An
+    operator may choose a memorable ID (AN-DIWALI, by design) and a short
+    password, so without a budget both are guessable at leisure.
+    """
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio["id"])
+    opened = open_room(client, headers, template["id"], id="DIWALI",
+                       password="front-of-house")
+
+    refusals = [join(client, "AN-DIWALI", f"guess-{attempt}").status_code
+                for attempt in range(12)]
+    assert 429 in refusals, "guessing was never slowed down"
+    assert refusals.index(429) <= 10
+
+    # And a correct password is not punished for the guessers' attempts
+    # forever: the limiter is per client key and clears on success, which the
+    # broadcast room already does.
+    assert refusals.count(401) >= 1

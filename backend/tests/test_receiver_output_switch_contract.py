@@ -59,6 +59,7 @@ def test_the_switch_only_calls_methods_the_real_sink_has(monkeypatch):
     receiver.sink = None
     receiver._announcement = None
     receiver.config_path = None
+    receiver._audio_backend = None
 
     receiver._switch_output_device(Device())
 
@@ -84,6 +85,7 @@ def test_the_previous_speaker_is_closed_not_left_open(monkeypatch):
     receiver.sink = None
     receiver._announcement = None
     receiver.config_path = None
+    receiver._audio_backend = None
 
     receiver._switch_output_device(Device())
 
@@ -108,6 +110,7 @@ def test_an_announcement_follows_the_shop_to_the_new_speaker(monkeypatch):
     receiver.sink = None
     receiver._announcement = playing
     receiver.config_path = None
+    receiver._audio_backend = None
 
     receiver._switch_output_device(Device())
 
