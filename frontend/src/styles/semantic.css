@@ -188,3 +188,31 @@ input[type="checkbox"], input[type="radio"] { accent-color: #2563eb; }
 .row-action-info { border-color: rgba(59, 130, 246, 0.5); color: #1d4ed8; }
 .dark .row-action-info { color: #93c5fd; }
 .row-action-info:hover:not(:disabled) { background-color: rgba(59, 130, 246, 0.12); }
+
+
+/* ------------------------------------------------------------- player bar */
+
+/* The recording player, pinned across the bottom of every page.
+ *
+ * It belongs to the application rather than to whichever page it happens to
+ * be over, so it takes the SHELL's colours and is dark in both themes for the
+ * same reason the sidebar is. Opaque on purpose: a translucent strip over a
+ * table puts rows through the transport controls.
+ */
+.player-bar {
+  background-color: var(--shell);
+  background-image: linear-gradient(180deg, var(--shell-top), var(--shell));
+  color: var(--shell-text);
+  border-top: 1px solid var(--shell-edge);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.28);
+}
+
+.player-bar .text-strong { color: var(--shell-text); }
+.player-bar .text-body { color: #cbd5e1; }
+.player-bar .text-muted, .player-bar .text-faint { color: #94a3b8; }
+.player-bar .bg-surface, .player-bar .bg-surface-muted {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+.player-bar .border-line, .player-bar .border-line-strong {
+  border-color: var(--shell-edge);
+}

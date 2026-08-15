@@ -967,3 +967,25 @@ test("Finished is never inferred from the percentage", async () => {
   await act(async () => { fireEvent.ended(audio); });
   expect(screen.getByTestId("recording-state").textContent).toBe("Finished");
 });
+
+test("the player bar carries its own surface, not a stylesheet's", async () => {
+  // It was styled by a rule keyed to its data-testid, and that rule was
+  // deleted along with a neighbouring block during a cleanup. The bar then
+  // had no background at all and the table underneath showed straight
+  // through a strip whose whole job is to sit on top of it - and nothing
+  // failed, because no test knew the surface existed.
+  await renderPlaying();
+  // The component NAMES its surface, and semantic.css defines it. Asserted
+  // from the class rather than from computed style because jsdom drops any
+  // property whose value is a custom property it cannot resolve - a browser
+  // paints it, and the test would have been asserting jsdom's limitations.
+  expect(screen.getByTestId("recording-player-bar").className)
+    .toContain("player-bar");
+
+  const fs = require("fs");
+  const path = require("path");
+  const semantic = fs.readFileSync(
+    path.join(__dirname, "..", "styles", "semantic.css"), "utf8");
+  expect(semantic).toContain(".player-bar {");
+  expect(semantic).toContain("background-color: var(--shell)");
+});

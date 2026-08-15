@@ -194,7 +194,11 @@ export default function Layout() {
             <div className="text-[10px] uppercase tracking-[0.2em] text-faint mt-0.5">Live Broadcast</div>
           </div>
         </div>
-        <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-4 space-y-4">
+        {/* pb-6: the list scrolls, and its last item used to stop flush
+            against the Emergency Stop block above the footer, which reads as
+            a link that has been cut in half rather than as a list that
+            continues. */}
+        <nav className="flex-1 min-h-0 overflow-y-auto px-3 pt-4 pb-6 space-y-4">
           {NAV_TOP.filter(allowed).length > 0 && (
             <div className="space-y-1" data-testid="nav-top">
               {NAV_TOP.filter(allowed).map((n) => (

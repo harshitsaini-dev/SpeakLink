@@ -364,7 +364,13 @@ function Remove-SpeakLinkTask {
     foreach ($attempt in 1..3) {
         try {
             Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction Stop
-            return $true
+            # VERIFIED, not assumed. A removal that reported success and left
+            # the task in place is exactly what happened here: the script went
+            # on to register, and Windows answered ResourceExists - an error
+            # about the register, for a failure in the delete.
+            if (-not (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue)) {
+                return $true
+            }
         } catch {
             $reason = $_.Exception.Message
             Start-Sleep -Milliseconds (300 * $attempt)
@@ -395,7 +401,10 @@ function Remove-SpeakLinkTask {
     try {
         $output = & $schtasks /Delete /TN $Name /F 2>&1 | Out-String
     } finally { $ErrorActionPreference = $previous }
-    if ($LASTEXITCODE -eq 0) { return $true }
+    if ($LASTEXITCODE -eq 0 -and
+        -not (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue)) {
+        return $true
+    }
 
     $owner = try { (Get-ScheduledTask -TaskName $Name).Principal.UserId } catch { 'unknown' }
     # A marker the wizard can act on, before the sentences a person reads.
@@ -492,7 +501,14 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers `
+# -Force: replace a task of this name if one is still there.
+#
+# Removal is attempted first and verified, because a task that is STOPPED and
+# then deleted leaves nothing running; -Force is the belt to that braces. It
+# exists because Windows can hold a registration this account cannot see or
+# delete but can overwrite, and the alternative outcome - "ResourceExists" on
+# a shop that is now half-installed - helps nobody.
+Register-ScheduledTask -Force -TaskName $TaskName -Action $action -Trigger $triggers `
     -Principal $principal -Settings $settings `
     -Description 'SpeakLink Store Receiver. Starts at logon, runs with no window.' | Out-Null
 

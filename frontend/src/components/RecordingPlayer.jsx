@@ -373,7 +373,15 @@ export default function RecordingPlayer({ session, onClose,
       // Starts where the sidebar ends, so it never covers the navigation.
       // No backdrop and no overlay: History's filters, checkboxes and
       // pagination all stay usable while this is open.
-      className="fixed bottom-0 left-0 md:left-64 right-0 z-40 shadow-lg px-4 py-3"
+      // `player-bar` NAMES the surface this belongs to - see semantic.css.
+      //
+      // It was styled by a stylesheet rule keyed to its data-testid, and that
+      // rule was deleted along with a neighbouring block during a cleanup:
+      // the bar then had no background at all and the table underneath showed
+      // straight through a strip whose whole job is to sit on top of it. A
+      // class the component asks for by name cannot be orphaned quietly -
+      // there is a test on each end of it.
+      className="player-bar night fixed bottom-0 left-0 md:left-64 right-0 z-40 px-4 py-3"
     >
       {/* The audio element is REAL but never shown: no browser-native widget,
           and every control here drives this directly. */}
