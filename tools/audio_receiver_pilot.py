@@ -208,6 +208,18 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def _receiver_version() -> str:
+    """This build's version string, or "unknown" rather than a guess."""
+    try:
+        from tools.speaklink_version import STORE_KIT_VERSION
+    except ImportError:  # pragma: no cover - a checkout laid out differently
+        try:
+            from speaklink_version import STORE_KIT_VERSION
+        except ImportError:
+            return "unknown"
+    return str(STORE_KIT_VERSION)
+
+
 def hidden_child_process_options() -> dict:
     """Start a child process with no console window. Windows only.
 
@@ -735,6 +747,21 @@ class AudioReceiverPilot:
         del token
         self.report["connected"] = True
         self._record_state("CONNECTED")
+
+        # WHAT THIS COMPUTER IS ACTUALLY RUNNING, said on every connection.
+        #
+        # Not the version recorded at enrolment - that is the version of
+        # whatever installed this Store, possibly months ago. A day was spent
+        # fixing announcements that could not have worked because the shop was
+        # running a build from before the feature existed, and HQ could not
+        # say so because nobody had ever told it.
+        try:
+            await self._send(connection, {
+                "type": "receiver_version",
+                "version": _receiver_version(),
+            })
+        except Exception:  # noqa: BLE001 - a version report never blocks audio
+            logger.debug("Could not report the Receiver version", exc_info=True)
 
         # Keep the socket fresh while nothing is happening. Without this a
         # Receiver waiting for an operator-driven browser broadcast is closed

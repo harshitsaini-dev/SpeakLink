@@ -48,7 +48,24 @@ const STATE_EXPLANATION = {
  * out from a customer that it is not. So an unreachable shop says what is
  * true: HQ asked, and nothing has answered.
  */
-function StateBadge({ state, reachable = true, confirmed = true, error = "" }) {
+function StateBadge({ state, reachable = true, confirmed = true, error = "",
+                     supported = true, version = "" }) {
+  // A SHOP THAT CANNOT PLAY ANNOUNCEMENTS AT ALL.
+  //
+  // Announcements need a Receiver new enough to have them; an older one
+  // connects, broadcasts, and ignores every announcement command it is sent.
+  // That is indistinguishable from silence unless somebody says so - and a
+  // whole day went into chasing a shop that was running an eleven-day-old
+  // build.
+  if (!supported) {
+    return (
+      <span data-testid="announcement-state-OLD-RECEIVER"
+            title={`This Store is running Receiver ${version}, which is older than announcements. Install the current Store Kit on that computer.`}
+            className="inline-block px-2 py-0.5 text-xs font-medium rounded-full border bg-amber-100 text-amber-800 border-amber-200">
+        Receiver too old ({version})
+      </span>
+    );
+  }
   // THE SHOP SAID IT COULD NOT.
   //
   // Its own words, because "it did not play" without a reason sends somebody
@@ -269,7 +286,9 @@ export default function Announcements() {
                   <td className="px-4 py-2 text-body">{row.zone}</td>
                   <td className="px-4 py-2"><StateBadge state={row.state} reachable={row.reachable !== false}
                                 confirmed={row.confirmed !== false}
-                                error={row.confirm_error || ""} /></td>
+                                error={row.confirm_error || ""}
+                                supported={row.announcements_supported !== false}
+                                version={row.receiver_version || ""} /></td>
                   <td className="px-4 py-2 text-body">
                     {row.template_name
                       ? <>

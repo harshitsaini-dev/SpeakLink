@@ -6234,6 +6234,14 @@ async def ws_receiver(websocket: WebSocket):
                 # Pushing them through a parser built for session
                 # acknowledgements would mean either inventing a fake session
                 # for them or loosening a validator that exists to be strict.
+                if data.get("type") == "receiver_version":
+                    # Kept in memory beside the connection: it describes the
+                    # process on the other end of THIS socket, and a restart
+                    # of either side makes it a fresh question.
+                    RECEIVER_VERSIONS[store_id] = str(
+                        data.get("version") or "unknown")[:40]
+                    continue
+
                 if data.get("type") in ("output_devices", "output_device_result"):
                     _handle_output_device_report(store_id, data)
                     continue
@@ -7765,6 +7773,41 @@ async def supervised_set_auto_approve(
 
 
 # Include routes
+#: The first Store Kit whose Receiver can play a recorded announcement.
+#: Anything older connects, broadcasts and ignores every announcement command
+#: it is sent - which is indistinguishable from silence unless somebody says
+#: so out loud.
+ANNOUNCEMENTS_NEED_VERSION = (1, 7, 5)
+
+
+def _supports_announcements(version: str) -> bool:
+    """Is this Store new enough to play announcements at all?
+
+    An unknown version answers True. A Store that has not told us is not
+    evidence of an old build, and marking every quiet Store as unsupported
+    would be a guess dressed as a fact - the opposite of the point.
+    """
+    if not version or version == "unknown":
+        return True
+    parts = []
+    for piece in str(version).split("."):
+        digits = "".join(character for character in piece
+                         if character.isdigit())
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3]) >= ANNOUNCEMENTS_NEED_VERSION
+
+
+#: What each connected Store says it is running, by store id.
+#:
+#: In memory on purpose. It is a property of a live connection, not of the
+#: Store - a Store that is offline is not running anything, and reporting a
+#: remembered version for one would be the same class of claim this project
+#: keeps removing.
+RECEIVER_VERSIONS: dict[int, str] = {}
+
+
 def _handle_output_device_report(store_id: int, data: dict) -> None:
     """What a Store says about its speakers.
 
@@ -10211,6 +10254,16 @@ def announcement_status(
         engine, search=q or "", zone=zone or "", state=state or "",
         store_id=store_id,
         connected_store_ids=manager.online_store_ids())
+    # WHICH RECEIVER EACH SHOP IS RUNNING.
+    #
+    # Announcements need a Receiver new enough to have them. A day was spent
+    # on a shop that could not have played anything because it was running a
+    # build from before the feature existed - and every screen HQ has was
+    # silent about that while showing the campaign as live.
+    for row in rows:
+        row["receiver_version"] = RECEIVER_VERSIONS.get(row["store_id"], "")
+        row["announcements_supported"] = _supports_announcements(
+            row["receiver_version"])
     rows = sort_rows(rows, sort, dir, ANNOUNCEMENT_STATUS_SORTS)
     offset = (page - 1) * page_size
     return Page(items=rows[offset:offset + page_size], total=len(rows),
