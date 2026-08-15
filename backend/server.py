@@ -6237,6 +6237,29 @@ async def ws_receiver(websocket: WebSocket):
                 if data.get("type") in ("output_devices", "output_device_result"):
                     _handle_output_device_report(store_id, data)
                     continue
+
+                # Announcement answers, for the same reason and in the same
+                # place. They carry no session, no command id and no sequence
+                # - an announcement runs for days with no broadcast anywhere
+                # near it - so the session-contract parser below would reject
+                # them, which is exactly what it was doing: the Store said
+                # "announcement_failed" and HQ went on showing PLAYING.
+                if data.get("type") in announcement_protocol.ACKNOWLEDGEMENTS:
+                    try:
+                        announcement_service.record_acknowledgement(
+                            engine, store_id=store_id, kind=data["type"],
+                            error=str(data.get("error") or ""))
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Could not record an announcement acknowledgement "
+                            "from Store %s", store_id)
+                    if data.get("type") == announcement_protocol.ACK_FAILED:
+                        # Logged at warn, because it is the shop telling us it
+                        # is silent - and that is not a debug detail.
+                        logger.warning(
+                            "Store %s could not play the announcement: %s",
+                            store_id, str(data.get("error") or "")[:300])
+                    continue
                 is_standby_ack = connection_manager.is_registered_standby(
                     identity.device_id
                 )

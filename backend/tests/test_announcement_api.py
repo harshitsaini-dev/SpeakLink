@@ -1669,3 +1669,46 @@ def test_a_receiver_cannot_download_a_recording_its_store_never_plays(client):
         assert "not part of anything this Store plays" in refused.json()["detail"]
     finally:
         client.server_module.app.state.receiver_runtime_authenticator = None
+
+
+def test_hq_records_what_the_store_said_rather_than_what_it_sent(client):
+    """The Receiver has always answered. Nothing read the answers.
+
+    announcement_playing and announcement_failed carry no session, no command
+    id and no sequence - an announcement runs for days with no broadcast near
+    it - so they fell through to the session-contract parser and were dropped.
+    A shop whose decoder could not start, or whose speaker was not open,
+    therefore appeared on the console as PLAYING for as long as anybody looked
+    at it. Two separate real faults hid behind that for a day.
+    """
+    import announcement_service
+
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    engine = client.server_module.engine
+
+    def row_for(store_id):
+        rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+        return [row for row in rows if row["store_id"] == store_id][0]
+
+    # Sent, and nothing has answered yet.
+    assert row_for(store)["confirmed"] is False
+
+    announcement_service.record_acknowledgement(
+        engine, store_id=store, kind="announcement_playing")
+    assert row_for(store)["confirmed"] is True
+    assert row_for(store)["confirm_error"] == ""
+
+    # And a refusal is kept in the shop's own words, because "it did not play"
+    # without a reason sends somebody to the wrong computer.
+    announcement_service.record_acknowledgement(
+        engine, store_id=store, kind="announcement_failed",
+        error="ffmpeg is not installed, so the announcement cannot be decoded")
+    after = row_for(store)
+    assert after["confirmed"] is False
+    assert "ffmpeg" in after["confirm_error"]

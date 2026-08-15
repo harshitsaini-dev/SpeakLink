@@ -239,6 +239,13 @@ def ensure_announcement_schema(engine: Engine) -> None:
                 -- this column exists to prevent.
                 updated_by INTEGER,
                 updated_at VARCHAR(40) NOT NULL,
+                -- What the STORE said back, as opposed to what HQ sent. See
+                -- announcement_service.record_acknowledgement: without this
+                -- the console reported a shop as playing on the strength of
+                -- a command having been written to a socket.
+                confirmed_kind VARCHAR(32),
+                confirmed_at VARCHAR(40),
+                confirmed_error VARCHAR(500) NOT NULL DEFAULT '',
                 started_at VARCHAR(40)
             )
             """
@@ -272,6 +279,18 @@ def ensure_announcement_schema(engine: Engine) -> None:
             )
             """
         )
+        if connection.engine.dialect.name == "sqlite":
+            present = {row[1] for row in connection.exec_driver_sql(
+                f"PRAGMA table_info({PLAYBACK_TABLE})")}
+            for column, definition in (
+                ("confirmed_kind", "VARCHAR(32)"),
+                ("confirmed_at", "VARCHAR(40)"),
+                ("confirmed_error", "VARCHAR(500) NOT NULL DEFAULT ''"),
+            ):
+                if column not in present:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {PLAYBACK_TABLE} ADD COLUMN {column} {definition}")
+
         for statement in (
             f"CREATE INDEX IF NOT EXISTS ix_announcement_audio_status "
             f"ON {AUDIO_TABLE}(status)",

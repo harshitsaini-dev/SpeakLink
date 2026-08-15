@@ -167,6 +167,7 @@ def get_playback(engine: Engine, *, store_id: int) -> dict[str, Any]:
         "state": STATE_STOPPED, "ducked_from": None,
         "volume_percent": announcements.DEFAULT_VOLUME,
         "updated_by": None, "updated_at": None, "started_at": None,
+        "confirmed_kind": None, "confirmed_at": None, "confirmed_error": "",
     }
 
 
@@ -285,6 +286,36 @@ def set_state(engine: Engine, *, store_id: int, state: str,
     except Exception:  # noqa: BLE001 - history must never fail a live action
         pass
     return get_playback(engine, store_id=store_id)
+
+
+def record_acknowledgement(engine: Engine, *, store_id: int, kind: str,
+                           error: str = "") -> None:
+    """What the Store said back about the announcement it was sent.
+
+    WHY HQ HAS TO KEEP THIS
+
+    Everything the console showed about announcements came from what HQ had
+    SENT. The Receiver has always answered - announcement_playing,
+    announcement_failed - and nothing here read those answers, so a shop whose
+    decoder could not start, or whose speaker was not open, appeared on the
+    console as PLAYING for as long as anybody looked at it. Two separate real
+    faults hid behind that for a day.
+
+    Stored on the playback row rather than in memory: the answer has to
+    outlive a restart of HQ, because the shop's state did.
+    """
+    # `updated_at` travels with it because the row may not exist yet - a Store
+    # can answer about a command that arrived before HQ ever wrote a playback
+    # row for it - and the column is NOT NULL. This is an acknowledgement, so
+    # it deliberately does not touch `state` or `updated_by`: what HQ asked
+    # for and what the shop reports are different facts and must not overwrite
+    # each other.
+    with engine.begin() as connection:
+        _write_playback(connection, store_id=store_id,
+                        confirmed_kind=kind,
+                        confirmed_at=_now(),
+                        confirmed_error=(error or "")[:500],
+                        updated_at=_now())
 
 
 def set_volume(engine: Engine, *, store_id: int, volume_percent: int,
@@ -445,6 +476,7 @@ def live_status(engine: Engine, *, search: str = "", zone: str = "",
                    s.status AS store_status,
                    COALESCE(p.state, :stopped) AS state,
                    p.ducked_from, p.template_id, p.audio_id,
+                   p.confirmed_kind, p.confirmed_at, p.confirmed_error,
                    COALESCE(p.volume_percent, :default_volume) AS volume_percent,
                    p.updated_at, p.started_at,
                    t.name AS template_name, a.title AS audio_title
@@ -472,6 +504,20 @@ def live_status(engine: Engine, *, search: str = "", zone: str = "",
         for row in rows:
             row["reachable"] = True
 
+    for row in rows:
+        # THREE DIFFERENT FACTS, and the console needs all three.
+        #
+        #   state            what HQ asked this shop to do
+        #   reachable        whether HQ is connected to it at all
+        #   confirmed        whether the Store answered that it is doing it
+        #
+        # Only the first of those was ever shown. The Receiver has always
+        # replied - announcement_playing, announcement_failed - and nothing
+        # read the replies, so a shop whose decoder could not start appeared
+        # as PLAYING for as long as anybody looked at it.
+        row["confirmed"] = (row.get("confirmed_kind") == "announcement_playing")
+        row["confirm_error"] = row.get("confirmed_error") or ""
+
     needle = (search or "").strip().lower()
     if needle:
         rows = [row for row in rows
@@ -479,21 +525,6 @@ def live_status(engine: Engine, *, search: str = "", zone: str = "",
                 or needle in (row.get("store_name") or "").lower()
                 or needle in (row.get("template_name") or "").lower()
                 or needle in (row.get("audio_title") or "").lower()]
-    # How long each run lasted, computed once here rather than in the browser.
-    # A row still playing has no duration yet and says None - putting "0" or
-    # the time so far under a column headed "Duration" would read as a
-    # finished run of that length.
-    connected = None if connected_store_ids is None else set(connected_store_ids)
-    for row in rows:
-        row["duration_seconds"] = _elapsed_seconds(row.get("started_at"),
-                                                   row.get("ended_at"))
-        # An open row for a shop HQ is not connected to is not "still
-        # playing": nothing ever confirmed it started, and nothing will close
-        # it. Saying so here rather than letting the page read an absent end
-        # time as sound in a shop.
-        row["reachable"] = (True if connected is None
-                            else row.get("store_id") in connected)
-
     if zone:
         rows = [row for row in rows if matches_any(row.get("zone") or "", zone)]
     if state:

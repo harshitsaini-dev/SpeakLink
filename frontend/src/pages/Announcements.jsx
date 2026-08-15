@@ -48,7 +48,20 @@ const STATE_EXPLANATION = {
  * out from a customer that it is not. So an unreachable shop says what is
  * true: HQ asked, and nothing has answered.
  */
-function StateBadge({ state, reachable = true }) {
+function StateBadge({ state, reachable = true, confirmed = true, error = "" }) {
+  // THE SHOP SAID IT COULD NOT.
+  //
+  // Its own words, because "it did not play" without a reason sends somebody
+  // to the wrong computer. This is the answer the Receiver has always sent
+  // and HQ never read.
+  if (error) {
+    return (
+      <span title={error} data-testid="announcement-state-FAILED"
+            className="inline-block max-w-[16rem] truncate px-2 py-0.5 text-xs font-medium rounded-full border bg-rose-100 text-rose-800 border-rose-200">
+        Refused: {error}
+      </span>
+    );
+  }
   if (!reachable && (state === "PLAYING" || state === "DUCKED")) {
     return (
       <span title="HQ sent this, but no Receiver is connected to this shop - nothing here confirms it is audible."
@@ -63,6 +76,12 @@ function StateBadge({ state, reachable = true }) {
           data-testid={`announcement-state-${state}`}
           className={`inline-block px-2 py-0.5 text-xs font-medium rounded-full border ${STATE_STYLES[state] || STATE_STYLES.STOPPED}`}>
       {state === "DUCKED" ? "Broadcast" : state.charAt(0) + state.slice(1).toLowerCase()}
+      {/* Sent, and nothing has answered yet. A dot rather than a second badge:
+          it is a qualifier on this state, not a state of its own. */}
+      {state === "PLAYING" && !confirmed && (
+        <span title="HQ has sent this and the Store has not confirmed it yet."
+              data-testid="announcement-unconfirmed"> ·&nbsp;unconfirmed</span>
+      )}
     </span>
   );
 }
@@ -248,7 +267,9 @@ export default function Announcements() {
                     <div className="text-xs text-muted">{row.store_code}</div>
                   </td>
                   <td className="px-4 py-2 text-body">{row.zone}</td>
-                  <td className="px-4 py-2"><StateBadge state={row.state} reachable={row.reachable !== false} /></td>
+                  <td className="px-4 py-2"><StateBadge state={row.state} reachable={row.reachable !== false}
+                                confirmed={row.confirmed !== false}
+                                error={row.confirm_error || ""} /></td>
                   <td className="px-4 py-2 text-body">
                     {row.template_name
                       ? <>
