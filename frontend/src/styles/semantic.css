@@ -1,0 +1,190 @@
+/* The names the product is written in.
+ *
+ * WHY THESE EXIST
+ *
+ * Every page used to name a literal colour - bg-white, text-slate-700,
+ * border-slate-200 - and a literal colour cannot have two values. Dark mode
+ * was therefore delivered by a "bridge": a block of `.dark .bg-white { ... }`
+ * overrides that re-pointed those literals. It worked, and it was the right
+ * way to get a whole product legible in one step, but it is an override
+ * rather than a design, and it leaked in exactly the way overrides do -
+ * `green` was covered while `emerald` was not, and a rule for `input`
+ * painted over a slider that was meant to be transparent.
+ *
+ * These classes say what a thing IS - a surface, body text, a hairline - and
+ * take their colour from the theme's variables. A page written in them has a
+ * dark mode because it was designed to, not because something downstream
+ * corrected it.
+ *
+ * WHY PLAIN CSS AND NOT A TAILWIND PLUGIN
+ *
+ * These are used with a handful of variants (hover, even, focus) and nothing
+ * else. Plain CSS makes the whole vocabulary readable in one file by anybody
+ * who knows CSS, with no build step to reason about.
+ */
+
+/* ---------------------------------------------------------------- surfaces */
+
+.bg-surface       { background-color: var(--surface-solid); }
+.bg-surface-muted { background-color: var(--surface-muted); }
+.bg-surface-raised{ background-color: var(--surface-raised); }
+/* A faint stripe for alternating rows: a tint of the surface, never a colour
+   of its own, so it works over glass as well as over a solid panel. */
+.bg-surface-alt   { background-color: rgb(var(--surface) / 0.35); }
+
+.hover\:bg-surface:hover        { background-color: var(--surface-solid); }
+.hover\:bg-surface-muted:hover  { background-color: var(--surface-muted); }
+.even\:bg-surface-alt:nth-child(even) { background-color: rgb(var(--surface) / 0.35); }
+
+/* ------------------------------------------------------------------- text */
+
+.text-strong { color: var(--text-strong); }
+.text-body   { color: var(--text-body); }
+.text-muted  { color: var(--text-muted); }
+.text-faint  { color: var(--text-faint); }
+
+.hover\:text-strong:hover { color: var(--text-strong); }
+
+/* ------------------------------------------------------------------ lines */
+
+.border-line        { border-color: var(--line); }
+.border-line-strong { border-color: var(--line-strong); }
+.divide-line > * + * { border-color: var(--line); }
+
+/* ---------------------------------------------------------------- controls */
+
+/* Form controls, once, as a base style rather than a dark-mode patch.
+ *
+ * Scoped to the types that actually have a box. A range input is frequently a
+ * transparent hit-area over a track somebody drew themselves, and a checkbox
+ * loses its tick to a background: painting those was the bug that made the
+ * recording player look like it had stopped playing.
+ */
+input[type="text"], input[type="password"], input[type="search"],
+input[type="email"], input[type="number"], input[type="time"],
+input[type="date"], input[type="datetime-local"], input[type="url"],
+input:not([type]), select, textarea {
+  background-color: var(--surface-solid);
+  color: var(--text-strong);
+  border-color: var(--line-strong);
+}
+
+input::placeholder, textarea::placeholder { color: var(--text-faint); }
+
+input[type="range"] { accent-color: #3b82f6; background-color: transparent; }
+input[type="checkbox"], input[type="radio"] { accent-color: #2563eb; }
+
+/* Inside the always-dark shell - the sidebar, the player strip - controls
+   take that surface instead of the page's. */
+.night input[type="text"], .night input[type="password"],
+.night input[type="search"], .night input:not([type]),
+.night select, .night textarea {
+  background-color: rgba(255, 255, 255, 0.06);
+  color: #e2e8f0;
+  border-color: rgba(148, 163, 184, 0.25);
+}
+
+
+/* ------------------------------------------------------------------ scrim */
+
+/* The dimmer behind a dialog.
+ *
+ * Every modal in the product used to write its own `bg-black/40`, which is a
+ * decision about opacity taken twelve times - and on a dark page a 40% black
+ * leaves the page behind still competing with the dialog in front. One name,
+ * one value per theme.
+ */
+.scrim {
+  background-color: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.dark .scrim { background-color: rgba(2, 6, 16, 0.7); }
+
+
+/* ------------------------------------------------------------ row actions */
+
+/* The buttons at the end of a table row.
+ *
+ * There were four sizes, three border weights and two ways of showing danger
+ * on one screen: an amber outline, a red outline, and a filled pink block for
+ * "Delete Permanently" that was the brightest thing on a page of grey rows -
+ * the most destructive action drawn as the most attractive one.
+ *
+ * These give them one shape. Danger is carried by the OUTLINE and the text,
+ * never by a fill: on a row of eight controls, a filled button is where the
+ * eye lands first, and that must not be the irreversible one. The fill is
+ * kept for hover, where it confirms what is about to be pressed.
+ */
+.row-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  height: 1.875rem;              /* 30px - one height for icons and labels */
+  padding: 0 0.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  color: var(--text-body);
+  font-size: 0.75rem;
+  line-height: 1;
+  white-space: nowrap;
+  background-color: transparent;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.row-action:hover:not(:disabled) {
+  background-color: var(--surface-muted);
+  color: var(--text-strong);
+}
+
+.row-action:disabled { opacity: 0.45; cursor: default; }
+
+/* Reversible harm: disable, archive. */
+.row-action-caution {
+  border-color: rgba(245, 158, 11, 0.5);
+  color: #b45309;
+}
+.dark .row-action-caution { color: #fcd34d; }
+.row-action-caution:hover:not(:disabled) {
+  background-color: rgba(245, 158, 11, 0.12);
+  color: #92400e;
+}
+.dark .row-action-caution:hover:not(:disabled) { color: #fde68a; }
+
+/* Harm that can be undone by somebody with the right, but not by this click. */
+.row-action-danger {
+  border-color: rgba(244, 63, 94, 0.5);
+  color: #be123c;
+}
+.dark .row-action-danger { color: #fda4af; }
+.row-action-danger:hover:not(:disabled) {
+  background-color: rgba(244, 63, 94, 0.12);
+  color: #9f1239;
+}
+.dark .row-action-danger:hover:not(:disabled) { color: #fecdd3; }
+
+/* Irreversible. A heavier outline, not a fill - it must be unmistakable
+   without being the first thing the eye is drawn to. */
+.row-action-destructive {
+  border-color: rgba(244, 63, 94, 0.85);
+  border-width: 1px;
+  box-shadow: inset 0 0 0 1px rgba(244, 63, 94, 0.25);
+  color: #be123c;
+  font-weight: 600;
+}
+.dark .row-action-destructive { color: #fda4af; }
+.row-action-destructive:hover:not(:disabled) {
+  background-color: rgba(244, 63, 94, 0.16);
+}
+
+/* Neutral-positive and informational rows: restore, promote, open. Same
+   shape, so a row of eight controls reads as one set. */
+.row-action-ok { border-color: rgba(16, 185, 129, 0.5); color: #047857; }
+.dark .row-action-ok { color: #6ee7b7; }
+.row-action-ok:hover:not(:disabled) { background-color: rgba(16, 185, 129, 0.12); }
+
+.row-action-info { border-color: rgba(59, 130, 246, 0.5); color: #1d4ed8; }
+.dark .row-action-info { color: #93c5fd; }
+.row-action-info:hover:not(:disabled) { background-color: rgba(59, 130, 246, 0.12); }

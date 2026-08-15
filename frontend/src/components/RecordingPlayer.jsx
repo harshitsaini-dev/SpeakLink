@@ -373,7 +373,7 @@ export default function RecordingPlayer({ session, onClose,
       // Starts where the sidebar ends, so it never covers the navigation.
       // No backdrop and no overlay: History's filters, checkboxes and
       // pagination all stay usable while this is open.
-      className="fixed bottom-0 left-0 md:left-64 right-0 z-40 border-t border-slate-700 bg-slate-900 text-slate-100 shadow-lg px-4 py-3"
+      className="fixed bottom-0 left-0 md:left-64 right-0 z-40 shadow-lg px-4 py-3"
     >
       {/* The audio element is REAL but never shown: no browser-native widget,
           and every control here drives this directly. */}
@@ -432,14 +432,14 @@ export default function RecordingPlayer({ session, onClose,
       <div className="flex items-center gap-4 flex-wrap md:flex-nowrap">
         {/* ---- what is playing ---- */}
         <div className="min-w-0 md:w-64">
-          <p className="text-[10px] uppercase tracking-[0.15em] text-slate-400">
+          <p className="text-[10px] uppercase tracking-[0.15em] text-faint">
             Broadcast Recording
           </p>
           <p className="text-sm font-semibold truncate"
              data-testid="recording-campaign">
             {session.campaign_name || "—"}
           </p>
-          <p className="text-xs text-slate-400 truncate" data-testid="recording-session">
+          <p className="text-xs text-faint truncate" data-testid="recording-session">
             Broadcast #{sessionId}
             {session.recording?.byte_size
               ? ` · ${formatSize(session.recording.byte_size)}` : ""}
@@ -468,12 +468,12 @@ export default function RecordingPlayer({ session, onClose,
                     className="rounded border border-slate-700 p-1.5 hover:bg-slate-800">
               <RotateCw size={14} />
             </button>
-            <span className="text-[11px] text-slate-400 ml-2"
+            <span className="text-[11px] text-faint ml-2"
                   data-testid="recording-state">{state}</span>
           </div>
 
           <div className="w-full flex items-center gap-2">
-            <span className="text-[11px] tabular-nums text-slate-400 w-10 text-right"
+            <span className="text-[11px] tabular-nums text-faint w-10 text-right"
                   data-testid="recording-position">
               {formatClock(position)}
             </span>
@@ -546,7 +546,7 @@ export default function RecordingPlayer({ session, onClose,
                            [&::-moz-range-thumb]:bg-transparent"
               />
             </div>
-            <span className="text-[11px] tabular-nums text-slate-400 w-10"
+            <span className="text-[11px] tabular-nums text-faint w-10"
                   data-testid="recording-duration">
               {/* A WebM written by MediaRecorder carries no duration in its
                   header, so the element may never expose one. An em dash

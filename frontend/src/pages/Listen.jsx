@@ -1,6 +1,8 @@
 import React from "react";
 import { useParams } from "react-router-dom";
 import { Loader2, Volume2, AlertCircle } from "lucide-react";
+import ThemeToggle from "@/components/ThemeToggle";
+import { useTheme } from "@/contexts/ThemeContext";
 import SpeakLinkMark from "@/components/SpeakLinkMark";
 import ListenerChat from "@/components/ListenerChat";
 import { api, wsUrl } from "@/lib/api";
@@ -63,11 +65,22 @@ function reconnectDelay(attempt) {
 }
 
 export default function Listen() {
+  // The page follows the choice made on its own toggle. Dark keeps the night
+  // ground this page was designed around; light makes it an ordinary light
+  // page rather than leaving the control doing nothing visible.
+  const { resolved } = useTheme();
   const { publicCode } = useParams();
 
   const [code, setCode] = React.useState(publicCode || "");
   const [name, setName] = React.useState("");
-  const [password, setPassword] = React.useState("");
+  // A link may carry the join password. Being handed a working link and then
+  // asked to retype what is already inside it is the whole friction this
+  // removes; the broadcaster still decides whether to hand out that kind of
+  // link at all.
+  const [password, setPassword] = React.useState(() => {
+    if (typeof window === "undefined" || !window.location) return "";
+    return new URLSearchParams(window.location.search).get("k") || "";
+  });
   const [phase, setPhase] = React.useState(Phase.BOOTSTRAPPING);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
@@ -403,7 +416,12 @@ export default function Listen() {
     : "Connecting…";
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4">
+    <div className={`listener-shell min-h-screen text-strong flex items-center
+                     justify-center p-4 ${resolved === "dark" ? "night" : ""}`}>
+      {/* On the page a listener actually lands on, not only inside HQ.
+          Somebody sent this link at ten at night; the first screen they see
+          is this one. */}
+      <div className="absolute right-4 top-4"><ThemeToggle compact /></div>
       <div className="w-full max-w-sm">
         <div className="flex items-center justify-center gap-2 mb-6">
           <SpeakLinkMark size={34} className="text-blue-500" />
@@ -416,14 +434,14 @@ export default function Listen() {
 
         {phase === Phase.BOOTSTRAPPING && (
           <Panel testId="listen-bootstrapping">
-            <Loader2 size={28} className="mx-auto mb-3 animate-spin text-slate-400" />
-            <p className="text-sm text-slate-400">Checking your access…</p>
+            <Loader2 size={28} className="mx-auto mb-3 animate-spin text-faint" />
+            <p className="text-sm text-faint">Checking your access…</p>
           </Panel>
         )}
 
         {phase === Phase.FORM && (
           <form
-            className="rounded-lg border border-slate-800 bg-slate-900 p-5 space-y-4"
+            className="glass p-5 space-y-4"
             onSubmit={(event) => { event.preventDefault(); submit("password"); }}
           >
             <Field label="Broadcast ID">
@@ -433,7 +451,7 @@ export default function Listen() {
                 onChange={(event) => setCode(event.target.value)}
                 placeholder="SL-7K4P92"
                 autoComplete="off"
-                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm uppercase tracking-widest focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full rounded-md border border-line-strong bg-surface-muted px-3 py-2 text-sm uppercase tracking-widest focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </Field>
             <Field label="Your Name">
@@ -443,7 +461,7 @@ export default function Listen() {
                 onChange={(event) => setName(event.target.value)}
                 placeholder="Harshit"
                 maxLength={40}
-                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full rounded-md border border-line-strong bg-surface-muted px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </Field>
             <Field label="Password">
@@ -453,7 +471,7 @@ export default function Listen() {
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 autoComplete="off"
-                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full rounded-md border border-line-strong bg-surface-muted px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </Field>
 
@@ -475,13 +493,13 @@ export default function Listen() {
             </button>
 
             <div className="pt-1 text-center">
-              <p className="text-xs text-slate-500 mb-2">Don&rsquo;t have the password?</p>
+              <p className="text-xs text-muted mb-2">Don&rsquo;t have the password?</p>
               <button
                 type="button"
                 data-testid="listen-request"
                 disabled={busy}
                 onClick={() => submit("request")}
-                className="w-full rounded-md border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800 disabled:opacity-60"
+                className="w-full rounded-md border border-line-strong px-4 py-2 text-sm font-semibold text-body hover:bg-surface-muted disabled:opacity-60"
               >
                 Request Access
               </button>
@@ -491,9 +509,9 @@ export default function Listen() {
 
         {phase === Phase.WAITING && (
           <Panel testId="listen-waiting">
-            <Loader2 size={28} className="mx-auto mb-3 animate-spin text-slate-400" />
+            <Loader2 size={28} className="mx-auto mb-3 animate-spin text-faint" />
             <p className="font-semibold">Waiting for broadcaster approval…</p>
-            <p className="mt-1 text-sm text-slate-400">
+            <p className="mt-1 text-sm text-faint">
               You&rsquo;ll start listening automatically once you&rsquo;re let in.
             </p>
           </Panel>
@@ -502,7 +520,7 @@ export default function Listen() {
         {phase === Phase.DENIED && (
           <Panel testId="listen-denied">
             <p className="font-semibold">Request denied</p>
-            <p className="mt-1 text-sm text-slate-400">
+            <p className="mt-1 text-sm text-faint">
               The broadcaster did not admit you to this Broadcast.
             </p>
             {/* A denial ends one attempt, not the listener's day. The button
@@ -514,8 +532,8 @@ export default function Listen() {
               data-testid="listen-request-again"
               onClick={startOver}
               disabled={busy}
-              className="mt-4 rounded-lg bg-white px-4 py-2 text-sm font-semibold
-                         text-slate-900 disabled:opacity-60">
+              className="mt-4 rounded-lg bg-surface px-4 py-2 text-sm font-semibold
+                         text-strong disabled:opacity-60">
               Request again
             </button>
           </Panel>
@@ -524,7 +542,7 @@ export default function Listen() {
         {phase === Phase.KICKED && (
           <Panel testId="listen-kicked">
             <p className="font-semibold">You were removed from this Broadcast.</p>
-            <p className="mt-1 text-sm text-slate-400">
+            <p className="mt-1 text-sm text-faint">
               You can ask to join again. The broadcaster decides.
             </p>
             {/* Deliberately a button and not an automatic retry. Kick has to
@@ -536,8 +554,8 @@ export default function Listen() {
               data-testid="listen-join-again"
               onClick={startOver}
               disabled={busy}
-              className="mt-4 rounded-lg bg-white px-4 py-2 text-sm font-semibold
-                         text-slate-900 disabled:opacity-60">
+              className="mt-4 rounded-lg bg-surface px-4 py-2 text-sm font-semibold
+                         text-strong disabled:opacity-60">
               Join again
             </button>
           </Panel>
@@ -545,9 +563,9 @@ export default function Listen() {
 
         {phase === Phase.WAITING_BROADCAST && (
           <Panel testId="listen-not-started-yet">
-            <Loader2 size={28} className="mx-auto mb-3 animate-spin text-slate-400" />
+            <Loader2 size={28} className="mx-auto mb-3 animate-spin text-faint" />
             <p className="font-semibold">The Broadcast hasn&rsquo;t started yet</p>
-            <p className="mt-1 text-sm text-slate-400">
+            <p className="mt-1 text-sm text-faint">
               You&rsquo;re admitted. Audio will begin when the broadcaster goes live.
             </p>
           </Panel>
@@ -556,7 +574,7 @@ export default function Listen() {
         {phase === Phase.LOST && (
           <Panel testId="listen-session-lost">
             <p className="font-semibold">You&rsquo;re not connected to this Broadcast</p>
-            <p className="mt-1 text-sm text-slate-400">
+            <p className="mt-1 text-sm text-faint">
               Your access may have been removed, or this browser is blocking the
               session. Try joining again.
             </p>
@@ -566,27 +584,27 @@ export default function Listen() {
         {phase === Phase.ENDED && (
           <Panel testId="listen-ended">
             <p className="font-semibold">Broadcast ended</p>
-            <p className="mt-1 text-sm text-slate-400">Thanks for listening.</p>
+            <p className="mt-1 text-sm text-faint">Thanks for listening.</p>
           </Panel>
         )}
 
         {phase === Phase.LIVE && (
           <div data-testid="listen-live"
-               className="rounded-lg border border-slate-800 bg-slate-900 p-6 text-center">
+               className="rounded-lg border border-line bg-surface-muted p-6 text-center">
             <div className="mb-4 flex items-center justify-center gap-2">
               <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-red-500" />
               <span className="text-sm font-bold tracking-[0.2em] text-red-400">LIVE</span>
             </div>
 
-            <p className="text-xs uppercase tracking-widest text-slate-500">Broadcast</p>
+            <p className="text-xs uppercase tracking-widest text-muted">Broadcast</p>
             <p data-testid="listen-room-code"
                className="font-mono text-lg font-bold">{(code || "").toUpperCase()}</p>
 
-            <p className="mt-4 text-xs uppercase tracking-widest text-slate-500">You</p>
+            <p className="mt-4 text-xs uppercase tracking-widest text-muted">You</p>
             <p data-testid="listen-display-name" className="font-semibold">{name.trim()}</p>
 
             <div className="mt-5 flex items-center justify-center gap-2 text-sm">
-              <Volume2 size={15} className="text-slate-400" />
+              <Volume2 size={15} className="text-faint" />
               <span data-testid="listen-status" className="font-semibold">{statusLabel}</span>
             </div>
 
@@ -607,18 +625,18 @@ export default function Listen() {
               data-testid="listen-leave"
               onClick={startOver}
               disabled={busy}
-              className="mt-5 w-full rounded-lg border border-slate-700 px-4 py-2
-                         text-sm font-semibold text-slate-300 hover:bg-slate-900
+              className="mt-5 w-full rounded-lg border border-line-strong px-4 py-2
+                         text-sm font-semibold text-body hover:bg-surface-muted
                          disabled:opacity-60">
               Leave Broadcast
             </button>
-            <p className="mt-1 text-[11px] text-slate-500">
+            <p className="mt-1 text-[11px] text-muted">
               You will stop hearing this Broadcast. You can join again with the
               Broadcast ID.
             </p>
 
             {!broadcastLive && (
-              <p className="mt-3 text-sm text-slate-400" data-testid="listen-not-started">
+              <p className="mt-3 text-sm text-faint" data-testid="listen-not-started">
                 The Broadcast hasn&rsquo;t started yet.
               </p>
             )}
@@ -637,7 +655,7 @@ export default function Listen() {
               <p data-testid="listen-live-error" className="mt-4 text-sm text-red-400">{error}</p>
             )}
 
-            <p className="mt-5 text-xs text-slate-600">
+            <p className="mt-5 text-xs text-body">
               Use your device&rsquo;s volume buttons to adjust how loud this is.
             </p>
           </div>
@@ -650,7 +668,7 @@ export default function Listen() {
 function Field({ label, children }) {
   return (
     <label className="block">
-      <span className="mb-1.5 block text-xs font-bold uppercase tracking-[0.1em] text-slate-500">
+      <span className="mb-1.5 block text-xs font-bold uppercase tracking-[0.1em] text-muted">
         {label}
       </span>
       {children}
@@ -660,8 +678,7 @@ function Field({ label, children }) {
 
 function Panel({ testId, children }) {
   return (
-    <div data-testid={testId}
-         className="rounded-lg border border-slate-800 bg-slate-900 p-6 text-center">
+    <div data-testid={testId} className="glass p-6 text-center">
       {children}
     </div>
   );

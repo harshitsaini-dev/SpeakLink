@@ -6,6 +6,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { MENU_PERMISSION_BY_PATH } from "@/lib/menuPermissions";
 import RecordingPlayer, { PLAYER_BAR_HEIGHT } from "@/components/RecordingPlayer";
 import EmergencyStopControl from "@/components/EmergencyStopControl";
+import ThemeToggle from "@/components/ThemeToggle";
 import { useRecordingPlayback } from "@/contexts/RecordingPlaybackContext";
 import { formatIstClock } from "@/lib/time";
 
@@ -21,6 +22,40 @@ import { formatIstClock } from "@/lib/time";
 //: the estate it plays to, then the records, then the settings. Groups whose
 //: every link is hidden by permission do not render at all - a heading over
 //: nothing tells a reader they are missing something without saying what.
+/** One nav row, everywhere.
+ *
+ * It was three copies of the same class string, and they had already started
+ * to drift. The active row is a soft pane rather than a solid blue block: at
+ * fourteen items a saturated bar shouts over the page it is pointing at, and
+ * a left marker plus a lit surface says "you are here" without competing with
+ * the content.
+ */
+function navItemClass(isActive) {
+  return [
+    "group relative flex items-center gap-3 rounded-lg pl-3 pr-3 py-2.5",
+    "text-sm font-medium transition-colors",
+    isActive
+      ? "text-white bg-white/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
+      : "text-slate-300 hover:bg-white/[0.06] hover:text-white",
+    // The marker. On the element rather than a separate node, so it cannot
+    // fall out of step with the row it belongs to.
+    isActive
+      ? "before:absolute before:left-0 before:top-1/2 before:h-5 before:w-[3px] before:-translate-y-1/2 before:rounded-r before:bg-blue-400"
+      : "",
+  ].filter(Boolean).join(" ");
+}
+
+/** The icon, in its own small tile so every label starts on one line. */
+function NavIcon({ icon: Icon, active }) {
+  return (
+    <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors ${
+      active ? "bg-blue-500/20 text-blue-200"
+             : "bg-surface/[0.04] text-faint group-hover:text-slate-200"}`}>
+      <Icon size={16} />
+    </span>
+  );
+}
+
 const NAV_GROUPS = [
   {
     title: "Live",
@@ -122,7 +157,7 @@ export default function Layout() {
   return (
     // The shell is exactly one viewport tall and never scrolls itself, so the
     // document is never the vertical scroll owner. Main owns scrolling.
-    <div data-testid="app-shell" className="h-screen bg-slate-50 overflow-hidden">
+    <div data-testid="app-shell" className="h-screen bg-surface-muted overflow-hidden">
       {/* Sidebar */}
       {/* FIXED to the viewport, on every screen size and in every state.
           It was md:sticky, which keeps a sticky element in normal flow and
@@ -132,16 +167,31 @@ export default function Layout() {
           the main shell carries the matching md:ml-64 offset below. */}
       <aside
         data-testid="app-sidebar"
-        className={`${open ? "translate-x-0" : "-translate-x-full"} md:translate-x-0
+        // `night`: the sidebar is dark in BOTH themes, so any glass inside it
+        // - the theme toggle - has to take its tint from the surface it is
+        // actually sitting on, not from the page's theme. In light mode it
+        // was a pale panel stuck to a dark rail with grey-on-grey labels.
+        className={`night ${open ? "translate-x-0" : "-translate-x-full"} md:translate-x-0
                     fixed inset-y-0 left-0 z-40 w-64 h-screen
-                    bg-slate-900 text-slate-100 flex flex-col transition-transform`}>
+                    flex flex-col transition-transform`}
+             style={{
+               // A gradient and a hairline rather than a flat block. The
+               // sidebar is the one surface that does NOT invert with the
+               // theme - it is the product's fixed point - so it has to look
+               // deliberate in both, not like a leftover dark rectangle.
+               backgroundImage:
+                 "linear-gradient(180deg, var(--shell-top), var(--shell) 60%)",
+               color: "var(--shell-text)",
+               boxShadow: "inset -1px 0 0 var(--shell-edge)",
+             }}>
         {/* Brand and account never scroll away: only the middle list does. */}
-        <div className="h-16 shrink-0 px-5 flex items-center gap-2 border-b border-slate-800">
+        <div className="h-16 shrink-0 px-5 flex items-center gap-2"
+             style={{ boxShadow: "inset 0 -1px 0 var(--shell-edge)" }}>
           <SpeakLinkMark className="text-blue-500" size={30} />
           <div>
             <div data-testid="sidebar-wordmark"
                  className="font-bold tracking-tight text-white text-lg leading-none">SpeakLink</div>
-            <div className="text-[10px] uppercase tracking-[0.2em] text-slate-400 mt-0.5">Live Broadcast</div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-faint mt-0.5">Live Broadcast</div>
           </div>
         </div>
         <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-4 space-y-4">
@@ -150,19 +200,21 @@ export default function Layout() {
               {NAV_TOP.filter(allowed).map((n) => (
                 <NavLink key={n.to} to={n.to} data-testid={n.testid}
                          onClick={() => setOpen(false)}
-                         className={({ isActive }) =>
-                           `flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
-                             isActive ? "bg-blue-700 text-white" : "text-slate-300 hover:bg-slate-800 hover:text-white"
-                           }`}>
-                  <n.icon size={18} />
-                  {n.label}
+                         className={({ isActive }) => navItemClass(isActive)}>
+                  {({ isActive }) => (
+                    <>
+                      <NavIcon icon={n.icon} active={isActive} />
+                      <span>{n.label}</span>
+                    </>
+                  )}
                 </NavLink>
               ))}
             </div>
           )}
           {visibleGroups.map((group) => (
             <div key={group.title} data-testid={`nav-group-${group.title.toLowerCase()}`}>
-              <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+              <div className="px-3 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.18em]"
+                   style={{ color: "var(--shell-heading)" }}>
                 {group.title}
               </div>
               <div className="space-y-1">
@@ -172,21 +224,22 @@ export default function Layout() {
                     to={n.to}
                     data-testid={n.testid}
                     onClick={() => setOpen(false)}
-                    className={({ isActive }) =>
-                      `flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
-                        isActive ? "bg-blue-700 text-white" : "text-slate-300 hover:bg-slate-800 hover:text-white"
-                      }`
-                    }
+                    className={({ isActive }) => navItemClass(isActive)}
                   >
-                    <n.icon size={18} />
-                    {n.label}
+                    {({ isActive }) => (
+                      <>
+                        <NavIcon icon={n.icon} active={isActive} />
+                        <span>{n.label}</span>
+                      </>
+                    )}
                   </NavLink>
                 ))}
               </div>
             </div>
           ))}
         </nav>
-        <div className="shrink-0 p-3 border-t border-slate-800">
+        <div className="shrink-0 p-3"
+             style={{ boxShadow: "inset 0 1px 0 var(--shell-edge)" }}>
           {/* Above the account block, in reach from EVERY page. It used to be a
               card on the Console, which meant that stopping a broadcast that
               had gone wrong required first navigating to the page - at the one
@@ -194,8 +247,14 @@ export default function Layout() {
           <div className="mb-3">
             <EmergencyStopControl />
           </div>
+          {/* Beside the account rather than in a settings page: it is a
+              preference about this screen, and somebody reaching for it is
+              looking at the screen. */}
+          <div className="px-3 pb-3">
+            <ThemeToggle />
+          </div>
           <div className="px-3 py-2 mb-2">
-            <div className="text-xs text-slate-400">Signed in as</div>
+            <div className="text-xs text-faint">Signed in as</div>
             <div className="text-sm font-medium text-white">{user?.username}</div>
           </div>
           <button
@@ -209,24 +268,29 @@ export default function Layout() {
       </aside>
 
       {/* Overlay for mobile */}
-      {open && <div className="fixed inset-0 bg-black/40 z-30 md:hidden" onClick={() => setOpen(false)} />}
+      {open && <div className="fixed inset-0 scrim z-30 md:hidden" onClick={() => setOpen(false)} />}
 
       {/* Main */}
       {/* md:ml-64 matches the w-64 sidebar exactly. A fixed sidebar is out of
           flow, so without this offset the page would sit underneath it. */}
       <div data-testid="app-main-shell"
            className="md:ml-64 flex flex-col min-w-0 h-screen min-h-0 overflow-hidden">
-        <header data-testid="app-header" className="h-16 shrink-0 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6">
+        {/* Glass, and fixed height: the header sits over the scrolling table
+            rather than beside it, so what is underneath stays faintly visible
+            and the eye keeps its place while a long list moves. */}
+        <header data-testid="app-header"
+                className="glass h-16 shrink-0 flex items-center justify-between px-4 md:px-6
+                           border-x-0 border-t-0 rounded-none">
           <button
             data-testid="sidebar-toggle-btn"
-            className="md:hidden p-2 rounded-md hover:bg-slate-100"
+            className="md:hidden p-2 rounded-md hover:bg-surface-muted"
             onClick={() => setOpen((o) => !o)}
           >
             {open ? <X size={20} /> : <Menu size={20} />}
           </button>
-          <div className="text-xs uppercase tracking-[0.15em] text-slate-500">HQ Broadcast Console · v1.0</div>
+          <div className="text-xs uppercase tracking-[0.15em] text-muted">HQ Broadcast Console · v1.0</div>
           <div data-testid="header-clock"
-               className="ml-auto font-mono text-xs text-slate-600 sm:text-sm">
+               className="ml-auto font-mono text-xs text-body sm:text-sm">
             {clock}
           </div>
         </header>

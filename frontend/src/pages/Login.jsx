@@ -1,3 +1,4 @@
+import ThemeToggle from "@/components/ThemeToggle";
 import React from "react";
 import { useNavigate } from "react-router-dom";
 import { LogIn } from "lucide-react";
@@ -38,7 +39,12 @@ export default function Login() {
 
   return (
     <div className="min-h-screen relative flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-slate-900">
+      {/* Before signing in, not after. Somebody who needs dark at six in the
+          morning needs it on the first screen too. */}
+      <div className="absolute right-4 top-4">
+        <ThemeToggle compact />
+      </div>
+      <div className="absolute inset-0 bg-surface-muted">
         <img src={BG_IMAGE} className="absolute inset-0 w-full h-full object-cover opacity-40" alt="" />
         <div className="absolute inset-0 bg-gradient-to-br from-slate-900/90 via-slate-900/80 to-blue-900/70" />
       </div>
@@ -54,37 +60,37 @@ export default function Login() {
             </div>
             <div className="text-left">
               <div className="text-4xl font-bold tracking-tight">SpeakLink</div>
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-300 mt-1">HQ → Store Live Broadcast</div>
+              <div className="text-xs uppercase tracking-[0.2em] text-body mt-1">HQ → Store Live Broadcast</div>
             </div>
           </div>
         </div>
 
-        <form onSubmit={submit} className="bg-white rounded-md shadow-xl border border-slate-200 p-6 space-y-4">
+        <form onSubmit={submit} className="glass rounded-xl p-6 space-y-4">
           <div>
-            <h2 className="text-xl font-semibold text-slate-900">HQ Admin Sign In</h2>
-            <p className="text-sm text-slate-500 mt-1">Enter your credentials to access the broadcast console.</p>
+            <h2 className="text-xl font-semibold text-strong">HQ Admin Sign In</h2>
+            <p className="text-sm text-muted mt-1">Enter your credentials to access the broadcast console.</p>
           </div>
 
           <div>
-            <label htmlFor="login-username" className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Username</label>
+            <label htmlFor="login-username" className="block text-xs font-bold uppercase tracking-[0.1em] text-muted mb-1.5">Username</label>
             <input
               id="login-username"
               name="username"
               data-testid="login-username-input"
               autoComplete="username"
-              className="w-full px-3 py-2.5 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              className="w-full px-3 py-2.5 border border-line-strong rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               value={u} onChange={(e) => setU(e.target.value)} required autoFocus
             />
           </div>
           <div>
-            <label htmlFor="login-password" className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Password</label>
+            <label htmlFor="login-password" className="block text-xs font-bold uppercase tracking-[0.1em] text-muted mb-1.5">Password</label>
             <input
               id="login-password"
               name="password"
               data-testid="login-password-input"
               type="password"
               autoComplete="current-password"
-              className="w-full px-3 py-2.5 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              className="w-full px-3 py-2.5 border border-line-strong rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               value={p} onChange={(e) => setP(e.target.value)} required
             />
           </div>
@@ -99,7 +105,7 @@ export default function Login() {
             <LogIn size={16} /> {busy ? "Signing in…" : "Sign In"}
           </button>
 
-          <p className="text-[11px] text-slate-500 text-center pt-2 border-t border-slate-100">
+          <p className="text-[11px] text-muted text-center pt-2 border-t border-line">
             Use the HQ credentials issued to you. If you do not have them, ask
             your SpeakLink administrator — they are never shown on this page.
           </p>

@@ -408,3 +408,27 @@ test("a listener whose session is rejected is not told the Broadcast ended", asy
   expect(screen.queryByTestId("listen-ended")).toBeNull();
   expect(screen.getByTestId("listen-session-lost")).toBeTruthy();
 });
+
+test("the listener's own page carries the theme control, and follows it", () => {
+  // The link arrives at ten at night and this is the first screen. A toggle
+  // that only existed inside HQ would be a setting for the people who never
+  // see this page - and a toggle that did not change THIS page would be a
+  // control that does nothing where it stands.
+  // Wrapped, because a theme choice is only real when something is holding
+  // it: outside the provider the control renders and does nothing, which is
+  // exactly the case the fallback in useTheme exists to survive.
+  const { ThemeProvider } = require("@/contexts/ThemeContext");
+  render(<ThemeProvider><Listen /></ThemeProvider>);
+  expect(screen.getByTestId("theme-toggle")).toBeTruthy();
+
+  const shell = document.querySelector(".listener-shell");
+  expect(shell).toBeTruthy();
+
+  fireEvent.click(screen.getByTestId("theme-light"));
+  expect(document.documentElement.classList.contains("dark")).toBe(false);
+  expect(shell.className).not.toMatch(/\bnight\b/);
+
+  fireEvent.click(screen.getByTestId("theme-dark"));
+  expect(document.documentElement.classList.contains("dark")).toBe(true);
+  expect(document.querySelector(".listener-shell").className).toMatch(/\bnight\b/);
+});

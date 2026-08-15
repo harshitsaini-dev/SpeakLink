@@ -65,7 +65,18 @@ export default function EmergencyStopControl() {
         onClick={() => setOpen(true)}
         disabled={busy}
         title="Stop every active broadcast, including other operators'."
-        className="w-full flex items-center justify-center gap-2 rounded-md border border-red-800 bg-red-600 px-3 py-4 text-base font-bold uppercase tracking-wider text-white shadow-sm hover:bg-red-700 active:bg-red-800 disabled:bg-red-300"
+        // Deliberately NOT glass. Everything else on this screen is a pane
+        // you can see through; this is the one control that must read as a
+        // physical button, and translucency would make the loudest action in
+        // the product look like a label.
+        className="w-full flex items-center justify-center gap-2 rounded-xl px-3 py-4
+                   text-base font-bold uppercase tracking-wider text-white
+                   bg-gradient-to-b from-red-500 to-red-700
+                   shadow-[0_6px_18px_rgba(220,38,38,0.35)]
+                   ring-1 ring-inset ring-red-300/40
+                   hover:from-red-500 hover:to-red-600
+                   active:from-red-700 active:to-red-800
+                   disabled:from-red-300 disabled:to-red-400 disabled:shadow-none"
       >
         <AlertOctagon size={20} /> Emergency Stop
       </button>
@@ -94,25 +105,25 @@ export default function EmergencyStopControl() {
           column and the confirmation appeared squeezed inside the navigation.
           The portal takes it out of that subtree entirely. */}
       {open && createPortal((
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+        <div className="fixed inset-0 z-50 scrim flex items-center justify-center p-4"
              data-testid="emergency-confirm-modal">
-          <div className="bg-white rounded-lg w-full max-w-md p-5 space-y-3">
+          <div className="glass w-full max-w-md p-5 space-y-3">
             <h3 className="font-bold text-red-900 uppercase tracking-wide">
               Stop all active broadcasts?
             </h3>
-            <p className="text-sm text-slate-800">
+            <p className="text-sm text-strong">
               This stops <strong>every active SpeakLink broadcast</strong>, including
               broadcasts started by other operators - not only your own. Every
               targeted Store is told to stop and every Store is released.
             </p>
-            <p className="text-xs text-slate-600">
+            <p className="text-xs text-body">
               SpeakLink cannot confirm that a speaker has fallen silent. This sends
               the stop command and releases the Stores.
             </p>
             <div className="flex gap-2 pt-1">
               <button type="button" data-testid="emergency-cancel-btn"
                       onClick={() => setOpen(false)}
-                      className="flex-1 px-4 py-2 border border-slate-300 rounded-md text-sm">
+                      className="flex-1 px-4 py-2 border border-line-strong rounded-md text-sm">
                 Cancel
               </button>
               <button type="button" data-testid="emergency-confirm-btn" disabled={busy}
