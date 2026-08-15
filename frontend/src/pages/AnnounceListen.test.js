@@ -27,13 +27,15 @@ beforeEach(() => {
   window.HTMLMediaElement.prototype.pause = jest.fn();
 });
 
-test("it asks for an ID and a password, and nothing else is required", async () => {
+test("it asks for an ID, a password, and who you are", async () => {
   render(<AnnounceListen />);
   expect(screen.getByTestId("announce-id")).toBeTruthy();
   expect(screen.getByTestId("announce-password")).toBeTruthy();
-  // A name is offered, not demanded: whoever holds the link is not a user of
-  // this product and must never need to become one.
-  expect(screen.getByTestId("announce-name").required).toBe(false);
+  // The name is demanded now. Still not an account - whoever holds the link
+  // is not a user of this product and must never become one - but HQ can see
+  // who is on a link and can throw somebody off it, and neither is worth
+  // anything against a page of anonymous rows.
+  expect(screen.getByTestId("announce-name").required).toBe(true);
 });
 
 test("a refused ID or password is reported in the page's own words", async () => {
@@ -106,4 +108,33 @@ test("a closed link ends the session rather than looping on an error", async () 
   expect((await screen.findByTestId("announce-error")).textContent)
     .toMatch(/no longer open/i);
   expect(sessionStorage.getItem("speaklink.announce.token")).toBeNull();
+});
+
+test("a link in hand is not shouted at about a previous session", async () => {
+  // Reported from the live estate: opening a fresh link showed "this
+  // listening link is no longer open" on the sign-in form. It was true of the
+  // token left over from an earlier visit and false of the link in the URL -
+  // and the person reads it as being about the link they just clicked.
+  sessionStorage.setItem("speaklink.announce.token", "stale");
+  delete window.location;
+  window.location = { search: "?id=AN-FRESH&k=say-this", pathname: "/announce" };
+  api.get.mockRejectedValue({ response: { status: 401, data: {
+    detail: "This listening link is no longer open. Ask for a new one." } } });
+  api.post.mockResolvedValue({ data: { token: "fresh", room: {} } });
+
+  render(<AnnounceListen />);
+
+  // The link fills itself in - its ID and its password are already in it, so
+  // stopping to ask for those again is friction with nothing behind it - and
+  // asks only for the one thing it cannot know.
+  expect((await screen.findByTestId("announce-id")).value).toBe("AN-FRESH");
+  expect(screen.getByTestId("announce-password").value).toBe("say-this");
+  expect(screen.getByTestId("announce-name").required).toBe(true);
+  expect(screen.queryByTestId("announce-error")).toBeNull();
+
+  fireEvent.change(screen.getByTestId("announce-name"),
+                   { target: { value: "Ravi" } });
+  fireEvent.submit(screen.getByTestId("announce-name").closest("form"));
+  await waitFor(() => expect(api.post).toHaveBeenCalledWith(
+    "/announce/join", { id: "AN-FRESH", password: "say-this", name: "Ravi" }));
 });

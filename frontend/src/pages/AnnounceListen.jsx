@@ -2,6 +2,7 @@ import React from "react";
 import { api } from "@/lib/api";
 import { Volume2, LogOut } from "lucide-react";
 import SpeakLinkMark from "@/components/SpeakLinkMark";
+import ThemeToggle from "@/components/ThemeToggle";
 
 /**
  * Listening to a recorded announcement through a shared link.
@@ -27,12 +28,27 @@ import SpeakLinkMark from "@/components/SpeakLinkMark";
 export default function AnnounceListen() {
   const params = new URLSearchParams(window.location.search);
   const [id, setId] = React.useState(params.get("id") || "");
-  const [password, setPassword] = React.useState("");
+  // A link may carry its own password. Whoever HQ gave it to is one click
+  // from listening, which is the point of that kind of link - and also its
+  // risk, which is why HQ has to choose it per link rather than get it by
+  // default.
+  const [password, setPassword] = React.useState(params.get("k") || "");
   const [name, setName] = React.useState("");
   const [token, setToken] = React.useState(
     () => sessionStorage.getItem("speaklink.announce.token") || "");
   const [state, setState] = React.useState(null);
   const [error, setError] = React.useState("");
+  // A leftover token from a previous visit, being reported over the top of a
+  // link the person has just opened.
+  //
+  // Somebody arriving at /announce with nothing has to be told why they are
+  // looking at a form: their old session ended. Somebody arriving by a fresh
+  // link is about to be admitted on it, and "this listening link is no longer
+  // open" over that is a sentence about a DIFFERENT link - which is exactly
+  // what made it look broken at login. So the message is suppressed only
+  // where a live link is in hand.
+  const arrivedByLink = React.useRef(Boolean(params.get("id")));
+  const inherited = React.useRef(Boolean(token));
   const [busy, setBusy] = React.useState(false);
   // The browser will not start audio until somebody has interacted with the
   // page. Rather than failing silently - a page that looks like it is playing
@@ -52,11 +68,17 @@ export default function AnnounceListen() {
     } catch (failure) {
       if (failure?.response?.status === 401) {
         // The link was closed, or the campaign ended. Said plainly, and the
-        // token dropped so a reload does not look like a bug.
+        // token dropped so a reload does not look like a bug - unless this
+        // was somebody else's leftover token from a previous visit, which is
+        // nothing to report.
+        const leftover = inherited.current && arrivedByLink.current;
+        inherited.current = false;
         setToken("");
         sessionStorage.removeItem("speaklink.announce.token");
-        setError(failure?.response?.data?.detail
-                 || "This listening link is no longer open.");
+        if (!leftover) {
+          setError(failure?.response?.data?.detail
+                   || "This listening link is no longer open.");
+        }
       }
     }
   }, [token, authHeader]);
@@ -84,20 +106,41 @@ export default function AnnounceListen() {
     }
   }, [state?.playing, started]);
 
-  async function join(event) {
-    event.preventDefault();
+  const attemptJoin = React.useCallback(async (code, secret, who) => {
     setBusy(true);
     setError("");
     try {
-      const { data } = await api.post("/announce/join", { id, password, name });
+      const { data } = await api.post("/announce/join",
+                                      { id: code, password: secret, name: who });
+      inherited.current = false;
       setToken(data.token);
       sessionStorage.setItem("speaklink.announce.token", data.token);
+      return true;
     } catch (failure) {
       setError(failure?.response?.data?.detail
                || "That listening ID or password is not right.");
+      return false;
     } finally {
       setBusy(false);
     }
+  }, []);
+
+  // A link that carries its ID and its password fills them in and stops
+  // there.
+  //
+  // It used to walk straight in. That was right until the name became
+  // required, and then it was a contradiction: HQ can see who is on a link
+  // and can throw somebody off it, and a link that admitted people
+  // anonymously made both of those useless. So the link still removes the
+  // retyping it was meant to remove - the ID and the password are already in
+  // the boxes - and the one thing it cannot know is the one thing it asks
+  // for.
+  //
+  // (The fields are seeded from the URL where they are declared, above.)
+
+  async function join(event) {
+    event.preventDefault();
+    await attemptJoin(id, password, name);
   }
 
   async function leave() {
@@ -112,42 +155,50 @@ export default function AnnounceListen() {
 
   if (!token) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6"
+      <div className="min-h-screen flex items-center justify-center p-6"
            data-testid="announce-join-page">
+        <div className="absolute right-4 top-4"><ThemeToggle compact /></div>
         <form onSubmit={join}
-              className="w-full max-w-sm bg-white border border-slate-200 rounded-lg p-6 space-y-4">
+              className="glass w-full max-w-sm rounded-xl p-6 space-y-4">
           <div className="flex items-center gap-2">
             <SpeakLinkMark className="text-blue-600" size={28} />
             <div>
-              <div className="font-bold text-slate-900">SpeakLink</div>
-              <div className="text-xs text-slate-500">Listen to an announcement</div>
+              <div className="font-bold text-strong">SpeakLink</div>
+              <div className="text-xs text-muted">Listen to an announcement</div>
             </div>
           </div>
 
           <label className="block">
-            <span className="text-xs uppercase tracking-widest text-slate-500">
+            <span className="text-xs uppercase tracking-widest text-muted">
               Listening ID
             </span>
             <input value={id} onChange={(event) => setId(event.target.value)}
                    data-testid="announce-id" required placeholder="AN-XXXXXX"
-                   className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md font-mono" />
+                   className="mt-1 w-full px-3 py-2 border border-line-strong rounded-md font-mono" />
           </label>
           <label className="block">
-            <span className="text-xs uppercase tracking-widest text-slate-500">
+            <span className="text-xs uppercase tracking-widest text-muted">
               Password
             </span>
             <input value={password} type="password" required
                    onChange={(event) => setPassword(event.target.value)}
                    data-testid="announce-password"
-                   className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md font-mono" />
+                   className="mt-1 w-full px-3 py-2 border border-line-strong rounded-md font-mono" />
           </label>
           <label className="block">
-            <span className="text-xs uppercase tracking-widest text-slate-500">
-              Your name (optional)
+            <span className="text-xs uppercase tracking-widest text-muted">
+              Your name
             </span>
+            {/* Required, not optional.
+                HQ can see who is on a link and can throw somebody off it, and
+                both of those are useless against a list of anonymous rows. A
+                name typed by the person is worth exactly what a self-declared
+                name is worth - which is why the times sit beside it on the HQ
+                card - but "somebody" is worth nothing at all. */}
             <input value={name} onChange={(event) => setName(event.target.value)}
-                   data-testid="announce-name"
-                   className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md" />
+                   data-testid="announce-name" required minLength={2}
+                   placeholder="so HQ knows who is listening"
+                   className="mt-1 w-full px-3 py-2 border border-line-strong rounded-md" />
           </label>
 
           {error && (
@@ -164,18 +215,19 @@ export default function AnnounceListen() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6"
+    <div className="min-h-screen flex items-center justify-center p-6"
          data-testid="announce-listen-page">
-      <div className="w-full max-w-md bg-white border border-slate-200 rounded-lg p-6 space-y-4">
+      <div className="absolute right-4 top-4"><ThemeToggle compact /></div>
+      <div className="glass w-full max-w-md rounded-xl p-6 space-y-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="font-bold text-slate-900" data-testid="announce-label">
+            <div className="font-bold text-strong" data-testid="announce-label">
               {state?.label || state?.template_name || "Announcement"}
             </div>
-            <div className="text-xs text-slate-500">{state?.window}</div>
+            <div className="text-xs text-muted">{state?.window}</div>
           </div>
           <button onClick={leave} data-testid="announce-leave"
-                  className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-800">
+                  className="row-action">
             <LogOut size={14} /> Leave
           </button>
         </div>
@@ -196,7 +248,7 @@ export default function AnnounceListen() {
                 <Volume2 className="inline w-4 h-4 mr-1" /> Start listening
               </button>
             ) : (
-              <div className="rounded-md border border-slate-200 px-3 py-3 text-sm"
+              <div className="rounded-md border border-line px-3 py-3 text-sm"
                    data-testid="announce-status">
                 {state.playing
                   ? <span className="text-emerald-700">Playing now</span>
@@ -207,13 +259,13 @@ export default function AnnounceListen() {
             )}
           </>
         ) : (
-          <p className="text-sm text-slate-600" data-testid="announce-nothing">
+          <p className="text-sm text-body" data-testid="announce-nothing">
             {state?.reason || "There is nothing to play on this link yet."}
           </p>
         )}
 
         {/* Said plainly, because somebody will otherwise assume it. */}
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-muted">
           This plays the recording in your browser, from its beginning. It is
           not a live feed of a particular shop's speaker - two people opening
           this link a minute apart will be a minute apart in the audio.

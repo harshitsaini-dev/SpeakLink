@@ -34,6 +34,24 @@ export function listenerLink(publicCode) {
   return `${origin}/listen/${publicCode}`;
 }
 
+/**
+ * The same link, carrying the join password.
+ *
+ * Whoever receives this is one step from the door instead of two - which is
+ * the point, and also exactly the risk: a link that forwards is a password
+ * that forwards, and a screenshot of it is the password in a photograph. So
+ * it is a SEPARATE button beside the plain link rather than a replacement for
+ * it, and the panel says which is which.
+ *
+ * Only available while this page still holds the generated password. After a
+ * refresh nothing but the hash exists, so the button is not offered at all -
+ * an empty `k=` would send people to a form that silently rejects them.
+ */
+export function oneClickListenerLink(publicCode, password) {
+  if (!publicCode || !password) return "";
+  return `${listenerLink(publicCode)}?k=${encodeURIComponent(password)}`;
+}
+
 function ago(seconds) {
   if (seconds === null || seconds === undefined) return "—";
   if (seconds < 2) return "now";
@@ -126,11 +144,11 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
   if (!room) {
     return (
       <div data-testid="web-audience-loading"
-           className="h-full border border-slate-200 bg-white rounded-md shadow-sm p-4">
-        <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
+           className="h-full glass rounded-xl shadow-sm p-4">
+        <div className="text-xs font-bold uppercase tracking-[0.15em] text-muted">
           Web Audience
         </div>
-        <p className="mt-2 text-sm text-slate-500">
+        <p className="mt-2 text-sm text-muted">
           {error || "Reading the listener link…"}
         </p>
       </div>
@@ -143,11 +161,11 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
     // In the Console row this is the VISIBLE card, so it is the thing that has
     // to reach the row's bottom edge - stretching an invisible wrapper around
     // it would leave the border ending early, which is the defect.
-    <div className={`border border-slate-200 bg-white rounded-md shadow-sm ${
+    <div className={`glass rounded-xl shadow-sm ${
            compact ? "lg:h-full lg:flex lg:flex-col" : ""}`}
          data-testid="web-audience-panel">
-      <div className="p-4 border-b border-slate-200 flex flex-wrap items-center gap-3">
-        <h3 className="font-semibold text-slate-900 mr-auto flex items-center gap-2">
+      <div className="p-4 border-b border-line flex flex-wrap items-center gap-3">
+        <h3 className="font-semibold text-strong mr-auto flex items-center gap-2">
           <Link2 size={15} /> Web Audience
         </h3>
         {room.delivery === "unavailable" && (
@@ -162,29 +180,39 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
         {/* ---- identity and secrets ---- */}
         <div className="grid gap-4 md:grid-cols-2">
           <div>
-            <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1">
+            <p className="text-xs font-bold uppercase tracking-[0.1em] text-muted mb-1">
               Broadcast ID
             </p>
             <div className="flex flex-wrap items-center gap-2">
               <span data-testid="web-room-code"
-                    className="min-w-0 break-all font-mono text-lg font-bold text-slate-900">
+                    className="min-w-0 break-all font-mono text-lg font-bold text-strong">
                 {room.public_code}
               </span>
               <button data-testid="web-copy-id"
                       onClick={() => copy("id", room.public_code)}
-                      className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50">
+                      className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-surface-muted">
                 <Copy size={14} /> {copied === "id" ? "Copied" : "Copy ID"}
               </button>
               <button data-testid="web-copy-link"
                       onClick={() => copy("link", listenerLink(room.public_code))}
-                      className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50">
+                      className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-surface-muted">
                 <Copy size={14} /> {copied === "link" ? "Copied" : "Copy Link"}
               </button>
+              {room.password && (
+                <button data-testid="web-copy-one-click"
+                        title="This link carries the password. Anybody it reaches - forwarded, or in a screenshot - can join without typing anything."
+                        onClick={() => copy("one-click",
+                          oneClickListenerLink(room.public_code, room.password))}
+                        className="inline-flex shrink-0 items-center gap-1 rounded border border-emerald-400 px-2 py-1 text-xs text-emerald-800 hover:bg-emerald-50">
+                  <Copy size={14} />
+                  {copied === "one-click" ? "Copied" : "Copy one-click link"}
+                </button>
+              )}
             </div>
           </div>
 
           <div>
-            <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1">
+            <p className="text-xs font-bold uppercase tracking-[0.1em] text-muted mb-1">
               Join Password
             </p>
             <div className="flex flex-wrap items-center gap-2">
@@ -194,18 +222,18 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
               {room.password ? (
                 <>
                   <span data-testid="web-room-password"
-                        className="min-w-0 break-all font-mono text-lg font-bold text-slate-900">
+                        className="min-w-0 break-all font-mono text-lg font-bold text-strong">
                     {room.password}
                   </span>
                   <button data-testid="web-copy-password"
                           onClick={() => copy("password", room.password)}
-                          className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50">
+                          className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-surface-muted">
                     <Copy size={14} /> {copied === "password" ? "Copied" : "Copy"}
                   </button>
                 </>
               ) : (
                 <span data-testid="web-password-configured"
-                      className="inline-flex items-center gap-1 text-sm text-slate-600">
+                      className="inline-flex items-center gap-1 text-sm text-body">
                   <KeyRound size={14} /> Password configured
                 </span>
               )}
@@ -214,12 +242,12 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
                 disabled={busy}
                 onClick={() => act(() => api.post(
                   `/broadcast/sessions/${sessionId}/web-room/password/rotate`))}
-                className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50 disabled:opacity-60">
+                className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-surface-muted disabled:opacity-60">
                 <RefreshCw size={14} /> New Password
               </button>
             </div>
             {!room.password && (
-              <p className="mt-1 text-xs text-slate-500">
+              <p className="mt-1 text-xs text-muted">
                 SpeakLink stores only a hash, so the password can&rsquo;t be shown
                 again. Generate a new one to share it.
               </p>
@@ -228,7 +256,7 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
         </div>
 
         {/* ---- auto approve ---- */}
-        <div className="rounded border border-slate-200 p-3">
+        <div className="rounded border border-line p-3">
           <label className="flex items-start gap-3 cursor-pointer">
             <input
               type="checkbox"
@@ -241,11 +269,11 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
               className="mt-0.5"
             />
             <span>
-              <span className="text-sm font-semibold text-slate-900">Auto Approve</span>
+              <span className="text-sm font-semibold text-strong">Auto Approve</span>
               {/* The consequence, stated plainly. This toggle turns a shared
                   link into an open door, and an operator should not have to
                   infer that. */}
-              <span className="block text-xs text-slate-500">
+              <span className="block text-xs text-muted">
                 Anyone with this Broadcast ID or link can request and enter
                 immediately, without you approving them.
               </span>
@@ -271,7 +299,7 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
             <input value={audienceQuery} data-testid="web-audience-search"
                    onChange={(event) => setAudienceQuery(event.target.value)}
                    placeholder="Search by name…"
-                   className="flex-1 min-w-[160px] rounded border border-slate-300 px-2 py-1 text-xs" />
+                   className="flex-1 min-w-[160px] rounded border border-line-strong px-2 py-1 text-xs" />
             <FilterSelect label="" testId="web-audience-state" allLabel="Any state"
                           value={audienceState} onChange={setAudienceState}
                           options={Object.entries(PLAYBACK_LABEL).map(
@@ -282,10 +310,10 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
         {/* ---- pending ---- */}
         {(room.waiting || []).length > 0 && (
           <div data-testid="web-join-requests">
-            <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-2">
+            <p className="text-xs font-bold uppercase tracking-[0.1em] text-muted mb-2">
               Join Requests
               {waiting.length !== (room.waiting || []).length && (
-                <span className="ml-2 font-normal normal-case tracking-normal text-slate-400"
+                <span className="ml-2 font-normal normal-case tracking-normal text-faint"
                       data-testid="audience-waiting-count">
                   showing {waiting.length} of {(room.waiting || []).length}
                 </span>
@@ -294,19 +322,19 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
             {/* Bounded, because a hundred people waiting must not push the
                 Store table a thousand pixels down the page. The list scrolls
                 inside itself and every action stays reachable. */}
-            <ul className={`divide-y divide-slate-200 rounded border border-slate-200 ${compact ? "max-h-40 overflow-y-auto" : ""}`}>
+            <ul className={`divide-y divide-line rounded border border-line ${compact ? "max-h-40 overflow-y-auto" : ""}`}>
               {waiting.map((person) => (
                 <li key={person.id}
                     data-testid={`web-request-${person.id}`}
                     className="flex items-center gap-3 px-3 py-2">
-                  <span className="font-medium text-slate-900">{person.display_name}</span>
+                  <span className="font-medium text-strong">{person.display_name}</span>
                   <span className="ml-auto flex gap-1">
                     <button
                       data-testid={`web-approve-${person.id}`}
                       disabled={busy}
                       onClick={() => act(() => api.post(
                         `/broadcast/sessions/${sessionId}/web-participants/${person.id}/approve`))}
-                      className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50 disabled:opacity-60">
+                      className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-surface-muted disabled:opacity-60">
                       <UserCheck size={14} /> Approve
                     </button>
                     <button
@@ -314,7 +342,7 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
                       disabled={busy}
                       onClick={() => act(() => api.post(
                         `/broadcast/sessions/${sessionId}/web-participants/${person.id}/deny`))}
-                      className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50 disabled:opacity-60">
+                      className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-surface-muted disabled:opacity-60">
                       <UserX size={14} /> Deny
                     </button>
                   </span>
@@ -326,28 +354,28 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
 
         {/* ---- admitted ---- */}
         <div data-testid="web-listeners">
-          <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-2">
+          <p className="text-xs font-bold uppercase tracking-[0.1em] text-muted mb-2">
             Web Listeners
           </p>
           {(room.listeners || []).length === 0 ? (
-            <p className="text-sm text-slate-500" data-testid="web-listeners-empty">
+            <p className="text-sm text-muted" data-testid="web-listeners-empty">
               Nobody has joined yet. Share the link or the Broadcast ID.
             </p>
           ) : (
-            <ul className={`divide-y divide-slate-200 rounded border border-slate-200 ${compact ? "max-h-48 overflow-y-auto" : ""}`}>
+            <ul className={`divide-y divide-line rounded border border-line ${compact ? "max-h-48 overflow-y-auto" : ""}`}>
               {listeners.map((person) => (
                 <li key={person.id}
                     data-testid={`web-listener-${person.id}`}
                     className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm">
-                  <span className="font-medium text-slate-900">{person.display_name}</span>
-                  <span className="text-xs text-slate-500">
+                  <span className="font-medium text-strong">{person.display_name}</span>
+                  <span className="text-xs text-muted">
                     {person.admitted_by === "password" ? "Password" : "Approved"}
                   </span>
                   <span data-testid={`web-listener-state-${person.id}`}
-                        className="rounded bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-700">
+                        className="rounded bg-surface-muted px-2 py-0.5 text-xs font-semibold text-body">
                     {PLAYBACK_LABEL[person.playback_state] || person.playback_state}
                   </span>
-                  <span className="text-xs text-slate-500">
+                  <span className="text-xs text-muted">
                     {person.stale ? (
                       <span data-testid={`web-listener-stale-${person.id}`}>
                         last seen {ago(person.seconds_since_seen)}
@@ -359,7 +387,7 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
                     disabled={busy}
                     onClick={() => act(() => api.post(
                       `/broadcast/sessions/${sessionId}/web-participants/${person.id}/kick`))}
-                    className="ml-auto inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50 disabled:opacity-60">
+                    className="ml-auto inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-surface-muted disabled:opacity-60">
                     <LogOut size={14} /> Kick
                   </button>
                 </li>
@@ -368,7 +396,7 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
           )}
         </div>
 
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-muted">
           &ldquo;Listening&rdquo; means the listener&rsquo;s browser is playing.
           It can&rsquo;t confirm their device volume or that anyone can actually
           hear it.
@@ -380,9 +408,9 @@ export default function WebAudiencePanel({ sessionId, compact = false }) {
 
 function Count({ testId, label, value }) {
   return (
-    <div className="rounded border border-slate-200 p-2.5" data-testid={testId}>
-      <div className="text-[10px] uppercase tracking-widest text-slate-500">{label}</div>
-      <div className="font-mono text-xl font-bold text-slate-900">{value ?? 0}</div>
+    <div className="rounded border border-line p-2.5" data-testid={testId}>
+      <div className="text-[10px] uppercase tracking-widest text-muted">{label}</div>
+      <div className="font-mono text-xl font-bold text-strong">{value ?? 0}</div>
     </div>
   );
 }

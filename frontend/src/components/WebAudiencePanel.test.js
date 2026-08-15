@@ -8,7 +8,7 @@
  */
 import React from "react";
 import { render, screen, act, fireEvent, cleanup } from "@testing-library/react";
-import WebAudiencePanel, { listenerLink } from "./WebAudiencePanel";
+import WebAudiencePanel, { listenerLink, oneClickListenerLink } from "./WebAudiencePanel";
 
 jest.mock("@/lib/api", () => ({
   api: { get: jest.fn(), post: jest.fn(), put: jest.fn() },
@@ -230,4 +230,17 @@ test("nothing renders before a session exists", async () => {
   await act(async () => {});
   expect(screen.queryByTestId("web-audience-panel")).toBeNull();
   expect(api.get).not.toHaveBeenCalled();
+});
+
+test("the one-click link carries the password, and only while HQ still has it", () => {
+  // Two buttons on purpose. A link that forwards is a password that forwards,
+  // so the plain link stays available beside it and the panel says which is
+  // which - rather than quietly making every copied link a skeleton key.
+  expect(oneClickListenerLink("SL-ABC", "HWDD-ECR3"))
+    .toBe(`${window.location.origin}/listen/SL-ABC?k=HWDD-ECR3`);
+
+  // After a refresh only the hash exists. An empty k= would send people to a
+  // form that rejects them without saying why, so there is no link at all.
+  expect(oneClickListenerLink("SL-ABC", "")).toBe("");
+  expect(oneClickListenerLink("SL-ABC", null)).toBe("");
 });
