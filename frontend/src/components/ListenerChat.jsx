@@ -97,9 +97,9 @@ export default function ListenerChat() {
 
   return (
     <div data-testid="listener-chat"
-         className="mt-5 rounded-lg border border-slate-800 bg-slate-950 text-left">
-      <div className="flex items-center gap-2 border-b border-slate-800 px-3 py-2">
-        <span className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400">
+         className="mt-5 rounded-lg border border-line bg-surface-muted text-left">
+      <div className="flex items-center gap-2 border-b border-line px-3 py-2">
+        <span className="text-[11px] font-bold uppercase tracking-[0.2em] text-faint">
           Chat
         </span>
         {state.chat_mode === "PRIVATE" && (
@@ -113,7 +113,7 @@ export default function ListenerChat() {
       <div ref={listRef} data-testid="listener-chat-messages"
            className="max-h-56 space-y-2 overflow-y-auto p-3">
         {messages.length === 0 && (
-          <p className="text-sm text-slate-500" data-testid="listener-chat-empty">
+          <p className="text-sm text-muted" data-testid="listener-chat-empty">
             {state.chat_mode === "PRIVATE"
               ? "Only the broadcaster sees what you send here."
               : "Say something to the broadcaster."}
@@ -124,9 +124,9 @@ export default function ListenerChat() {
                className={`rounded px-2 py-1.5 text-sm ${
                  message.author_kind === "HOST"
                    ? "border border-blue-900 bg-blue-950/60"
-                   : "border border-slate-800 bg-slate-900"}`}>
+                   : "border border-line bg-surface-muted"}`}>
             <div className="flex items-baseline gap-2">
-              <span className="text-xs font-semibold text-slate-300">
+              <span className="text-xs font-semibold text-body">
                 {message.author_kind === "HOST"
                   ? "Broadcaster"
                   : (message.participant_id === state.me ? "You" : message.author_name)}
@@ -137,7 +137,7 @@ export default function ListenerChat() {
                 </span>
               )}
               <span data-testid={`listener-chat-time-${message.id}`}
-                    className="ml-auto font-mono text-[10px] text-slate-500">
+                    className="ml-auto font-mono text-[10px] text-muted">
                 {formatIstTimeOfDay(message.created_at)}
               </span>
             </div>
@@ -151,13 +151,13 @@ export default function ListenerChat() {
                 <img data-testid={`listener-chat-image-${message.id}`}
                      src={`${API_BASE}/listen/chat/messages/${message.id}/image`}
                      alt="Sent in chat"
-                     className="mt-1 max-h-44 rounded border border-slate-800 object-contain" />
+                     className="mt-1 max-h-44 rounded border border-line object-contain" />
               </a>
             )}
             {message.deleted ? (
-              <p className="italic text-slate-500">Removed by the broadcaster</p>
+              <p className="italic text-muted">Removed by the broadcaster</p>
             ) : message.body ? (
-              <p className="whitespace-pre-wrap break-words text-slate-100">{message.body}</p>
+              <p className="whitespace-pre-wrap break-words text-strong">{message.body}</p>
             ) : null}
           </div>
         ))}
@@ -165,7 +165,7 @@ export default function ListenerChat() {
 
       {!state.chat_enabled && (
         <p data-testid="listener-chat-off"
-           className="border-t border-slate-800 px-3 py-2 text-xs text-slate-400">
+           className="border-t border-line px-3 py-2 text-xs text-faint">
           The broadcaster has turned chat off.
         </p>
       )}
@@ -173,7 +173,7 @@ export default function ListenerChat() {
         // Said plainly. A composer that silently swallowed messages would be
         // worse than one that says why it will not send them.
         <p data-testid="listener-chat-muted"
-           className="border-t border-slate-800 px-3 py-2 text-xs text-amber-300">
+           className="border-t border-line px-3 py-2 text-xs text-amber-300">
           The broadcaster has muted you in this chat. You can still listen.
         </p>
       )}
@@ -184,7 +184,7 @@ export default function ListenerChat() {
         </p>
       )}
 
-      <form onSubmit={send} className="flex gap-2 border-t border-slate-800 p-2">
+      <form onSubmit={send} className="flex gap-2 border-t border-line p-2">
         <label htmlFor="listener-chat-input" className="sr-only">Message the broadcaster</label>
         <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp"
                data-testid="listener-chat-image-input" className="hidden"
@@ -193,14 +193,14 @@ export default function ListenerChat() {
                 disabled={!enabled || busy}
                 onClick={() => fileRef.current?.click()}
                 title="Send a picture (PNG, JPEG or WebP)"
-                className="rounded border border-slate-700 px-2 text-slate-300 hover:bg-slate-900 disabled:opacity-40">
+                className="rounded border border-line-strong px-2 text-body hover:bg-surface-muted disabled:opacity-40">
           <ImagePlus size={16} />
         </button>
         <input id="listener-chat-input" data-testid="listener-chat-input"
                value={draft} maxLength={500} disabled={!enabled}
                onChange={(event) => setDraft(event.target.value)}
                placeholder={enabled ? "Type a message…" : "Chat is not available"}
-               className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50" />
+               className="min-w-0 flex-1 rounded border border-line-strong bg-surface-muted px-2 py-1.5 text-sm text-strong placeholder:text-body focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50" />
         <button type="submit" data-testid="listener-chat-send"
                 disabled={!enabled || busy || !draft.trim()}
                 className="inline-flex items-center gap-1 rounded bg-blue-700 px-3 py-1.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:bg-slate-700">

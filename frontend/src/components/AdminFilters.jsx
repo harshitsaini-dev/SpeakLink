@@ -17,28 +17,28 @@ import { api } from "@/lib/api";
 
 export function FilterBar({ children, onClear, activeCount = 0, total, loading }) {
   return (
-    <div className="border border-slate-200 rounded-md bg-white p-3 space-y-3"
+    <div className="glass rounded-xl p-3 space-y-3"
          data-testid="filter-bar">
       <div className="flex flex-wrap items-end gap-2">{children}</div>
-      <div className="flex items-center justify-between border-t border-slate-100 pt-2">
-        <div className="text-xs text-slate-500" data-testid="result-count">
+      <div className="flex items-center justify-between border-t border-line pt-2">
+        <div className="text-xs text-muted" data-testid="result-count">
           {loading ? (
             <span className="inline-flex items-center gap-1">
               <Loader2 size={12} className="animate-spin" /> Loading…
             </span>
           ) : (
             <>
-              <span className="font-semibold text-slate-700">{total ?? 0}</span>
+              <span className="font-semibold text-body">{total ?? 0}</span>
               {" "}result{total === 1 ? "" : "s"}
               {activeCount > 0 && (
-                <span className="text-slate-400"> · {activeCount} filter{activeCount === 1 ? "" : "s"} active</span>
+                <span className="text-faint"> · {activeCount} filter{activeCount === 1 ? "" : "s"} active</span>
               )}
             </>
           )}
         </div>
         {activeCount > 0 && (
           <button type="button" onClick={onClear} data-testid="clear-filters"
-                  className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-300 rounded hover:bg-slate-50">
+                  className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-line-strong rounded hover:bg-surface-muted">
             <X size={12} /> Clear Filters
           </button>
         )}
@@ -50,10 +50,10 @@ export function FilterBar({ children, onClear, activeCount = 0, total, loading }
 export function SearchInput({ value, onChange, placeholder = "Search…", testId = "search-input" }) {
   return (
     <label className="relative flex-1 min-w-[180px]">
-      <Search size={14} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
+      <Search size={14} className="absolute left-2 top-1/2 -translate-y-1/2 text-faint" />
       <input
         data-testid={testId}
-        className="w-full pl-7 pr-2 py-1.5 text-sm border border-slate-300 rounded-md"
+        className="w-full pl-7 pr-2 py-1.5 text-sm border border-line-strong rounded-md"
         value={value || ""} placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
       />
@@ -137,10 +137,10 @@ export function FilterSelect({ label, value, onChange, options = [], testId,
   if (!multiple) {
     return (
       <label className="flex flex-col gap-1">
-        <span className="text-[10px] uppercase tracking-widest text-slate-500">{label}</span>
+        <span className="text-[10px] uppercase tracking-widest text-muted">{label}</span>
         <select data-testid={testId} value={value ?? ""}
                 onChange={(e) => onChange(e.target.value)}
-                className="px-2 py-1.5 text-sm border border-slate-300 rounded-md bg-white min-w-[120px]">
+                className="px-2 py-1.5 text-sm border border-line-strong rounded-md bg-surface min-w-[120px]">
           {allLabel !== null && <option value="">{allLabel}</option>}
           {normalised.map((option) => (
             <option key={option.value} value={option.value}>{option.label}</option>
@@ -167,16 +167,16 @@ export function FilterSelect({ label, value, onChange, options = [], testId,
 
   return (
     <div className="flex flex-col gap-1 relative" ref={holder}>
-      <span className="text-[10px] uppercase tracking-widest text-slate-500">{label}</span>
+      <span className="text-[10px] uppercase tracking-widest text-muted">{label}</span>
       <button type="button" data-testid={testId} disabled={disabled}
               onClick={() => setOpen((was) => !was)}
-              className="px-2 py-1.5 text-sm border border-slate-300 rounded-md bg-white min-w-[140px] text-left disabled:opacity-50">
+              className="px-2 py-1.5 text-sm border border-line-strong rounded-md bg-surface min-w-[140px] text-left disabled:opacity-50">
         {summary}
       </button>
       {open && (
         <div data-testid={`${testId}-panel`}
              className="absolute z-20 top-full mt-1 w-56 max-h-64 overflow-y-auto
-                        border border-slate-300 rounded-md bg-white shadow-lg p-2">
+                        border border-line-strong rounded-md bg-surface shadow-lg p-2">
           {/* Always, not only on long lists.
               I gated this on the list being long and the reasoning was wrong:
               the person opening a filter does not know how long the list is
@@ -185,15 +185,15 @@ export function FilterSelect({ label, value, onChange, options = [], testId,
               line; a missing one costs a hunt through two hundred. */}
           <input value={needle} onChange={(event) => setNeedle(event.target.value)}
                  data-testid={`${testId}-search`} placeholder="Search…"
-                 className="w-full mb-1 px-2 py-1 text-sm border border-slate-300 rounded" />
+                 className="w-full mb-1 px-2 py-1 text-sm border border-line-strong rounded" />
           <button type="button" data-testid={`${testId}-clear`}
                   onClick={() => onChange("")}
-                  className="w-full text-left px-2 py-1 text-sm rounded hover:bg-slate-50 text-slate-600">
+                  className="w-full text-left px-2 py-1 text-sm rounded hover:bg-surface-muted text-body">
             {allLabel}
           </button>
           {shown.map((option) => (
             <label key={option.value}
-                   className="flex items-center gap-2 px-2 py-1 text-sm rounded hover:bg-slate-50 cursor-pointer">
+                   className="flex items-center gap-2 px-2 py-1 text-sm rounded hover:bg-surface-muted cursor-pointer">
               <input type="checkbox" checked={chosen.includes(String(option.value))}
                      data-testid={`${testId}-option-${option.value}`}
                      onChange={() => toggle(String(option.value))} />
@@ -201,10 +201,10 @@ export function FilterSelect({ label, value, onChange, options = [], testId,
             </label>
           ))}
           {normalised.length === 0 && (
-            <p className="px-2 py-1 text-xs text-slate-500">Nothing to choose from yet.</p>
+            <p className="px-2 py-1 text-xs text-muted">Nothing to choose from yet.</p>
           )}
           {normalised.length > 0 && shown.length === 0 && (
-            <p className="px-2 py-1 text-xs text-slate-500"
+            <p className="px-2 py-1 text-xs text-muted"
                data-testid={`${testId}-no-match`}>
               Nothing here matches “{needle}”.
             </p>
@@ -292,9 +292,9 @@ export function SortableTh({ column, label, list, className = "",
                           : "none"}>
       <button type="button" onClick={toggle}
               data-testid={`sort-${column}`}
-              className="inline-flex items-center gap-1 hover:text-slate-900">
+              className="inline-flex items-center gap-1 hover:text-strong">
         {label}
-        <span aria-hidden="true" className={active ? "text-slate-900" : "text-slate-300"}>
+        <span aria-hidden="true" className={active ? "text-strong" : "text-faint"}>
           {active ? (direction === "desc" ? "↓" : "↑") : "⇅"}
         </span>
       </button>
@@ -345,7 +345,7 @@ export function ExportButton({ dataset, list, testId = "export-button",
     <span className="inline-flex items-center gap-2">
       <button type="button" onClick={download} disabled={busy || disabled}
               data-testid={testId}
-              className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50 disabled:opacity-50">
+              className="inline-flex items-center gap-1 px-3 py-2 border border-line-strong rounded-md text-sm hover:bg-surface-muted disabled:opacity-50">
         <Download size={14} /> {busy ? "Preparing…" : "Export"}
       </button>
       {failure && (
@@ -368,10 +368,10 @@ function activeParams(filters) {
 export function FilterDate({ label, value, onChange, testId }) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-[10px] uppercase tracking-widest text-slate-500">{label}</span>
+      <span className="text-[10px] uppercase tracking-widest text-muted">{label}</span>
       <input type="date" data-testid={testId} value={value || ""}
              onChange={(e) => onChange(e.target.value)}
-             className="px-2 py-1.5 text-sm border border-slate-300 rounded-md bg-white" />
+             className="px-2 py-1.5 text-sm border border-line-strong rounded-md bg-surface" />
     </label>
   );
 }
@@ -380,7 +380,7 @@ export function FilterDate({ label, value, onChange, testId }) {
 export function ListState({ loading, error, empty, emptyText, colSpan, onRetry }) {
   if (loading) {
     return (
-      <tr><td colSpan={colSpan} className="px-3 py-8 text-center text-slate-500" data-testid="list-loading">
+      <tr><td colSpan={colSpan} className="px-3 py-8 text-center text-muted" data-testid="list-loading">
         <Loader2 size={16} className="inline animate-spin mr-1" /> Loading…
       </td></tr>
     );
@@ -391,7 +391,7 @@ export function ListState({ loading, error, empty, emptyText, colSpan, onRetry }
         <div className="text-sm text-red-700">{error}</div>
         {onRetry && (
           <button type="button" onClick={onRetry}
-                  className="mt-2 text-xs px-2 py-1 border border-slate-300 rounded hover:bg-slate-50">
+                  className="mt-2 text-xs px-2 py-1 border border-line-strong rounded hover:bg-surface-muted">
             Try again
           </button>
         )}
@@ -400,7 +400,7 @@ export function ListState({ loading, error, empty, emptyText, colSpan, onRetry }
   }
   if (empty) {
     return (
-      <tr><td colSpan={colSpan} className="px-3 py-8 text-center text-slate-500"
+      <tr><td colSpan={colSpan} className="px-3 py-8 text-center text-muted"
               data-testid="list-empty">{emptyText}</td></tr>
     );
   }
@@ -410,18 +410,18 @@ export function ListState({ loading, error, empty, emptyText, colSpan, onRetry }
 export function Pager({ page, pages, total, hasMore, onPage }) {
   if (!total) return null;
   return (
-    <div className="flex items-center justify-between px-3 py-2 border-t border-slate-200 text-xs"
+    <div className="flex items-center justify-between px-3 py-2 border-t border-line text-xs"
          data-testid="pager">
-      <span className="text-slate-500">Page {page} of {Math.max(pages, 1)}</span>
+      <span className="text-muted">Page {page} of {Math.max(pages, 1)}</span>
       <div className="flex gap-1">
         <button type="button" data-testid="page-prev" disabled={page <= 1}
                 onClick={() => onPage(page - 1)}
-                className="px-2 py-1 border border-slate-300 rounded disabled:opacity-40 hover:bg-slate-50">
+                className="px-2 py-1 border border-line-strong rounded disabled:opacity-40 hover:bg-surface-muted">
           Previous
         </button>
         <button type="button" data-testid="page-next" disabled={!hasMore}
                 onClick={() => onPage(page + 1)}
-                className="px-2 py-1 border border-slate-300 rounded disabled:opacity-40 hover:bg-slate-50">
+                className="px-2 py-1 border border-line-strong rounded disabled:opacity-40 hover:bg-surface-muted">
           Next
         </button>
       </div>
@@ -441,26 +441,26 @@ export function BulkBar({ selection, total, pageCount, children }) {
   if (!selection.hasSelection && pageCount === 0) return null;
   const showSelectAll = selection.mode !== "filtered" && total > pageCount;
   return (
-    <div className="flex flex-wrap items-center gap-2 border border-slate-200 rounded-md bg-slate-50 px-3 py-2"
+    <div className="flex flex-wrap items-center gap-2 border border-line rounded-md bg-surface-muted px-3 py-2"
          data-testid="bulk-bar">
       <button type="button" onClick={selection.selectPage} data-testid="select-page"
-              className="text-xs px-2 py-1 border border-slate-300 rounded bg-white hover:bg-slate-50">
+              className="text-xs px-2 py-1 border border-line-strong rounded bg-surface hover:bg-surface-muted">
         Select Page ({pageCount})
       </button>
       {showSelectAll && (
         <button type="button" onClick={selection.selectAllFiltered} data-testid="select-all-filtered"
-                className="text-xs px-2 py-1 border border-blue-300 text-blue-800 rounded bg-white hover:bg-blue-50">
+                className="text-xs px-2 py-1 border border-blue-300 text-blue-800 rounded bg-surface hover:bg-blue-50">
           Select All Filtered ({total})
         </button>
       )}
       {selection.hasSelection && (
         <>
-          <span className="text-xs text-slate-600" data-testid="selected-count">
+          <span className="text-xs text-body" data-testid="selected-count">
             {selection.selectedCount} selected
             {selection.mode === "filtered" && " (all matches, including other pages)"}
           </span>
           <button type="button" onClick={selection.clear} data-testid="clear-selection"
-                  className="text-xs px-2 py-1 border border-slate-300 rounded bg-white hover:bg-slate-50">
+                  className="text-xs px-2 py-1 border border-line-strong rounded bg-surface hover:bg-surface-muted">
             Clear
           </button>
           <span className="flex-1" />
@@ -485,22 +485,22 @@ export function DestructiveModal({
   const ready = typed === confirmWord && acknowledged && !busy;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+    <div className="fixed inset-0 z-50 scrim flex items-center justify-center p-4"
          data-testid={`${testIdPrefix}-modal`}>
-      <div className="bg-white rounded-lg w-full max-w-md p-5 space-y-3">
+      <div className="glass w-full max-w-md p-5 space-y-3">
         <h3 className="font-semibold text-red-900">{title}</h3>
-        <p className="text-sm text-slate-700" data-testid={`${testIdPrefix}-count`}>
+        <p className="text-sm text-body" data-testid={`${testIdPrefix}-count`}>
           This will permanently remove{" "}
           <strong>{count} {countNoun}{count === 1 ? "" : "s"}</strong>.
         </p>
         <p className="text-sm text-red-800">{warning}</p>
 
         <label htmlFor={`${testIdPrefix}-confirm`}
-               className="block text-xs font-bold uppercase tracking-widest text-slate-500">
+               className="block text-xs font-bold uppercase tracking-widest text-muted">
           Type <span className="font-mono">{confirmWord}</span> to confirm
         </label>
         <input id={`${testIdPrefix}-confirm`} data-testid={`${testIdPrefix}-confirm-input`}
-               className="w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono"
+               className="w-full rounded border border-line-strong px-3 py-2 text-sm font-mono"
                value={typed} autoComplete="off" placeholder={confirmWord}
                onChange={(e) => setTyped(e.target.value)} />
 
@@ -519,7 +519,7 @@ export function DestructiveModal({
 
         <div className="flex gap-2 pt-1">
           <button type="button" data-testid={`${testIdPrefix}-cancel`} onClick={onCancel}
-                  className="flex-1 px-4 py-2 border border-slate-300 rounded-md text-sm">
+                  className="flex-1 px-4 py-2 border border-line-strong rounded-md text-sm">
             Cancel
           </button>
           <button type="button" data-testid={`${testIdPrefix}-confirm-btn`} disabled={!ready}

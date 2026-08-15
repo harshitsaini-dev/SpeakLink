@@ -87,7 +87,7 @@ export default function StoreOutputDevice({ storeId }) {
       return (
         <section className="border border-rose-200 bg-rose-50 rounded-md px-4 py-3"
                  data-testid="store-output-device">
-          <h2 className="font-semibold text-slate-900 flex items-center gap-2">
+          <h2 className="font-semibold text-strong flex items-center gap-2">
             <Speaker className="w-4 h-4" /> Speaker
           </h2>
           <p className="text-sm text-rose-800" data-testid="store-output-error">{error}</p>
@@ -100,14 +100,14 @@ export default function StoreOutputDevice({ storeId }) {
   const devices = state.devices || [];
 
   return (
-    <section className="border border-slate-200 rounded-md bg-white"
+    <section className="glass rounded-xl"
              data-testid="store-output-device">
-      <div className="px-4 py-3 border-b border-slate-200 flex items-start justify-between gap-3">
+      <div className="px-4 py-3 border-b border-line flex items-start justify-between gap-3">
         <div>
-          <h2 className="font-semibold text-slate-900 flex items-center gap-2">
+          <h2 className="font-semibold text-strong flex items-center gap-2">
             <Speaker className="w-4 h-4" /> Speaker
           </h2>
-          <p className="text-sm text-slate-600" data-testid="store-output-summary">
+          <p className="text-sm text-body" data-testid="store-output-summary">
             {state.summary}
           </p>
         </div>
@@ -116,7 +116,7 @@ export default function StoreOutputDevice({ storeId }) {
                   disabled={busy !== ""}
                   onClick={() => run("Refresh",
                     () => api.post(`/stores/${storeId}/audio-output/refresh`))}
-                  className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50 disabled:opacity-50">
+                  className="inline-flex items-center gap-1 px-3 py-2 border border-line-strong rounded-md text-sm hover:bg-surface-muted disabled:opacity-50">
             <RefreshCw className="w-4 h-4" /> Ask the Store again
           </button>
         )}
@@ -126,7 +126,7 @@ export default function StoreOutputDevice({ storeId }) {
         {/* The list is another computer's answer at a moment, not something HQ
             knows. Saying so is what stops somebody choosing an endpoint that
             was unplugged this morning. */}
-        <p className="text-xs text-slate-500" data-testid="store-output-provenance">
+        <p className="text-xs text-muted" data-testid="store-output-provenance">
           {devices.length === 0
             ? "This Store has not reported its speakers yet. It has to be online at least once."
             : `Reported by the Store${state.reported_at ? ` at ${state.reported_at}` : ""}. If a speaker was just plugged in, ask the Store again.`}
@@ -137,7 +137,7 @@ export default function StoreOutputDevice({ storeId }) {
             <select value={selected} disabled={!mayChange || busy !== ""}
                     onChange={(event) => setSelected(event.target.value)}
                     data-testid="store-output-select"
-                    className="px-3 py-2 border border-slate-300 rounded-md text-sm min-w-[260px]">
+                    className="px-3 py-2 border border-line-strong rounded-md text-sm min-w-[260px]">
               <option value="">Choose a speaker…</option>
               {devices.map((device) => (
                 <option key={device.verified_selector || device.selector}
@@ -154,7 +154,7 @@ export default function StoreOutputDevice({ storeId }) {
                       onClick={() => run("Change the speaker",
                         () => api.post(`/stores/${storeId}/audio-output`,
                                        { selector: selected }))}
-                      className="px-3 py-2 rounded-md text-sm text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-50">
+                      className="px-3 py-2 rounded-md text-sm text-white bg-surface-muted hover:bg-surface-muted disabled:opacity-50">
                 Send to the Store
               </button>
             )}
@@ -175,7 +175,7 @@ export default function StoreOutputDevice({ storeId }) {
         )}
 
         {awaitingAnswer && (
-          <p className="text-sm text-slate-600" data-testid="store-output-pending">
+          <p className="text-sm text-body" data-testid="store-output-pending">
             Sent. Waiting for the Store to confirm which speaker it ended up on.
           </p>
         )}
@@ -189,13 +189,13 @@ export default function StoreOutputDevice({ storeId }) {
           </p>
         )}
 
-        {note && <p className="text-sm text-slate-700" data-testid="store-output-note">{note}</p>}
+        {note && <p className="text-sm text-body" data-testid="store-output-note">{note}</p>}
         {error && <p className="text-sm text-rose-800" data-testid="store-output-error">{error}</p>}
 
         {/* Deliberately said out loud. This program cannot prove a speaker is
             connected, plugged into the right amplifier, or turned up - and a
             "verified" badge it had not earned would be worse than none. */}
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-muted">
           HQ cannot hear this Store. Confirming the speaker is connected and
           audible is still a job for somebody in the shop.
         </p>

@@ -37,7 +37,7 @@ const TEMPLATE = {
 const AUDIO = { id: 7, title: "Diwali Offer", original_filename: "d.mp3",
                 byte_size: 1024 };
 const STORES = [{ id: 4, store_name: "Nehru Place", store_code: "NA" },
-                { id: 5, store_name: "Dwarka Mor", store_code: "DM" }];
+                { id: 5, store_name: "Second Example Shop", store_code: "EX2" }];
 
 function listResponse(items, total = null) {
   return { data: { items, total: total ?? items.length, page: 1, pages: 1,

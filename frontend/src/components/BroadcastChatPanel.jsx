@@ -132,16 +132,16 @@ export default function BroadcastChatPanel({ sessionId }) {
   const filtering = Boolean(query.trim()) || kind !== "all";
 
   return (
-    <div className="flex h-full min-h-[22rem] max-h-[calc(100vh-9rem)] flex-col overflow-hidden border border-slate-200 bg-white rounded-md shadow-sm"
+    <div className="flex h-full min-h-[22rem] max-h-[calc(100vh-9rem)] flex-col overflow-hidden glass rounded-xl shadow-sm"
          data-testid="broadcast-chat-card">
-      <div className="shrink-0 border-b border-slate-200 p-3">
+      <div className="shrink-0 border-b border-line p-3">
         <div className="flex items-center gap-2">
-          <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
+          <div className="text-xs font-bold uppercase tracking-[0.15em] text-muted">
             Web Chat
           </div>
           {!enabled && (
             <span data-testid="chat-off-badge"
-                  className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-600">
+                  className="rounded bg-surface-muted px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-body">
               Off
             </span>
           )}
@@ -160,7 +160,7 @@ export default function BroadcastChatPanel({ sessionId }) {
                   title={enabled
                     ? "Stop listeners typing. You can still reply."
                     : "Let listeners type again."}
-                  className="inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                  className="inline-flex items-center gap-1 rounded border border-line-strong px-2 py-1 text-xs font-semibold text-body hover:bg-surface-muted disabled:opacity-40">
             {enabled ? <MessageSquareOff size={13} /> : <MessageSquare size={13} />}
             {enabled ? "Turn chat off" : "Turn chat on"}
           </button>
@@ -169,7 +169,7 @@ export default function BroadcastChatPanel({ sessionId }) {
                   title={isPrivate
                     ? "Public: listeners see each other's messages."
                     : "Private: a listener's message reaches only you."}
-                  className="inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                  className="inline-flex items-center gap-1 rounded border border-line-strong px-2 py-1 text-xs font-semibold text-body hover:bg-surface-muted disabled:opacity-40">
             {isPrivate ? <Globe size={13} /> : <Lock size={13} />}
             {isPrivate ? "Make public" : "Make private"}
           </button>
@@ -180,16 +180,16 @@ export default function BroadcastChatPanel({ sessionId }) {
           already loaded rather than as a server query: the transcript a
           console holds is bounded, and a round trip per keystroke would make
           the search feel broken on a slow link. */}
-      <div className="flex shrink-0 gap-2 border-b border-slate-200 px-3 py-2">
+      <div className="flex shrink-0 gap-2 border-b border-line px-3 py-2">
         <label htmlFor="chat-search" className="sr-only">Search chat</label>
         <input id="chat-search" data-testid="chat-search" value={query}
                onChange={(e) => setQuery(e.target.value)}
                placeholder="Search messages or names…"
-               className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+               className="min-w-0 flex-1 rounded border border-line-strong px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
         <label htmlFor="chat-filter" className="sr-only">Filter chat</label>
         <select id="chat-filter" data-testid="chat-filter" value={kind}
                 onChange={(e) => setKind(e.target.value)}
-                className="rounded border border-slate-300 bg-white px-1 py-1 text-xs">
+                className="rounded border border-line-strong bg-surface px-1 py-1 text-xs">
           {CHAT_FILTERS.map((option) => (
             <option key={option.value} value={option.value}>{option.label}</option>
           ))}
@@ -204,14 +204,14 @@ export default function BroadcastChatPanel({ sessionId }) {
           // "nobody has spoken", and an operator who mistook one for the other
           // would think the room had gone quiet.
           filtering ? (
-            <p className="text-sm text-slate-500" data-testid="chat-no-matches">
+            <p className="text-sm text-muted" data-testid="chat-no-matches">
               No messages match that search.{" "}
               <button type="button" data-testid="chat-clear-filter"
                       onClick={() => { setQuery(""); setKind("all"); }}
                       className="underline">Show all {allMessages.length}</button>
             </p>
           ) : (
-            <p className="text-sm text-slate-500" data-testid="chat-empty">
+            <p className="text-sm text-muted" data-testid="chat-empty">
               Nothing yet. Messages from web listeners appear here.
             </p>
           )
@@ -221,9 +221,9 @@ export default function BroadcastChatPanel({ sessionId }) {
                className={`group rounded px-2 py-1.5 text-sm ${
                  message.author_kind === "HOST"
                    ? "bg-blue-50 border border-blue-100"
-                   : "bg-slate-50 border border-slate-100"}`}>
+                   : "bg-surface-muted border border-line"}`}>
             <div className="flex items-baseline gap-2">
-              <span className="text-xs font-semibold text-slate-800">
+              <span className="text-xs font-semibold text-strong">
                 {message.author_kind === "HOST" ? "You" : message.author_name}
               </span>
               {message.visibility === "PRIVATE" && (
@@ -233,14 +233,14 @@ export default function BroadcastChatPanel({ sessionId }) {
                 </span>
               )}
               <span data-testid={`chat-time-${message.id}`}
-                    className="font-mono text-[10px] text-slate-400">
+                    className="font-mono text-[10px] text-faint">
                 {formatIstTimeOfDay(message.created_at)}
               </span>
               {!message.deleted && (
                 <button type="button" data-testid={`chat-delete-${message.id}`}
                         onClick={() => remove(message.id)} disabled={busy}
                         title="Remove this message for everyone"
-                        className="ml-auto text-slate-400 opacity-0 transition group-hover:opacity-100 hover:text-red-700">
+                        className="ml-auto text-faint opacity-0 transition group-hover:opacity-100 hover:text-red-700">
                   <Trash2 size={13} />
                 </button>
               )}
@@ -256,20 +256,20 @@ export default function BroadcastChatPanel({ sessionId }) {
               // chat.view_deleted receives no body, so there is nothing here
               // for a client-side toggle to reveal.
               <p data-testid={`chat-removed-${message.id}`}
-                 className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                 className="text-[11px] font-semibold uppercase tracking-wider text-muted">
                 Removed by the host
               </p>
             )}
             {message.deleted && message.body ? (
               <p data-testid={`chat-removed-body-${message.id}`}
-                 className="whitespace-pre-wrap break-words rounded border border-dashed border-slate-300 bg-slate-50 px-1.5 py-1 text-slate-500 line-through">
+                 className="whitespace-pre-wrap break-words rounded border border-dashed border-line-strong bg-surface-muted px-1.5 py-1 text-muted line-through">
                 {message.body}
               </p>
             ) : null}
             {!message.deleted && message.body ? (
               // Rendered as TEXT by React, never as markup. Escaping on the way
               // in would corrupt a message that legitimately contains < or &.
-              <p className="whitespace-pre-wrap break-words text-slate-800">{message.body}</p>
+              <p className="whitespace-pre-wrap break-words text-strong">{message.body}</p>
             ) : null}
           </div>
         ))}
@@ -282,7 +282,7 @@ export default function BroadcastChatPanel({ sessionId }) {
         </p>
       )}
 
-      <form onSubmit={send} className="shrink-0 border-t border-slate-200 p-2">
+      <form onSubmit={send} className="shrink-0 border-t border-line p-2">
         <div className="flex gap-2">
           <label htmlFor="chat-compose" className="sr-only">Message the web audience</label>
           <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp"
@@ -291,14 +291,14 @@ export default function BroadcastChatPanel({ sessionId }) {
           <button type="button" data-testid="chat-attach" disabled={busy}
                   onClick={() => fileRef.current?.click()}
                   title="Send a picture (PNG, JPEG or WebP)"
-                  className="rounded border border-slate-300 px-2 text-slate-600 hover:bg-slate-50 disabled:opacity-40">
+                  className="rounded border border-line-strong px-2 text-body hover:bg-surface-muted disabled:opacity-40">
             <ImagePlus size={16} />
           </button>
           <input id="chat-compose" data-testid="chat-input" value={draft}
                  onChange={(e) => setDraft(e.target.value)} maxLength={500}
                  placeholder={enabled ? "Reply to the audience…"
                                       : "Chat is off for listeners. You can still reply."}
-                 className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                 className="min-w-0 flex-1 rounded border border-line-strong px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
           <button type="submit" data-testid="chat-send" disabled={busy || !draft.trim()}
                   className="inline-flex items-center gap-1 rounded bg-blue-700 px-3 py-1.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:bg-slate-400">
             <Send size={14} /> Send
@@ -339,18 +339,18 @@ function ChatImage({ path, testId }) {
 
   if (failed) {
     return (
-      <p data-testid={`${testId}-missing`} className="text-xs text-slate-500">
+      <p data-testid={`${testId}-missing`} className="text-xs text-muted">
         This image is no longer stored.
       </p>
     );
   }
   if (!url) {
-    return <div data-testid={`${testId}-loading`} className="h-24 w-32 animate-pulse rounded bg-slate-100" />;
+    return <div data-testid={`${testId}-loading`} className="h-24 w-32 animate-pulse rounded bg-surface-muted" />;
   }
   return (
     <a href={url} target="_blank" rel="noreferrer">
       <img data-testid={testId} src={url} alt="Sent in chat"
-           className="mt-1 max-h-48 rounded border border-slate-200 object-contain" />
+           className="mt-1 max-h-48 rounded border border-line object-contain" />
     </a>
   );
 }

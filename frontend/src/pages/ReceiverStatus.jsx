@@ -44,13 +44,13 @@ export default function ReceiverStatus() {
     <div className="space-y-4" data-testid="receivers-page">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Receiver Status</h1>
-          <p className="text-sm text-slate-500">Live connection status of every store receiver.</p>
+          <h1 className="text-2xl font-bold tracking-tight text-strong">Receiver Status</h1>
+          <p className="text-sm text-muted">Live connection status of every store receiver.</p>
         </div>
         <div className="flex items-center gap-2">
           <ExportButton dataset="receiver-status" list={list} testId="receivers-export" />
           <button data-testid="receivers-refresh-btn" onClick={list.reload}
-                  className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
+                  className="inline-flex items-center gap-1 px-3 py-2 border border-line-strong rounded-md text-sm hover:bg-surface-muted">
             <RefreshCw size={14} /> Refresh
           </button>
         </div>
@@ -85,9 +85,9 @@ export default function ReceiverStatus() {
                       onChange={(v) => list.setFilter("has_primary", v)} />
       </FilterBar>
 
-      <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
+      <div className="glass rounded-xl overflow-x-auto">
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
+          <thead className="bg-surface-muted text-left text-[11px] uppercase tracking-wider text-muted border-b border-line">
             <tr>
               <SortableTh column="store_code" label="Code" list={list} />
               <SortableTh column="store_name" label="Store" list={list} />
@@ -104,12 +104,12 @@ export default function ReceiverStatus() {
                        emptyText="No Stores match these filters. Clear them to see everything in this account's Scope." />
             {!list.loading && !list.error && list.items.map((row) => (
               <tr key={row.id} data-testid={`receiver-card-${row.store_code}`}
-                  className="border-b border-slate-100 even:bg-slate-50/50">
+                  className="border-b border-line even:bg-surface-alt">
                 <td className="px-3 py-2 font-mono text-xs">{row.store_code}</td>
                 <td className="px-3 py-2 font-medium">{row.store_name}</td>
                 <td className="px-3 py-2">{row.city}</td>
                 <td className="px-3 py-2">{row.region}</td>
-                <td className="px-3 py-2 text-xs text-slate-600">{row.device_count}</td>
+                <td className="px-3 py-2 text-xs text-body">{row.device_count}</td>
                 <td className="px-3 py-2 text-xs">
                   {row.has_primary
                     ? <span className="text-green-800">Assigned</span>

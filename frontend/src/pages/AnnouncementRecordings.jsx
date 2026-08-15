@@ -25,6 +25,12 @@ export default function AnnouncementRecordings() {
   const [error, setError] = React.useState("");
 
   const mayUpload = can("announcements.upload");
+  // The title only. The FILE is deliberately not replaceable: templates, the
+  // history and every Store's cache point at a recording by id and by content
+  // hash, so swapping the audio underneath would rewrite what a shop played
+  // last week without leaving a trace.
+  const [renaming, setRenaming] = React.useState(null);
+  const [draftTitle, setDraftTitle] = React.useState("");
   const mayDelete = can("announcements.delete_permanently");
 
   async function act(label, request) {
@@ -47,8 +53,8 @@ export default function AnnouncementRecordings() {
     <div className="space-y-4" data-testid="recordings-page">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Recordings</h1>
-          <p className="text-sm text-slate-500">
+          <h1 className="text-2xl font-bold tracking-tight text-strong">Recordings</h1>
+          <p className="text-sm text-muted">
             Listen to one here before sending it to a shop - nobody at HQ can
             hear what a Store is playing.
           </p>
@@ -57,7 +63,7 @@ export default function AnnouncementRecordings() {
           <ExportButton dataset="announcement-recordings" list={list}
                         testId="recordings-export" />
           <button data-testid="recordings-refresh" onClick={list.reload}
-                  className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
+                  className="inline-flex items-center gap-1 px-3 py-2 border border-line-strong rounded-md text-sm hover:bg-surface-muted">
             <RefreshCw size={14} /> Refresh
           </button>
         </div>
@@ -119,9 +125,9 @@ export default function AnnouncementRecordings() {
           })} />
       )}
 
-      <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
+      <div className="glass rounded-xl overflow-x-auto">
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
+          <thead className="bg-surface-muted text-left text-[11px] uppercase tracking-wider text-muted border-b border-line">
             <tr>
               {(mayUpload || mayDelete) && <th className="px-3 py-2 w-8"></th>}
               <SortableTh column="title" label="Recording" list={list} />
@@ -137,7 +143,7 @@ export default function AnnouncementRecordings() {
                        emptyText="No recording matches these filters." />
             {!list.loading && !list.error && list.items.map((row) => (
               <tr key={row.id} data-testid={`recording-${row.id}`}
-                  className="border-b border-slate-100 even:bg-slate-50/50">
+                  className="border-b border-line even:bg-surface-alt">
                 {(mayUpload || mayDelete) && (
                   <td className="px-3 py-2">
                     <input type="checkbox" checked={bulk.isChosen(row.id)}
@@ -146,23 +152,62 @@ export default function AnnouncementRecordings() {
                   </td>
                 )}
                 <td className="px-3 py-2">
-                  <div className="font-medium text-slate-900">{row.title}</div>
-                  <div className="text-xs text-slate-500">{row.original_filename}</div>
+                  {renaming === row.id ? (
+                    <form data-testid={`recording-rename-form-${row.id}`}
+                          className="flex flex-wrap items-center gap-2"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            act(`Rename ${row.title}`, async () => {
+                              await api.put(`/announcements/audio/${row.id}`,
+                                            { title: draftTitle });
+                              setRenaming(null);
+                            });
+                          }}>
+                      <input value={draftTitle} autoFocus required
+                             data-testid={`recording-rename-input-${row.id}`}
+                             onChange={(event) => setDraftTitle(event.target.value)}
+                             className="px-2 py-1 text-sm border border-line-strong rounded-md" />
+                      <button type="submit" disabled={busy !== ""}
+                              data-testid={`recording-rename-save-${row.id}`}
+                              className="px-2 py-1 rounded bg-surface-muted text-white text-xs disabled:opacity-50">
+                        Save
+                      </button>
+                      <button type="button" onClick={() => setRenaming(null)}
+                              className="px-2 py-1 rounded border border-line-strong text-xs">
+                        Cancel
+                      </button>
+                    </form>
+                  ) : (
+                    <>
+                      <div className="font-medium text-strong">{row.title}</div>
+                      {/* The filename is shown and never edited: it is what
+                          arrived, and rewriting it would make the record of
+                          what was uploaded disagree with the upload. */}
+                      <div className="text-xs text-muted">{row.original_filename}</div>
+                    </>
+                  )}
                 </td>
                 <td className="px-3 py-2 text-xs">{(row.byte_size / 1024).toFixed(0)} KB</td>
                 <td className="px-3 py-2 text-xs">{formatIst(row.uploaded_at)}</td>
                 <td className="px-3 py-2 text-xs">
                   {row.status === "archived"
                     ? <span className="text-amber-700">Archived</span>
-                    : <span className="text-slate-600">Active</span>}
+                    : <span className="text-body">Active</span>}
                 </td>
                 <td className="px-3 py-2 text-right whitespace-nowrap">
+                  {mayUpload && renaming !== row.id && (
+                    <button data-testid={`recording-rename-${row.id}`}
+                            onClick={() => { setRenaming(row.id); setDraftTitle(row.title); }}
+                            className="px-2 py-1 rounded border border-line-strong text-sm hover:bg-surface-muted mr-1">
+                      Rename
+                    </button>
+                  )}
                   {mayUpload && row.status !== "archived" && (
                     <button data-testid={`recording-archive-${row.id}`}
                             disabled={busy !== ""}
                             onClick={() => act(`Archive ${row.title}`,
                               () => api.delete(`/announcements/audio/${row.id}`))}
-                            className="px-2 py-1 rounded border border-slate-300 text-sm hover:bg-slate-50 mr-1">
+                            className="px-2 py-1 rounded border border-line-strong text-sm hover:bg-surface-muted mr-1">
                       Archive
                     </button>
                   )}
@@ -214,27 +259,27 @@ function UploadRecording({ onUploaded }) {
 
   return (
     <form onSubmit={submit} data-testid="recording-upload-form"
-          className="flex flex-wrap items-center gap-2 border border-slate-200 rounded-md bg-white px-3 py-3">
+          className="flex flex-wrap items-center gap-2 glass rounded-xl px-3 py-3">
       <input type="text" value={title} placeholder="What is it called?"
              onChange={(event) => setTitle(event.target.value)}
              data-testid="recording-title"
-             className="px-3 py-2 border border-slate-300 rounded-md text-sm" />
+             className="px-3 py-2 border border-line-strong rounded-md text-sm" />
       {/* The browser's native file button is the one control here that looks
           like it belongs to a different decade, and it has nowhere to show
           WHICH file is chosen. Hidden, driven by a styled label - still a real
           file input, so keyboard and screen-reader behaviour is unchanged. */}
-      <label className="inline-flex items-center gap-2 px-3 py-2 border border-slate-300 rounded-md text-sm cursor-pointer hover:bg-slate-50">
+      <label className="inline-flex items-center gap-2 px-3 py-2 border border-line-strong rounded-md text-sm cursor-pointer hover:bg-surface-muted">
         <input type="file" accept="audio/*" data-testid="recording-file"
                onChange={(event) => setFile(event.target.files?.[0] || null)}
                className="sr-only" />
         <Upload className="w-4 h-4" />
         Choose a recording
       </label>
-      <span className="text-sm text-slate-600" data-testid="recording-chosen">
+      <span className="text-sm text-body" data-testid="recording-chosen">
         {file ? file.name : "No file chosen yet"}
       </span>
       <button type="submit" disabled={busy || !file} data-testid="recording-upload"
-              className="inline-flex items-center gap-1 px-3 py-2 rounded-md text-sm text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-50">
+              className="inline-flex items-center gap-1 px-3 py-2 rounded-md text-sm text-white bg-surface-muted hover:bg-surface-muted disabled:opacity-50">
         <Upload className="w-4 h-4" /> {busy ? "Uploading…" : "Upload"}
       </button>
       {failure && (

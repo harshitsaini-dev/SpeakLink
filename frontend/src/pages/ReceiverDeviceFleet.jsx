@@ -63,8 +63,8 @@ export default function ReceiverDeviceFleet() {
     <div className="space-y-4" data-testid="device-fleet-page">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Receiver Devices</h1>
-          <p className="text-sm text-slate-500">
+          <h1 className="text-2xl font-bold tracking-tight text-strong">Receiver Devices</h1>
+          <p className="text-sm text-muted">
             Every enrolled Device across the Stores this account may see. Open a Store to
             enrol, rotate or promote.
           </p>
@@ -73,7 +73,7 @@ export default function ReceiverDeviceFleet() {
           <ExportButton dataset="receiver-devices" list={list}
                         testId="fleet-export" />
           <button data-testid="fleet-refresh-btn" onClick={list.reload}
-                className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
+                className="inline-flex items-center gap-1 px-3 py-2 border border-line-strong rounded-md text-sm hover:bg-surface-muted">
           <RefreshCw size={14} /> Refresh
         </button>
         </div>
@@ -135,10 +135,10 @@ export default function ReceiverDeviceFleet() {
         </div>
       )}
 
-      <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
+      <div className="glass rounded-xl overflow-x-auto">
         <table className="w-full text-sm">
           <caption className="sr-only">Receiver Devices across every visible Store</caption>
-          <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
+          <thead className="bg-surface-muted text-left text-[11px] uppercase tracking-wider text-muted border-b border-line">
             <tr>
               <SortableTh column="display_name" label="Device" list={list} />
               <SortableTh column="public_id" label="Identifier" list={list} />
@@ -159,29 +159,29 @@ export default function ReceiverDeviceFleet() {
               const deleted = device.lifecycle === "deleted";
               return (
                 <tr key={device.public_id} data-testid={`fleet-row-${device.public_id}`}
-                    className={`border-b border-slate-100 even:bg-slate-50/50 ${
+                    className={`border-b border-line even:bg-surface-alt ${
                       deleted ? "bg-red-50/40" : device.lifecycle === "archived" ? "opacity-75" : ""}`}>
                   <td className="px-3 py-2 font-medium">{device.display_name}</td>
-                  <td className="px-3 py-2 font-mono text-xs text-slate-500"
+                  <td className="px-3 py-2 font-mono text-xs text-muted"
                       title={device.public_id}>{shortId(device.public_id)}</td>
                   <td className="px-3 py-2">
                     <Link to={`/stores/${device.store_id}/devices`}
                           data-testid={`fleet-open-store-${device.public_id}`}
-                          className="inline-flex items-center gap-1 text-blue-800 hover:underline">
+                          className="row-action row-action-info">
                       {device.store_code} <ExternalLink size={11} />
                     </Link>
-                    <div className="text-xs text-slate-500">{device.store_name}</div>
+                    <div className="text-xs text-muted">{device.store_name}</div>
                   </td>
                   <td className="px-3 py-2 text-xs">{device.city}</td>
                   <td className="px-3 py-2 text-xs">{device.region}</td>
                   <td className="px-3 py-2 text-xs">
                     {device.is_primary
-                      ? <span className="inline-flex items-center gap-1 text-blue-800 font-semibold">
+                      ? <span className="row-action row-action-info">
                           <Star size={11} /> Primary
                         </span>
-                      : <span className="text-slate-500">Standby</span>}
+                      : <span className="text-muted">Standby</span>}
                   </td>
-                  <td className="px-3 py-2 text-xs uppercase tracking-wide text-slate-600"
+                  <td className="px-3 py-2 text-xs uppercase tracking-wide text-body"
                       data-testid={`fleet-status-${device.public_id}`}>
                     {device.status}
                   </td>
@@ -192,7 +192,7 @@ export default function ReceiverDeviceFleet() {
                       {LIFECYCLE_LABEL[device.lifecycle] || device.lifecycle}
                     </span>
                     {deleted && (
-                      <div className="mt-0.5 text-[11px] text-slate-500"
+                      <div className="mt-0.5 text-[11px] text-muted"
                            data-testid={`fleet-deleted-note-${device.public_id}`}>
                         Kept only so history stays readable. This cannot be restored.
                       </div>
@@ -202,7 +202,7 @@ export default function ReceiverDeviceFleet() {
                     {!deleted && can("devices.delete_permanently") && (
                       <button type="button" data-testid={`fleet-purge-${device.public_id}`}
                               onClick={() => { setPurgeError(""); setPurging(device); }}
-                              className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50">
+                              className="row-action row-action-destructive">
                         <Trash2 size={12} /> Delete Permanently
                       </button>
                     )}

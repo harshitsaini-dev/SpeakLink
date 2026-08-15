@@ -155,11 +155,11 @@ export default function Receiver() {
 
   if (status === "unauthorized") {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900 text-white p-6">
+      <div className="min-h-screen flex items-center justify-center bg-surface-muted text-white p-6">
         <div className="text-center max-w-md" data-testid="receiver-unauthorized">
           <AlertTriangle className="mx-auto mb-4 text-red-400" size={48}/>
           <h1 className="text-2xl font-bold">Invalid Receiver Token</h1>
-          <p className="text-slate-400 mt-2 text-sm">This receiver URL is not authorized. Ask HQ admin for the correct link from Store Management.</p>
+          <p className="text-faint mt-2 text-sm">This receiver URL is not authorized. Ask HQ admin for the correct link from Store Management.</p>
         </div>
       </div>
     );
@@ -182,15 +182,15 @@ export default function Receiver() {
 
       <header className="relative z-10 p-4 flex items-center justify-between border-b border-white/10">
         <div className="flex items-center gap-2"><Radio className="text-red-500" size={20}/><span className="font-bold tracking-wide">SpeakLink Receiver</span></div>
-        <div className="text-xs uppercase tracking-widest text-slate-300">Store Kiosk</div>
+        <div className="text-xs uppercase tracking-widest text-body">Store Kiosk</div>
       </header>
 
       <main className="relative z-10 flex-1 flex items-center justify-center p-6">
         <div className="w-full max-w-2xl text-center space-y-8">
           <div>
-            <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Store</div>
+            <div className="text-xs uppercase tracking-[0.2em] text-faint">Store</div>
             <div className="text-3xl md:text-5xl font-bold tracking-tight mt-1" data-testid="receiver-store-name">{store?.store_name || "…"}</div>
-            <div className="text-sm text-slate-400 mt-2 font-mono">{store?.store_code} · {store?.city}, {store?.region}</div>
+            <div className="text-sm text-faint mt-2 font-mono">{store?.store_code} · {store?.city}, {store?.region}</div>
           </div>
 
           <div className={`inline-flex items-center gap-3 px-6 py-3 rounded-full ${statusColor} shadow-lg`} data-testid="receiver-status-pill">
@@ -209,11 +209,11 @@ export default function Receiver() {
               <button
                 data-testid="enable-audio-btn"
                 onClick={enableAudio}
-                className="inline-flex items-center gap-3 px-8 py-4 bg-emerald-500 hover:bg-emerald-600 text-white text-xl font-bold uppercase tracking-widest rounded-md shadow-lg transition-colors"
+                className="row-action row-action-ok"
               >
                 <Play size={22}/> Enable Audio
               </button>
-              <div className="text-xs text-slate-400">One-time setup required by browser autoplay policy.</div>
+              <div className="text-xs text-faint">One-time setup required by browser autoplay policy.</div>
             </div>
           ) : (
             <div className="text-sm text-emerald-300 flex items-center gap-2 justify-center"><Volume2 size={16}/> Audio ready — waiting for HQ commands</div>
@@ -227,9 +227,9 @@ export default function Receiver() {
         </div>
       </main>
 
-      <footer className="relative z-10 p-4 border-t border-white/10 text-xs text-slate-400 flex flex-wrap items-center gap-4 justify-between">
-        <div>Last Command: <span className="font-mono text-slate-200" data-testid="receiver-last-command">{lastCommand}</span></div>
-        <div>Audio: <span className="font-mono text-slate-200">{audioEnabled ? <><Volume2 size={12} className="inline"/> ON</> : <><VolumeX size={12} className="inline"/> OFF</>}</span></div>
+      <footer className="relative z-10 p-4 border-t border-white/10 text-xs text-faint flex flex-wrap items-center gap-4 justify-between">
+        <div>Last Command: <span className="font-mono text-body" data-testid="receiver-last-command">{lastCommand}</span></div>
+        <div>Audio: <span className="font-mono text-body">{audioEnabled ? <><Volume2 size={12} className="inline"/> ON</> : <><VolumeX size={12} className="inline"/> OFF</>}</span></div>
       </footer>
 
       {/* audio element — hidden but active */}

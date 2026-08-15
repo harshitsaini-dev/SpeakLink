@@ -21,7 +21,7 @@ import { api } from "@/lib/api";
 
 const ACTION_BUTTON =
   "inline-flex items-center gap-1 rounded border px-2 py-1 text-xs "
-  + "hover:bg-slate-50 disabled:opacity-50";
+  + "hover:bg-surface-muted disabled:opacity-50";
 
 export function formatSize(bytes) {
   if (bytes === null || bytes === undefined) return null;
@@ -64,7 +64,7 @@ export default function RecordingActions({ sessionId, recording, onPlay,
   if (!recording) {
     return (
       <span data-testid={`recording-none-${sessionId}`}
-            className="text-xs text-slate-400">
+            className="text-xs text-faint">
         No recording
       </span>
     );
@@ -75,7 +75,7 @@ export default function RecordingActions({ sessionId, recording, onPlay,
   if (status === "recording") {
     return (
       <span data-testid={`recording-inprogress-${sessionId}`}
-            className="text-xs text-slate-500">
+            className="text-xs text-muted">
         Recording…
       </span>
     );
@@ -122,7 +122,7 @@ export default function RecordingActions({ sessionId, recording, onPlay,
           </span>
         )}
         <span data-testid={`recording-meta-${sessionId}`}
-              className="text-xs text-slate-500">
+              className="text-xs text-muted">
           {formatSize(recording.byte_size) || "—"}
         </span>
       </div>

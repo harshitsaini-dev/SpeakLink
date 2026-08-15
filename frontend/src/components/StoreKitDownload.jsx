@@ -124,23 +124,23 @@ Continue?`)) {
   const latest = state?.latest;
 
   return (
-    <div className="border border-slate-200 bg-white rounded-md shadow-sm p-4"
+    <div className="glass rounded-xl shadow-sm p-4"
          data-testid="store-kit-download">
       <div className="flex items-center gap-2">
-        <PackageOpen size={16} className="text-slate-500" />
-        <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
+        <PackageOpen size={16} className="text-muted" />
+        <div className="text-xs font-bold uppercase tracking-[0.15em] text-muted">
           Store Kit
         </div>
       </div>
 
       {!state && !error && (
-        <p className="mt-2 text-sm text-slate-500">Reading what this HQ has…</p>
+        <p className="mt-2 text-sm text-muted">Reading what this HQ has…</p>
       )}
 
       {state && !latest && (
         // "No kit" and "this is broken" look identical without this sentence,
         // and the fix for the first one is a build, not a bug report.
-        <p className="mt-2 text-sm text-slate-500" data-testid="store-kit-none">
+        <p className="mt-2 text-sm text-muted" data-testid="store-kit-none">
           This HQ has no Store Kit yet. Build one and put it in the
           store-kits folder for it to appear here.
         </p>
@@ -149,10 +149,10 @@ Continue?`)) {
       {latest && (
         <div className="mt-2 space-y-2">
           <div className="text-sm">
-            <div className="font-medium text-slate-900" data-testid="store-kit-name">
+            <div className="font-medium text-strong" data-testid="store-kit-name">
               {latest.name}
             </div>
-            <div className="text-xs text-slate-500">
+            <div className="text-xs text-muted">
               {(latest.size_bytes / (1024 * 1024)).toFixed(1)} MB · built{" "}
               {new Date(latest.modified_at).toLocaleString("en-IN",
                 { timeZone: "Asia/Kolkata" })}
@@ -165,7 +165,7 @@ Continue?`)) {
             <Download size={15} /> {busy ? "Downloading…" : "Download the current kit"}
           </button>
 
-          <p className="text-xs text-slate-500">
+          <p className="text-xs text-muted">
             Copy it to the Store PC and run it. It installs, upgrades, repairs
             or removes - and an upgrade keeps the Store enrolled.
           </p>
@@ -174,14 +174,14 @@ Continue?`)) {
       )}
 
       {mayManage && (
-        <div className="mt-3 border-t border-slate-200 pt-3">
+        <div className="mt-3 border-t border-line pt-3">
           <input ref={fileRef} type="file" accept=".exe,.zip"
                  data-testid="store-kit-upload-input" className="hidden"
                  onChange={(event) => upload(event.target.files?.[0])} />
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" data-testid="store-kit-upload" disabled={busy}
                     onClick={() => fileRef.current?.click()}
-                    className="inline-flex items-center gap-2 rounded border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                    className="inline-flex items-center gap-2 rounded border border-line-strong px-2 py-1 text-xs font-semibold text-body hover:bg-surface-muted disabled:opacity-40">
               <Upload size={14} /> Upload a new installer
             </button>
             {latest && (
@@ -193,7 +193,7 @@ Continue?`)) {
               </button>
             )}
           </div>
-          <p className="mt-1 text-[11px] text-slate-500">
+          <p className="mt-1 text-[11px] text-muted">
             HQ checks the extension, the size and the file's magic bytes. It
             cannot tell whether a build is the right one - the account that
             uploaded it is recorded so that judgement has somewhere to point.

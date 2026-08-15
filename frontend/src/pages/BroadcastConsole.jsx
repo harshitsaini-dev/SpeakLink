@@ -5,7 +5,7 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { FilterSelect, SearchableSelect } from "@/components/AdminFilters";
 import { useBroadcast } from "@/contexts/BroadcastContext";
-import { elapsedSeconds } from "@/lib/time";
+import { elapsedSeconds, formatIst } from "@/lib/time";
 import StatusBadge from "@/components/StatusBadge";
 import StoreAudioControl from "@/components/StoreAudioControl";
 import { useStoreAudioControl } from "@/lib/audio/useStoreAudioControl";
@@ -541,14 +541,14 @@ export default function BroadcastConsole() {
           row is something grid does for free and hand-tuned heights never
           quite manage. */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-12 lg:auto-rows-min lg:items-stretch">
-        <div className="lg:col-span-4 lg:h-full flex flex-col border border-slate-200 bg-white rounded-md shadow-sm p-4"
+        <div className="lg:col-span-4 lg:h-full flex flex-col glass rounded-xl shadow-sm p-4"
              data-testid="broadcast-status-card">
           {/* Label, state and clock on ONE line. The clock was 5xl, which
               made a card that only reports taller than the card you operate.
               min-w-0 with truncate on the campaign name so a long name
               shortens instead of pushing the clock off the row. */}
           <div className="flex items-center gap-3">
-            <div className="text-[11px] font-bold uppercase tracking-[0.15em] text-slate-500 shrink-0">
+            <div className="text-[11px] font-bold uppercase tracking-[0.15em] text-muted shrink-0">
               Status
             </div>
             <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -556,15 +556,15 @@ export default function BroadcastConsole() {
                 <>
                   <span className="live-dot shrink-0" />
                   <span className="shrink-0 text-sm font-bold uppercase tracking-widest text-red-600" data-testid="live-indicator">LIVE</span>
-                  <span className="truncate text-sm text-slate-700" title={current?.session?.campaign_name}>
+                  <span className="truncate text-sm text-body" title={current?.session?.campaign_name}>
                     · {current?.session?.campaign_name}
                   </span>
                 </>
               ) : (
-                <span className="text-sm font-semibold uppercase tracking-widest text-slate-500">Idle · Ready</span>
+                <span className="text-sm font-semibold uppercase tracking-widest text-muted">Idle · Ready</span>
               )}
             </div>
-            <div className="shrink-0 font-mono text-4xl md:text-5xl tracking-tighter text-slate-900" data-testid="live-timer">
+            <div className="shrink-0 font-mono text-4xl md:text-5xl tracking-tighter text-strong" data-testid="live-timer">
               {isLive ? fmtDur(elapsed) : "00:00:00"}
             </div>
           </div>
@@ -579,11 +579,11 @@ export default function BroadcastConsole() {
                   pre-gain meter let an operator watch their voice move a bar
                   while the shops heard nothing. */}
               <div>
-                <div className="flex items-center justify-between text-[10px] uppercase tracking-widest text-slate-500 mb-1">
+                <div className="flex items-center justify-between text-[10px] uppercase tracking-widest text-muted mb-1">
                   <span>Mic Input</span>
-                  <span className="text-slate-400 normal-case tracking-normal">before volume</span>
+                  <span className="text-faint normal-case tracking-normal">before volume</span>
                 </div>
-                <div className="h-2 bg-slate-100 rounded overflow-hidden">
+                <div className="h-2 bg-surface-muted rounded overflow-hidden">
                   <div data-testid="mic-input-meter"
                        className="h-full bg-slate-400 transition-all"
                        style={{ width: `${Math.min(100, Math.round((micLevels?.input ?? 0) * 100))}%` }} />
@@ -591,7 +591,7 @@ export default function BroadcastConsole() {
               </div>
 
               <div>
-                <div className="flex items-center justify-between text-[10px] uppercase tracking-widest text-slate-500 mb-1">
+                <div className="flex items-center justify-between text-[10px] uppercase tracking-widest text-muted mb-1">
                   <span>Sent to Stores</span>
                   {micEffectivelySilent && (
                     <span data-testid="mic-muted-badge"
@@ -600,7 +600,7 @@ export default function BroadcastConsole() {
                     </span>
                   )}
                 </div>
-                <div className="h-3 bg-slate-100 rounded overflow-hidden">
+                <div className="h-3 bg-surface-muted rounded overflow-hidden">
                   <div data-testid="mic-sent-meter"
                        className={`h-full transition-all ${micEffectivelySilent ? "bg-red-300"
                          : "bg-gradient-to-r from-emerald-500 via-yellow-400 to-red-500"}`}
@@ -614,7 +614,7 @@ export default function BroadcastConsole() {
                         onClick={() => setMicMute(!micMuted)}
                         className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs font-semibold ${
                           micMuted ? "border-red-400 bg-red-100 text-red-800"
-                                   : "border-slate-300 text-slate-700"}`}>
+                                   : "border-line-strong text-body"}`}>
                   {micMuted ? <MicOff size={13} /> : <Mic size={13} />}
                   {micMuted ? "Unmute" : "Mute"}
                 </button>
@@ -626,7 +626,7 @@ export default function BroadcastConsole() {
                        onChange={(e) => setMicVolume(e.target.value)}
                        className="flex-1 accent-blue-600" />
                 <span data-testid="mic-volume-value"
-                      className="w-10 text-right text-xs font-mono text-slate-700">
+                      className="w-10 text-right text-xs font-mono text-body">
                   {micVolumePercent}%
                 </span>
               </div>
@@ -643,11 +643,11 @@ export default function BroadcastConsole() {
           {liveSessionId ? (
             <WebAudiencePanel sessionId={liveSessionId} compact />
           ) : (
-            <div className="lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4">
-              <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
+            <div className="lg:h-full glass rounded-xl shadow-sm p-4">
+              <div className="text-xs font-bold uppercase tracking-[0.15em] text-muted">
                 Web Audience
               </div>
-              <p className="mt-2 text-sm text-slate-500">
+              <p className="mt-2 text-sm text-muted">
                 A shareable listener link is created when this Broadcast starts.
               </p>
             </div>
@@ -672,13 +672,13 @@ export default function BroadcastConsole() {
             // No session, no room, nothing to say in it. An empty message list
             // would imply a conversation that has not started rather than one
             // that cannot exist yet.
-            <div className="flex h-full min-h-[22rem] flex-col border border-slate-200 bg-white rounded-md shadow-sm p-4"
+            <div className="flex h-full min-h-[22rem] flex-col glass rounded-xl shadow-sm p-4"
                  data-testid="chat-card">
-              <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
+              <div className="text-xs font-bold uppercase tracking-[0.15em] text-muted">
                 Web Chat
               </div>
               <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
-                <p className="max-w-[16rem] text-sm text-slate-500">
+                <p className="max-w-[16rem] text-sm text-muted">
                   Chat opens with the Broadcast. Listeners who join through the
                   link can message you here.
                 </p>
@@ -689,18 +689,34 @@ export default function BroadcastConsole() {
 
       {active?.mine && (
         <div data-testid="my-active-broadcast"
-             className="lg:col-start-1 lg:col-span-8 lg:row-start-3 border border-blue-200 bg-blue-50/60 rounded-md shadow-sm p-4">
-          <div className="text-xs font-bold uppercase tracking-[0.15em] text-blue-900">
+             // Glass with a blue edge and a live marker, rather than a solid
+             // pale-blue slab: on a dark page that slab was the brightest
+             // thing on screen and its own text was barely readable on it.
+             // This is a status strip, not a warning.
+             className="lg:col-start-1 lg:col-span-8 lg:row-start-3 glass p-4
+                        border-l-4 border-l-blue-500">
+          <div className="flex items-center gap-2 text-xs font-bold uppercase
+                          tracking-[0.15em] text-blue-700 dark:text-blue-300">
+            <span className="relative flex h-2 w-2">
+              {/* It is on air right now, and a still page does not say so. */}
+              <span className="absolute inline-flex h-full w-full animate-ping
+                               rounded-full bg-blue-400 opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-blue-500" />
+            </span>
             Your Active Broadcast
           </div>
           <div className="mt-2 flex flex-wrap items-baseline gap-x-6 gap-y-1">
-            <span data-testid="my-active-campaign" className="text-lg font-semibold text-slate-900">
+            <span data-testid="my-active-campaign" className="text-lg font-semibold text-strong">
               {active.mine.campaign_name}
             </span>
-            <span className="text-xs text-slate-600">
-              Started <span data-testid="my-active-started">{active.mine.started_at || "—"}</span>
+            <span className="text-xs text-body">
+              {/* A readable clock, not a raw ISO instant. Nobody reads
+                  2026-08-15T06:44:05.212585 off a screen. */}
+              Started <span data-testid="my-active-started">
+                {active.mine.started_at ? formatIst(active.mine.started_at) : "—"}
+              </span>
             </span>
-            <span className="text-xs text-slate-600">
+            <span className="text-xs text-body">
               <span data-testid="my-active-target-count">{active.mine.target_store_count}</span>
               {" "}Store{active.mine.target_store_count === 1 ? "" : "s"}
             </span>
@@ -710,12 +726,12 @@ export default function BroadcastConsole() {
 
       {active?.may_manage_active && (
         <div data-testid="active-broadcasts-badge"
-             className="lg:col-start-1 lg:col-span-8 lg:row-start-4 border border-slate-200 bg-white rounded-md shadow-sm px-4 py-3 flex items-center justify-between gap-4">
-          <div className="text-sm text-slate-700">
-            <span className="font-bold uppercase tracking-[0.15em] text-xs text-slate-500 mr-2">
+             className="lg:col-start-1 lg:col-span-8 lg:row-start-4 glass rounded-xl shadow-sm px-4 py-3 flex items-center justify-between gap-4">
+          <div className="text-sm text-body">
+            <span className="font-bold uppercase tracking-[0.15em] text-xs text-muted mr-2">
               Active Broadcasts
             </span>
-            <span data-testid="active-broadcasts-count" className="font-semibold text-slate-900">
+            <span data-testid="active-broadcasts-count" className="font-semibold text-strong">
               {active.active_count ?? 0}
             </span>
           </div>
@@ -726,39 +742,39 @@ export default function BroadcastConsole() {
         </div>
       )}
 
-        <div className="lg:col-start-5 lg:col-span-4 lg:row-start-1 lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-3"
+        <div className="lg:col-start-5 lg:col-span-4 lg:row-start-1 lg:h-full glass rounded-xl shadow-sm p-4 space-y-3"
              data-testid="console-controls-card">
           <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold text-slate-900">Broadcast Controls</h2>
+            <h2 className="text-base font-semibold text-strong">Broadcast Controls</h2>
             {error && <div data-testid="console-error" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1">{error}</div>}
           </div>
 
           <div className="grid grid-cols-1 gap-3">
             <div>
-              <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Campaign Name</label>
+              <label className="block text-xs font-bold uppercase tracking-[0.1em] text-muted mb-1.5">Campaign Name</label>
               <input
                 data-testid="campaign-name-input"
                 value={campaign} onChange={(e) => setCampaign(e.target.value)}
                 placeholder='e.g. "Diwali Festival Offer"'
-                className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-3 py-2 border border-line-strong rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 disabled={isLive}
               />
             </div>
             {!mayDeliverToStores && (
               <div data-testid="no-store-delivery-notice"
-                   className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1">
+                   className="rounded-md border border-line bg-surface-muted p-3">
+                <p className="text-xs font-bold uppercase tracking-[0.1em] text-muted mb-1">
                   Target Mode
                 </p>
-                <p className="text-sm font-semibold text-slate-900"
+                <p className="text-sm font-semibold text-strong"
                    data-testid="link-only-mode">
                   Only With Link
                 </p>
-                <p className="text-sm text-slate-700 mt-1">
+                <p className="text-sm text-body mt-1">
                   This Broadcast reaches web listeners through a shared link.
                   It does not play in any Store.
                 </p>
-                <p className="text-xs text-slate-500 mt-1">
+                <p className="text-xs text-muted mt-1">
                   Ask an administrator for &ldquo;Broadcast to Stores / Zones&rdquo;
                   if you need to broadcast to shops.
                 </p>
@@ -766,11 +782,11 @@ export default function BroadcastConsole() {
             )}
             {mayDeliverToStores && (
             <div>
-              <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Target Mode</label>
+              <label className="block text-xs font-bold uppercase tracking-[0.1em] text-muted mb-1.5">Target Mode</label>
               <select
                 data-testid="target-mode-select"
                 value={targetMode} onChange={(e) => setTargetMode(e.target.value)}
-                className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-3 py-2 border border-line-strong rounded-md text-sm bg-surface focus:outline-none focus:ring-2 focus:ring-blue-500"
                 disabled={isLive}
               >
                 {ALL_TARGET_MODES.map((m) => (
@@ -782,7 +798,7 @@ export default function BroadcastConsole() {
 
             {targetMode === "region" && (
               <div>
-                <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">Zone</label>
+                <label className="block text-xs font-bold uppercase tracking-[0.1em] text-muted mb-1.5">Zone</label>
                 {/* Several zones, not one. A campaign is almost never one
                     zone, and with a single-value picker "the North and the
                     South" meant either two broadcasts - two microphones, two
@@ -795,7 +811,7 @@ export default function BroadcastConsole() {
             )}
             {targetMode === "city" && (
               <div>
-                <label className="block text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1.5">City</label>
+                <label className="block text-xs font-bold uppercase tracking-[0.1em] text-muted mb-1.5">City</label>
                 <FilterSelect testId="city-select" allLabel="— select —"
                               value={city} onChange={setCity}
                               options={meta.cities} disabled={isLive} />
@@ -807,7 +823,7 @@ export default function BroadcastConsole() {
           <div className="flex flex-wrap items-center gap-2 pt-2">
             {!micTest.on ? (
               <button data-testid="mic-test-btn" onClick={startMicTest} disabled={isLive}
-                      className="inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50">
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium border border-line-strong bg-surface hover:bg-surface-muted disabled:opacity-50">
                 <Mic size={16}/> Mic Test
               </button>
             ) : (
@@ -829,7 +845,7 @@ export default function BroadcastConsole() {
                     || (targetMode !== ONLY_WITH_LINK && targetIds.length === 0)
                     || (targetMode === "region" && !region)
                     || (targetMode === "city" && !city)}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-semibold text-white bg-blue-700 hover:bg-blue-800 disabled:bg-slate-400"
+                  className="row-action row-action-info"
                 >
                   <Play size={16}/> Start Live Broadcast
                 </button>
@@ -837,29 +853,29 @@ export default function BroadcastConsole() {
             ) : (
               can("broadcast.stop") && (
                 <button data-testid="stop-broadcast-btn" onClick={stopBroadcast} disabled={busy}
-                        className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-semibold text-white bg-slate-800 hover:bg-slate-900">
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-semibold text-white bg-surface-muted hover:bg-surface-muted">
                   <Square size={16}/> Stop Broadcast
                 </button>
               )
             )}
 
             <button data-testid="refresh-btn" onClick={load}
-                    className="ml-auto inline-flex items-center gap-1 px-3 py-2 rounded-md text-sm text-slate-600 border border-slate-200 hover:bg-slate-50">
+                    className="ml-auto inline-flex items-center gap-1 px-3 py-2 rounded-md text-sm text-body border border-line hover:bg-surface-muted">
               <RefreshCcw size={14}/> Refresh
             </button>
           </div>
 
-          <div className="text-xs text-slate-500">Broadcaster: <span className="font-mono">{broadcasterStatus}</span></div>
+          <div className="text-xs text-muted">Broadcaster: <span className="font-mono">{broadcasterStatus}</span></div>
         </div>
 
-        <div className="lg:col-start-5 lg:col-span-4 lg:row-start-2 lg:h-full border border-slate-200 bg-white rounded-md shadow-sm p-4 space-y-2.5" data-testid="target-summary">
+        <div className="lg:col-start-5 lg:col-span-4 lg:row-start-2 lg:h-full glass rounded-xl shadow-sm p-4 space-y-2.5" data-testid="target-summary">
           <div className="flex items-center gap-2">
-            <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Broadcast Targets</div>
+            <div className="text-xs font-bold uppercase tracking-[0.15em] text-muted">Broadcast Targets</div>
             {targetMode === ONLY_WITH_LINK && (
               // Zero targets is correct here, so it is labelled rather than
               // left looking like a Broadcast that failed to find any.
               <span data-testid="web-only-badge"
-                    className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-600">
+                    className="rounded bg-surface-muted px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-body">
                 Web only
               </span>
             )}
@@ -869,19 +885,19 @@ export default function BroadcastConsole() {
                 automatic modes, and "Selected 0" beside a live Zone broadcast
                 reads as a fault. It means the same thing in every mode - the
                 Stores this broadcast would reach. */}
-            <StatCard label="Targets" value={targetIds.length} testid="stat-selected" icon={<Users size={14} className="text-slate-500"/>} />
+            <StatCard label="Targets" value={targetIds.length} testid="stat-selected" icon={<Users size={14} className="text-muted"/>} />
             <StatCard label="Online" value={onlineCount} testid="stat-online" icon={<Wifi size={14} className="text-emerald-600"/>} color="emerald" />
             <StatCard
               label={targetMode === "online_only" ? "Excluded" : "Offline"}
               value={targetMode === "online_only" ? excludedOfflineCount : offlineCount}
               testid="stat-offline"
-              icon={<WifiOff size={14} className="text-slate-400"/>} />
+              icon={<WifiOff size={14} className="text-faint"/>} />
           </div>
           {isLive && (
-            <div className="pt-2 border-t border-slate-100 space-y-2">
-              <div className="text-[11px] uppercase tracking-widest text-slate-500">
+            <div className="pt-2 border-t border-line space-y-2">
+              <div className="text-[11px] uppercase tracking-widest text-muted">
                 Receiver Acknowledgements
-                <span className="text-slate-400 normal-case tracking-normal"> · of {targetCounts.total}</span>
+                <span className="text-faint normal-case tracking-normal"> · of {targetCounts.total}</span>
               </div>
               <div className="grid grid-cols-3 gap-2">
                 <StatCard label="Receiving" value={targetCounts.receiving} testid="stat-audio-receiving"
@@ -891,7 +907,7 @@ export default function BroadcastConsole() {
                 <StatCard label="Errors" value={targetCounts.errors} testid="stat-target-errors"
                           icon={<AlertOctagon size={14} className="text-red-600"/>} />
               </div>
-              <p className="text-[10px] leading-snug text-slate-500">
+              <p className="text-[10px] leading-snug text-muted">
                 Confirmed means the Receiver's output device accepted decoded PCM frames.
                 It does not mean sound was audible at a Store speaker.
               </p>
@@ -911,10 +927,10 @@ export default function BroadcastConsole() {
           NORTH" is one action. Both empty is refused by the backend, because
           an empty selector would mean the whole estate. */}
       {isLive && mayDeliverToStores && targetMode !== ONLY_WITH_LINK && (
-        <div className="border border-slate-200 bg-white rounded-md shadow-sm p-4"
+        <div className="glass rounded-xl shadow-sm p-4"
              data-testid="zone-actions">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
+            <div className="text-xs font-bold uppercase tracking-[0.15em] text-muted">
               Zone Actions
             </div>
             <label htmlFor="zone-action-region" className="sr-only">Zone</label>
@@ -948,7 +964,7 @@ export default function BroadcastConsole() {
                         title={option.slow
                           ? "Each Store waits for its Receiver to report ready, so this can take a few seconds per shop."
                           : undefined}
-                        className={`rounded border bg-white px-2 py-1 text-xs font-semibold disabled:opacity-40 ${option.className}`}>
+                        className={`rounded border bg-surface px-2 py-1 text-xs font-semibold disabled:opacity-40 ${option.className}`}>
                   {zoneBusy ? "Working…" : option.label}
                 </button>
               ))}
@@ -956,20 +972,20 @@ export default function BroadcastConsole() {
           </div>
 
           {!zoneScope.region && !zoneScope.city && (
-            <p className="mt-2 text-xs text-slate-500" data-testid="zone-needs-scope">
+            <p className="mt-2 text-xs text-muted" data-testid="zone-needs-scope">
               Choose a Zone or a City first. Without one this would mean every
               Store in the estate.
             </p>
           )}
 
           {zoneResult && (
-            <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-2"
+            <div className="mt-3 rounded border border-line bg-surface-muted p-2"
                  data-testid="zone-result">
               {zoneResult.error ? (
                 <p role="alert" className="text-sm text-red-700">{zoneResult.error}</p>
               ) : (
                 <>
-                  <p className="text-sm text-slate-800">
+                  <p className="text-sm text-strong">
                     <span className="font-semibold uppercase">{zoneResult.action}</span>
                     {" — "}
                     <span data-testid="zone-result-summary">
@@ -997,13 +1013,13 @@ export default function BroadcastConsole() {
           selector would still print the name of every Store the account may
           not reach, which is the leak the control is meant to prevent. */}
       {mayDeliverToStores && targetMode !== ONLY_WITH_LINK && (
-      <div className="border border-slate-200 bg-white rounded-md shadow-sm">
-        <div className="p-4 border-b border-slate-200 flex flex-wrap items-center gap-3">
-          <h3 className="font-semibold text-slate-900 mr-auto">Stores {targetMode === "selected" && <span className="text-slate-500 font-normal text-sm">— pick receivers to include</span>}</h3>
+      <div className="glass rounded-xl shadow-sm">
+        <div className="p-4 border-b border-line flex flex-wrap items-center gap-3">
+          <h3 className="font-semibold text-strong mr-auto">Stores {targetMode === "selected" && <span className="text-muted font-normal text-sm">— pick receivers to include</span>}</h3>
           <div className="relative">
-            <Search size={14} className="absolute left-2 top-2.5 text-slate-400"/>
+            <Search size={14} className="absolute left-2 top-2.5 text-faint"/>
             <input data-testid="stores-search" value={q} onChange={(e) => setQ(e.target.value)}
-                   placeholder="Search stores…" className="pl-7 pr-3 py-2 text-sm border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+                   placeholder="Search stores…" className="pl-7 pr-3 py-2 text-sm border border-line-strong rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"/>
           </div>
           {/* The same multi-value control the rest of the site uses.
               Picking targets is where naming several zones matters MOST: a
@@ -1024,7 +1040,7 @@ export default function BroadcastConsole() {
                         options={[{ value: "online", label: "Online" },
                                   { value: "offline", label: "Offline" }]} />
           <button data-testid="stores-clear-filters" onClick={clearStoreFilters}
-                  className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">
+                  className="text-xs px-2 py-1 rounded border border-line-strong hover:bg-surface-muted">
             Clear filters
           </button>
           {targetMode === "selected" && (
@@ -1033,15 +1049,15 @@ export default function BroadcastConsole() {
                   Beside a paginated table that phrase means one thing to
                   somebody seeing ten rows and another to the code. */}
               <button data-testid="select-page-btn" onClick={selectPage}
-                      className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">
+                      className="text-xs px-2 py-1 rounded border border-line-strong hover:bg-surface-muted">
                 Select page ({visibleStores.length})
               </button>
               <button data-testid="select-all-filtered-btn" onClick={selectAllFiltered}
-                      className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">
+                      className="text-xs px-2 py-1 rounded border border-line-strong hover:bg-surface-muted">
                 Select all {filteredStores.length} filtered
               </button>
               <button data-testid="clear-selection-btn" onClick={clearSelection}
-                      className="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">
+                      className="text-xs px-2 py-1 rounded border border-line-strong hover:bg-surface-muted">
                 Clear selection
               </button>
             </>
@@ -1051,7 +1067,7 @@ export default function BroadcastConsole() {
         {/* What the filters actually produced, and where in it we are. The
             total is of AUTHORISED Stores: a scoped operator is never told how
             much fleet they cannot see. */}
-        <div className="px-4 py-2 border-b border-slate-200 flex flex-wrap items-center gap-3 text-xs text-slate-600">
+        <div className="px-4 py-2 border-b border-line flex flex-wrap items-center gap-3 text-xs text-body">
           <span data-testid="stores-result-count">
             {filteredStores.length === 0
               ? "No Stores match these filters"
@@ -1064,15 +1080,15 @@ export default function BroadcastConsole() {
             // Selection is independent of the visible page, so it is reported
             // separately - otherwise hiding a selected Store looks like losing
             // it.
-            <span data-testid="stores-selected-count" className="font-semibold text-slate-800">
+            <span data-testid="stores-selected-count" className="font-semibold text-strong">
               {selectedIds.size} selected
             </span>
           )}
           <span className="ml-auto flex items-center gap-2">
-            <label className="text-slate-500">Per page</label>
+            <label className="text-muted">Per page</label>
             <select data-testid="stores-page-size" value={storePageSize}
                     onChange={(e) => setStorePageSize(Number(e.target.value))}
-                    className="px-1.5 py-1 border border-slate-300 rounded bg-white">
+                    className="px-1.5 py-1 border border-line-strong rounded bg-surface">
               {STORE_PAGE_SIZES.map((size) => (
                 <option key={size} value={size}>{size}</option>
               ))}
@@ -1081,7 +1097,7 @@ export default function BroadcastConsole() {
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
+            <thead className="bg-surface-muted text-left text-[11px] uppercase tracking-wider text-muted border-b border-line">
               <tr>
                 {targetMode === "selected" && <th className="px-3 py-2 w-10"></th>}
                 <PickerTh column="store_code" label="Code" sort={storeSort}
@@ -1117,7 +1133,7 @@ export default function BroadcastConsole() {
                 // console.
                 const busyElsewhere = isStoreBusyForOthers(s.id);
                 return (
-                  <tr key={s.id} data-testid={`store-row-${s.store_code}`} className={`border-b border-slate-100 even:bg-slate-50/50 ${isTarget ? "bg-blue-50/40" : ""} ${busyElsewhere ? "bg-amber-50/60" : ""}`}>
+                  <tr key={s.id} data-testid={`store-row-${s.store_code}`} className={`border-b border-line even:bg-surface-alt ${isTarget ? "bg-blue-50/40" : ""} ${busyElsewhere ? "bg-amber-50/60" : ""}`}>
                     {targetMode === "selected" && (
                       <td className="px-3 py-2">
                         <input type="checkbox" data-testid={`store-checkbox-${s.store_code}`}
@@ -1129,7 +1145,7 @@ export default function BroadcastConsole() {
                                className="w-4 h-4"/>
                       </td>
                     )}
-                    <td className="px-3 py-2 font-mono text-xs text-slate-700">
+                    <td className="px-3 py-2 font-mono text-xs text-body">
                       {s.store_code}
                       {busyElsewhere && (
                         // Deliberately says WHAT, never WHO. Naming the other
@@ -1143,11 +1159,11 @@ export default function BroadcastConsole() {
                         </span>
                       )}
                     </td>
-                    <td className="px-3 py-2 text-slate-900 font-medium">{s.store_name}</td>
-                    <td className="px-3 py-2 text-slate-600">{s.city} · <span className="text-slate-500">{s.region}</span></td>
+                    <td className="px-3 py-2 text-strong font-medium">{s.store_name}</td>
+                    <td className="px-3 py-2 text-body">{s.city} · <span className="text-muted">{s.region}</span></td>
                     <td className="px-3 py-2"><StatusBadge status={s.status} testid={`store-status-${s.store_code}`} /></td>
                     <td className="px-3 py-2">
-                      {playStatus === "—" ? <span className="text-slate-400 text-xs">—</span> :
+                      {playStatus === "—" ? <span className="text-faint text-xs">—</span> :
                         <StatusBadge status={playStatus} testid={`play-status-${s.store_code}`} />}
                     </td>
                     {isLive && (
@@ -1192,7 +1208,7 @@ export default function BroadcastConsole() {
                             onMuteToggle={(value) => storeAudio.setMuted(s.id, value)}
                           />
                         ) : (
-                          <span className="text-slate-400 text-xs">—</span>
+                          <span className="text-faint text-xs">—</span>
                         )}
                       </td>
                     )}
@@ -1201,27 +1217,27 @@ export default function BroadcastConsole() {
               })}
               {filteredStores.length === 0 && (
                 <tr><td colSpan={6 + (isLive ? 1 : 0) + (isLive && mayControlAudio ? 1 : 0)}
-                        className="px-3 py-6 text-center text-slate-500">No stores found.</td></tr>
+                        className="px-3 py-6 text-center text-muted">No stores found.</td></tr>
               )}
             </tbody>
           </table>
         </div>
 
-        <div className="p-3 border-t border-slate-200 flex flex-wrap items-center gap-2 text-sm">
-          <span className="text-slate-600" data-testid="stores-page-info">
+        <div className="p-3 border-t border-line flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-body" data-testid="stores-page-info">
             Page {safeStorePage} of {storePageCount}
           </span>
           <span className="ml-auto flex gap-2">
             <button data-testid="stores-prev-page"
                     disabled={safeStorePage <= 1}
                     onClick={() => setStorePage(safeStorePage - 1)}
-                    className="px-3 py-1.5 rounded-md border border-slate-300 disabled:opacity-40 hover:bg-slate-100">
+                    className="px-3 py-1.5 rounded-md border border-line-strong disabled:opacity-40 hover:bg-surface-muted">
               Previous
             </button>
             <button data-testid="stores-next-page"
                     disabled={safeStorePage >= storePageCount}
                     onClick={() => setStorePage(safeStorePage + 1)}
-                    className="px-3 py-1.5 rounded-md border border-slate-300 disabled:opacity-40 hover:bg-slate-100">
+                    className="px-3 py-1.5 rounded-md border border-line-strong disabled:opacity-40 hover:bg-surface-muted">
               Next
             </button>
           </span>
@@ -1236,8 +1252,8 @@ export default function BroadcastConsole() {
 
 
       {confirmOpen && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" data-testid="confirm-modal">
-          <div className="bg-white rounded-md shadow-xl max-w-md w-full p-6">
+        <div className="fixed inset-0 z-50 scrim flex items-center justify-center p-4" data-testid="confirm-modal">
+          <div className="glass shadow-2xl max-w-md w-full p-6">
             <div className="flex items-start gap-3 mb-3">
               <div className="p-2 rounded bg-red-100 text-red-700"><Radio size={20}/></div>
               <div>
@@ -1245,17 +1261,17 @@ export default function BroadcastConsole() {
                 {/* A link-only broadcast reaches nobody in a shop, and telling
                     an operator otherwise at the moment they confirm is the
                     worst place to be wrong. */}
-                <p className="text-sm text-slate-500" data-testid="confirm-delivery-copy">
+                <p className="text-sm text-muted" data-testid="confirm-delivery-copy">
                   {targetMode === ONLY_WITH_LINK
                     ? "Your voice will be broadcast to approved web listeners in real time. No Store will play it."
                     : "Your voice will be transmitted to the selected stores in real-time."}
                 </p>
               </div>
             </div>
-            <div className="bg-slate-50 border border-slate-200 rounded-md p-3 text-sm space-y-1 my-3">
-              <div><span className="text-slate-500">Campaign:</span> <span className="font-medium">{campaign}</span></div>
-              <div><span className="text-slate-500">Target Mode:</span> <span className="font-medium">{ALL_TARGET_MODES.find((m) => m.value === targetMode)?.label}</span></div>
-              <div><span className="text-slate-500">Stores:</span> <span className="font-medium">{targetIds.length}</span> ({onlineCount} online, {offlineCount} offline)</div>
+            <div className="bg-surface-muted border border-line rounded-md p-3 text-sm space-y-1 my-3">
+              <div><span className="text-muted">Campaign:</span> <span className="font-medium">{campaign}</span></div>
+              <div><span className="text-muted">Target Mode:</span> <span className="font-medium">{ALL_TARGET_MODES.find((m) => m.value === targetMode)?.label}</span></div>
+              <div><span className="text-muted">Stores:</span> <span className="font-medium">{targetIds.length}</span> ({onlineCount} online, {offlineCount} offline)</div>
             </div>
             {targetMode === "all" && (
               <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2 mb-2">
@@ -1263,7 +1279,7 @@ export default function BroadcastConsole() {
               </div>
             )}
             <div className="flex gap-2 mt-4">
-              <button data-testid="confirm-cancel-btn" onClick={() => setConfirmOpen(false)} className="flex-1 px-4 py-2 rounded-md border border-slate-300 text-sm hover:bg-slate-50">Cancel</button>
+              <button data-testid="confirm-cancel-btn" onClick={() => setConfirmOpen(false)} className="flex-1 px-4 py-2 rounded-md border border-line-strong text-sm hover:bg-surface-muted">Cancel</button>
               <button data-testid="confirm-start-btn" onClick={startBroadcast} disabled={busy}
                       className="flex-1 px-4 py-2 rounded-md bg-red-600 hover:bg-red-700 text-white text-sm font-semibold flex items-center justify-center gap-2">
                 <Play size={16}/> {busy ? "Starting…" : "Go Live"}
@@ -1316,21 +1332,21 @@ function LiveTargetAction({
             <button type="button" data-testid={`resume-store-${code}`}
                     onClick={onResume} disabled={disabled || busy}
                     title={`Bring ${code} back into this broadcast. It rejoins at the live edge.`}
-                    className="rounded border border-emerald-300 bg-white px-2 py-1 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-40">
+                    className="rounded border border-emerald-300 bg-surface px-2 py-1 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-40">
               {busy ? "Resuming…" : "Resume"}
             </button>
           ) : (
             <button type="button" data-testid={`pause-store-${code}`}
                     onClick={onPause} disabled={disabled || busy}
                     title={`Silence ${code} without taking it out. Its place in this broadcast is kept.`}
-                    className="rounded border border-amber-300 bg-white px-2 py-1 text-xs font-semibold text-amber-800 hover:bg-amber-50 disabled:opacity-40">
+                    className="rounded border border-amber-300 bg-surface px-2 py-1 text-xs font-semibold text-amber-800 hover:bg-amber-50 disabled:opacity-40">
               {busy ? "Pausing…" : "Pause"}
             </button>
           )}
           <button type="button" data-testid={`remove-store-${code}`}
                   onClick={onRemove} disabled={disabled || busy}
                   title={`Take ${code} out of this broadcast. The other Stores keep playing.`}
-                  className="rounded border border-red-300 bg-white px-2 py-1 text-xs font-semibold text-red-800 hover:bg-red-50 disabled:opacity-40">
+                  className="rounded border border-red-300 bg-surface px-2 py-1 text-xs font-semibold text-red-800 hover:bg-red-50 disabled:opacity-40">
             {busy ? "Removing…" : "Remove"}
           </button>
           {(settling || paused) && (
@@ -1341,22 +1357,44 @@ function LiveTargetAction({
             </span>
           )}
         </div>
-      ) : busyElsewhere ? (
-        // Says WHAT, never WHO - the same rule the In-use badge follows.
-        <span data-testid={`add-blocked-${code}`} className="text-xs text-amber-800">
-          In another broadcast
-        </span>
-      ) : !online ? (
-        <span data-testid={`add-blocked-${code}`} className="text-xs text-slate-500">
-          Receiver offline
-        </span>
       ) : (
-        <button type="button" data-testid={`add-store-${code}`}
-                onClick={onAdd} disabled={disabled || busy}
-                title={`Add ${code} to this broadcast. It joins at the live edge, not from the beginning.`}
-                className="rounded border border-blue-300 bg-white px-2 py-1 text-xs font-semibold text-blue-800 hover:bg-blue-50 disabled:opacity-40">
-          {busy ? "Adding…" : "Add"}
-        </button>
+        // THE BUTTON IS ALWAYS ON THE ROW, and says when it cannot be used.
+        //
+        // It used to be replaced by a line of text whenever the shop could
+        // not join, and on an estate where every Receiver was offline that
+        // left a table with no actions in it at all - which reads as a
+        // missing feature rather than as forty shops being unreachable. The
+        // control stays, disabled, with the reason beside it: the operator
+        // can see what they would press and why they cannot.
+        //
+        // Disabled, not merely warned: the server refuses a Store with no
+        // Receiver, and a button that always sends the request would turn
+        // "this shop is unreachable" into a red error the operator has to
+        // read twice to learn the same thing.
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" data-testid={`add-store-${code}`}
+                  onClick={onAdd}
+                  disabled={disabled || busy || busyElsewhere || !online}
+                  title={busyElsewhere
+                    ? `${code} is in another broadcast.`
+                    : !online
+                    ? `${code} has no Receiver connected, so it cannot join a broadcast.`
+                    : `Add ${code} to this broadcast. It joins at the live edge, not from the beginning.`}
+                  className="rounded border border-blue-300 bg-surface px-2 py-1 text-xs font-semibold text-blue-800 hover:bg-blue-50 disabled:opacity-40">
+            {busy ? "Adding…" : "Add"}
+          </button>
+          {/* Says WHAT, never WHO - the same rule the In-use badge follows. */}
+          {busyElsewhere && (
+            <span data-testid={`add-blocked-${code}`} className="text-xs text-amber-800">
+              In another broadcast
+            </span>
+          )}
+          {!busyElsewhere && !online && (
+            <span data-testid={`add-blocked-${code}`} className="text-xs text-muted">
+              Receiver offline
+            </span>
+          )}
+        </div>
       )}
       {error && (
         // On the row, because an operator adding one shop out of forty needs
@@ -1371,10 +1409,10 @@ function LiveTargetAction({
 }
 
 function StatCard({ label, value, testid, icon, color }) {
-  const textColor = color === "emerald" ? "text-emerald-700" : "text-slate-900";
+  const textColor = color === "emerald" ? "text-emerald-700" : "text-strong";
   return (
-    <div className="border border-slate-200 rounded-md p-2.5" data-testid={testid}>
-      <div className="text-[10px] uppercase tracking-widest text-slate-500 flex items-center gap-1">{icon}{label}</div>
+    <div className="border border-line rounded-md p-2.5" data-testid={testid}>
+      <div className="text-[10px] uppercase tracking-widest text-muted flex items-center gap-1">{icon}{label}</div>
       <div className={`text-xl font-bold ${textColor} font-mono`}>{value}</div>
     </div>
   );
@@ -1401,9 +1439,9 @@ function PickerTh({ column, label, sort, onSort }) {
         aria-sort={active ? (sort.dir === "desc" ? "descending" : "ascending")
                           : "none"}>
       <button type="button" onClick={toggle} data-testid={`picker-sort-${column}`}
-              className="inline-flex items-center gap-1 hover:text-slate-900">
+              className="inline-flex items-center gap-1 hover:text-strong">
         {label}
-        <span aria-hidden="true" className={active ? "text-slate-900" : "text-slate-300"}>
+        <span aria-hidden="true" className={active ? "text-strong" : "text-faint"}>
           {active ? (sort.dir === "desc" ? "↓" : "↑") : "⇅"}
         </span>
       </button>

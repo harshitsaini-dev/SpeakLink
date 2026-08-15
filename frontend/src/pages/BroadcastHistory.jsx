@@ -142,12 +142,12 @@ export default function BroadcastHistory() {
   return (
     <div className="space-y-4" data-testid="history-page">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold tracking-tight text-slate-900">Broadcast History</h1>
+        <h1 className="text-2xl font-bold tracking-tight text-strong">Broadcast History</h1>
         <div className="flex items-center gap-2">
           <ExportButton dataset="broadcast-history" list={list}
                         testId="history-export" />
           <button data-testid="history-refresh-btn" onClick={list.reload}
-                className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
+                className="inline-flex items-center gap-1 px-3 py-2 border border-line-strong rounded-md text-sm hover:bg-surface-muted">
           <RefreshCw size={14} /> Refresh
         </button>
         </div>
@@ -200,12 +200,12 @@ export default function BroadcastHistory() {
             <>
               <button type="button" data-testid="history-archive-selected" disabled={busy}
                       onClick={() => runBulk("/broadcast/history/archive")}
-                      className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-300 rounded bg-white hover:bg-slate-50 disabled:opacity-40">
+                      className="row-action">
                 <Archive size={12} /> Archive
               </button>
               <button type="button" data-testid="history-unarchive-selected" disabled={busy}
                       onClick={() => runBulk("/broadcast/history/unarchive")}
-                      className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-300 rounded bg-white hover:bg-slate-50 disabled:opacity-40">
+                      className="row-action">
                 <ArchiveRestore size={12} /> Unarchive
               </button>
             </>
@@ -213,7 +213,7 @@ export default function BroadcastHistory() {
           {can("broadcast_history.delete_permanently") && (
             <button type="button" data-testid="history-delete-selected" disabled={busy}
                     onClick={() => setConfirming(true)}
-                    className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-300 text-red-700 rounded bg-white hover:bg-red-50 disabled:opacity-40">
+                    className="row-action row-action-destructive">
               <Trash2 size={12} /> Delete Permanently
             </button>
           )}
@@ -227,9 +227,9 @@ export default function BroadcastHistory() {
         </div>
       )}
 
-      <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
+      <div className="glass rounded-xl overflow-x-auto">
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
+          <thead className="bg-surface-muted text-left text-[11px] uppercase tracking-wider text-muted border-b border-line">
             <tr>
               <th className="px-3 py-2 w-8"></th>
               <SortableTh column="id" label="#" list={list} />
@@ -248,28 +248,28 @@ export default function BroadcastHistory() {
                        emptyText="No broadcast sessions match these filters." />
             {!list.loading && !list.error && list.items.map((s) => (
               <tr key={s.id} data-testid={`history-row-${s.id}`}
-                  className="border-b border-slate-100 even:bg-slate-50/50">
+                  className="border-b border-line even:bg-surface-alt">
                 <td className="px-3 py-2">
                   <input type="checkbox" data-testid={`history-select-${s.id}`}
                          checked={selection.isSelected(s.id)}
                          disabled={selection.mode === "filtered"}
                          onChange={() => selection.toggleRow(s.id)} />
                 </td>
-                <td className="px-3 py-2 font-mono text-xs text-slate-500 cursor-pointer"
+                <td className="px-3 py-2 font-mono text-xs text-muted cursor-pointer"
                     onClick={() => openDetail(s.id)}>#{s.id}</td>
                 <td className="px-3 py-2 font-medium cursor-pointer hover:text-blue-700"
                     onClick={() => openDetail(s.id)}>
                   {s.campaign_name}
                   {s.archived_at && (
                     <span data-testid={`history-archived-${s.id}`}
-                          className="ml-2 inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-slate-100 text-slate-600 border border-slate-300">
+                          className="ml-2 inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-surface-muted text-body border border-line-strong">
                       Archived
                     </span>
                   )}
                 </td>
-                <td className="px-3 py-2 text-xs text-slate-600 uppercase tracking-wider">{s.target_mode}</td>
+                <td className="px-3 py-2 text-xs text-body uppercase tracking-wider">{s.target_mode}</td>
                 <td className="px-3 py-2">{s.selected_store_count}{" "}
-                  <span className="text-slate-400 text-xs">({s.online_store_count} online)</span></td>
+                  <span className="text-faint text-xs">({s.online_store_count} online)</span></td>
                 <td className="px-3 py-2 text-xs">{fmt(s.started_at)}</td>
                 <td className="px-3 py-2 font-mono text-xs">{dur(s.started_at, s.ended_at)}</td>
                 <td className="px-3 py-2"><StatusBadge status={s.status} /></td>
@@ -310,20 +310,20 @@ export default function BroadcastHistory() {
       )}
 
       {open && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" data-testid="history-detail-modal">
-          <div className="bg-white rounded-md shadow-xl max-w-3xl w-full max-h-[80vh] flex flex-col">
-            <div className="p-5 border-b border-slate-200 flex items-center justify-between">
+        <div className="fixed inset-0 z-50 scrim flex items-center justify-center p-4" data-testid="history-detail-modal">
+          <div className="glass shadow-2xl max-w-3xl w-full max-h-[80vh] flex flex-col">
+            <div className="p-5 border-b border-line flex items-center justify-between">
               <div>
-                <div className="text-xs text-slate-500 uppercase tracking-widest">Session #{open.id}</div>
+                <div className="text-xs text-muted uppercase tracking-widest">Session #{open.id}</div>
                 <div className="text-lg font-semibold">{open.campaign_name}</div>
               </div>
-              <button data-testid="close-detail-btn" onClick={() => setOpen(null)} className="text-slate-500 hover:text-slate-900">✕</button>
+              <button data-testid="close-detail-btn" onClick={() => setOpen(null)} className="text-muted hover:text-strong">✕</button>
             </div>
-            <div className="p-5 grid grid-cols-2 md:grid-cols-4 gap-3 border-b border-slate-200 text-sm">
-              <div><div className="text-[10px] uppercase text-slate-500">Mode</div><div>{open.target_mode}</div></div>
-              <div><div className="text-[10px] uppercase text-slate-500">Started</div><div>{fmt(open.started_at)}</div></div>
-              <div><div className="text-[10px] uppercase text-slate-500">Ended</div><div>{fmt(open.ended_at)}</div></div>
-              <div><div className="text-[10px] uppercase text-slate-500">Status</div><StatusBadge status={open.status}/></div>
+            <div className="p-5 grid grid-cols-2 md:grid-cols-4 gap-3 border-b border-line text-sm">
+              <div><div className="text-[10px] uppercase text-muted">Mode</div><div>{open.target_mode}</div></div>
+              <div><div className="text-[10px] uppercase text-muted">Started</div><div>{fmt(open.started_at)}</div></div>
+              <div><div className="text-[10px] uppercase text-muted">Ended</div><div>{fmt(open.ended_at)}</div></div>
+              <div><div className="text-[10px] uppercase text-muted">Status</div><StatusBadge status={open.status}/></div>
             </div>
             <div className="p-5 overflow-y-auto">
               {/* Searched and sorted here, in the browser.
@@ -333,7 +333,7 @@ export default function BroadcastHistory() {
                   failed. The whole target list is already loaded, so ordering
                   and filtering it here covers all of it. */}
               <div className="flex flex-wrap items-center gap-2 mb-2">
-                <div className="text-xs uppercase text-slate-500 mr-auto">
+                <div className="text-xs uppercase text-muted mr-auto">
                   Targets ({visibleTargets.length}
                   {visibleTargets.length !== (open.targets?.length || 0)
                     && ` of ${open.targets?.length || 0}`})
@@ -341,10 +341,10 @@ export default function BroadcastHistory() {
                 <input value={targetQuery} data-testid="history-target-search"
                        onChange={(event) => setTargetQuery(event.target.value)}
                        placeholder="Store code or name…"
-                       className="rounded border border-slate-300 px-2 py-1 text-xs" />
+                       className="rounded border border-line-strong px-2 py-1 text-xs" />
                 <select value={targetStatus} data-testid="history-target-status"
                         onChange={(event) => setTargetStatus(event.target.value)}
-                        className="rounded border border-slate-300 bg-white px-2 py-1 text-xs">
+                        className="rounded border border-line-strong bg-surface px-2 py-1 text-xs">
                   <option value="">Any play status</option>
                   <option value="playing">Playing</option>
                   <option value="stopped">Stopped</option>
@@ -353,7 +353,7 @@ export default function BroadcastHistory() {
                 </select>
               </div>
               <table className="w-full text-sm">
-                <thead className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
+                <thead className="text-left text-[11px] uppercase tracking-wider text-muted border-b border-line">
                   <tr>
                     <TargetTh column="store_name" label="Store" sort={targetSort}
                               onSort={setTargetSort} />
@@ -369,12 +369,12 @@ export default function BroadcastHistory() {
                 </thead>
                 <tbody>
                   {visibleTargets.map((t) => (
-                    <tr key={t.id} className="border-b border-slate-100" data-testid={`history-target-${t.store_id}`}>
+                    <tr key={t.id} className="border-b border-line" data-testid={`history-target-${t.store_id}`}>
                       <td className="px-2 py-1.5 text-xs">
                         {t.store_name ? (
                           <>
                             <span className="font-medium">{t.store_name}</span>
-                            {t.store_code && <span className="font-mono text-slate-500"> ({t.store_code})</span>}
+                            {t.store_code && <span className="font-mono text-muted"> ({t.store_code})</span>}
                             {t.store_deleted && (
                               <span data-testid={`history-target-deleted-badge-${t.store_id}`}
                                     className="ml-1 inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-red-50 text-red-700 border border-red-200">
@@ -408,7 +408,7 @@ export default function BroadcastHistory() {
                   trusted with the history itself. */}
               <div className="mt-6" data-testid="history-chat">
                 <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <div className="text-xs uppercase text-slate-500">
+                  <div className="text-xs uppercase text-muted">
                     Chat ({visibleChat.length}
                     {visibleChat.length !== (chat?.messages?.length || 0)
                       && ` of ${chat?.messages?.length || 0}`})
@@ -420,13 +420,13 @@ export default function BroadcastHistory() {
                     <input id="history-chat-search" data-testid="history-chat-search"
                            value={chatQuery} onChange={(e) => setChatQuery(e.target.value)}
                            placeholder="Search messages or names…"
-                           className="rounded border border-slate-300 px-2 py-1 text-xs" />
+                           className="rounded border border-line-strong px-2 py-1 text-xs" />
                     <label htmlFor="history-chat-filter" className="sr-only">
                       Filter this transcript
                     </label>
                     <select id="history-chat-filter" data-testid="history-chat-filter"
                             value={chatKind} onChange={(e) => setChatKind(e.target.value)}
-                            className="rounded border border-slate-300 bg-white px-1 py-1 text-xs">
+                            className="rounded border border-line-strong bg-surface px-1 py-1 text-xs">
                       {CHAT_FILTERS.map((option) => (
                         <option key={option.value} value={option.value}>{option.label}</option>
                       ))}
@@ -434,15 +434,15 @@ export default function BroadcastHistory() {
                   </div>
                 </div>
                 {chat === null && (
-                  <p className="text-sm text-slate-500">Loading the transcript…</p>
+                  <p className="text-sm text-muted">Loading the transcript…</p>
                 )}
                 {chat?.unavailable && (
-                  <p className="text-sm text-slate-500" data-testid="history-chat-unavailable">
+                  <p className="text-sm text-muted" data-testid="history-chat-unavailable">
                     The transcript for this Broadcast could not be read.
                   </p>
                 )}
                 {chat && !chat.unavailable && chat.messages.length === 0 && (
-                  <p className="text-sm text-slate-500" data-testid="history-chat-empty">
+                  <p className="text-sm text-muted" data-testid="history-chat-empty">
                     Nobody said anything during this Broadcast.
                   </p>
                 )}
@@ -451,7 +451,7 @@ export default function BroadcastHistory() {
                   // Said differently from an empty transcript on purpose: "no
                   // matches" and "nobody spoke" are different facts about the
                   // Broadcast.
-                  <p className="text-sm text-slate-500" data-testid="history-chat-no-matches">
+                  <p className="text-sm text-muted" data-testid="history-chat-no-matches">
                     No messages match that search.
                   </p>
                 )}
@@ -461,9 +461,9 @@ export default function BroadcastHistory() {
                          className={`rounded border px-2 py-1.5 text-sm ${
                            message.author_kind === "HOST"
                              ? "border-blue-100 bg-blue-50"
-                             : "border-slate-100 bg-slate-50"}`}>
+                             : "border-line bg-surface-muted"}`}>
                       <div className="flex items-baseline gap-2">
-                        <span className="text-xs font-semibold text-slate-800">
+                        <span className="text-xs font-semibold text-strong">
                           {message.author_kind === "HOST"
                             ? `${message.author_name} (host)` : message.author_name}
                         </span>
@@ -472,7 +472,7 @@ export default function BroadcastHistory() {
                             private
                           </span>
                         )}
-                        <span className="ml-auto font-mono text-[10px] text-slate-400">
+                        <span className="ml-auto font-mono text-[10px] text-faint">
                           {fmt(message.created_at)}
                         </span>
                       </div>
@@ -482,18 +482,18 @@ export default function BroadcastHistory() {
                       )}
                       {message.deleted && (
                         <p data-testid={`history-chat-removed-${message.id}`}
-                           className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                           className="text-[11px] font-semibold uppercase tracking-wider text-muted">
                           Removed by the host
                         </p>
                       )}
                       {message.deleted && message.body ? (
                         <p data-testid={`history-chat-removed-body-${message.id}`}
-                           className="whitespace-pre-wrap break-words rounded border border-dashed border-slate-300 bg-slate-50 px-1.5 py-1 text-slate-500 line-through">
+                           className="whitespace-pre-wrap break-words rounded border border-dashed border-line-strong bg-surface-muted px-1.5 py-1 text-muted line-through">
                           {message.body}
                         </p>
                       ) : null}
                       {!message.deleted && message.body ? (
-                        <p className="whitespace-pre-wrap break-words text-slate-800">
+                        <p className="whitespace-pre-wrap break-words text-strong">
                           {message.body}
                         </p>
                       ) : null}
@@ -538,14 +538,14 @@ function HistoryChatImage({ sessionId, messageId }) {
   }, [sessionId, messageId]);
 
   if (failed) {
-    return <p className="text-xs text-slate-500">This image is no longer stored.</p>;
+    return <p className="text-xs text-muted">This image is no longer stored.</p>;
   }
-  if (!url) return <div className="h-20 w-28 animate-pulse rounded bg-slate-100" />;
+  if (!url) return <div className="h-20 w-28 animate-pulse rounded bg-surface-muted" />;
   return (
     <a href={url} target="_blank" rel="noreferrer">
       <img data-testid={`history-chat-image-${messageId}`} src={url}
            alt="Sent in chat"
-           className="mt-1 max-h-40 rounded border border-slate-200 object-contain" />
+           className="mt-1 max-h-40 rounded border border-line object-contain" />
     </a>
   );
 }
@@ -565,9 +565,9 @@ function TargetTh({ column, label, sort, onSort }) {
         aria-sort={active ? (sort.dir === "desc" ? "descending" : "ascending")
                           : "none"}>
       <button type="button" onClick={toggle} data-testid={`target-sort-${column}`}
-              className="inline-flex items-center gap-1 hover:text-slate-900">
+              className="inline-flex items-center gap-1 hover:text-strong">
         {label}
-        <span aria-hidden="true" className={active ? "text-slate-900" : "text-slate-300"}>
+        <span aria-hidden="true" className={active ? "text-strong" : "text-faint"}>
           {active ? (sort.dir === "desc" ? "↓" : "↑") : "⇅"}
         </span>
       </button>

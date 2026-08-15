@@ -77,9 +77,9 @@ const TONE_CLASS = {
   ok: "text-emerald-700",
   // Amber, not red: needing an output re-selected is a task, not a fault.
   warn: "text-amber-700",
-  pending: "text-slate-500",
+  pending: "text-muted",
   error: "text-red-700",
-  muted: "text-slate-400",
+  muted: "text-faint",
 };
 
 export default function StoreAudioControl({
@@ -119,8 +119,8 @@ export default function StoreAudioControl({
         onClick={() => onMuteToggle(!muted)}
         className={`inline-flex items-center rounded border px-1.5 py-1 ${
           muted ? "border-red-400 bg-red-100 text-red-800"
-                : "border-slate-300 text-slate-600"
-        } ${unavailable ? "opacity-40 cursor-not-allowed" : "hover:bg-slate-50"}`}
+                : "border-line-strong text-body"
+        } ${unavailable ? "opacity-40 cursor-not-allowed" : "hover:bg-surface-muted"}`}
       >
         {muted ? <VolumeX size={13} /> : <Volume2 size={13} />}
       </button>
@@ -144,7 +144,7 @@ export default function StoreAudioControl({
 
       <span
         data-testid={`store-volume-value-${store.store_code}`}
-        className="w-9 text-right text-xs font-mono text-slate-700"
+        className="w-9 text-right text-xs font-mono text-body"
       >
         {muted ? "—" : `${requested}%`}
       </span>

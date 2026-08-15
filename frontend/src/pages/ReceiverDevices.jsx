@@ -38,7 +38,7 @@ function RoleBadge({ role }) {
         "inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold uppercase tracking-wide " +
         (isPrimary
           ? "bg-blue-50 text-blue-800 border border-blue-200"
-          : "bg-slate-100 text-slate-600 border border-slate-200")
+          : "bg-surface-muted text-body border border-line")
       }
     >
       {isPrimary && <Star size={11} aria-hidden="true" />}
@@ -84,7 +84,7 @@ function SetupProgress({ progress }) {
         return (
           <li key={stage} data-testid={`setup-stage-${stage}`}
               data-reached={done ? "true" : "false"}
-              className={done ? "text-emerald-800" : "text-slate-400"}>
+              className={done ? "text-emerald-800" : "text-faint"}>
             <span aria-hidden="true">{done ? "✓" : "○"}</span>{" "}
             {STAGE_LABELS[stage]}
             {!done && <span className="sr-only"> (not proved)</span>}
@@ -121,24 +121,24 @@ function EnrolmentCodePanel({ issued, record, onDismiss }) {
   const tone = used
     ? "border-emerald-200 bg-emerald-50"
     : expired
-      ? "border-slate-300 bg-slate-50"
+      ? "border-line-strong bg-surface-muted"
       : "border-amber-200 bg-amber-50";
   const badgeTone = used
     ? "border-emerald-300 bg-emerald-100 text-emerald-900"
     : expired
-      ? "border-slate-300 bg-slate-200 text-slate-700"
+      ? "border-line-strong bg-surface-muted text-body"
       : "border-amber-300 bg-amber-100 text-amber-900";
 
   return (
     <div data-testid="enrolment-code-panel" className={`rounded border px-3 py-2 ${tone}`}>
       <div className="mb-1 flex items-center gap-2 text-xs">
-        <span className="font-medium text-slate-700">One-time enrolment code</span>
+        <span className="font-medium text-body">One-time enrolment code</span>
         <span data-testid="enrolment-code-state"
               className={`rounded border px-2 py-0.5 font-medium ${badgeTone}`}>
           {state}
         </span>
         {!used && !expired && (
-          <span data-testid="enrolment-code-countdown" className="text-slate-600"
+          <span data-testid="enrolment-code-countdown" className="text-body"
                 aria-live="polite">
             expires in {minutes}:{seconds}
           </span>
@@ -153,7 +153,7 @@ function EnrolmentCodePanel({ issued, record, onDismiss }) {
             This code was used. It cannot be used again and cannot be shown again.
           </p>
           {record?.device_public_id && (
-            <p className="mt-1 text-xs text-slate-700">
+            <p className="mt-1 text-xs text-body">
               Enrolled Device:{" "}
               <code data-testid="enrolled-device-public-id">{record.device_public_id}</code>
             </p>
@@ -162,7 +162,7 @@ function EnrolmentCodePanel({ issued, record, onDismiss }) {
       ) : expired ? (
         // The value is removed from the DOM entirely once it can no longer be
         // used. A dead secret left on screen is still a secret on screen.
-        <p className="text-sm text-slate-700" data-testid="enrolment-code-expired">
+        <p className="text-sm text-body" data-testid="enrolment-code-expired">
           This code has run out of time and was removed. Generate a new one and
           use it straight away.
         </p>
@@ -240,7 +240,7 @@ function ShownOnce({ label, value, testId, onDismiss }) {
       <div className="text-sm font-semibold text-amber-900">{label}</div>
       <code
         data-testid={`${testId}-value`}
-        className="block break-all bg-white border border-amber-200 rounded px-3 py-2 font-mono text-sm"
+        className="block break-all bg-surface border border-amber-200 rounded px-3 py-2 font-mono text-sm"
       >
         {value}
       </code>
@@ -260,7 +260,7 @@ function ShownOnce({ label, value, testId, onDismiss }) {
           type="button"
           data-testid={`${testId}-copy`}
           onClick={copy}
-          className="px-3 py-1.5 border border-amber-500 bg-white rounded text-xs font-semibold hover:bg-amber-100"
+          className="px-3 py-1.5 border border-amber-500 bg-surface rounded text-xs font-semibold hover:bg-amber-100"
         >
           {copied ? "Copied" : "Copy code"}
         </button>
@@ -488,12 +488,12 @@ export default function ReceiverDevices() {
           <Link
             to="/stores"
             data-testid="back-to-stores"
-            className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-800"
+            className="row-action"
           >
             <ArrowLeft size={12} /> Back to Stores
           </Link>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Receiver Devices</h1>
-          <p className="text-sm text-slate-500">
+          <h1 className="text-2xl font-bold text-strong tracking-tight">Receiver Devices</h1>
+          <p className="text-sm text-muted">
             The computers enrolled in this Store. One primary plays announcements; standbys stay
             connected and play nothing. Credentials are shown once and never stored here.
           </p>
@@ -502,8 +502,8 @@ export default function ReceiverDevices() {
           <input value={deviceQuery} data-testid="devices-search"
                  onChange={(event) => setDeviceQuery(event.target.value)}
                  placeholder="Device name, id or hostname…"
-                 className="px-3 py-2 border border-slate-300 rounded-md text-sm min-w-[220px]" />
-          <label className="inline-flex items-center gap-1.5 px-3 py-2 border border-slate-300 rounded-md text-sm">
+                 className="px-3 py-2 border border-line-strong rounded-md text-sm min-w-[220px]" />
+          <label className="inline-flex items-center gap-1.5 px-3 py-2 border border-line-strong rounded-md text-sm">
             <input
               type="checkbox"
               data-testid="show-archived-toggle"
@@ -522,7 +522,7 @@ export default function ReceiverDevices() {
           <button
             data-testid="devices-refresh-btn"
             onClick={load}
-            className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50"
+            className="inline-flex items-center gap-1 px-3 py-2 border border-line-strong rounded-md text-sm hover:bg-surface-muted"
           >
             <RefreshCw size={14} /> Refresh
           </button>
@@ -581,10 +581,10 @@ export default function ReceiverDevices() {
         </div>
       )}
 
-      <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
+      <div className="glass rounded-xl overflow-x-auto">
         <table className="w-full text-sm">
           <caption className="sr-only">Receiver Devices enrolled in this Store</caption>
-          <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
+          <thead className="bg-surface-muted text-left text-[11px] uppercase tracking-wider text-muted border-b border-line">
             <tr>
               <DeviceTh column="display_name" label="Device" sort={deviceSort}
                         onSort={setDeviceSort} />
@@ -604,14 +604,14 @@ export default function ReceiverDevices() {
           <tbody>
             {loading && (
               <tr>
-                <td colSpan={7} data-testid="devices-loading" className="px-3 py-6 text-center text-slate-500">
+                <td colSpan={7} data-testid="devices-loading" className="px-3 py-6 text-center text-muted">
                   Loading…
                 </td>
               </tr>
             )}
             {!loading && visibleDevices.length === 0 && (
               <tr>
-                <td colSpan={7} data-testid="devices-empty" className="px-3 py-6 text-center text-slate-500">
+                <td colSpan={7} data-testid="devices-empty" className="px-3 py-6 text-center text-muted">
                   {devices.length === 0
                     ? "No Receiver Devices are enrolled in this Store yet. Create an enrolment code and run the Agent on that computer."
                     : "No active Devices. Check “Show Archived” to see retired ones."}
@@ -627,10 +627,10 @@ export default function ReceiverDevices() {
               <tr
                 key={device.public_id}
                 data-testid={`device-row-${device.public_id}`}
-                className={`border-b border-slate-100 even:bg-slate-50/50 ${device.archived_at ? "opacity-70" : ""}`}
+                className={`border-b border-line even:bg-surface-alt ${device.archived_at ? "opacity-70" : ""}`}
               >
                 <td className="px-3 py-2 font-medium">{device.display_name}</td>
-                <td className="px-3 py-2 font-mono text-xs text-slate-500" title="Shortened identifier">
+                <td className="px-3 py-2 font-mono text-xs text-muted" title="Shortened identifier">
                   {shortId(device.public_id)}
                 </td>
                 <td className="px-3 py-2">
@@ -639,7 +639,7 @@ export default function ReceiverDevices() {
                 <td className="px-3 py-2">
                   <span
                     data-testid={`device-status-${device.public_id}`}
-                    className="text-xs uppercase tracking-wide text-slate-600"
+                    className="text-xs uppercase tracking-wide text-body"
                   >
                     {device.status}
                   </span>
@@ -650,10 +650,10 @@ export default function ReceiverDevices() {
                     </span>
                   )}
                 </td>
-                <td className="px-3 py-2 text-xs text-slate-500">
+                <td className="px-3 py-2 text-xs text-muted">
                   {(device.enrolled_at || "").slice(0, 16).replace("T", " ")}
                 </td>
-                <td className="px-3 py-2 text-xs text-slate-500" data-testid={`device-archived-at-${device.public_id}`}>
+                <td className="px-3 py-2 text-xs text-muted" data-testid={`device-archived-at-${device.public_id}`}>
                   {device.archived_at ? device.archived_at.slice(0, 16).replace("T", " ") : "—"}
                 </td>
                 <td className="px-3 py-2 text-right space-x-1 whitespace-nowrap">
@@ -664,7 +664,7 @@ export default function ReceiverDevices() {
                       disabled={busy.startsWith("promote-")}
                       title="Make this the primary Device"
                       aria-label={`Make ${device.display_name} the primary Device`}
-                      className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-blue-200 text-blue-800 rounded hover:bg-blue-50 disabled:opacity-50"
+                      className="row-action row-action-info"
                     >
                       <Star size={12} /> Promote
                     </button>
@@ -676,7 +676,7 @@ export default function ReceiverDevices() {
                       disabled={busy.startsWith("rotate-")}
                       title="Rotate this Device's credential"
                       aria-label={`Rotate the credential for ${device.display_name}`}
-                      className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-amber-50 disabled:opacity-50"
+                      className="row-action row-action-caution"
                     >
                       <KeyRound size={12} /> Rotate
                     </button>
@@ -688,7 +688,7 @@ export default function ReceiverDevices() {
                       disabled={busy.startsWith("disable-")}
                       title="Disable this Device"
                       aria-label={`Disable ${device.display_name}`}
-                      className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50"
+                      className="row-action"
                     >
                       <Ban size={12} /> Disable
                     </button>
@@ -700,7 +700,7 @@ export default function ReceiverDevices() {
                       disabled={busy.startsWith("revoke-")}
                       title="Revoke this Device permanently"
                       aria-label={`Revoke ${device.display_name} permanently`}
-                      className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-200 text-red-700 rounded hover:bg-red-50 disabled:opacity-50"
+                      className="row-action row-action-danger"
                     >
                       <Trash2 size={12} /> Revoke
                     </button>
@@ -712,7 +712,7 @@ export default function ReceiverDevices() {
                       disabled={busy.startsWith("archive-")}
                       title="Archive this Device"
                       aria-label={`Archive ${device.display_name}`}
-                      className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50"
+                      className="row-action"
                     >
                       <Archive size={12} /> Archive
                     </button>
@@ -723,7 +723,7 @@ export default function ReceiverDevices() {
                       disabled={busy.startsWith("restore-")}
                       title="Restore this Device"
                       aria-label={`Restore ${device.display_name}`}
-                      className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50"
+                      className="row-action"
                     >
                       <ArchiveRestore size={12} /> Restore
                     </button>
@@ -737,7 +737,7 @@ export default function ReceiverDevices() {
                       onClick={() => setDeletingDevice(device)}
                       title="Permanently delete this Device"
                       aria-label={`Permanently delete ${device.display_name}`}
-                      className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50 disabled:opacity-50"
+                      className="row-action row-action-destructive"
                     >
                       <Trash2 size={12} /> Delete
                     </button>
@@ -765,7 +765,7 @@ export default function ReceiverDevices() {
         />
       )}
 
-      <p className="text-xs text-slate-400">
+      <p className="text-xs text-faint">
         Playing here means a Device accepted and decoded audio. It does not mean anyone heard it -
         only LinkGuard acoustic verification can establish that.
       </p>
@@ -806,7 +806,7 @@ function DeleteDeviceDialog({ device, onCancel, onConfirm }) {
       </h2>
 
       {summary === null && !failed && (
-        <p className="text-sm text-slate-600" data-testid="delete-device-checking">
+        <p className="text-sm text-body" data-testid="delete-device-checking">
           Checking what still refers to this Device…
         </p>
       )}
@@ -817,7 +817,7 @@ function DeleteDeviceDialog({ device, onCancel, onConfirm }) {
       )}
       {summary && (
         <>
-          <p className="text-sm text-slate-700" data-testid="delete-device-summary">
+          <p className="text-sm text-body" data-testid="delete-device-summary">
             {summary.explanation}
           </p>
           {!summary.deletable && (
@@ -881,9 +881,9 @@ function DeviceTh({ column, label, sort, onSort }) {
         aria-sort={active ? (sort.dir === "desc" ? "descending" : "ascending")
                           : "none"}>
       <button type="button" onClick={toggle} data-testid={`device-sort-${column}`}
-              className="inline-flex items-center gap-1 hover:text-slate-900">
+              className="inline-flex items-center gap-1 hover:text-strong">
         {label}
-        <span aria-hidden="true" className={active ? "text-slate-900" : "text-slate-300"}>
+        <span aria-hidden="true" className={active ? "text-strong" : "text-faint"}>
           {active ? (sort.dir === "desc" ? "↓" : "↑") : "⇅"}
         </span>
       </button>

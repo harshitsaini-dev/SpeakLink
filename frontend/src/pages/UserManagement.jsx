@@ -47,13 +47,13 @@ const ROLE_STYLE = {
   OWNER: "bg-purple-100 text-purple-800 border-purple-200",
   ADMIN: "bg-blue-100 text-blue-800 border-blue-200",
   BROADCASTER: "bg-emerald-100 text-emerald-800 border-emerald-200",
-  VIEWER: "bg-slate-100 text-slate-700 border-slate-200",
+  VIEWER: "bg-surface-muted text-body border-line",
 };
 
 const STATE_STYLE = {
   active: "bg-emerald-100 text-emerald-800 border-emerald-200",
   disabled: "bg-amber-100 text-amber-900 border-amber-200",
-  archived: "bg-slate-200 text-slate-600 border-slate-300",
+  archived: "bg-surface-muted text-body border-line-strong",
   // Deliberately red, not grey: archived is reversible and deleted is not,
   // and the two must never look like variations of the same thing.
   deleted: "bg-red-100 text-red-800 border-red-300",
@@ -154,7 +154,7 @@ export default function UserManagement() {
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">User Management</h1>
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-muted">
             Archive an account when it may need to be restored later. Permanent deletion
             removes the account and cannot be undone — its username becomes available again,
             and historical audit records remain.
@@ -162,7 +162,7 @@ export default function UserManagement() {
           {/* Said here rather than only in a refusal message, so an ADMIN
               understands why a control is missing instead of thinking the page
               is broken. */}
-          <p className="mt-1 text-xs text-slate-500" data-testid="owner-protection-note">
+          <p className="mt-1 text-xs text-muted" data-testid="owner-protection-note">
             <strong>SUPER ADMIN</strong> and <strong>ADMIN</strong> both have full operational
             access. The one difference: only a SUPER ADMIN can change another SUPER ADMIN, and the
             last enabled SUPER ADMIN cannot be disabled, archived or demoted — otherwise nobody
@@ -181,7 +181,7 @@ export default function UserManagement() {
           {MANAGEABLE[myRole]?.size > 0 && can("users.create") && (
             <button
               type="button" onClick={() => setCreating(true)} disabled={busy}
-              className="inline-flex items-center gap-2 rounded bg-slate-900 px-3 py-2 text-sm text-white"
+              className="inline-flex items-center gap-2 rounded bg-surface-muted px-3 py-2 text-sm text-white"
               data-testid="new-user"
             >
               <UserPlus size={16} /> New User
@@ -237,9 +237,9 @@ export default function UserManagement() {
             with State above. */}
       </FilterBar>
 
-      <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
+      <div className="glass rounded-xl overflow-x-auto">
         <table className="w-full text-sm" data-testid="users-table">
-          <thead className="text-left text-slate-500">
+          <thead className="text-left text-muted">
             <tr>
               <SortableTh column="display_name" label="Name" list={list} />
               <SortableTh column="username" label="Username" list={list} />
@@ -264,7 +264,7 @@ export default function UserManagement() {
               return (
                 <tr key={row.id} className="border-t" data-testid={`user-row-${row.username}`}>
                   <td className="py-2 px-3">{row.display_name}</td>
-                  <td className="px-3 text-slate-600">{row.username}</td>
+                  <td className="px-3 text-body">{row.username}</td>
                   <td className="px-3"><Badge text={roleLabel(row.role)} styles={ROLE_STYLE[row.role] || ROLE_STYLE.VIEWER} /></td>
                   <td className="px-3">
                     <Badge text={purged ? "permanently deleted" : row.lifecycle_state}
@@ -272,7 +272,7 @@ export default function UserManagement() {
                   </td>
                   <td className="px-3 space-x-2 text-right">
                     {purged && (
-                      <span className="text-xs text-slate-500" data-testid={`purged-${row.username}`}>
+                      <span className="text-xs text-muted" data-testid={`purged-${row.username}`}>
                         Awaiting removal. Restart HQ to release this username.
                       </span>
                     )}
@@ -280,7 +280,7 @@ export default function UserManagement() {
                         your own account too. */}
                     {((allowed && can("users.update")) || mine) && (
                       <button type="button" disabled={busy} onClick={() => setEditing(row)}
-                              className="inline-flex items-center gap-1 rounded border px-2 py-1"
+                              className="row-action"
                               data-testid={`edit-${row.username}`}>
                         <Pencil size={14} /> Edit
                       </button>
@@ -289,7 +289,7 @@ export default function UserManagement() {
                       <button type="button" disabled={busy}
                               onClick={() => act(() => api.post(`/users/${row.id}/disable`),
                                                  `${row.display_name} was disabled.`)}
-                              className="inline-flex items-center gap-1 rounded border px-2 py-1"
+                              className="row-action"
                               data-testid={`disable-${row.username}`}>
                         <Power size={14} /> Disable
                       </button>
@@ -298,7 +298,7 @@ export default function UserManagement() {
                       <button type="button" disabled={busy}
                               onClick={() => act(() => api.post(`/users/${row.id}/enable`),
                                                  `${row.display_name} was enabled.`)}
-                              className="inline-flex items-center gap-1 rounded border px-2 py-1"
+                              className="row-action"
                               data-testid={`enable-${row.username}`}>
                         <Power size={14} /> Enable
                       </button>
@@ -307,7 +307,7 @@ export default function UserManagement() {
                       <button type="button" disabled={busy}
                               onClick={() => act(() => api.post(`/users/${row.id}/archive`),
                                                  `${row.display_name} was archived.`)}
-                              className="inline-flex items-center gap-1 rounded border px-2 py-1"
+                              className="row-action"
                               data-testid={`archive-${row.username}`}>
                         <Archive size={14} /> Archive
                       </button>
@@ -316,14 +316,14 @@ export default function UserManagement() {
                       <button type="button" disabled={busy}
                               onClick={() => act(() => api.post(`/users/${row.id}/restore`),
                                                  `${row.display_name} was restored, and is disabled until somebody enables it.`)}
-                              className="inline-flex items-center gap-1 rounded border px-2 py-1"
+                              className="row-action"
                               data-testid={`restore-${row.username}`}>
                         <ArchiveRestore size={14} /> Restore
                       </button>
                     )}
                     {isSuperAdmin && !mine && (
                       <button type="button" disabled={busy} onClick={() => setResetting(row)}
-                              className="inline-flex items-center gap-1 rounded border px-2 py-1"
+                              className="row-action"
                               data-testid={`reset-${row.username}`}>
                         <KeyRound size={14} /> Reset password
                       </button>
@@ -334,7 +334,7 @@ export default function UserManagement() {
                         server inside the deleting transaction. */}
                     {allowed && can("users.disable") && row.role !== "OWNER" && (
                       <button type="button" disabled={busy} onClick={() => setDeleting(row)}
-                              className="inline-flex items-center gap-1 rounded border border-red-300 px-2 py-1 text-red-700"
+                              className="row-action row-action-danger"
                               data-testid={`delete-${row.username}`}>
                         <Trash2 size={14} /> Delete
                       </button>
@@ -351,7 +351,7 @@ export default function UserManagement() {
                     {allowed && can("users.permissions.manage")
                       && row.role !== "OWNER" && row.id !== me?.id && (
                       <button type="button" disabled={busy} onClick={() => setEditingRights(row)}
-                              className="inline-flex items-center gap-1 rounded border px-2 py-1"
+                              className="row-action"
                               data-testid={`rights-${row.username}`}>
                         <ShieldCheck size={14} /> Rights
                       </button>
@@ -360,7 +360,7 @@ export default function UserManagement() {
                         Rights, for the same reason. */}
                     {isSuperAdmin && row.role !== "OWNER" && (row.role === "ADMIN" || row.role === "BROADCASTER") && (
                       <button type="button" disabled={busy} onClick={() => setEditingScope(row)}
-                              className="inline-flex items-center gap-1 rounded border px-2 py-1"
+                              className="row-action"
                               data-testid={`scope-${row.username}`}>
                         <MapPin size={14} /> Scope
                       </button>
@@ -372,7 +372,7 @@ export default function UserManagement() {
                     {allowed && can("users.delete_permanently") && row.role !== "OWNER" && (
                       <button type="button" disabled={busy}
                               onClick={() => { setPurgeError(""); setPurging(row); }}
-                              className="inline-flex items-center gap-1 rounded border border-red-400 bg-red-50 px-2 py-1 text-red-800"
+                              className="row-action row-action-destructive"
                               data-testid={`purge-${row.username}`}>
                         <ShieldX size={14} /> Delete Permanently
                       </button>
@@ -628,18 +628,18 @@ function RightsEditor({ user, onCancel, onSaved }) {
   }, [rows, search, category, effect, overriddenOnly, pending]);
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+    <div className="fixed inset-0 z-50 scrim flex items-center justify-center p-4"
          data-testid="rights-editor">
-      <div className="bg-white rounded-md shadow-xl max-w-2xl w-full max-h-[85vh] flex flex-col">
+      <div className="glass shadow-2xl max-w-2xl w-full max-h-[85vh] flex flex-col">
         <div className="p-5 border-b flex items-center justify-between">
           <div>
-            <div className="text-xs uppercase tracking-widest text-slate-500">User</div>
+            <div className="text-xs uppercase tracking-widest text-muted">User</div>
             <div className="text-lg font-semibold" data-testid="rights-username">{user.display_name}</div>
-            <div className="text-xs text-slate-500">
+            <div className="text-xs text-muted">
               Base Role: <span className="font-medium" data-testid="rights-base-role">{roleLabel(role)}</span>
             </div>
           </div>
-          <button type="button" onClick={onCancel} className="text-slate-500 hover:text-slate-900"
+          <button type="button" onClick={onCancel} className="text-muted hover:text-strong"
                   data-testid="rights-close">✕</button>
         </div>
 
@@ -648,7 +648,7 @@ function RightsEditor({ user, onCancel, onSaved }) {
             <p className="text-sm text-red-700" data-testid="rights-load-error">{loadError}</p>
           )}
           {!rows && !loadError && (
-            <p className="text-sm text-slate-500" data-testid="rights-loading">Loading rights…</p>
+            <p className="text-sm text-muted" data-testid="rights-loading">Loading rights…</p>
           )}
 
           {rows && (
@@ -664,28 +664,28 @@ function RightsEditor({ user, onCancel, onSaved }) {
                                         { value: "DENY", label: "Deny" },
                                         { value: "INHERIT", label: "Inherit" }]}
                               onChange={setEffect} />
-                <label className="flex items-center gap-2 text-xs text-slate-600 pb-1.5">
+                <label className="flex items-center gap-2 text-xs text-body pb-1.5">
                   <input type="checkbox" checked={overriddenOnly}
                          data-testid="rights-overridden-only"
                          onChange={(e) => setOverriddenOnly(e.target.checked)} />
                   Explicit overrides only
                 </label>
               </div>
-              <div className="flex items-center justify-between border-t pt-2 text-xs text-slate-500">
+              <div className="flex items-center justify-between border-t pt-2 text-xs text-muted">
                 <span data-testid="rights-result-count">
-                  <span className="font-semibold text-slate-700">{visibleCount}</span> of {rows.length} rights
+                  <span className="font-semibold text-body">{visibleCount}</span> of {rows.length} rights
                 </span>
                 {(search || category || effect || overriddenOnly) && (
                   <button type="button" data-testid="rights-clear-filters"
                           onClick={() => { setSearch(""); setCategory(""); setEffect(""); setOverriddenOnly(false); }}
-                          className="rounded border px-2 py-1 hover:bg-slate-50">
+                          className="rounded border px-2 py-1 hover:bg-surface-muted">
                     Clear Filters
                   </button>
                 )}
               </div>
               {/* Said on screen as well as in the code, so the exception is not
                   mistaken for an oversight. */}
-              <p className="text-[11px] text-slate-400">
+              <p className="text-[11px] text-faint">
                 These filters run in the browser: the rights catalog is a fixed list of
                 {" "}{rows.length} entries that is already fully loaded.
               </p>
@@ -693,14 +693,14 @@ function RightsEditor({ user, onCancel, onSaved }) {
           )}
 
           {rows && visibleCount === 0 && (
-            <p className="text-sm text-slate-500" data-testid="rights-empty">
+            <p className="text-sm text-muted" data-testid="rights-empty">
               No rights match these filters.
             </p>
           )}
 
           {grouped.map(([group, groupRows]) => (
             <div key={group}>
-              <h3 className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">{group}</h3>
+              <h3 className="text-xs font-bold uppercase tracking-widest text-muted mb-2">{group}</h3>
               <div className="space-y-2">
                 {groupRows.map((row) => {
                   const override = effectiveOverride(row);
@@ -711,7 +711,7 @@ function RightsEditor({ user, onCancel, onSaved }) {
                          data-testid={`right-row-${row.code}`}>
                       <div className="min-w-0">
                         <div className="text-sm font-medium">{row.label}</div>
-                        <div className="text-xs text-slate-500">
+                        <div className="text-xs text-muted">
                           Role: {row.role_allowed ? "Allowed" : "Not allowed"}
                           {override !== "INHERIT" && <> · Override: {override}</>}
                           {" · "}
@@ -722,7 +722,7 @@ function RightsEditor({ user, onCancel, onSaved }) {
                         </div>
                       </div>
                       <select
-                        className="border rounded px-2 py-1 text-sm bg-white shrink-0"
+                        className="border rounded px-2 py-1 text-sm bg-surface shrink-0"
                         value={override}
                         data-testid={`right-select-${row.code}`}
                         onChange={(event) => {
@@ -755,7 +755,7 @@ function RightsEditor({ user, onCancel, onSaved }) {
           <div className="flex gap-2">
             <button
               type="button" onClick={save} disabled={saving || changedCount === 0}
-              className="rounded bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-40"
+              className="rounded bg-surface-muted px-3 py-2 text-sm text-white disabled:opacity-40"
               data-testid="rights-save"
             >
               {saving ? "Saving…" : `Save Changes${changedCount ? ` (${changedCount})` : ""}`}
@@ -780,13 +780,13 @@ function RightsEditor({ user, onCancel, onSaved }) {
 function Panel({ title, children, onCancel, submitLabel, onSubmit, testid }) {
   return (
     <form
-      className="rounded border bg-white p-4 space-y-3" data-testid={testid}
+      className="rounded border bg-surface p-4 space-y-3" data-testid={testid}
       onSubmit={(event) => { event.preventDefault(); onSubmit(); }}
     >
       <h2 className="font-medium">{title}</h2>
       {children}
       <div className="flex gap-2">
-        <button type="submit" className="rounded bg-slate-900 px-3 py-2 text-sm text-white"
+        <button type="submit" className="rounded bg-surface-muted px-3 py-2 text-sm text-white"
                 data-testid={`${testid}-submit`}>
           {submitLabel}
         </button>
@@ -802,7 +802,7 @@ function Panel({ title, children, onCancel, submitLabel, onSubmit, testid }) {
 function Field({ label, ...rest }) {
   return (
     <label className="block text-sm">
-      <span className="mb-1 block text-slate-600">{label}</span>
+      <span className="mb-1 block text-body">{label}</span>
       <input className="w-full rounded border px-2 py-1" {...rest} />
     </label>
   );
@@ -823,7 +823,7 @@ function CreateUserForm({ myRole, onCancel, onSubmit }) {
       <Field label="Username" value={form.username} onChange={change("username")}
              required data-testid="create-username" />
       <label className="block text-sm">
-        <span className="mb-1 block text-slate-600">Role</span>
+        <span className="mb-1 block text-body">Role</span>
         <select className="w-full rounded border px-2 py-1" value={form.role}
                 onChange={change("role")} data-testid="create-role">
           {assignable.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}
@@ -834,7 +834,7 @@ function CreateUserForm({ myRole, onCancel, onSubmit }) {
       <Field label="Temporary password (at least 8 characters)" type="password"
              value={form.password} onChange={change("password")} minLength={8}
              required data-testid="create-password" autoComplete="new-password" />
-      <p className="text-xs text-slate-500">
+      <p className="text-xs text-muted">
         Tell them this password in person or by phone, and ask them to change it. It is not
         e-mailed, not shown again, and not stored anywhere you can read it back.
       </p>
@@ -858,14 +858,14 @@ function EditUserForm({ user, onCancel, onSubmit, canChangeRole, assignableRoles
              required data-testid="edit-username" />
       {canChangeRole && (
         <label className="block text-sm">
-          <span className="mb-1 block text-slate-600">Role</span>
+          <span className="mb-1 block text-body">Role</span>
           <select className="w-full rounded border px-2 py-1" value={role}
                   onChange={(event) => setRole(event.target.value)} data-testid="edit-role">
             {[...new Set([user.role, ...assignableRoles])].map((option) => (
               <option key={option} value={option}>{roleLabel(option)}</option>
             ))}
           </select>
-          <span className="mt-1 block text-xs text-slate-500">
+          <span className="mt-1 block text-xs text-muted">
             Changing a role signs that account out immediately.
           </span>
         </label>
@@ -904,7 +904,7 @@ function DeleteUserDialog({ user, onCancel, onConfirm }) {
       <h2 className="font-medium text-red-900">Permanently delete {user.username}</h2>
 
       {summary === null && !failed && (
-        <p className="text-sm text-slate-600" data-testid="delete-checking">
+        <p className="text-sm text-body" data-testid="delete-checking">
           Checking what still refers to this account…
         </p>
       )}
@@ -917,7 +917,7 @@ function DeleteUserDialog({ user, onCancel, onConfirm }) {
 
       {summary && (
         <>
-          <p className="text-sm text-slate-700" data-testid="delete-summary">
+          <p className="text-sm text-body" data-testid="delete-summary">
             {summary.explanation}
           </p>
           {!summary.deletable && (
@@ -968,7 +968,7 @@ function ResetPasswordForm({ user, onCancel, onSubmit }) {
     <Panel title={`Reset the password for ${user.username}`} testid="reset-password-form"
            submitLabel="Set password" onCancel={onCancel}
            onSubmit={() => confirmed && onSubmit(password)}>
-      <p className="text-sm text-slate-600">
+      <p className="text-sm text-body">
         This ends every session that account currently has, everywhere.
       </p>
       <Field label="New password (at least 8 characters)" type="password" value={password}
@@ -1098,26 +1098,26 @@ function ScopeEditor({ user, onCancel, onSaved }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+    <div className="fixed inset-0 z-50 scrim flex items-center justify-center p-4"
          data-testid="scope-editor">
-      <div className="bg-white rounded-md shadow-xl max-w-lg w-full max-h-[85vh] flex flex-col">
+      <div className="glass shadow-2xl max-w-lg w-full max-h-[85vh] flex flex-col">
         <div className="p-5 border-b flex items-center justify-between">
           <div>
-            <div className="text-xs uppercase tracking-widest text-slate-500">User</div>
+            <div className="text-xs uppercase tracking-widest text-muted">User</div>
             <div className="text-lg font-semibold">{user.display_name}</div>
-            <p className="mt-1 text-xs text-slate-500">
+            <p className="mt-1 text-xs text-muted">
               No entries means unrestricted — this account sees every Store. Adding an entry
               limits it to only what is listed here.
             </p>
           </div>
-          <button type="button" onClick={onCancel} className="text-slate-500 hover:text-slate-900"
+          <button type="button" onClick={onCancel} className="text-muted hover:text-strong"
                   data-testid="scope-close">✕</button>
         </div>
 
         <div className="p-5 overflow-y-auto space-y-4">
           {loadError && <p className="text-sm text-red-700" data-testid="scope-load-error">{loadError}</p>}
           {entries === null && !loadError && (
-            <p className="text-sm text-slate-500" data-testid="scope-loading">Loading scope…</p>
+            <p className="text-sm text-muted" data-testid="scope-loading">Loading scope…</p>
           )}
 
           {entries && (
@@ -1125,13 +1125,13 @@ function ScopeEditor({ user, onCancel, onSaved }) {
               <div className="rounded-md border px-3 py-2 text-xs"
                    data-testid="scope-clarity-banner">
                 {entries.length === 0 ? (
-                  <span className="text-slate-600">No assignments = All Stores (unrestricted)</span>
+                  <span className="text-body">No assignments = All Stores (unrestricted)</span>
                 ) : (
                   <span className="text-amber-800">
                     Restricted Scope — Effective Stores: {effectiveStores ? effectiveStores.length : "…"}
                   </span>
                 )}
-                <p className="mt-1 text-slate-500">
+                <p className="mt-1 text-muted">
                   Store, City and Zone assignments are combined. A Store matching any assignment
                   is included.
                 </p>
@@ -1139,12 +1139,12 @@ function ScopeEditor({ user, onCancel, onSaved }) {
 
               {entries.length > 0 && effectiveStores && (
                 <details className="text-xs" data-testid="scope-effective-preview">
-                  <summary className="cursor-pointer text-slate-600">
+                  <summary className="cursor-pointer text-body">
                     Preview effective Stores ({effectiveStores.length})
                   </summary>
                   <ul className="mt-1 space-y-0.5 max-h-32 overflow-y-auto">
                     {effectiveStores.map((s) => (
-                      <li key={s.id} className="text-slate-600">
+                      <li key={s.id} className="text-body">
                         {s.store_name} ({s.store_code})
                       </li>
                     ))}
@@ -1154,7 +1154,7 @@ function ScopeEditor({ user, onCancel, onSaved }) {
 
               <div className="space-y-1">
                 {entries.length === 0 && (
-                  <p className="text-sm text-slate-500" data-testid="scope-empty">
+                  <p className="text-sm text-muted" data-testid="scope-empty">
                     Unrestricted — no Store/City/Zone limits.
                   </p>
                 )}
@@ -1172,11 +1172,11 @@ function ScopeEditor({ user, onCancel, onSaved }) {
               </div>
 
               <div className="border-t pt-3 space-y-2">
-                <div className="text-xs font-bold uppercase tracking-widest text-slate-500">
+                <div className="text-xs font-bold uppercase tracking-widest text-muted">
                   Add assignment
                 </div>
                 <div className="flex gap-2">
-                  <select className="border rounded px-2 py-1 text-sm bg-white" value={draftType}
+                  <select className="border rounded px-2 py-1 text-sm bg-surface" value={draftType}
                           data-testid="scope-add-type"
                           onChange={(e) => { setDraftType(e.target.value); setDraftValue(""); }}>
                     <option value="STORE">Store</option>
@@ -1217,7 +1217,7 @@ function ScopeEditor({ user, onCancel, onSaved }) {
           )}
           <div className="flex gap-2">
             <button type="button" onClick={save} disabled={saving || entries === null}
-                    className="rounded bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-40"
+                    className="rounded bg-surface-muted px-3 py-2 text-sm text-white disabled:opacity-40"
                     data-testid="scope-save">
               {saving ? "Saving…" : "Save Changes"}
             </button>

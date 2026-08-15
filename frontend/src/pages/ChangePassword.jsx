@@ -61,7 +61,7 @@ export default function ChangePassword() {
   return (
     <div className="p-6" data-testid="change-password-page">
       <h1 className="mb-1 text-2xl font-semibold">Change your password</h1>
-      <p className="mb-4 text-sm text-slate-500">
+      <p className="mb-4 text-sm text-muted">
         You will be signed out on every device once this succeeds, and will need to sign in again.
       </p>
 
@@ -74,13 +74,13 @@ export default function ChangePassword() {
 
       <form onSubmit={submit} className="max-w-sm space-y-3" data-testid="change-password-form">
         <label className="block text-sm">
-          <span className="mb-1 block text-slate-600">Current password</span>
+          <span className="mb-1 block text-body">Current password</span>
           <input type="password" className="w-full rounded border px-2 py-1" required
                  value={current} onChange={(event) => setCurrent(event.target.value)}
                  autoComplete="current-password" data-testid="current-password" />
         </label>
         <label className="block text-sm">
-          <span className="mb-1 block text-slate-600">New password (at least 8 characters)</span>
+          <span className="mb-1 block text-body">New password (at least 8 characters)</span>
           <input type="password" className="w-full rounded border px-2 py-1" required minLength={8}
                  value={next} onChange={(event) => setNext(event.target.value)}
                  autoComplete="new-password" data-testid="new-password" />
@@ -91,7 +91,7 @@ export default function ChangePassword() {
           )}
         </label>
         <label className="block text-sm">
-          <span className="mb-1 block text-slate-600">New password again</span>
+          <span className="mb-1 block text-body">New password again</span>
           <input type="password" className="w-full rounded border px-2 py-1" required
                  value={repeat} onChange={(event) => setRepeat(event.target.value)}
                  autoComplete="new-password" data-testid="repeat-password" />
@@ -102,7 +102,7 @@ export default function ChangePassword() {
           )}
         </label>
         <button type="submit" disabled={busy || tooShort || mismatched}
-                className="inline-flex items-center gap-2 rounded bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-50"
+                className="inline-flex items-center gap-2 rounded bg-surface-muted px-3 py-2 text-sm text-white disabled:opacity-50"
                 data-testid="change-password-submit">
           <KeyRound size={16} /> Change password and sign out
         </button>

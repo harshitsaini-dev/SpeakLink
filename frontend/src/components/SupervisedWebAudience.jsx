@@ -113,19 +113,19 @@ export default function SupervisedWebAudience({ sessionId, campaignName, onClose
   const counts = state?.counts || {};
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+    <div className="fixed inset-0 z-50 scrim flex items-center justify-center p-4"
          data-testid="supervised-audience-modal">
-      <div className="bg-white rounded-md shadow-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto">
-        <div className="flex items-center gap-3 border-b border-slate-200 p-4">
+      <div className="glass shadow-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto">
+        <div className="flex items-center gap-3 border-b border-line p-4">
           <div>
-            <h3 className="font-semibold text-slate-900">Web Audience</h3>
-            <p className="text-xs text-slate-500"
+            <h3 className="font-semibold text-strong">Web Audience</h3>
+            <p className="text-xs text-muted"
                data-testid="supervised-audience-campaign">
               {campaignName || state?.campaign_name || "—"}
             </p>
           </div>
           <button onClick={onClose} data-testid="supervised-audience-close"
-                  className="ml-auto p-1.5 rounded hover:bg-slate-100">
+                  className="ml-auto p-1.5 rounded hover:bg-surface-muted">
             <X size={16} />
           </button>
         </div>
@@ -140,40 +140,40 @@ export default function SupervisedWebAudience({ sessionId, campaignName, onClose
             <>
               {/* ---- room identity, only if the server sent it ---- */}
               {can.can_view_room_credentials && state.public_code && (
-                <div className="rounded border border-slate-200 p-3"
+                <div className="rounded border border-line p-3"
                      data-testid="supervised-room-credentials">
-                  <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-1">
+                  <p className="text-xs font-bold uppercase tracking-[0.1em] text-muted mb-1">
                     Web Room
                   </p>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono font-bold text-slate-900"
+                    <span className="font-mono font-bold text-strong"
                           data-testid="supervised-room-code">{state.public_code}</span>
                     <button data-testid="supervised-copy-id"
                             onClick={() => copy("id", state.public_code)}
-                            className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50">
+                            className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-surface-muted">
                       <Copy size={13} /> {copied === "id" ? "Copied" : "Copy ID"}
                     </button>
                     <button data-testid="supervised-copy-link"
                             onClick={() => copy("link", listenerLink(state.public_code))}
-                            className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50">
+                            className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-surface-muted">
                       <Copy size={13} /> {copied === "link" ? "Copied" : "Copy Link"}
                     </button>
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     {state.password ? (
                       <>
-                        <span className="font-mono font-bold text-slate-900"
+                        <span className="font-mono font-bold text-strong"
                               data-testid="supervised-room-password">{state.password}</span>
                         <button data-testid="supervised-copy-password"
                                 onClick={() => copy("password", state.password)}
-                                className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50">
+                                className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-surface-muted">
                           <Copy size={13} /> {copied === "password" ? "Copied" : "Copy Password"}
                         </button>
                       </>
                     ) : (
                       // SpeakLink stores only a hash. Printing asterisks would
                       // imply it knows a value it is merely hiding.
-                      <span className="inline-flex items-center gap-1 text-sm text-slate-600"
+                      <span className="inline-flex items-center gap-1 text-sm text-body"
                             data-testid="supervised-password-unavailable">
                         <KeyRound size={13} />
                         Password not recoverable — the broadcaster can generate a new one
@@ -191,7 +191,7 @@ export default function SupervisedWebAudience({ sessionId, campaignName, onClose
               </div>
 
               {can.can_toggle_auto_approve && (
-                <label className="flex items-start gap-2 rounded border border-slate-200 p-3 cursor-pointer">
+                <label className="flex items-start gap-2 rounded border border-line p-3 cursor-pointer">
                   <input type="checkbox" data-testid="supervised-auto-approve"
                          checked={!!state.auto_approve} disabled={busy}
                          onChange={(event) => act(() => api.put(
@@ -199,8 +199,8 @@ export default function SupervisedWebAudience({ sessionId, campaignName, onClose
                            { auto_approve: event.target.checked }))}
                          className="mt-0.5" />
                   <span>
-                    <span className="text-sm font-semibold text-slate-900">Auto Approve</span>
-                    <span className="block text-xs text-slate-500">
+                    <span className="text-sm font-semibold text-strong">Auto Approve</span>
+                    <span className="block text-xs text-muted">
                       Anyone with this Broadcast ID or link can request and enter
                       immediately.
                     </span>
@@ -222,7 +222,7 @@ export default function SupervisedWebAudience({ sessionId, campaignName, onClose
                   <input value={audienceQuery} data-testid="supervised-audience-search"
                          onChange={(event) => setAudienceQuery(event.target.value)}
                          placeholder="Search by name…"
-                         className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" />
+                         className="w-full rounded border border-line-strong px-2 py-1.5 text-sm" />
                 </label>
                 <FilterSelect label="Playback" testId="supervised-audience-state"
                               allLabel="Any state" value={audienceState}
@@ -238,7 +238,7 @@ export default function SupervisedWebAudience({ sessionId, campaignName, onClose
                   <button data-testid="supervised-audience-clear"
                           onClick={() => { setAudienceQuery(""); setAudienceState("");
                                            setAudienceAdmitted(""); }}
-                          className="rounded border border-slate-300 px-2 py-1.5 text-sm hover:bg-slate-50">
+                          className="rounded border border-line-strong px-2 py-1.5 text-sm hover:bg-surface-muted">
                     Clear
                   </button>
                 )}
@@ -247,36 +247,36 @@ export default function SupervisedWebAudience({ sessionId, campaignName, onClose
               {/* ---- pending ---- */}
               {(state.waiting || []).length > 0 && (
                 <div data-testid="supervised-waiting-list">
-                  <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-2">
+                  <p className="text-xs font-bold uppercase tracking-[0.1em] text-muted mb-2">
                     Join Requests
                     {waiting.length !== (state.waiting || []).length && (
-                      <span className="ml-2 font-normal normal-case tracking-normal text-slate-400"
+                      <span className="ml-2 font-normal normal-case tracking-normal text-faint"
                             data-testid="supervised-waiting-count">
                         showing {waiting.length} of {(state.waiting || []).length}
                       </span>
                     )}
                   </p>
-                  <ul className="divide-y divide-slate-200 rounded border border-slate-200">
+                  <ul className="divide-y divide-line rounded border border-line">
                     {waiting.map((person) => (
                       <li key={person.id}
                           data-testid={`supervised-waiting-${person.id}`}
                           className="flex items-center gap-3 px-3 py-2 text-sm">
-                        <span className="font-medium text-slate-900">{person.display_name}</span>
-                        <span className="text-xs text-slate-500">{person.requested_at || ""}</span>
+                        <span className="font-medium text-strong">{person.display_name}</span>
+                        <span className="text-xs text-muted">{person.requested_at || ""}</span>
                         {can.can_approve && (
                           <span className="ml-auto flex gap-1">
                             <button data-testid={`supervised-approve-${person.id}`}
                                     disabled={busy}
                                     onClick={() => act(() => api.post(
                                       `/broadcast/active-management/${sessionId}/web-audience/${person.id}/approve`))}
-                                    className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50 disabled:opacity-60">
+                                    className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-surface-muted disabled:opacity-60">
                               <UserCheck size={13} /> Approve
                             </button>
                             <button data-testid={`supervised-deny-${person.id}`}
                                     disabled={busy}
                                     onClick={() => act(() => api.post(
                                       `/broadcast/active-management/${sessionId}/web-audience/${person.id}/deny`))}
-                                    className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-slate-50 disabled:opacity-60">
+                                    className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-surface-muted disabled:opacity-60">
                               <UserX size={13} /> Deny
                             </button>
                           </span>
@@ -289,37 +289,37 @@ export default function SupervisedWebAudience({ sessionId, campaignName, onClose
 
               {/* ---- admitted ---- */}
               <div data-testid="supervised-listener-list">
-                <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500 mb-2">
+                <p className="text-xs font-bold uppercase tracking-[0.1em] text-muted mb-2">
                   Web Listeners
                   {listeners.length !== (state.listeners || []).length && (
-                    <span className="ml-2 font-normal normal-case tracking-normal text-slate-400"
+                    <span className="ml-2 font-normal normal-case tracking-normal text-faint"
                           data-testid="supervised-listener-count">
                       showing {listeners.length} of {(state.listeners || []).length}
                     </span>
                   )}
                 </p>
                 {(state.listeners || []).length === 0 ? (
-                  <p className="text-sm text-slate-500"
+                  <p className="text-sm text-muted"
                      data-testid="supervised-listeners-empty">
                     Nobody has joined this Broadcast.
                   </p>
                 ) : listeners.length === 0 ? (
-                  <p className="text-sm text-slate-500"
+                  <p className="text-sm text-muted"
                      data-testid="supervised-listeners-no-match">
                     No listener matches those filters.
                   </p>
                 ) : (
-                  <ul className="divide-y divide-slate-200 rounded border border-slate-200">
+                  <ul className="divide-y divide-line rounded border border-line">
                     {listeners.map((person) => (
                       <li key={person.id}
                           data-testid={`supervised-listener-${person.id}`}
                           className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm">
-                        <span className="font-medium text-slate-900">{person.display_name}</span>
-                        <span className="text-xs text-slate-500">
+                        <span className="font-medium text-strong">{person.display_name}</span>
+                        <span className="text-xs text-muted">
                           {person.admitted_by === "password" ? "Password" : "Approved"}
                         </span>
                         <span data-testid={`supervised-state-${person.id}`}
-                              className="rounded bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-700">
+                              className="rounded bg-surface-muted px-2 py-0.5 text-xs font-semibold text-body">
                           {PLAYBACK_LABEL[person.playback_state] || person.playback_state}
                         </span>
                         {person.stale && (
@@ -341,7 +341,7 @@ export default function SupervisedWebAudience({ sessionId, campaignName, onClose
                 )}
               </div>
 
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-muted">
                 &ldquo;Listening&rdquo; means the listener&rsquo;s browser is
                 playing. It can&rsquo;t confirm their device volume or that
                 anyone can actually hear it.
@@ -356,9 +356,9 @@ export default function SupervisedWebAudience({ sessionId, campaignName, onClose
 
 function Count({ testId, label, value }) {
   return (
-    <div className="rounded border border-slate-200 p-2.5" data-testid={testId}>
-      <div className="text-[10px] uppercase tracking-widest text-slate-500">{label}</div>
-      <div className="font-mono text-xl font-bold text-slate-900">{value ?? 0}</div>
+    <div className="rounded border border-line p-2.5" data-testid={testId}>
+      <div className="text-[10px] uppercase tracking-widest text-muted">{label}</div>
+      <div className="font-mono text-xl font-bold text-strong">{value ?? 0}</div>
     </div>
   );
 }

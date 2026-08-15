@@ -64,29 +64,29 @@ export function BulkBar({ bulk, list, testIdPrefix, onArchive, onDelete,
                           archiveLabel = "Archive selected",
                           deleteLabel = "Delete selected", busy }) {
   return (
-    <div className="flex flex-wrap items-center gap-2 border border-slate-200 rounded-md bg-white px-3 py-2"
+    <div className="flex flex-wrap items-center gap-2 glass rounded-xl px-3 py-2"
          data-testid={`${testIdPrefix}-bulk-bar`}>
       <button data-testid={`${testIdPrefix}-select-page`} onClick={bulk.selectPage}
-              className="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-50">
+              className="px-3 py-1.5 rounded border border-line-strong text-sm hover:bg-surface-muted">
         Select Page ({list.items.length})
       </button>
       <button data-testid={`${testIdPrefix}-select-all`} onClick={bulk.selectAllFiltered}
-              className="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-50">
+              className="px-3 py-1.5 rounded border border-line-strong text-sm hover:bg-surface-muted">
         Select All Filtered ({list.total})
       </button>
       {bulk.count > 0 && (
         <>
-          <span className="text-sm text-slate-600" data-testid={`${testIdPrefix}-chosen`}>
+          <span className="text-sm text-body" data-testid={`${testIdPrefix}-chosen`}>
             {bulk.count} selected
           </span>
           <button data-testid={`${testIdPrefix}-clear-selection`} onClick={bulk.clear}
-                  className="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-50">
+                  className="px-3 py-1.5 rounded border border-line-strong text-sm hover:bg-surface-muted">
             Clear
           </button>
           {onArchive && (
             <button data-testid={`${testIdPrefix}-bulk-archive`} disabled={busy}
                     onClick={onArchive}
-                    className="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-50 disabled:opacity-50">
+                    className="px-3 py-1.5 rounded border border-line-strong text-sm hover:bg-surface-muted disabled:opacity-50">
               {archiveLabel}
             </button>
           )}
@@ -125,7 +125,7 @@ export function BulkDeleteConfirm({ count, noun, warning, testIdPrefix,
           Delete permanently
         </button>
         <button onClick={onCancel} data-testid={`${testIdPrefix}-delete-cancel`}
-                className="px-3 py-2 rounded-md text-sm border border-slate-300 hover:bg-white">
+                className="px-3 py-2 rounded-md text-sm border border-line-strong hover:bg-surface">
           Cancel
         </button>
       </div>

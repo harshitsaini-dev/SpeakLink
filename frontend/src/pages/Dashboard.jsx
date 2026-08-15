@@ -29,11 +29,24 @@ import { FilterSelect, SearchableSelect } from "@/components/AdminFilters";
 //: Fixed colours per announcement state, matching the badges on the
 //: Announcements console. A chart that colours "Paused" green on one screen
 //: and amber on another makes the reader check the legend every time.
+//: One tooltip surface for every chart on this page. Recharts defaults to a
+//: white card with black text, which on a dark dashboard is a torch.
+const TOOLTIP_STYLE = {
+  background: "var(--surface-solid)",
+  border: "1px solid var(--line)",
+  borderRadius: 10,
+  color: "var(--text-strong)",
+  boxShadow: "var(--glass-shadow)",
+};
+
 const STATE_COLOURS = {
   PLAYING: "#059669",
   PAUSED: "#d97706",
   DUCKED: "#0284c7",
   STOPPED: "#94a3b8",
+  // Red, like the badge on the Announcements table: this is the slice that
+  // means somebody believes a promotion is on air and it is not.
+  UNREACHABLE: "#e11d48",
 };
 
 const STATE_LABELS = {
@@ -41,6 +54,10 @@ const STATE_LABELS = {
   PAUSED: "Paused by a person",
   DUCKED: "Standing aside for a broadcast",
   STOPPED: "Nothing chosen",
+  // HQ sent a play and nothing answered. Its own slice, because folding it
+  // into "Playing" is the claim this dashboard must never make - and leaving
+  // it unlabelled put the raw word UNREACHABLE on the chart.
+  UNREACHABLE: "Asked, no Receiver",
 };
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -71,12 +88,12 @@ const REPORTS = [
 
 function Tile({ icon: Icon, label, value, hint, testId }) {
   return (
-    <div className="border border-slate-200 bg-white rounded-md p-4" data-testid={testId}>
-      <div className="flex items-center gap-2 text-slate-500 text-xs uppercase tracking-widest">
+    <div className="glass rounded-xl p-4" data-testid={testId}>
+      <div className="flex items-center gap-2 text-muted text-xs uppercase tracking-widest">
         <Icon size={14} /> {label}
       </div>
-      <div className="text-3xl font-bold text-slate-900 mt-1 tabular-nums">{value}</div>
-      {hint && <div className="text-xs text-slate-500 mt-1">{hint}</div>}
+      <div className="text-3xl font-bold text-strong mt-1 tabular-nums">{value}</div>
+      {hint && <div className="text-xs text-muted mt-1">{hint}</div>}
     </div>
   );
 }
@@ -129,6 +146,9 @@ export default function Dashboard() {
   }, []);
 
   const states = data?.announcements?.states || {};
+  const pieTotal = Object.entries(states)
+    .filter(([, count]) => count > 0)
+    .reduce((sum, [, count]) => sum + count, 0);
   const pie = Object.entries(states)
     .filter(([, count]) => count > 0)
     .map(([state, count]) => ({ name: STATE_LABELS[state] || state,
@@ -160,15 +180,15 @@ export default function Dashboard() {
   return (
     <div className="space-y-4" data-testid="dashboard-page">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight text-slate-900">Dashboard</h1>
-        <p className="text-sm text-slate-500">
+        <h1 className="text-2xl font-bold tracking-tight text-strong">Dashboard</h1>
+        <p className="text-sm text-muted">
           What has been broadcast, by whom, where, and what every shop is
           playing now.
         </p>
       </div>
 
       {/* ---- Filters ---- */}
-      <div className="border border-slate-200 bg-white rounded-md p-3 flex flex-wrap items-end gap-3"
+      <div className="glass rounded-xl p-3 flex flex-wrap items-end gap-3"
            data-testid="dashboard-filters">
         {/* The same panel as every other filter, rather than a bare select.
             One gesture to learn across the whole product beats a control that
@@ -180,16 +200,16 @@ export default function Dashboard() {
         {preset === "custom" && (
           <>
             <label className="flex flex-col gap-1">
-              <span className="text-[10px] uppercase tracking-widest text-slate-500">From</span>
+              <span className="text-[10px] uppercase tracking-widest text-muted">From</span>
               <input type="date" value={custom.since} data-testid="dashboard-since"
                      onChange={(event) => setCustom((was) => ({ ...was, since: event.target.value }))}
-                     className="px-2 py-1.5 border border-slate-300 rounded-md text-sm" />
+                     className="px-2 py-1.5 border border-line-strong rounded-md text-sm" />
             </label>
             <label className="flex flex-col gap-1">
-              <span className="text-[10px] uppercase tracking-widest text-slate-500">To</span>
+              <span className="text-[10px] uppercase tracking-widest text-muted">To</span>
               <input type="date" value={custom.until} data-testid="dashboard-until"
                      onChange={(event) => setCustom((was) => ({ ...was, until: event.target.value }))}
-                     className="px-2 py-1.5 border border-slate-300 rounded-md text-sm" />
+                     className="px-2 py-1.5 border border-line-strong rounded-md text-sm" />
             </label>
           </>
         )}
@@ -210,7 +230,7 @@ export default function Dashboard() {
                       allLabel="Anybody" value={ownerId} onChange={setOwnerId}
                       options={users} />
         <button data-testid="dashboard-refresh" onClick={load}
-                className="ml-auto inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
+                className="ml-auto inline-flex items-center gap-1 px-3 py-2 border border-line-strong rounded-md text-sm hover:bg-surface-muted">
           <RefreshCw size={14} /> Refresh
         </button>
       </div>
@@ -222,7 +242,7 @@ export default function Dashboard() {
         </div>
       )}
       {loading && !data && (
-        <p className="text-sm text-slate-500" data-testid="dashboard-loading">Loading…</p>
+        <p className="text-sm text-muted" data-testid="dashboard-loading">Loading…</p>
       )}
 
       {data && (
@@ -241,15 +261,22 @@ export default function Dashboard() {
             <Tile icon={StoreIcon} label="Stores" testId="tile-stores"
                   value={data.stores.total}
                   hint={`${data.stores.online} online, ${data.stores.offline} not`} />
+            {/* PLAYING counts shops HQ can actually observe. The ones it
+                asked and never heard back from are their own number: folding
+                them in read as "44 playing" on an estate with 2 shops online,
+                and a headline figure gets believed without being checked. */}
             <Tile icon={Megaphone} label="Announcements playing"
                   testId="tile-announcements" value={states.PLAYING || 0}
-                  hint={`${states.DUCKED || 0} standing aside for a broadcast`} />
+                  hint={[`${states.DUCKED || 0} standing aside for a broadcast`,
+                         states.UNREACHABLE
+                           ? `${states.UNREACHABLE} asked, no Receiver`
+                           : ""].filter(Boolean).join(" - ")} />
           </div>
 
           <div className="grid gap-4 lg:grid-cols-3">
-            <section className="border border-slate-200 bg-white rounded-md p-4 lg:col-span-2">
-              <h2 className="font-semibold text-slate-900">Minutes on air, by day</h2>
-              <p className="text-xs text-slate-500 mb-2">
+            <section className="glass rounded-xl p-4 lg:col-span-2">
+              <h2 className="font-semibold text-strong">Minutes on air, by day</h2>
+              <p className="text-xs text-muted mb-2">
                 Counts and minutes together: ten short interruptions and one
                 long campaign are not the same day.
               </p>
@@ -259,7 +286,10 @@ export default function Dashboard() {
                     <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                     <XAxis dataKey="day" tick={{ fontSize: 11 }} />
                     <YAxis tick={{ fontSize: 11 }} />
-                    <Tooltip />
+                    <Tooltip cursor={{ fill: "rgba(148,163,184,0.12)" }}
+                             contentStyle={TOOLTIP_STYLE}
+                             labelStyle={{ color: "var(--text-strong)" }}
+                             itemStyle={{ color: "var(--text-body)" }} />
                     <Legend />
                     <Line type="monotone" dataKey="minutes" name="Minutes"
                           stroke="#1d4ed8" strokeWidth={2} dot={{ r: 3 }} />
@@ -269,30 +299,79 @@ export default function Dashboard() {
                 </ResponsiveContainer>
               </div>
               {data.by_day.length === 0 && (
-                <p className="text-sm text-slate-500" data-testid="by-day-empty">
+                <p className="text-sm text-muted" data-testid="by-day-empty">
                   Nothing has been broadcast in this period.
                 </p>
               )}
             </section>
 
-            <section className="border border-slate-200 bg-white rounded-md p-4">
-              <h2 className="font-semibold text-slate-900">What the shops are playing</h2>
-              <p className="text-xs text-slate-500 mb-2">Right now.</p>
-              <div style={{ width: "100%", height: 240 }} data-testid="chart-states">
+            <section className="glass rounded-xl p-4">
+              <h2 className="font-semibold text-strong">What the shops are playing</h2>
+              <p className="text-xs text-muted mb-2">Right now.</p>
+              {/* A ring, not a disc, with the estate's size in the middle.
+                  The question this answers is "how much of my estate is
+                  actually playing something", and on 44 shops with one
+                  exception the disc was a grey circle with a red splinter -
+                  true, and unreadable. The ring gives the total somewhere to
+                  live, and the list underneath gives every slice a number,
+                  because a two-degree wedge cannot be read off a chart. */}
+              <div className="relative" style={{ width: "100%", height: 210 }}
+                   data-testid="chart-states">
                 <ResponsiveContainer>
                   <PieChart>
-                    <Pie data={pie} dataKey="value" nameKey="name" outerRadius={80}>
+                    {/* paddingAngle only when there is more than one slice.
+                        With a single slice it cuts a wedge out of a ring that
+                        is, truthfully, the whole estate - the chart drew a gap
+                        where no gap exists. */}
+                    <Pie data={pie} dataKey="value" nameKey="name"
+                         innerRadius={62} outerRadius={88}
+                         paddingAngle={pie.length > 1 ? 2 : 0}
+                         stroke="none" minAngle={pie.length > 1 ? 3 : 0}
+                         isAnimationActive={false}>
                       {pie.map((slice) => (
                         <Cell key={slice.state} fill={STATE_COLOURS[slice.state]} />
                       ))}
                     </Pie>
-                    <Tooltip />
-                    <Legend />
+                    {/* No tooltip. The list underneath already gives every
+                        slice its count and its share, permanently and without
+                        hovering - and the hover card landed on top of the
+                        total in the middle, hiding the one number the ring
+                        exists to show. */}
                   </PieChart>
                 </ResponsiveContainer>
+                <div className="pointer-events-none absolute inset-0 flex flex-col
+                                items-center justify-center">
+                  <div className="text-2xl font-bold text-strong"
+                       data-testid="states-total">{pieTotal}</div>
+                  <div className="text-[11px] uppercase tracking-widest text-muted">
+                    Stores
+                  </div>
+                </div>
               </div>
+
+              {/* The legend, as a list with counts and shares. Recharts' own
+                  legend gives colour and name only, and "Asked, no Receiver"
+                  next to a two-degree wedge tells nobody how many shops that
+                  is. */}
+              <ul className="mt-1 space-y-1" data-testid="states-legend">
+                {pie.map((slice) => (
+                  <li key={slice.state}
+                      data-testid={`states-legend-${slice.state}`}
+                      className="flex items-center gap-2 text-sm">
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-sm"
+                          style={{ backgroundColor: STATE_COLOURS[slice.state] }} />
+                    <span className="text-body">{slice.name}</span>
+                    <span className="ml-auto tabular-nums font-medium text-strong">
+                      {slice.value}
+                    </span>
+                    <span className="w-12 text-right tabular-nums text-xs text-muted">
+                      {pieTotal ? Math.round((slice.value / pieTotal) * 100) : 0}%
+                    </span>
+                  </li>
+                ))}
+              </ul>
               {pie.length === 0 && (
-                <p className="text-sm text-slate-500" data-testid="states-empty">
+                <p className="text-sm text-muted" data-testid="states-empty">
                   No Store has an announcement chosen yet.
                 </p>
               )}
@@ -300,9 +379,9 @@ export default function Dashboard() {
           </div>
 
           {/* ---- Reports: the same numbers as a chart AND a table ---- */}
-          <section className="border border-slate-200 bg-white rounded-md">
-            <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center gap-2">
-              <h2 className="font-semibold text-slate-900 mr-auto">Reports</h2>
+          <section className="glass rounded-xl">
+            <div className="px-4 py-3 border-b border-line flex flex-wrap items-center gap-2">
+              <h2 className="font-semibold text-strong mr-auto">Reports</h2>
               {REPORTS.map((entry) => (
                 <button key={entry.key}
                         onClick={() => { setReport(entry.key);
@@ -311,8 +390,8 @@ export default function Dashboard() {
                         aria-current={report === entry.key ? "true" : undefined}
                         className={`px-3 py-1.5 rounded-md text-sm border ${
                           report === entry.key
-                            ? "bg-slate-900 text-white border-slate-900"
-                            : "border-slate-300 text-slate-700 hover:bg-slate-50"}`}>
+                            ? "bg-surface-muted text-white border-slate-900"
+                            : "border-line-strong text-body hover:bg-surface-muted"}`}>
                   {entry.label}
                 </button>
               ))}
@@ -327,7 +406,10 @@ export default function Dashboard() {
                     <XAxis type="number" tick={{ fontSize: 11 }} />
                     <YAxis type="category" dataKey={activeReport.nameKey} width={150}
                            tick={{ fontSize: 11 }} />
-                    <Tooltip />
+                    <Tooltip cursor={{ fill: "rgba(148,163,184,0.12)" }}
+                             contentStyle={TOOLTIP_STYLE}
+                             labelStyle={{ color: "var(--text-strong)" }}
+                             itemStyle={{ color: "var(--text-body)" }} />
                     <Legend />
                     <Bar dataKey="minutes" name="Minutes" fill="#1d4ed8" />
                     <Bar dataKey="broadcasts" name="Broadcasts" fill="#94a3b8" />
@@ -341,7 +423,7 @@ export default function Dashboard() {
                   or question a colleague's hours needs the number. */}
               <div className="overflow-x-auto max-h-80 overflow-y-auto">
                 <table className="w-full text-sm" data-testid={`report-table-${report}`}>
-                  <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 sticky top-0">
+                  <thead className="bg-surface-muted text-left text-[11px] uppercase tracking-wider text-muted sticky top-0">
                     <tr>
                       <ReportTh column={activeReport.nameKey}
                                 label={activeReport.heading}
@@ -362,17 +444,17 @@ export default function Dashboard() {
                   </thead>
                   <tbody>
                     {rows.length === 0 && (
-                      <tr><td colSpan={4} className="px-3 py-6 text-center text-slate-500"
+                      <tr><td colSpan={4} className="px-3 py-6 text-center text-muted"
                               data-testid={`report-empty-${report}`}>
                         Nothing in this period.
                       </td></tr>
                     )}
                     {rows.map((row, index) => (
-                      <tr key={index} className="border-b border-slate-100 even:bg-slate-50/50">
+                      <tr key={index} className="border-b border-line even:bg-surface-alt">
                         <td className="px-3 py-2">
                           {row[activeReport.nameKey]}
                           {report === "by_store" && (
-                            <span className="block text-xs text-slate-400">
+                            <span className="block text-xs text-faint">
                               {row.store_code}
                             </span>
                           )}
@@ -416,9 +498,9 @@ function ReportTh({ column, label, sort, onSort, align = "left" }) {
         aria-sort={active ? (sort.dir === "desc" ? "descending" : "ascending")
                           : "none"}>
       <button type="button" onClick={toggle} data-testid={`report-sort-${column}`}
-              className="inline-flex items-center gap-1 hover:text-slate-900">
+              className="inline-flex items-center gap-1 hover:text-strong">
         {label}
-        <span aria-hidden="true" className={active ? "text-slate-900" : "text-slate-300"}>
+        <span aria-hidden="true" className={active ? "text-strong" : "text-faint"}>
           {active ? (sort.dir === "desc" ? "↓" : "↑") : "⇅"}
         </span>
       </button>

@@ -30,7 +30,7 @@ function LifecycleBadge({ state }) {
   const styles = {
     ACTIVE: "bg-green-50 text-green-800 border-green-200",
     DISABLED: "bg-amber-50 text-amber-800 border-amber-200",
-    ARCHIVED: "bg-slate-100 text-slate-600 border-slate-300",
+    ARCHIVED: "bg-surface-muted text-body border-line-strong",
     DELETED: "bg-red-50 text-red-700 border-red-200",
   };
   return (
@@ -128,12 +128,12 @@ export default function StoreManagement() {
     <div className="space-y-4" data-testid="stores-page">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Store Management</h1>
-          <p className="text-sm text-slate-500">Manage stores and rotate Receiver credentials. Credentials are never displayed or copied from this page.</p>
+          <h1 className="text-2xl font-bold text-strong tracking-tight">Store Management</h1>
+          <p className="text-sm text-muted">Manage stores and rotate Receiver credentials. Credentials are never displayed or copied from this page.</p>
         </div>
         <div className="flex gap-2">
           <ExportButton dataset="stores" list={list} testId="stores-export" />
-          <button data-testid="stores-refresh-btn" onClick={load} className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50"><RefreshCw size={14}/> Refresh</button>
+          <button data-testid="stores-refresh-btn" onClick={load} className="inline-flex items-center gap-1 px-3 py-2 border border-line-strong rounded-md text-sm hover:bg-surface-muted"><RefreshCw size={14}/> Refresh</button>
           {can("stores.create") && (
             <button data-testid="add-store-btn" onClick={() => setShowAdd(true)} className="inline-flex items-center gap-1 px-3 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-md text-sm font-medium"><Plus size={16}/> Add Store</button>
           )}
@@ -171,9 +171,9 @@ export default function StoreManagement() {
                       onChange={(v) => list.setFilter("lifecycle", v || "all_current")} />
       </FilterBar>
 
-      <div className="border border-slate-200 rounded-md bg-white overflow-x-auto">
+      <div className="glass rounded-xl overflow-x-auto">
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
+          <thead className="bg-surface-muted text-left text-[11px] uppercase tracking-wider text-muted border-b border-line">
             <tr>
               <SortableTh column="store_code" label="Code" list={list} />
               <SortableTh column="store_name" label="Name" list={list} />
@@ -197,33 +197,33 @@ export default function StoreManagement() {
               const state = lifecycleOf(s);
               const archived = state === "ARCHIVED";
               return (
-                <tr key={s.id} data-testid={`store-mgmt-row-${s.store_code}`} className="border-b border-slate-100 even:bg-slate-50/50">
+                <tr key={s.id} data-testid={`store-mgmt-row-${s.store_code}`} className="border-b border-line even:bg-surface-alt">
                   <td className="px-3 py-2 font-mono text-xs">{s.store_code}</td>
                   <td className="px-3 py-2 font-medium">{s.store_name}</td>
                   <td className="px-3 py-2">{s.city}</td>
                   <td className="px-3 py-2">{s.region}</td>
-                  <td className="px-3 py-2 text-xs text-slate-600">{s.is_online_store ? "Online" : "Physical"}</td>
+                  <td className="px-3 py-2 text-xs text-body">{s.is_online_store ? "Online" : "Physical"}</td>
                   <td className="px-3 py-2"><LifecycleBadge state={state}/></td>
                   <td className="px-3 py-2 text-right space-x-1 whitespace-nowrap">
                     {/* The Store id, not a credential. Enrolment lives on that page. */}
-                    <Link data-testid={`devices-${s.store_code}`} to={`/stores/${s.id}/devices`} title="Receiver Devices" aria-label={`Receiver Devices for ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-blue-50"><MonitorSmartphone size={12}/></Link>
+                    <Link data-testid={`devices-${s.store_code}`} to={`/stores/${s.id}/devices`} title="Receiver Devices" aria-label={`Receiver Devices for ${s.store_name}`} className="row-action row-action-info"><MonitorSmartphone size={12}/></Link>
                     {!archived && can("stores.update") && (
-                      <button data-testid={`edit-store-${s.store_code}`} onClick={() => setEditing(s)} title="Edit Store" aria-label={`Edit ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-slate-50"><Pencil size={12}/></button>
+                      <button data-testid={`edit-store-${s.store_code}`} onClick={() => setEditing(s)} title="Edit Store" aria-label={`Edit ${s.store_name}`} className="row-action"><Pencil size={12}/></button>
                     )}
                     {!archived && can("stores.update") && (
-                      <button data-testid={`regen-token-${s.store_code}`} onClick={() => regen(s.id)} disabled={busy === `regen-${s.id}`} title="Regenerate legacy token" aria-label={`Regenerate the legacy Receiver token for ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-slate-200 rounded hover:bg-amber-50 disabled:opacity-50"><KeyRound size={12}/></button>
+                      <button data-testid={`regen-token-${s.store_code}`} onClick={() => regen(s.id)} disabled={busy === `regen-${s.id}`} title="Regenerate legacy token" aria-label={`Regenerate the legacy Receiver token for ${s.store_name}`} className="row-action row-action-caution"><KeyRound size={12}/></button>
                     )}
                     {state === "ACTIVE" && can("stores.archive") && (
-                      <button data-testid={`disable-store-${s.store_code}`} onClick={() => disable(s)} disabled={busy === `disable-${s.id}`} title="Disable" aria-label={`Disable ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-amber-200 text-amber-800 rounded hover:bg-amber-50 disabled:opacity-50"><Power size={12}/></button>
+                      <button data-testid={`disable-store-${s.store_code}`} onClick={() => disable(s)} disabled={busy === `disable-${s.id}`} title="Disable" aria-label={`Disable ${s.store_name}`} className="row-action row-action-caution"><Power size={12}/></button>
                     )}
                     {state === "DISABLED" && can("stores.update") && (
-                      <button data-testid={`enable-store-${s.store_code}`} onClick={() => enable(s)} disabled={busy === `enable-${s.id}`} title="Re-enable" aria-label={`Re-enable ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-green-200 text-green-800 rounded hover:bg-green-50 disabled:opacity-50"><Power size={12}/></button>
+                      <button data-testid={`enable-store-${s.store_code}`} onClick={() => enable(s)} disabled={busy === `enable-${s.id}`} title="Re-enable" aria-label={`Re-enable ${s.store_name}`} className="row-action row-action-ok"><Power size={12}/></button>
                     )}
                     {!archived && can("stores.archive") && (
-                      <button data-testid={`archive-store-${s.store_code}`} onClick={() => archive(s)} disabled={busy === `archive-${s.id}`} title="Archive" aria-label={`Archive ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-200 text-red-700 rounded hover:bg-red-50 disabled:opacity-50"><Archive size={12}/></button>
+                      <button data-testid={`archive-store-${s.store_code}`} onClick={() => archive(s)} disabled={busy === `archive-${s.id}`} title="Archive" aria-label={`Archive ${s.store_name}`} className="row-action row-action-danger"><Archive size={12}/></button>
                     )}
                     {archived && can("stores.update") && (
-                      <button data-testid={`restore-store-${s.store_code}`} onClick={() => restore(s)} disabled={busy === `restore-${s.id}`} title="Restore to disabled" aria-label={`Restore ${s.store_name}`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-blue-200 text-blue-800 rounded hover:bg-blue-50 disabled:opacity-50"><ArchiveRestore size={12}/></button>
+                      <button data-testid={`restore-store-${s.store_code}`} onClick={() => restore(s)} disabled={busy === `restore-${s.id}`} title="Restore to disabled" aria-label={`Restore ${s.store_name}`} className="row-action row-action-info"><ArchiveRestore size={12}/></button>
                     )}
                     {/* Offered on every Store this account may archive, because
                         whether it is actually allowed is decided by the
@@ -232,13 +232,13 @@ export default function StoreManagement() {
                         on a guess would hide it from the one never-used Store
                         it exists for. */}
                     {can("stores.archive") && (
-                      <button data-testid={`delete-store-${s.store_code}`} onClick={() => setDeleting(s)} title="Delete permanently (if unused)" aria-label={`Delete ${s.store_name} permanently if unused`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50"><Trash2 size={12}/></button>
+                      <button data-testid={`delete-store-${s.store_code}`} onClick={() => setDeleting(s)} title="Delete permanently (if unused)" aria-label={`Delete ${s.store_name} permanently if unused`} className="row-action row-action-destructive"><Trash2 size={12}/></button>
                     )}
                     {/* Distinct from the button above: this one works even
                         when the Store HAS history. SUPER ADMIN only - see
                         stores.delete_permanently in the permission catalog. */}
                     {can("stores.delete_permanently") && (
-                      <button data-testid={`tombstone-store-${s.store_code}`} onClick={() => setTombstoning(s)} title="Permanently delete (even with history)" aria-label={`Permanently delete ${s.store_name}, even with history`} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-red-500 text-red-800 bg-red-50 rounded hover:bg-red-100"><ShieldAlert size={12}/></button>
+                      <button data-testid={`tombstone-store-${s.store_code}`} onClick={() => setTombstoning(s)} title="Permanently delete (even with history)" aria-label={`Permanently delete ${s.store_name}, even with history`} className="row-action row-action-destructive"><ShieldAlert size={12}/></button>
                     )}
                   </td>
                 </tr>
@@ -314,15 +314,15 @@ function DeleteStoreModal({ store, onClose, onDeleted }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+    <div className="fixed inset-0 z-50 scrim flex items-center justify-center p-4"
          data-testid="delete-store-modal">
-      <div className="bg-white rounded-lg w-full max-w-md p-5 space-y-3">
+      <div className="glass w-full max-w-md p-5 space-y-3">
         <h3 className="font-semibold text-red-900">
           Delete {store.store_code} permanently
         </h3>
 
         {summary === null && !failed && (
-          <p className="text-sm text-slate-600" data-testid="delete-store-checking">
+          <p className="text-sm text-body" data-testid="delete-store-checking">
             Checking what still refers to this Store…
           </p>
         )}
@@ -335,7 +335,7 @@ function DeleteStoreModal({ store, onClose, onDeleted }) {
 
         {summary && (
           <>
-            <p className="text-sm text-slate-700" data-testid="delete-store-summary">
+            <p className="text-sm text-body" data-testid="delete-store-summary">
               {summary.explanation}
             </p>
             {!summary.deletable && (
@@ -351,7 +351,7 @@ function DeleteStoreModal({ store, onClose, onDeleted }) {
                   This cannot be undone. Type <strong>{store.store_code}</strong> to confirm.
                 </p>
                 <input
-                  className="w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                  className="w-full rounded border border-line-strong px-3 py-2 text-sm"
                   value={typed} onChange={(e) => setTyped(e.target.value)}
                   autoComplete="off" data-testid="delete-store-confirm-input"
                 />
@@ -369,7 +369,7 @@ function DeleteStoreModal({ store, onClose, onDeleted }) {
 
         <div className="flex gap-2 pt-1">
           <button type="button" data-testid="delete-store-cancel" onClick={onClose}
-                  className="flex-1 px-4 py-2 border border-slate-300 rounded-md text-sm">
+                  className="flex-1 px-4 py-2 border border-line-strong rounded-md text-sm">
             Cancel
           </button>
           <button
@@ -430,15 +430,15 @@ function TombstoneStoreModal({ store, onClose, onDeleted }) {
   ].filter(Boolean);
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+    <div className="fixed inset-0 z-50 scrim flex items-center justify-center p-4"
          data-testid="tombstone-store-modal">
-      <div className="bg-white rounded-lg w-full max-w-md p-5 space-y-3">
+      <div className="glass w-full max-w-md p-5 space-y-3">
         <h3 className="font-semibold text-red-900">
           Permanently delete {store.store_code}?
         </h3>
 
         {summary === null && (
-          <p className="text-sm text-slate-600" data-testid="tombstone-checking">
+          <p className="text-sm text-body" data-testid="tombstone-checking">
             Checking this Store's history…
           </p>
         )}
@@ -446,14 +446,14 @@ function TombstoneStoreModal({ store, onClose, onDeleted }) {
         {summary !== null && (
           <>
             {historyLines.length > 0 ? (
-              <div className="text-sm text-slate-700 space-y-1" data-testid="tombstone-history-summary">
+              <div className="text-sm text-body space-y-1" data-testid="tombstone-history-summary">
                 <p>This Store has:</p>
                 <ul className="list-disc list-inside">
                   {historyLines.map((line) => <li key={line}>{line}</li>)}
                 </ul>
               </div>
             ) : (
-              <p className="text-sm text-slate-700" data-testid="tombstone-no-history">
+              <p className="text-sm text-body" data-testid="tombstone-no-history">
                 Nothing currently refers to this Store.
               </p>
             )}
@@ -466,12 +466,12 @@ function TombstoneStoreModal({ store, onClose, onDeleted }) {
               Devices or history.
             </p>
 
-            <label htmlFor="tombstone-confirm-input" className="block text-xs font-bold uppercase tracking-widest text-slate-500">
+            <label htmlFor="tombstone-confirm-input" className="block text-xs font-bold uppercase tracking-widest text-muted">
               Type the Store code to confirm
             </label>
             <input
               id="tombstone-confirm-input"
-              className="w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono"
+              className="w-full rounded border border-line-strong px-3 py-2 text-sm font-mono"
               value={typed} onChange={(e) => setTyped(e.target.value)}
               placeholder={store.store_code}
               autoComplete="off" data-testid="tombstone-confirm-input"
@@ -495,7 +495,7 @@ function TombstoneStoreModal({ store, onClose, onDeleted }) {
 
         <div className="flex gap-2 pt-1">
           <button type="button" data-testid="tombstone-cancel" onClick={onClose}
-                  className="flex-1 px-4 py-2 border border-slate-300 rounded-md text-sm">
+                  className="flex-1 px-4 py-2 border border-line-strong rounded-md text-sm">
             Cancel
           </button>
           <button
@@ -528,19 +528,19 @@ function EditStoreModal({ store, onClose, onSaved }) {
     finally { setBusy(false); }
   };
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" data-testid="edit-store-modal">
-      <form onSubmit={submit} className="bg-white rounded-md shadow-xl w-full max-w-md p-6 space-y-3">
+    <div className="fixed inset-0 z-50 scrim flex items-center justify-center p-4" data-testid="edit-store-modal">
+      <form onSubmit={submit} className="glass shadow-2xl w-full max-w-md p-6 space-y-3">
         <h3 className="text-lg font-semibold">Edit Store</h3>
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-muted">
           Details only. Enabling, disabling and archiving have their own actions, and
           Receiver credentials are never editable here.
         </p>
         {["store_code", "store_name", "city", "region"].map((k) => (
           <div key={k}>
-            <label htmlFor={`edit-${k}`} className="block text-xs font-bold uppercase tracking-widest text-slate-500 mb-1">{(k === "region" ? "zone" : k).replace("_", " ")}</label>
+            <label htmlFor={`edit-${k}`} className="block text-xs font-bold uppercase tracking-widest text-muted mb-1">{(k === "region" ? "zone" : k).replace("_", " ")}</label>
             <input required id={`edit-${k}`} data-testid={`edit-${k.replace("_", "-")}-input`} value={f[k]}
                    onChange={(e) => setF({ ...f, [k]: e.target.value })}
-                   className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+                   className="w-full px-3 py-2 border border-line-strong rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
           </div>
         ))}
         <label className="flex items-center gap-2 text-sm">
@@ -549,7 +549,7 @@ function EditStoreModal({ store, onClose, onSaved }) {
         </label>
         {err && <div data-testid="edit-store-error" role="alert" className="text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">{err}</div>}
         <div className="flex gap-2 pt-2">
-          <button type="button" data-testid="edit-store-cancel" onClick={onClose} className="flex-1 px-4 py-2 border border-slate-300 rounded-md text-sm">Cancel</button>
+          <button type="button" data-testid="edit-store-cancel" onClick={onClose} className="flex-1 px-4 py-2 border border-line-strong rounded-md text-sm">Cancel</button>
           <button type="submit" data-testid="edit-store-submit-btn" disabled={busy} className="flex-1 px-4 py-2 bg-blue-700 text-white rounded-md text-sm font-medium">{busy ? "Saving…" : "Save"}</button>
         </div>
       </form>
@@ -568,15 +568,15 @@ function AddStoreModal({ onClose, onCreated }) {
     finally { setBusy(false); }
   };
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" data-testid="add-store-modal">
-      <form onSubmit={submit} className="bg-white rounded-md shadow-xl w-full max-w-md p-6 space-y-3">
+    <div className="fixed inset-0 z-50 scrim flex items-center justify-center p-4" data-testid="add-store-modal">
+      <form onSubmit={submit} className="glass shadow-2xl w-full max-w-md p-6 space-y-3">
         <h3 className="text-lg font-semibold">Add Store</h3>
         {["store_code", "store_name", "city", "region"].map((k) => (
           <div key={k}>
-            <label className="block text-xs font-bold uppercase tracking-widest text-slate-500 mb-1">{(k === "region" ? "zone" : k).replace("_", " ")}</label>
+            <label className="block text-xs font-bold uppercase tracking-widest text-muted mb-1">{(k === "region" ? "zone" : k).replace("_", " ")}</label>
             <input required data-testid={`add-${k.replace("_", "-")}-input`} value={f[k]}
                    onChange={(e) => setF({ ...f, [k]: e.target.value })}
-                   className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+                   className="w-full px-3 py-2 border border-line-strong rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
           </div>
         ))}
         <label className="flex items-center gap-2 text-sm">
@@ -585,7 +585,7 @@ function AddStoreModal({ onClose, onCreated }) {
         </label>
         {err && <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">{err}</div>}
         <div className="flex gap-2 pt-2">
-          <button type="button" onClick={onClose} className="flex-1 px-4 py-2 border border-slate-300 rounded-md text-sm">Cancel</button>
+          <button type="button" onClick={onClose} className="flex-1 px-4 py-2 border border-line-strong rounded-md text-sm">Cancel</button>
           <button type="submit" data-testid="add-store-submit-btn" disabled={busy} className="flex-1 px-4 py-2 bg-blue-700 text-white rounded-md text-sm font-medium">{busy ? "Saving…" : "Create"}</button>
         </div>
       </form>
