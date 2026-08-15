@@ -35,6 +35,16 @@ import hashlib
 import logging
 import os
 import subprocess
+
+try:  # the Receiver runtime
+    from tools.audio_receiver_pilot import hidden_child_process_options
+except ImportError:  # pragma: no cover - a checkout laid out differently
+    try:
+        from audio_receiver_pilot import hidden_child_process_options
+    except ImportError:
+        def hidden_child_process_options() -> dict:
+            """No Receiver runtime here - a test, or a non-Windows machine."""
+            return {}
 import sys
 import threading
 from pathlib import Path
@@ -126,6 +136,27 @@ def fetch_if_absent(*, state_root: Path, sha256: str, download_path: str,
     return destination
 
 
+def ffmpeg_executable() -> str:
+    """The FFmpeg this package shipped with, by absolute path.
+
+    NOT the bare name "ffmpeg".
+
+    A Store desktop has no FFmpeg on PATH and no reason to acquire one - the
+    Receiver package carries its own, and every other decoder in this product
+    already resolves it this way. This one asked PATH, so on a real shop
+    computer the decode failed instantly and the announcement was silent while
+    HQ showed it playing.
+
+    A checkout falls back to PATH, because that is where a developer's FFmpeg
+    genuinely lives and there is no package to be incomplete.
+    """
+    try:
+        from tools.resource_paths import resolve_packaged_ffmpeg
+    except ImportError:  # pragma: no cover - a checkout laid out differently
+        from resource_paths import resolve_packaged_ffmpeg
+    return str(resolve_packaged_ffmpeg())
+
+
 def decode_command(path: Path) -> list[str]:
     """ffmpeg arguments to turn any accepted format into the sink's PCM.
 
@@ -134,7 +165,7 @@ def decode_command(path: Path) -> list[str]:
     a decoder that blocks on a terminal nobody is attached to.
     """
     return [
-        "ffmpeg", "-nostdin", "-loglevel", "error",
+        ffmpeg_executable(), "-nostdin", "-loglevel", "error",
         "-i", str(path),
         "-f", SAMPLE_FORMAT, "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
         "-",
@@ -237,9 +268,21 @@ class AnnouncementPlayback:
     def _pump(self) -> None:
         while not self._stopping:
             try:
+                # NO CONSOLE WINDOW.
+                #
+                # SpeakLinkReceiverBackground.exe is GUI-subsystem, so it has
+                # no console. Starting a console child - and ffmpeg is one -
+                # without CREATE_NO_WINDOW makes Windows hand that child a
+                # BRAND-NEW console, which is a black window appearing on the
+                # shop counter the moment an announcement starts.
+                #
+                # The broadcast decoder already does this; the announcement
+                # decoder was the one place that did not, and the window
+                # flashing on the Store PC was exactly that.
                 self._process = self._spawn(decode_command(self._path),
                                             stdout=subprocess.PIPE,
-                                            stderr=subprocess.DEVNULL)
+                                            stderr=subprocess.DEVNULL,
+                                            **hidden_child_process_options())
             except FileNotFoundError:
                 logger.error("ffmpeg is not installed, so the announcement "
                              "cannot be decoded.")

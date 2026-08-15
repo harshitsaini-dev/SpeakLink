@@ -188,7 +188,12 @@ def main() -> int:
     # ---- 2. the kit package: wizard + Receiver + scripts
     receiver = arguments.receiver_package
     if not receiver:
-        packages = sorted((ROOT / "artifacts").glob("SpeakLinkReceiver-*"))
+        # By the timestamp in the name, for the same reason the Store Setup
+        # package is: the git hash sits before the stamp, so alphabetical
+        # order is not chronological, and "the newest Receiver" was one sort
+        # away from being last month's.
+        packages = sorted((ROOT / "artifacts").glob("SpeakLinkReceiver-*"),
+                          key=lambda path: path.name.rsplit("-", 2)[-2:])
         if not packages:
             raise SystemExit(
                 "no Receiver package in artifacts/. Build one first with "

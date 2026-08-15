@@ -302,3 +302,85 @@ def test_an_odd_trailing_byte_does_not_end_the_announcement():
     playback.start()
     playback._thread.join(timeout=5)
     assert len(sink.written) == 8
+
+
+# ===========================================================================
+# What the shop computer actually runs
+# ===========================================================================
+
+def test_the_decoder_names_the_packaged_ffmpeg_not_a_bare_command():
+    """A Store desktop has no FFmpeg on PATH and no reason to acquire one.
+
+    The Receiver package carries its own, and every other decoder in this
+    product already resolves it by absolute path. This one asked PATH - so on
+    a real shop computer the decode failed instantly, the announcement was
+    silent, and HQ went on showing it as playing.
+    """
+    from tools.announcement_player import decode_command
+    from pathlib import Path
+
+    first = decode_command(Path("promo.mp3"))[0]
+    assert first != "ffmpeg", "a bare command is resolved against PATH"
+    assert first.lower().endswith("ffmpeg.exe") or first.endswith("ffmpeg")
+    assert Path(first).is_absolute()
+
+
+def test_the_decoder_starts_with_no_console_window():
+    """SpeakLinkReceiverBackground.exe is GUI-subsystem, so it has no console.
+
+    A console child started without CREATE_NO_WINDOW is given a brand-new
+    console by Windows - a black window on the shop counter, appearing exactly
+    when an announcement starts. The broadcast decoder already guards this;
+    the announcement decoder did not, and that window was reported from a real
+    Store.
+    """
+    import sys
+    import time
+    from pathlib import Path
+    from tools.announcement_player import AnnouncementPlayback
+
+    seen = {}
+
+    class FakeStdout:
+        def read(self, _size):
+            return b""          # end of stream: one pass and done
+
+        def close(self):
+            return None
+
+    class FakeProcess:
+        stdout = FakeStdout()
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            return None
+
+        def terminate(self):
+            return None
+
+    def spy(command, **options):
+        seen.update(options)
+        return FakeProcess()
+
+    playback = AnnouncementPlayback(path=Path("promo.mp3"), sink=None,
+                                    spawn=spy)
+    playback.start()
+    # The decoder starts on its own thread; this waits for the spawn rather
+    # than for the playback, which loops until it is told to stop.
+    for _ in range(200):
+        if seen:
+            break
+        time.sleep(0.01)
+    playback.stop()
+
+    if sys.platform == "win32":
+        assert seen.get("creationflags"), "no CREATE_NO_WINDOW on Windows"
+    else:
+        # Nothing to hide on a platform without consoles, and the option set
+        # is empty rather than wrong.
+        assert "creationflags" not in seen
