@@ -36,6 +36,31 @@ export function activeFilters(filters) {
   return out;
 }
 
+/**
+ * A detail that is safe to put on screen.
+ *
+ * A validation failure answers with a LIST of objects, not a sentence. Handed
+ * to React as a child that threw, and the whole page went white - so the one
+ * thing that was meant to explain the problem became a worse problem than the
+ * one it was explaining. Anything that is not already a string is turned into
+ * a sentence here, once, rather than at each of the twenty places that show
+ * an error.
+ */
+export function asSentence(detail) {
+  if (!detail) return "";
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail.map((entry) => asSentence(entry)).filter(Boolean);
+    return parts.join(" ");
+  }
+  if (typeof detail === "object") {
+    return String(detail.msg || detail.message || detail.detail
+                  || JSON.stringify(detail));
+  }
+  return String(detail);
+}
+
+
 export function countActiveFilters(filters, { ignore = [] } = {}) {
   return Object.keys(activeFilters(filters)).filter((k) => !ignore.includes(k)).length;
 }
@@ -82,7 +107,8 @@ export function useAdminList(path, initialFilters = {}, { pageSize = DEFAULT_PAG
       setError(
         failure?.response?.status === 403
           ? "You do not have permission to view this."
-          : failure?.response?.data?.detail || "This list could not be loaded. Try again."
+          : asSentence(failure?.response?.data?.detail)
+            || "This list could not be loaded. Try again."
       );
       setData({ items: [], total: 0, pages: 0, has_more: false });
     } finally {

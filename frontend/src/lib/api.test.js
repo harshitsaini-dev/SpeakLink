@@ -325,3 +325,20 @@ test("an explicit override still wins over same-origin", () => {
   });
   expect(api.BACKEND_URL).toBe("http://api.internal:9000");
 });
+
+test("a request that brings its own Authorization keeps it", async () => {
+  const { api, setToken } = require("./api");
+  // The listening pages have their own room token and no HQ account. When an
+  // operator opens a listening link in the browser they administer from, the
+  // HQ token used to overwrite the room token and the room - correctly - did
+  // not recognise the operator.
+  setToken("hq-session-token");
+  const handler = api.interceptors.request.handlers[0].fulfilled;
+
+  const listener = handler({ headers: { Authorization: "Bearer room-token" } });
+  expect(listener.headers.Authorization).toBe("Bearer room-token");
+
+  // And an ordinary admin request still gets the session token.
+  const admin = handler({ headers: {} });
+  expect(admin.headers.Authorization).toBe("Bearer hq-session-token");
+});

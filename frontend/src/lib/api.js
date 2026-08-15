@@ -145,6 +145,17 @@ export const clearToken = () => localStorage.removeItem(TOKEN_KEY);
 export const api = axios.create({ baseURL: API_BASE });
 
 api.interceptors.request.use((config) => {
+  // A header the CALLER set always wins.
+  //
+  // The listening pages carry their own credential - a token for one room,
+  // with no account behind it - and pass it per request. This interceptor
+  // used to overwrite it with the HQ session token whenever one happened to
+  // be in this browser, so an operator who opened a listening link in the
+  // same browser they administer from was refused with "this listening link
+  // is no longer open" while holding a perfectly good link. The link was
+  // fine; the request was arriving as the operator, and the room had never
+  // heard of them.
+  if (config.headers?.Authorization) return config;
   const t = getToken();
   if (t) config.headers.Authorization = `Bearer ${t}`;
   return config;
@@ -159,7 +170,11 @@ api.interceptors.response.use(
       // bouncing that listener to the HQ sign-in screen would both lose their
       // error message and show a stranger an administrator login. It would also
       // clear the operator's token in another tab.
-      if (window.location.pathname.startsWith("/listen")) {
+      // The listener pages have no HQ account and never will. Bouncing
+      // somebody who mistyped a link password onto the staff login page tells
+      // them to sign in to a product they are not a user of.
+      if (window.location.pathname.startsWith("/listen")
+          || window.location.pathname.startsWith("/announce")) {
         return Promise.reject(err);
       }
       clearToken();
