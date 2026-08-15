@@ -1026,7 +1026,16 @@ class AudioReceiverPilot:
         replacement = SinkConfiguration(sink_mode=SINK_MODE_WINDOWS,
                                         device=device)
         opened = WindowsPcmSink(replacement)
-        opened.start()
+        # `open()`, which is what this class has. It was `start()` - a method
+        # that does not exist on it - so every remote speaker change failed at
+        # the first line with an AttributeError, and HQ reported it, correctly
+        # and uselessly, as "the Store refused that change".
+        #
+        # Nothing caught it because the only tests of this path handed it a
+        # fake sink, and a fake answers to whatever it is asked. See the
+        # contract test beside them: the double now has to have the same
+        # surface as the real class.
+        opened.open()
 
         previous = self.pcm_sink
         self.sink = replacement
