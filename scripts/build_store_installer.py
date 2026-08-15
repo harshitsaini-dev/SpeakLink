@@ -28,6 +28,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -193,14 +194,37 @@ def main() -> int:
                 "no Receiver package in artifacts/. Build one first with "
                 "scripts/Build-SpeakLinkReceiver.ps1.")
         receiver = str(packages[-1])
+    started_at = time.time()
     say(f"wrapping Receiver package {Path(receiver).name}")
     run("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
         str(ROOT / "scripts" / "Build-SpeakLinkStoreSetupPackage.ps1"),
         "-ReceiverPackagePath", receiver, "-Version", STORE_KIT_VERSION,
         "-AllowDirtyTree")
 
-    package = sorted((ROOT / "artifacts").glob(
-        f"SpeakLinkStoreSetup-{STORE_KIT_VERSION}-*"))[-1]
+    # THE ONE THAT WAS JUST BUILT, not the one that sorts last.
+    #
+    # Package names are SpeakLinkStoreSetup-<version>-<git hash>-<stamp>, and
+    # the hash sits BEFORE the timestamp - so alphabetical order is not
+    # chronological order. `sorted(...)[-1]` picked a package built half an
+    # hour earlier because its hash happened to start with a later letter, and
+    # the installer shipped without the fix that had just been written. That
+    # is the exact failure this script exists to prevent, arriving through a
+    # door it had left open.
+    #
+    # Sorted on the timestamp the name carries, and then checked against the
+    # clock: a package that is not newer than this run started is not this
+    # run's package.
+    candidates = sorted(
+        (ROOT / "artifacts").glob(f"SpeakLinkStoreSetup-{STORE_KIT_VERSION}-*"),
+        key=lambda path: path.name.rsplit("-", 2)[-2:])
+    if not candidates:
+        raise SystemExit("the Store Setup package step produced nothing.")
+    package = candidates[-1]
+    if package.stat().st_mtime < started_at:
+        raise SystemExit(
+            f"the newest Store Setup package is {package.name}, which predates "
+            "this build. Something failed quietly - refusing to ship a kit "
+            "that does not contain what was just written.")
 
     # ---- 3. the payload the installer carries
     payload = BUILD / "store-payload.zip"
@@ -213,6 +237,32 @@ def main() -> int:
                 archive.write(path, path.relative_to(package).as_posix())
                 count += 1
     say(f"payload: {count} files, {payload.stat().st_size / (1024 * 1024):.1f} MB")
+
+    # THE SCRIPTS INSIDE THE PAYLOAD ARE THE ONES IN THIS REPOSITORY.
+    #
+    # "It built" and "it contains what I just wrote" are different claims, and
+    # this script already checks the second one for its own entry module. It
+    # was not checking it for the PowerShell the wizard actually runs - which
+    # is where the last two Store-side fixes lived, and where a stale copy
+    # went out unnoticed.
+    with zipfile.ZipFile(payload) as archive:
+        packaged = {name for name in archive.namelist()
+                    if name.startswith("scripts/") and name.endswith(".ps1")}
+        stale = []
+        for name in sorted(packaged):
+            source = ROOT / "scripts" / Path(name).name
+            if not source.exists():
+                continue
+            shipped = archive.read(name).decode("utf-8", "replace")
+            written = source.read_text(encoding="utf-8")
+            if shipped.replace("\r\n", "\n") != written.replace("\r\n", "\n"):
+                stale.append(Path(name).name)
+        if stale:
+            raise SystemExit(
+                "the payload carries a different version of: "
+                + ", ".join(stale)
+                + ". The kit would ship without the change that was just made.")
+    say(f"verified {len(packaged)} packaged scripts match the repository")
 
     # ---- 4. the installer, from clean, and verified
     clean(BUILD / "pyi-installer")
