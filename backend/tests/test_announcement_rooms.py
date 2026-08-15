@@ -101,6 +101,7 @@ def open_room(client, headers, template_id, **payload):
 
 
 def join(client, code, password, name="Bz"):
+    """A listener presenting a code, a password and - required - a name."""
     return client.post("/api/announce/join",
                        json={"id": code, "password": password, "name": name})
 
@@ -304,3 +305,192 @@ def test_opening_a_link_is_its_own_right(client):
     # ...and may not hand the campaign to the outside world.
     assert client.post(f"/api/announcements/templates/{template['id']}/room",
                        headers=broadcaster, json={}).status_code == 403
+
+
+# ===========================================================================
+# Credentials somebody chose, and links that carry their own password
+# ===========================================================================
+
+def test_hq_may_choose_the_id_and_the_password(client):
+    """A code somebody picked is a code they can say down a phone."""
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio["id"])
+
+    opened = open_room(client, headers, template["id"],
+                       id="DIWALI", password="front-of-house")
+    assert opened["room"]["public_code"] == "AN-DIWALI"
+    assert join(client, "AN-DIWALI", "front-of-house").status_code == 200
+    # And the one they chose is the one that works - not a generated one
+    # quietly substituted.
+    assert opened["password_shown_once"] == "front-of-house"
+
+
+def test_a_chosen_id_already_in_use_is_refused_rather_than_stolen(client):
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    first = make_template(client, headers, audio["id"])
+    second = make_template(client, headers, audio["id"], name="Second")
+    open_room(client, headers, first["id"], id="DIWALI")
+
+    clash = client.post(f"/api/announcements/templates/{second['id']}/room",
+                        headers=headers, json={"id": "DIWALI"})
+    assert clash.status_code == 400
+    assert "still open" in clash.json()["detail"].lower()
+
+
+def test_a_link_can_be_opened_with_no_password_at_all(client):
+    """Whoever holds the link is in. Chosen explicitly, because a link that
+    forwards is a room that forwards."""
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio["id"])
+
+    opened = open_room(client, headers, template["id"], no_password=True)
+    assert opened["password_shown_once"] is None
+    assert opened["room"]["requires_password"] is False
+    assert join(client, opened["room"]["public_code"], "").status_code == 200
+    # Anything typed is accepted too - there is nothing to be wrong about.
+    assert join(client, opened["room"]["public_code"], "junk").status_code == 200
+
+
+def test_the_share_link_carries_the_password_so_nobody_has_to_type_it(client):
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio["id"])
+
+    opened = open_room(client, headers, template["id"], password="say-this")
+    assert opened["share_link"].startswith(opened["room"]["listen_path"])
+    assert "k=say-this" in opened["share_link"]
+
+    # A password-free link has nothing to carry.
+    free = open_room(client, headers, template["id"], no_password=True)
+    assert "k=" not in free["share_link"]
+
+
+def test_hq_can_see_and_remove_the_people_on_a_link(client):
+    """A link that leaves the building is only manageable if HQ can see who
+    walked in on it."""
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio["id"])
+    opened = open_room(client, headers, template["id"])
+    room_id = opened["room"]["id"]
+    token = join(client, opened["room"]["public_code"],
+                 opened["password_shown_once"], name="Ravi").json()["token"]
+
+    listed = client.get(f"/api/announcements/rooms/{room_id}/listeners",
+                        headers=headers)
+    assert listed.status_code == 200, listed.text
+    people = listed.json()["items"]
+    assert [row["display_name"] for row in people] == ["Ravi"]
+
+    removed = client.post(
+        f"/api/announcements/rooms/{room_id}/listeners/{people[0]['id']}/remove",
+        headers=headers)
+    assert removed.status_code == 200, removed.text
+    # And they are actually out, not merely off the list.
+    assert client.get("/api/announce/state",
+                      headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
+def test_a_closed_links_id_can_be_used_again(client):
+    """A closed link is withdrawn, not reserved.
+
+    Keeping AN-DIWALI forever made a chosen ID a one-use thing: closing a link
+    and opening the replacement everybody had already been told about was
+    impossible, which is the opposite of why somebody picks a memorable code.
+    """
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio["id"])
+
+    first = open_room(client, headers, template["id"], id="DIWALI")
+    client.post(f"/api/announcements/rooms/{first['room']['id']}/close",
+                headers=headers)
+
+    second = open_room(client, headers, template["id"], id="DIWALI",
+                       password="new-secret")
+    assert second["room"]["public_code"] == "AN-DIWALI"
+    assert second["room"]["id"] != first["room"]["id"]
+
+    # The new link works, and the old one's listeners are still turned away -
+    # reusing the ID must not resurrect a link somebody withdrew.
+    assert join(client, "AN-DIWALI", "new-secret").status_code == 200
+    assert join(client, "AN-DIWALI", first["password_shown_once"]).status_code == 401
+
+
+def test_an_existing_database_is_rebuilt_without_losing_its_links(tmp_path):
+    """The live estate's table was created with UNIQUE(public_code).
+
+    SQLite cannot drop a column constraint, so the table is rebuilt - and a
+    rebuild is exactly how enrolment broke once before, by silently losing the
+    indexes the new table needed. This asserts both halves: the rows survive,
+    and every index exists afterwards.
+    """
+    from sqlalchemy import create_engine, text
+    import announcement_rooms
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE announcement_rooms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id INTEGER NOT NULL,
+                public_code VARCHAR(24) NOT NULL UNIQUE,
+                password_hash VARCHAR(255) NOT NULL,
+                label VARCHAR(120) NOT NULL DEFAULT '',
+                status VARCHAR(16) NOT NULL DEFAULT 'OPEN',
+                created_by INTEGER,
+                created_at VARCHAR(40) NOT NULL,
+                closed_at VARCHAR(40),
+                closed_by INTEGER,
+                requires_password INTEGER NOT NULL DEFAULT 1
+            )
+            """)
+        connection.exec_driver_sql(
+            "INSERT INTO announcement_rooms (template_id, public_code, "
+            "password_hash, label, status, created_at) VALUES "
+            "(1, 'AN-OLD', 'hash', 'Diwali', 'CLOSED', '2026-01-01T00:00:00')")
+
+    announcement_rooms.ensure_announcement_room_schema(engine)
+
+    with engine.connect() as connection:
+        rows = connection.execute(text(
+            "SELECT public_code, label, status FROM announcement_rooms")).all()
+        assert [tuple(row) for row in rows] == [("AN-OLD", "Diwali", "CLOSED")]
+
+        names = {row[1] for row in connection.exec_driver_sql(
+            "PRAGMA index_list(announcement_rooms)")}
+        assert "ux_announcement_rooms_open_code" in names
+        assert "ix_announcement_rooms_template" in names
+        assert "ix_announcement_rooms_status" in names
+
+    # And the withdrawn code is free: this is the whole point of the rebuild.
+    room, _password = announcement_rooms.create_room(
+        engine, template_id=1, label="Diwali again", created_by=1,
+        hash_password=lambda value: f"hashed:{value}", code="OLD")
+    assert room["public_code"] == "AN-OLD"
+
+    # While two OPEN links still cannot share one code.
+    with pytest.raises(announcement_rooms.RoomRefused):
+        announcement_rooms.create_room(
+            engine, template_id=1, label="clash", created_by=1,
+            hash_password=lambda value: f"hashed:{value}", code="OLD")
+
+
+def test_a_listener_has_to_say_who_they_are(client):
+    """HQ can see who is on a link and can throw somebody off it. Both are
+    useless against a page of anonymous rows - and a rule that lives only in
+    the browser is one a curl command skips."""
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio["id"])
+    opened = open_room(client, headers, template["id"])
+
+    nameless = client.post("/api/announce/join", json={
+        "id": opened["room"]["public_code"],
+        "password": opened["password_shown_once"]})
+    assert nameless.status_code == 400
+    assert "your name" in nameless.json()["detail"].lower()

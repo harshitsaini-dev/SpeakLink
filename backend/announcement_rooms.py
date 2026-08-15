@@ -68,7 +68,15 @@ def ensure_announcement_room_schema(engine: Engine) -> None:
                 template_id INTEGER NOT NULL,
                 -- Random and public. Never derived from the template id: a
                 -- guessable link is a link anybody can guess.
-                public_code VARCHAR(24) NOT NULL UNIQUE,
+                --
+                -- NOT unique on its own. A code belongs to a link while that
+                -- link is OPEN; once it is closed the code is free again, so
+                -- the replacement link everybody has already been told about
+                -- can carry the same ID. The rule is enforced exactly, by a
+                -- partial unique index over the open rows, rather than
+                -- approximately by a column constraint that also reserves
+                -- every code ever withdrawn.
+                public_code VARCHAR(24) NOT NULL,
                 -- bcrypt. There is no column the plaintext could be read from,
                 -- which is why creating a room returns it once and a later
                 -- page cannot show it again.
@@ -78,7 +86,14 @@ def ensure_announcement_room_schema(engine: Engine) -> None:
                 created_by INTEGER,
                 created_at VARCHAR(40) NOT NULL,
                 closed_at VARCHAR(40),
-                closed_by INTEGER
+                closed_by INTEGER,
+                -- 0 means anybody with the URL can listen.
+                --
+                -- Its own column rather than an empty password, so that
+                -- "no password" is a state somebody chose and a reader can
+                -- see, not the accidental result of a blank field. Every
+                -- other code path still compares against a real hash.
+                requires_password INTEGER NOT NULL DEFAULT 1
             )
             """
         )
@@ -97,7 +112,68 @@ def ensure_announcement_room_schema(engine: Engine) -> None:
             )
             """
         )
+        # Additive for a database created before password-free links existed.
+        columns = {row[1] for row in connection.exec_driver_sql(
+            f"PRAGMA table_info({TABLE})")} if engine.dialect.name == 'sqlite' else set()
+        if columns and 'requires_password' not in columns:
+            connection.exec_driver_sql(
+                f"ALTER TABLE {TABLE} ADD COLUMN requires_password "
+                "INTEGER NOT NULL DEFAULT 1")
+
+        # A database created before closed codes could be reused still has
+        # UNIQUE(public_code) baked into the table. SQLite cannot drop a
+        # column constraint, so the table is rebuilt - carefully, because a
+        # rebuild that forgets an index is how enrolment broke once before:
+        # every index is recreated below, unconditionally, for both the fresh
+        # and the rebuilt table.
+        if engine.dialect.name == "sqlite":
+            indexes = list(connection.exec_driver_sql(
+                f"PRAGMA index_list({TABLE})"))
+            has_unique_code = False
+            for index in indexes:
+                name, unique = index[1], index[2]
+                if not unique:
+                    continue
+                columns_in_index = [row[2] for row in connection.exec_driver_sql(
+                    f"PRAGMA index_info('{name}')")]
+                # The auto-index for the column constraint covers exactly
+                # public_code; the partial index this code creates is named,
+                # and is skipped.
+                if columns_in_index == ["public_code"] and name.startswith("sqlite_autoindex"):
+                    has_unique_code = True
+            if has_unique_code:
+                connection.exec_driver_sql(f"ALTER TABLE {TABLE} RENAME TO {TABLE}_old")
+                connection.exec_driver_sql(
+                    f"""
+                    CREATE TABLE {TABLE} (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        template_id INTEGER NOT NULL,
+                        public_code VARCHAR(24) NOT NULL,
+                        password_hash VARCHAR(255) NOT NULL,
+                        label VARCHAR(120) NOT NULL DEFAULT '',
+                        status VARCHAR(16) NOT NULL DEFAULT 'OPEN',
+                        created_by INTEGER,
+                        created_at VARCHAR(40) NOT NULL,
+                        closed_at VARCHAR(40),
+                        closed_by INTEGER,
+                        requires_password INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+                connection.exec_driver_sql(
+                    f"INSERT INTO {TABLE} (id, template_id, public_code, "
+                    "password_hash, label, status, created_by, created_at, "
+                    "closed_at, closed_by, requires_password) "
+                    "SELECT id, template_id, public_code, password_hash, "
+                    "label, status, created_by, created_at, closed_at, "
+                    f"closed_by, requires_password FROM {TABLE}_old")
+                connection.exec_driver_sql(f"DROP TABLE {TABLE}_old")
+
         for statement in (
+            # The real rule, stated exactly: one OPEN link per code, and no
+            # claim at all on the codes of links that have been withdrawn.
+            f"CREATE UNIQUE INDEX IF NOT EXISTS ux_announcement_rooms_open_code "
+            f"ON {TABLE}(public_code) WHERE status = 'OPEN'",
             f"CREATE INDEX IF NOT EXISTS ix_announcement_rooms_template "
             f"ON {TABLE}(template_id)",
             f"CREATE INDEX IF NOT EXISTS ix_announcement_rooms_status "
@@ -136,26 +212,101 @@ def _row(engine: Engine, sql: str, **parameters):
     return dict(found._mapping) if found else None
 
 
-def create_room(engine: Engine, *, template_id: int, label: str,
-                created_by: int, hash_password) -> tuple[dict, str]:
-    """Open a link for this template. Returns the room and the ONE-TIME password.
+def validate_chosen_code(code: str) -> str:
+    """A code somebody typed themselves.
 
-    The plaintext is returned exactly once and never stored. A page that could
-    show it again would make "who has this link" unanswerable - and the honest
-    answer to "I lost the password" is a new one, which is why closing and
-    reopening is cheap.
+    Uppercased and checked, not merely accepted. Two reasons: a code is read
+    out over a phone, so a lowercase l next to a 1 is a support call; and a
+    code that can contain anything can contain a space, a slash or an entire
+    URL, none of which survive being pasted into the ID field.
     """
-    password = generate_join_password()
-    code = generate_public_code()
+    cleaned = (code or "").strip().upper()
+    if not cleaned:
+        raise RoomRefused("A listening ID cannot be empty.")
+    if not cleaned.startswith(PUBLIC_CODE_PREFIX):
+        cleaned = f"{PUBLIC_CODE_PREFIX}{cleaned}"
+    body = cleaned[len(PUBLIC_CODE_PREFIX):]
+    if not 3 <= len(body) <= 20:
+        raise RoomRefused(
+            "A listening ID needs between 3 and 20 characters after "
+            f"{PUBLIC_CODE_PREFIX}.")
+    # The full alphabet, not the generator's. PUBLIC_CODE_ALPHABET leaves out
+    # I, O and L so a MACHINE never coins a code that gets misread; a person
+    # who typed DIWALI meant DIWALI, and refusing it would be this code
+    # imposing its own convenience on their word.
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+    if any(character not in allowed for character in body):
+        raise RoomRefused(
+            "A listening ID may use letters, numbers and hyphens only - it "
+            "gets read out over the phone.")
+    return cleaned
+
+
+def validate_chosen_password(password: str) -> str:
+    """A password somebody typed themselves.
+
+    Short is allowed - this guards a recorded advertisement, not an account -
+    but empty is not, because an empty password is a link with no password
+    and that is a different thing with its own switch.
+    """
+    cleaned = (password or "").strip()
+    if len(cleaned) < 4:
+        raise RoomRefused(
+            "A listening password needs at least 4 characters. To share "
+            "something with no password at all, tick 'no password' instead - "
+            "that is a decision worth making on purpose.")
+    return cleaned
+
+
+def create_room(engine: Engine, *, template_id: int, label: str,
+                created_by: int, hash_password, code: str | None = None,
+                password: str | None = None,
+                no_password: bool = False) -> tuple[dict, str]:
+    """Open a link for this template. Returns the room and the join password.
+
+    A chosen ID and password are allowed, because a code somebody can say out
+    loud is worth more than a random one nobody can. A generated one is still
+    the default: it is unguessable, and most links are pasted rather than
+    dictated.
+
+    ``no_password`` opens a link anybody with the URL can use. It is a
+    separate argument rather than an empty password so that it cannot happen
+    by accident - see the column comment on requires_password.
+    """
+    if no_password:
+        # Stored as a real random secret that nobody is told, so every code
+        # path below still compares a hash against something. A sentinel like
+        # "" would mean an empty submitted password matched, which is the
+        # opposite of what a reader of this line expects.
+        password = secrets.token_urlsafe(32)
+    elif password is not None:
+        password = validate_chosen_password(password)
+    else:
+        password = generate_join_password()
+    code = validate_chosen_code(code) if code else generate_public_code()
+
+    # Only an OPEN link holds its ID.
+    #
+    # A closed link is withdrawn: nobody can join it, its tokens are dead, and
+    # its rows exist for the record. Letting it keep AN-DIWALI forever meant
+    # that closing a link and opening the replacement everybody had already
+    # been told about was impossible - which made the ID somebody chose a
+    # one-use thing, exactly the opposite of why they chose it.
+    clash = get_room_by_code(engine, code=code)
+    if clash is not None and clash["status"] == STATUS_OPEN:
+        raise RoomRefused(
+            f"{code} is in use by a listening link that is still open. Close "
+            "that one first, or choose a different ID.")
     with engine.begin() as connection:
         result = connection.execute(text(
             f"INSERT INTO {TABLE} (template_id, public_code, password_hash, "
-            "label, status, created_by, created_at) "
+            "label, status, created_by, created_at, requires_password) "
             "VALUES (:template_id, :code, :password_hash, :label, :status, "
-            "        :created_by, :now)"),
+            "        :created_by, :now, :requires_password)"),
             {"template_id": template_id, "code": code,
              "password_hash": hash_password(password), "label": label[:120],
-             "status": STATUS_OPEN, "created_by": created_by, "now": utcnow()})
+             "status": STATUS_OPEN, "created_by": created_by, "now": utcnow(),
+             "requires_password": 0 if no_password else 1})
         room_id = result.lastrowid
     return get_room(engine, room_id=room_id), password
 
@@ -165,7 +316,15 @@ def get_room(engine: Engine, *, room_id: int) -> dict | None:
 
 
 def get_room_by_code(engine: Engine, *, code: str) -> dict | None:
-    return _row(engine, f"SELECT * FROM {TABLE} WHERE public_code = :code",
+    """The room this code names.
+
+    Newest first, because a code can have been used before: an old CLOSED room
+    and today's OPEN one can share it, and a listener presenting that code
+    means the one that is open now.
+    """
+    return _row(engine,
+                f"SELECT * FROM {TABLE} WHERE public_code = :code "
+                "ORDER BY (status = 'OPEN') DESC, id DESC",
                 code=(code or "").strip().upper())
 
 
@@ -213,7 +372,11 @@ def admit(engine: Engine, *, code: str, password: str, display_name: str,
         "sent you the link.")
     if room is None or room["status"] != STATUS_OPEN:
         raise refusal
-    if not verify_password(password or "", room["password_hash"]):
+    # A link deliberately opened without a password admits whoever has the
+    # URL. That is the whole point of the switch, and it is why the switch is
+    # explicit rather than implied by an empty field.
+    if room.get("requires_password", 1) and not verify_password(
+            password or "", room["password_hash"]):
         raise refusal
 
     token = secrets.token_urlsafe(LISTENER_TOKEN_BYTES)
@@ -257,3 +420,30 @@ def leave(engine: Engine, *, token: str) -> None:
         connection.execute(text(
             f"DELETE FROM {TABLE}_listeners WHERE token_hash = :token_hash"),
             {"token_hash": token_hash(token)})
+
+
+def list_listeners(engine: Engine, *, room_id: int) -> list[dict]:
+    """Who is on this link right now.
+
+    A count alone answers "is anybody there" and nothing else. The question
+    people actually have about a link that left the building is WHO followed
+    it - and the honest answer is: the name they typed, which is worth
+    exactly what a self-declared name is worth. That is why the joined and
+    last-seen times are here beside it: those, at least, this program
+    observed.
+    """
+    with engine.connect() as connection:
+        rows = connection.execute(text(
+            f"SELECT id, display_name, joined_at, last_seen_at "
+            f"FROM {TABLE}_listeners WHERE room_id = :room_id "
+            "ORDER BY joined_at"), {"room_id": room_id}).fetchall()
+    return [dict(row._mapping) for row in rows]
+
+
+def remove_listener(engine: Engine, *, room_id: int, listener_id: int) -> bool:
+    """Turn one listener away without withdrawing the link from everybody."""
+    with engine.begin() as connection:
+        result = connection.execute(text(
+            f"DELETE FROM {TABLE}_listeners WHERE id = :id AND room_id = :room_id"),
+            {"id": listener_id, "room_id": room_id})
+    return result.rowcount > 0

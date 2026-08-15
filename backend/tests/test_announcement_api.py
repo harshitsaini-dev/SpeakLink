@@ -60,12 +60,56 @@ def sign_in(client, username="founder", password=PASSWORD):
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
-def make_store(client, headers, code, *, region="NORTH", city="DELHI"):
+def make_store(client, headers, code, *, region="NORTH", city="DELHI",
+               connected=True):
+    """A Store, and by default one with its Receiver connected.
+
+    HISTORY IS ONLY WRITTEN FOR A SHOP HQ IS CONNECTED TO - a play sent into a
+    gap is not a run, and recording it put hours of imaginary "playing" into
+    the record for shops that were silent. So a test about what history
+    contains has to say that somebody was listening at the other end; pass
+    connected=False for the tests that are about the opposite.
+    """
     response = client.post("/api/stores", headers=headers, json={
         "store_code": code, "store_name": f"Store {code}",
         "city": city, "region": region})
     assert response.status_code == 201, response.text
-    return response.json()["id"]
+    store_id = response.json()["id"]
+    if connected:
+        pretend_receiver_is_connected(client, store_id)
+    return store_id
+
+
+def pretend_receiver_is_connected(client, store_id):
+    """Put this Store into the runtime registry as a connected Receiver.
+
+    Reaches into the manager rather than opening a real socket: the sockets
+    have their own tests, and what these tests need is the ONE fact the
+    announcement code reads - whether HQ has this shop on the end of a
+    connection right now.
+    """
+    from datetime import datetime, timezone
+    from receiver_contract import ReceiverSnapshot, mark_connected
+
+    class SilentSocket:
+        """A socket that accepts everything and says nothing.
+
+        It has to actually WORK: a stand-in that raised on send made the
+        manager treat the Store as having dropped off, so the second play in
+        a test was "unreachable" and wrote no history - which looked exactly
+        like the feature being broken rather than the fixture being wrong.
+        """
+
+        async def send_text(self, _message):
+            return None
+
+        async def send_json(self, _message):
+            return None
+
+    manager = client.server_module.manager
+    manager.receivers[store_id] = SilentSocket()
+    manager.receiver_snapshots[store_id] = mark_connected(
+        ReceiverSnapshot(), datetime.now(timezone.utc))
 
 
 def make_user(client, headers, username, role):
@@ -1180,3 +1224,366 @@ def test_an_empty_filter_still_means_everything(client):
     everything = client.get("/api/announcements/status?zone=&state=&store_id=",
                             headers=headers).json()
     assert everything["total"] >= 1
+
+
+# ===========================================================================
+# Stop, which is not pause
+# ===========================================================================
+
+def test_stop_lets_go_of_what_was_chosen(client):
+    """Pause keeps the choice so it can carry on; stop discards it.
+
+    A stop that kept the campaign would leave a finished promotion one
+    accidental click from coming back on in front of customers.
+    """
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    stopped = client.post(f"/api/announcements/stores/{store}/stop",
+                          headers=headers)
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["state"] == "STOPPED"
+
+    # The ASSIGNMENT survives. Which template a shop belongs to was decided on
+    # the Templates page, and a transport button does not undo it - the first
+    # version cleared it, and the console then said "nothing chosen" for shops
+    # that were still part of a live campaign.
+    assert stopped.json()["template_id"] == template["id"]
+
+    # And Play starts it again rather than refusing.
+    resumed = client.post(f"/api/announcements/stores/{store}/play",
+                          headers=headers)
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["state"] == "PLAYING"
+
+
+def test_pause_keeps_the_choice_so_play_can_carry_on(client):
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    paused = client.post(f"/api/announcements/stores/{store}/pause",
+                         headers=headers).json()
+    assert paused["state"] == "PAUSED"
+    assert paused["template_id"] == template["id"]
+    assert client.post(f"/api/announcements/stores/{store}/play",
+                       headers=headers).json()["state"] == "PLAYING"
+
+
+def test_stop_all_clears_every_shop(client):
+    headers = sign_in(client)
+    first = make_store(client, headers, "NA", region="NORTH")
+    second = make_store(client, headers, "NB", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    stopped = client.post("/api/announcements/stop-all", headers=headers)
+    assert stopped.status_code == 200, stopped.text
+    assert set(stopped.json()["stopped"]) >= {first, second}
+
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    assert all(row["state"] == "STOPPED" for row in rows)
+    # Silent everywhere, and every shop the campaign reached still holds it.
+    # Shops it never reached keep their own nothing - stop-all is not a way of
+    # assigning a template to the estate.
+    reached = [row for row in rows if row["store_id"] in (first, second)]
+    assert reached and all(row["template_id"] == template["id"] for row in reached)
+
+
+def test_stopping_the_whole_estate_is_its_own_right(client):
+    """One shop is a local decision; every shop at once has the reach of an
+    emergency stop."""
+    headers = sign_in(client)
+    client.post("/api/users", headers=headers, json={
+        "username": "shopfloor", "password": PASSWORD,
+        "display_name": "shopfloor", "role": "BROADCASTER"})
+    theirs = sign_in(client, "shopfloor")
+    assert client.post("/api/announcements/stop-all",
+                       headers=theirs).status_code == 403
+
+
+def test_stopping_one_shop_needs_the_control_right(client):
+    """Stop is not a lighter action than pause - it discards the choice - so it
+    sits behind the same right, and is refused without it."""
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    client.post("/api/users", headers=headers, json={
+        "username": "watcher", "password": PASSWORD, "display_name": "watcher",
+        "role": "VIEWER"})
+    theirs = sign_in(client, "watcher")
+    assert client.post(f"/api/announcements/stores/{store}/stop",
+                       headers=theirs).status_code == 403
+
+
+# ===========================================================================
+# Editing what was already decided
+# ===========================================================================
+
+def test_a_template_can_be_edited_in_place(client):
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    other = upload(client, headers, title="Second")
+    template = make_template(client, headers, audio_id=audio["id"])
+
+    edited = client.put(f"/api/announcements/templates/{template['id']}",
+                        headers=headers, json={
+                            "name": "Festival - revised",
+                            "description": "now the other recording",
+                            "items": [{"audio_id": other["id"], "zone": "SOUTH"}]})
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["name"] == "Festival - revised"
+    # The lines are REPLACED, not added to. Editing "this recording, in these
+    # places" one row at a time would need ids for rows nobody refers to.
+    assert [item["audio_id"] for item in edited.json()["items"]] == [other["id"]]
+    assert [item["zone"] for item in edited.json()["items"]] == ["SOUTH"]
+
+
+def test_editing_a_name_does_not_drop_the_end_date(client):
+    """Absent means "leave it"; empty means "no limit". Collapsing the two
+    would quietly un-expire a campaign somebody only renamed."""
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"],
+                             expires_at="2030-01-01T00:00:00+00:00")
+
+    edited = client.put(f"/api/announcements/templates/{template['id']}",
+                        headers=headers, json={"name": "Renamed"})
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["expires_at"] == "2030-01-01T00:00:00+00:00"
+
+    cleared = client.put(f"/api/announcements/templates/{template['id']}",
+                         headers=headers,
+                         json={"name": "Renamed", "expires_at": ""})
+    assert cleared.json()["expires_at"] is None
+
+
+def test_an_empty_edit_is_refused_rather_than_emptying_the_template(client):
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    refused = client.put(f"/api/announcements/templates/{template['id']}",
+                         headers=headers, json={"name": "X", "items": []})
+    assert refused.status_code == 400
+    assert "plays nothing" in refused.json()["detail"]
+
+
+def test_a_recording_can_be_renamed_but_not_swapped(client):
+    headers = sign_in(client)
+    audio = upload(client, headers)
+
+    renamed = client.put(f"/api/announcements/audio/{audio['id']}",
+                         headers=headers, json={"title": "Diwali - final cut"})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["title"] == "Diwali - final cut"
+    # The stored file is untouched: history and every Store's cache point at
+    # this recording by id and by content hash.
+    assert renamed.json()["sha256"] == audio["sha256"]
+    assert renamed.json()["storage_name"] == audio["storage_name"]
+
+
+def test_editing_is_gated_on_the_rights_that_own_each_thing(client):
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post("/api/users", headers=headers, json={
+        "username": "reader", "password": PASSWORD, "display_name": "reader",
+        "role": "VIEWER"})
+    theirs = sign_in(client, "reader")
+
+    assert client.put(f"/api/announcements/templates/{template['id']}",
+                      headers=theirs, json={"name": "no"}).status_code == 403
+    assert client.put(f"/api/announcements/audio/{audio['id']}",
+                      headers=theirs, json={"title": "no"}).status_code == 403
+
+
+def test_emergency_stop_silences_announcements_as_well(client):
+    """Whoever presses this is not distinguishing between kinds of audio -
+    they are stopping the sound in their shops. A version that killed live
+    microphones and left a jingle playing would answer a question nobody
+    asked."""
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    stopped = client.post("/api/broadcast/emergency-stop", headers=headers)
+    assert stopped.status_code == 200, stopped.text
+
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    playing = [row for row in rows if row["state"] != "STOPPED"]
+    assert playing == []
+    # And the assignment survives, exactly as an ordinary Stop leaves it: the
+    # shop is silent, not un-targeted.
+    assert any(row["template_id"] == template["id"] for row in rows)
+
+
+def test_history_does_not_claim_a_disconnected_shop_is_still_playing(client):
+    """An open row for an unreachable shop is not "still playing".
+
+    Nothing confirmed it started, and with no Receiver connected nothing will
+    ever close it - so the row would go on claiming sound in a shop for as
+    long as anybody looked at it. This is the same lie the live status and the
+    dashboard used to tell, in the one place people go to check afterwards.
+    """
+    headers = sign_in(client)
+    make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    # The shop drops off AFTER the run began: the row is open, and there is
+    # now nothing to close it.
+    client.server_module.manager.receivers.clear()
+    client.server_module.manager.receiver_snapshots.clear()
+
+    rows = client.get("/api/announcements/history", headers=headers).json()["items"]
+    open_rows = [row for row in rows if not row.get("ended_at")]
+    assert open_rows, "the play should have opened a history row"
+    assert all(row["reachable"] is False for row in open_rows)
+
+
+def test_a_shop_with_no_receiver_writes_no_history_at_all(client):
+    """History is what PLAYED, not what was sent.
+
+    Opening a row for a disconnected shop put minutes - then hours - of
+    "playing" into the record for shops that were silent throughout, and every
+    report built on this table drifted further from the truth the longer the
+    shop stayed offline. The state is still recorded and the shop still picks
+    it up when it reconnects; that reconnection is when a run begins.
+    """
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH", connected=False)
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+
+    # No Receiver is connected for this shop, and none is pretended.
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    rows = client.get("/api/announcements/history", headers=headers).json()["items"]
+    assert [row for row in rows if row["store_id"] == store] == []
+
+    # The Store is still holding the campaign, and still says so.
+    status = client.get("/api/announcements/status", headers=headers).json()["items"]
+    mine = [row for row in status if row["store_id"] == store][0]
+    assert mine["state"] == "PLAYING"
+    assert mine["reachable"] is False
+
+
+# ===========================================================================
+# The daily window, applied
+# ===========================================================================
+
+def scheduler_tick(client, when):
+    """Run one scheduler pass at a chosen moment."""
+    import asyncio
+    from datetime import datetime
+
+    return asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        client.server_module._apply_announcement_schedules(
+            now=datetime.strptime(when, "%Y-%m-%d %H:%M")))
+
+
+def test_a_daily_window_starts_and_stops_the_campaign_by_itself(client):
+    """Ten to ten: nobody presses anything."""
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"],
+                             daily_start="10:00", daily_end="22:00")
+
+    def state():
+        rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+        return [row for row in rows if row["store_id"] == store][0]["state"]
+
+    assert state() == "STOPPED"
+
+    scheduler_tick(client, "2026-08-14 10:00")
+    assert state() == "PLAYING"
+
+    # And it puts itself away. The stop time is exclusive, so 22:00 is silent.
+    scheduler_tick(client, "2026-08-14 22:00")
+    assert state() == "STOPPED"
+
+
+def test_the_window_does_not_overrule_a_person(client):
+    """A pause a machine undoes thirty seconds later is not a pause.
+
+    Somebody silenced a shop at eleven for a reason; the window must not argue
+    with them at noon.
+    """
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"],
+                             daily_start="10:00", daily_end="22:00")
+
+    scheduler_tick(client, "2026-08-14 10:00")
+    client.post(f"/api/announcements/stores/{store}/pause", headers=headers)
+
+    scheduler_tick(client, "2026-08-14 12:00")
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    assert [row for row in rows if row["store_id"] == store][0]["state"] == "PAUSED"
+
+
+def test_an_expired_campaign_is_not_started_by_the_clock(client):
+    """The daily window says WHEN in the day, not whether the campaign is
+    still running at all."""
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    make_template(client, headers, audio_id=audio["id"],
+                  daily_start="10:00", daily_end="22:00",
+                  expires_at="2020-01-01T00:00:00+00:00")
+
+    scheduler_tick(client, "2026-08-14 10:30")
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    assert [row for row in rows if row["store_id"] == store][0]["state"] == "STOPPED"
+
+
+def test_half_a_window_is_refused_by_the_api(client):
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    refused = client.post("/api/announcements/templates", headers=headers, json={
+        "name": "Half", "daily_start": "10:00",
+        "items": [{"audio_id": audio["id"], "zone": "NORTH"}]})
+    assert refused.status_code == 400
+    assert "both a start and a stop" in refused.json()["detail"]
+
+
+def test_the_window_is_shown_in_words_on_the_template(client):
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"],
+                             daily_start="10:00", daily_end="22:00")
+    assert "10:00 to 22:00" in template["window"]
+
+
+def test_editing_a_name_keeps_the_daily_window(client):
+    headers = sign_in(client)
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"],
+                             daily_start="10:00", daily_end="22:00")
+    edited = client.put(f"/api/announcements/templates/{template['id']}",
+                        headers=headers, json={"name": "Renamed"})
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["daily_start"] == "10:00"
+    assert edited.json()["daily_end"] == "22:00"
+
+    cleared = client.put(f"/api/announcements/templates/{template['id']}",
+                         headers=headers,
+                         json={"name": "Renamed", "daily_start": "",
+                               "daily_end": ""})
+    assert cleared.json()["daily_start"] == ""

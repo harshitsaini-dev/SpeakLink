@@ -248,12 +248,14 @@ from receiver_runtime_auth import (
 )
 import csv
 import io
+from urllib.parse import quote
 import hashlib
 import secrets
 import broadcast_recording
 import web_rooms
 import web_chat
 import announcements
+import announcement_schedule
 import announcement_service
 import announcement_protocol
 import receiver_output_device
@@ -917,6 +919,36 @@ def startup_event():
     logger.info("SpeakLink startup complete")
 
 
+#: The scheduler task, held so shutdown can end it rather than leaving it
+#: running against a closing event loop.
+_schedule_task: "asyncio.Task | None" = None
+
+
+@app.on_event("startup")
+async def start_announcement_scheduler():
+    """The clock that opens and closes daily windows.
+
+    Started here rather than woken by a request: a shop's ten o'clock has to
+    arrive whether or not anybody happens to be looking at HQ, which is the
+    entire point of scheduling a campaign instead of pressing play.
+    """
+    global _schedule_task
+    _schedule_task = asyncio.create_task(_announcement_schedule_loop())
+
+
+@app.on_event("shutdown")
+async def stop_announcement_scheduler():
+    global _schedule_task
+    task, _schedule_task = _schedule_task, None
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
 api = APIRouter(prefix="/api")
 
 
@@ -1139,7 +1171,11 @@ def search_users(
     q: Optional[str] = None,
     role: Optional[str] = None,
     state: Optional[str] = None,
-    scope_store_id: Optional[int] = None,
+    # A string, like every other multi-select filter: the control offers
+    # tick-boxes, so `scope_store_id=4,7` is an ordinary request. As an int it
+    # answered with "Input should be a valid integer" the moment somebody
+    # ticked a second shop.
+    scope_store_id: Optional[str] = None,
     scope_city: Optional[str] = None,
     scope_region: Optional[str] = None,
     sort: Optional[str] = None,
@@ -1178,24 +1214,27 @@ def search_users(
     # by every Store that City happens to contain. UNION semantics are
     # untouched: this filters the list of accounts, it does not change what
     # any account can see.
-    if scope_store_id is not None or scope_city or scope_region:
+    wanted_scope_stores = _id_list(scope_store_id)
+    wanted_cities = _text_list(scope_city)
+    wanted_regions = _text_list(scope_region)
+    if wanted_scope_stores or wanted_cities or wanted_regions:
         matching_users = set()
         with engine.connect() as connection:
-            if scope_store_id is not None:
+            for store in wanted_scope_stores:
                 matching_users |= {r[0] for r in connection.execute(text(
                     "SELECT user_id FROM user_store_scope "
                     "WHERE scope_type = 'STORE' AND store_id = :i"),
-                    {"i": scope_store_id})}
-            if scope_city:
+                    {"i": store})}
+            for city in wanted_cities:
                 matching_users |= {r[0] for r in connection.execute(text(
                     "SELECT user_id FROM user_store_scope "
                     "WHERE scope_type = 'CITY' AND scope_value = :v"),
-                    {"v": scope_city})}
-            if scope_region:
+                    {"v": city})}
+            for region in wanted_regions:
                 matching_users |= {r[0] for r in connection.execute(text(
                     "SELECT user_id FROM user_store_scope "
                     "WHERE scope_type = 'REGION' AND scope_value = :v"),
-                    {"v": scope_region})}
+                    {"v": region})}
         records = [r for r in records if r["id"] in matching_users]
 
     total = len(records)
@@ -1509,9 +1548,14 @@ def search_receiver_devices(
     q: Optional[str] = None,
     city: Optional[str] = None,
     region: Optional[str] = None,
-    store_id: Optional[int] = None,
+    # A string, not an int: a multi-select filter legitimately sends
+    # `store_id=4,7`, and an int parameter answers that with a 422 whose
+    # detail is a LIST - which is how choosing two Stores took a page white.
+    store_id: Optional[str] = None,
     status_f: Optional[str] = Query(None, alias="status"),
-    is_primary: Optional[bool] = None,
+    # Both boxes ticked means "either", which is the unfiltered list. Said
+    # here rather than built into `A AND NOT A`, which returns nothing.
+    is_primary: Optional[str] = None,
     lifecycle: Optional[str] = None,
     include_archived: bool = True,
     page: int = 1,
@@ -1539,14 +1583,14 @@ def search_receiver_devices(
         params["term"] = term
         where.append("(d.public_id LIKE :term OR d.display_name LIKE :term "
                      "OR s.store_code LIKE :term OR s.store_name LIKE :term)")
-    if city:
-        params["city"] = city; where.append("s.city = :city")
-    if region:
-        params["region"] = region; where.append("s.region = :region")
-    if store_id is not None:
-        params["store_id"] = store_id; where.append("d.store_id = :store_id")
-    if status_f:
-        params["status_f"] = status_f; where.append("d.status = :status_f")
+    # Every one of these is multi-value. The controls above them offer
+    # tick-boxes, so `city=DELHI,JAIPUR` is an ordinary request rather than an
+    # error - and an `=` comparison would answer a two-city question with an
+    # empty table.
+    _in_clause(where, params, "s.city", "city", _text_list(city))
+    _in_clause(where, params, "s.region", "region", _text_list(region))
+    _in_clause(where, params, "d.store_id", "store", _id_list(store_id))
+    _in_clause(where, params, "d.status", "status", _text_list(status_f))
     # UNCONDITIONAL, and the only unconditional clause here. This endpoint is
     # operational, a permanently deleted Device is not, and there is therefore
     # no parameter that may bring one back. Making it opt-out was the defect:
@@ -1575,10 +1619,11 @@ def search_receiver_devices(
         where.append("d.archived_at IS NOT NULL AND d.deleted_at IS NULL")
     elif lifecycle == "active":
         where.append("d.archived_at IS NULL AND d.deleted_at IS NULL")
-    if is_primary is not None:
+    want_primary = _tri_state(is_primary)
+    if want_primary is not None:
         exists = ("EXISTS (SELECT 1 FROM receiver_store_primary_device p "
                   "WHERE p.device_id = d.id)")
-        where.append(exists if is_primary else f"NOT {exists}")
+        where.append(exists if want_primary else f"NOT {exists}")
 
     clause = " AND ".join(where) + _receiver_scope_clause(user, params)
     base = f"FROM receiver_devices d JOIN stores s ON s.id = d.store_id WHERE {clause}"
@@ -3482,6 +3527,7 @@ async def emergency_stop(db: Session = Depends(get_db), user: HQUser = Depends(r
     snapshot = list(manager.broadcasts.active_session_ids())
     stopped: list[int] = []
     failed: list[int] = []
+    silenced_stores: list[int] = []
     for session_id in snapshot:
         try:
             session = db.query(BroadcastSession).filter(
@@ -3496,6 +3542,34 @@ async def emergency_stop(db: Session = Depends(get_db), user: HQUser = Depends(r
             db.rollback()
             failed.append(session_id)
             logger.exception("Emergency Stop could not end session %s", session_id)
+
+    # ...and every recorded announcement, in every shop.
+    #
+    # This button is pressed when something must come out of the speakers NOW.
+    # A version that stopped live microphones and left a jingle playing would
+    # be answering the question nobody asked: whoever hits Emergency Stop is
+    # not distinguishing between the two kinds of audio, they are stopping the
+    # sound in their shops.
+    #
+    # Attempted per Store and never allowed to fail the whole action, for the
+    # same reason each session is: one unreachable shop must not leave the
+    # rest playing.
+    for row in announcement_service.live_status(engine):
+        if row["state"] == announcements.STATE_STOPPED:
+            continue
+        try:
+            updated = announcement_service.stop(
+                engine, store_id=row["store_id"], actor_id=user.id)
+            await _dispatch_announcement(row["store_id"], updated)
+            silenced_stores.append(row["store_id"])
+        except Exception:  # noqa: BLE001
+            logger.exception("Emergency Stop could not silence Store %s",
+                             row["store_id"])
+
+    if silenced_stores:
+        _write_log(db, "warn",
+                   f"EMERGENCY STOP by {user.username}: announcements silenced "
+                   f"in {len(silenced_stores)} Stores")
 
     if failed:
         _write_log(db, "error",
@@ -3691,8 +3765,12 @@ def _active_management_rows(db: Session, user: HQUser, visibility) -> list:
 def active_management_list(
     q: str | None = None,
     owner: str = "all",
-    owner_user_id: int | None = None,
-    store_id: int | None = None,
+    # Strings, because the controls above them are multi-select: `store_id=4,7`
+    # is an ordinary request. An int parameter answered it with "Input should
+    # be a valid integer", which is a sentence about types shown to somebody
+    # who ticked a second Store.
+    owner_user_id: str | None = None,
+    store_id: str | None = None,
     sort: str = abm.SORT_NEWEST,
     dir: str = "asc",
     page: int = 1,
@@ -4853,18 +4931,24 @@ def _history_ids_matching(filters: dict, user: HQUser, db: Session) -> list:
         query = query.filter(BroadcastSession.created_at >= start_at)
     if end_at:
         query = query.filter(BroadcastSession.created_at <= end_at)
-    if filters.get("started_by") is not None:
-        query = query.filter(BroadcastSession.started_by == filters["started_by"])
+    # The SAME shapes the list route accepts. If this resolved filters
+    # differently, "Select all filtered" would act on a different set from the
+    # one on screen - which for a permanent delete is the worst bug this file
+    # could have.
+    bulk_owners = _id_list(filters.get("started_by"))
+    if bulk_owners:
+        query = query.filter(BroadcastSession.started_by.in_(bulk_owners))
 
     target_conditions = []
-    if filters.get("store_id") is not None:
-        target_conditions.append(BroadcastTarget.store_id == filters["store_id"])
+    bulk_stores = _id_list(filters.get("store_id"))
+    if bulk_stores:
+        target_conditions.append(BroadcastTarget.store_id.in_(bulk_stores))
     if filters.get("city") or filters.get("region"):
         store_match = []
         if filters.get("city"):
-            store_match.append(Store.city == filters["city"])
+            store_match.append(Store.city.in_(_text_list(filters["city"])))
         if filters.get("region"):
-            store_match.append(Store.region == filters["region"])
+            store_match.append(Store.region.in_(_text_list(filters["region"])))
         target_conditions.append(BroadcastTarget.store_id.in_(
             db.query(Store.id).filter(*store_match).scalar_subquery()))
     if target_conditions:
@@ -5254,6 +5338,61 @@ def _receiver_scope_clause(user, params):
     return f" AND s.id IN ({', '.join(keys)})"
 
 
+def _text_list(value) -> list[str]:
+    """`ACTIVE`, `ACTIVE,OFFLINE`, or nothing - as a list."""
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def _in_clause(where: list, params: dict, column: str, name: str,
+               values: list) -> None:
+    """An IN over however many values were chosen, one numbered bind each.
+
+    Numbered binds rather than an expanding bindparam because these queries
+    are assembled as text and executed in several places; a parameter that
+    only works if every call site remembers to declare it expanding is a trap
+    the next filter falls into.
+    """
+    if not values:
+        return
+    keys = []
+    for index, value in enumerate(values):
+        key = f"{name}_{index}"
+        params[key] = value
+        keys.append(f":{key}")
+    where.append(f"{column} IN ({', '.join(keys)})")
+
+
+def _id_list(value) -> list[int]:
+    """`4`, `4,7`, or nothing - as a list of ints.
+
+    One helper for every filter that names rows by id. A filter that accepts
+    one value where the control offers several is not a smaller feature; it is
+    a 422 in front of somebody who ticked a second box.
+    """
+    out: list[int] = []
+    for part in str(value or "").split(","):
+        text_part = part.strip()
+        if text_part:
+            try:
+                out.append(int(text_part))
+            except ValueError:
+                continue
+    return out
+
+
+def _tri_state(value) -> bool | None:
+    """Yes, no, or either. Both ticked is "either", not "nothing"."""
+    picked = {part.strip().lower()
+              for part in str(value or "").split(",") if part.strip()}
+    yes = bool(picked & {"true", "1", "yes"})
+    no = bool(picked & {"false", "0", "no"})
+    if yes and not no:
+        return True
+    if no and not yes:
+        return False
+    return None
+
+
 def _receiver_status_where(user, *, q, city, region, store_id, status_f):
     """One narrowing used by BOTH the search and its filter options, so an
     option list can never offer a Zone whose Stores the caller cannot see."""
@@ -5298,7 +5437,12 @@ def search_receiver_status(
     region: Optional[str] = None,
     store_id: Optional[str] = None,
     status_f: Optional[str] = Query(None, alias="status"),
-    has_primary: Optional[bool] = None,
+    # A string, for the same reason as the others: the control offers two
+    # boxes and somebody may tick both. `true,false` is a legitimate request
+    # meaning "either", and a bool parameter answers it with a 422 the
+    # operator can neither read nor act on - which is how this filter took a
+    # whole page white.
+    has_primary: Optional[str] = None,
     sort: Optional[str] = None,
     dir: str = "asc",
     page: int = 1,
@@ -5318,10 +5462,11 @@ def search_receiver_status(
     where, params = _receiver_status_where(
         user, q=q, city=city, region=region, store_id=store_id, status_f=status_f)
 
-    if has_primary is not None:
+    want = _tri_state(has_primary)
+    if want is not None:
         exists = ("EXISTS (SELECT 1 FROM receiver_store_primary_device p "
                   "WHERE p.store_id = s.id)")
-        where += f" AND {'' if has_primary else 'NOT '}{exists}"
+        where += f" AND {'' if want else 'NOT '}{exists}"
 
     def prepared(sql: str):
         """Bind the list parameters as expanding, so IN gets a real list."""
@@ -5591,8 +5736,8 @@ def search_logs(
     level: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    actor_user_id: Optional[int] = None,
-    store_id: Optional[int] = None,
+    actor_user_id: Optional[str] = None,
+    store_id: Optional[str] = None,
     device_public_id: Optional[str] = None,
     include_archived: bool = False,
     archived_only: bool = False,
@@ -5627,10 +5772,12 @@ def search_logs(
         query = query.filter(SystemLog.created_at >= start_at)
     if end_at:
         query = query.filter(SystemLog.created_at <= end_at)
-    if actor_user_id is not None:
-        query = query.filter(SystemLog.actor_user_id == actor_user_id)
-    if store_id is not None:
-        query = query.filter(SystemLog.store_id == store_id)
+    wanted_actors = _id_list(actor_user_id)
+    if wanted_actors:
+        query = query.filter(SystemLog.actor_user_id.in_(wanted_actors))
+    wanted_log_stores = _id_list(store_id)
+    if wanted_log_stores:
+        query = query.filter(SystemLog.store_id.in_(wanted_log_stores))
     if device_public_id:
         query = query.filter(SystemLog.device_public_id == device_public_id)
 
@@ -5661,8 +5808,11 @@ def search_broadcast_history(
     status_f: Optional[str] = Query(None, alias="status"),
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    started_by: Optional[int] = None,
-    store_id: Optional[int] = None,
+    # Strings, because the controls are multi-select. `store_id=4,7` and
+    # `started_by=1,2` are ordinary requests; as ints they answered with
+    # "Input should be a valid integer" the moment a second box was ticked.
+    started_by: Optional[str] = None,
+    store_id: Optional[str] = None,
     city: Optional[str] = None,
     region: Optional[str] = None,
     include_archived: bool = False,
@@ -5698,18 +5848,21 @@ def search_broadcast_history(
         query = query.filter(BroadcastSession.created_at >= start_at)
     if end_at:
         query = query.filter(BroadcastSession.created_at <= end_at)
-    if started_by is not None:
-        query = query.filter(BroadcastSession.started_by == started_by)
+    wanted_owners = _id_list(started_by)
+    if wanted_owners:
+        query = query.filter(BroadcastSession.started_by.in_(wanted_owners))
 
     target_conditions = []
-    if store_id is not None:
-        target_conditions.append(BroadcastTarget.store_id == store_id)
+    wanted_history_stores = _id_list(store_id)
+    if wanted_history_stores:
+        target_conditions.append(
+            BroadcastTarget.store_id.in_(wanted_history_stores))
     if city or region:
         store_match = []
         if city:
-            store_match.append(Store.city == city)
+            store_match.append(Store.city.in_(_text_list(city)))
         if region:
-            store_match.append(Store.region == region)
+            store_match.append(Store.region.in_(_text_list(region)))
         target_conditions.append(
             BroadcastTarget.store_id.in_(
                 db.query(Store.id).filter(*store_match).scalar_subquery()))
@@ -7890,7 +8043,8 @@ EXPORTS = {
         "columns": [("store_code", "Store code"), ("store_name", "Store"),
                     ("zone", "Zone"), ("audio_title", "Recording"),
                     ("template_name", "Template"), ("started_at", "Started"),
-                    ("ended_at", "Ended"), ("ended_reason", "Because"),
+                    ("ended_at", "Ended"), ("duration_seconds", "Duration (s)"),
+                    ("ended_reason", "Because"),
                     ("ended_by_username", "Ended by")],
         "sorts": "ANNOUNCEMENT_HISTORY_SORTS",
     },
@@ -8070,7 +8224,7 @@ def _export_rows(dataset: str, params: dict, user: HQUser, db: Session) -> list[
         return search_users(
             q=params.get("q"), role=params.get("role"),
             state=params.get("state"),
-            scope_store_id=_as_int(params.get("scope_store_id")),
+            scope_store_id=params.get("scope_store_id"),
             scope_city=params.get("scope_city"),
             scope_region=params.get("scope_region"),
             sort=params.get("sort"), dir=params.get("dir", "asc"),
@@ -8232,18 +8386,31 @@ def create_announcement_room(
     closing and reopening costs nothing.
     """
     template = _template_or_404(template_id)
-    room, password = announcement_rooms.create_room(
-        engine, template_id=template_id,
-        label=(payload or {}).get("label") or template["name"],
-        created_by=user.id, hash_password=hash_password)
+    body = payload or {}
+    try:
+        room, password = announcement_rooms.create_room(
+            engine, template_id=template_id,
+            label=body.get("label") or template["name"],
+            created_by=user.id, hash_password=hash_password,
+            code=body.get("id") or body.get("code"),
+            password=body.get("password"),
+            no_password=bool(body.get("no_password")))
+    except announcement_rooms.RoomRefused as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
     _write_log(db, "info",
                f"announcement_room_opened template={template_id} "
                f"code={room['public_code']} by={user.username}")
+    out = _room_out(room)
     return {
-        "room": _room_out(room),
-        # Once. Named plainly so the UI cannot mistake it for something it can
-        # fetch again later.
-        "password_shown_once": password,
+        "room": out,
+        # Once, and only when there is one. Named plainly so the UI cannot
+        # mistake it for something it can fetch again later.
+        "password_shown_once": None if body.get("no_password") else password,
+        # A link that carries the password, for the common case of pasting it
+        # into a message. Whoever receives it is one click from listening -
+        # which is the point, and also the risk, so the UI says both.
+        "share_link": (out["listen_path"] if body.get("no_password")
+                       else f"{out['listen_path']}&k={quote(password)}"),
     }
 
 
@@ -8254,6 +8421,44 @@ def list_announcement_rooms(
 ):
     rooms = announcement_rooms.list_rooms(engine, template_id=template_id)
     return {"items": [_room_out(row) for row in rooms], "total": len(rooms)}
+
+
+@api.get("/announcements/rooms/{room_id}/listeners")
+def list_announcement_room_listeners(
+    room_id: int,
+    user: HQUser = Depends(require("menu.announcements.view")),
+):
+    """Who followed this link.
+
+    The name is the one they typed, and the page says so: a self-declared
+    name is worth exactly what a self-declared name is worth. The joined and
+    last-seen times beside it are what this program actually observed.
+    """
+    if announcement_rooms.get_room(engine, room_id=room_id) is None:
+        raise HTTPException(status_code=404, detail="No such listening link.")
+    listeners = announcement_rooms.list_listeners(engine, room_id=room_id)
+    return {"items": listeners, "total": len(listeners)}
+
+
+@api.post("/announcements/rooms/{room_id}/listeners/{listener_id}/remove")
+def remove_announcement_room_listener(
+    room_id: int, listener_id: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.rooms.manage")),
+):
+    """Turn ONE listener away, without withdrawing the link from everybody.
+
+    Closing the link is the blunt instrument; this is the one for a single
+    person who should not have followed it.
+    """
+    if not announcement_rooms.remove_listener(engine, room_id=room_id,
+                                              listener_id=listener_id):
+        raise HTTPException(status_code=404,
+                            detail="That listener is not on this link.")
+    _write_log(db, "info",
+               f"announcement_room_listener_removed room={room_id} "
+               f"listener={listener_id} by={user.username}")
+    return {"ok": True}
 
 
 @api.post("/announcements/rooms/{room_id}/close")
@@ -8290,6 +8495,7 @@ def _room_out(room: dict) -> dict:
         "created_at": room.get("created_at"),
         "closed_at": room.get("closed_at"),
         "listener_count": room.get("listener_count", 0),
+        "requires_password": bool(room.get("requires_password", 1)),
         # A ready-made link, because the alternative is somebody assembling it
         # by hand and getting the host wrong.
         "listen_path": f"/announce?id={room['public_code']}",
@@ -8306,12 +8512,22 @@ def join_announcement_room(payload: dict, db: Session = Depends(get_db)):
     product and must never need to be. What they get is a token scoped to one
     room, which stops working the moment that room is closed.
     """
+    # Checked here, not only in the form. HQ's "who is listening" list and its
+    # Remove button are worth nothing against a page of anonymous rows, and a
+    # rule that lives only in the browser is a rule anybody can skip with a
+    # curl command.
+    listener_name = ((payload or {}).get("name") or "").strip()
+    if len(listener_name) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Please give your name, so the people running this "
+                   "announcement know who is listening.")
     try:
         room, token = announcement_rooms.admit(
             engine,
             code=(payload or {}).get("id") or (payload or {}).get("code") or "",
             password=(payload or {}).get("password") or "",
-            display_name=(payload or {}).get("name") or "",
+            display_name=listener_name,
             verify_password=verify_password)
     except announcement_rooms.RoomRefused as refusal:
         # One refusal for a wrong ID and a wrong password: telling a stranger
@@ -8667,17 +8883,32 @@ def dashboard_summary(
         row["stores"] = len(row["stores"])
 
     # ---- Announcements, right now --------------------------------------
-    playback = announcement_service.live_status(engine)
+    # Told who is actually connected, so PLAYING stays a claim about shops HQ
+    # can observe. Without this the tile counted every shop HQ had SENT a play
+    # to - 44 playing with 2 online, which is the same lie the status table
+    # used to tell and worse here, because a headline number gets believed.
+    connected_now = manager.online_store_ids()
+    playback = announcement_service.live_status(
+        engine, connected_store_ids=connected_now)
     if scope is not None:
         playback = [row for row in playback if row["store_id"] in set(scope)]
     if matching is not None:
         playback = [row for row in playback if row["store_id"] in matching]
-    states = {"PLAYING": 0, "PAUSED": 0, "DUCKED": 0, "STOPPED": 0}
+    states = {"PLAYING": 0, "PAUSED": 0, "DUCKED": 0, "STOPPED": 0,
+              "UNREACHABLE": 0}
     for row in playback:
+        if row["state"] in ("PLAYING", "DUCKED") and not row.get("reachable", True):
+            # HQ asked and nothing answered. Counting it as playing would put
+            # a number on audio nobody can hear.
+            states["UNREACHABLE"] += 1
+            continue
         states[row["state"]] = states.get(row["state"], 0) + 1
 
     # ---- Stores, right now ---------------------------------------------
-    online = sum(1 for row in playback if row.get("store_status") == "online")
+    # Connected NOW, from the runtime - not the `status` column, which records
+    # what a Store was last set to rather than whether it is on the end of a
+    # socket at this moment.
+    online = sum(1 for row in playback if row["store_id"] in connected_now)
 
     return {
         "since": window_from.isoformat(),
@@ -8760,9 +8991,101 @@ ANNOUNCEMENT_HISTORY_SORTS = {
     "started_at": lambda row: row.get("started_at"),
     "ended_at": lambda row: row.get("ended_at"),
     "ended_reason": lambda row: row.get("ended_reason"),
+    # Still-playing rows have no duration. Sorted as -1 so they group together
+    # at one end instead of scattering among short runs.
+    "duration_seconds": lambda row: (row.get("duration_seconds")
+                                     if row.get("duration_seconds") is not None
+                                     else -1),
 }
 
 # ================ RECORDED ANNOUNCEMENTS ================
+
+#: How often the scheduler looks at the clock. Thirty seconds, because a shop
+#: opening "at ten" means within half a minute of ten, and a tighter loop
+#: would spend the day waking up to do nothing.
+SCHEDULE_TICK_SECONDS = 30
+
+
+async def _apply_announcement_schedules(*, now: datetime | None = None) -> dict:
+    """Start and stop templates that carry a daily window.
+
+    IT OPENS AND CLOSES THE WINDOW. IT DOES NOT POLICE WHAT HAPPENS INSIDE IT.
+    A shop paused by a person at eleven stays paused at noon: a pause that a
+    machine undoes thirty seconds later is not a pause, and an operator who
+    silenced a shop for a reason must not have to argue with a timer.
+
+    So: at the moment a window contains the time, any Store of that template
+    which is STOPPED is started. At the moment it does not, any Store PLAYING
+    that template is stopped. Everything else is left exactly as it is.
+    """
+    moment = now or datetime.now()
+    started: list[int] = []
+    stopped: list[int] = []
+    connected = manager.online_store_ids()
+
+    for template in announcement_service.list_templates(engine, status="active"):
+        window_start = template.get("daily_start")
+        window_end = template.get("daily_end")
+        if not window_start or not window_end:
+            continue
+        inside = announcement_schedule.is_within(
+            window_start, window_end, template.get("daily_days"), moment)
+        # A campaign whose dates have passed is never started by the clock -
+        # the daily window says WHEN in the day, not whether the campaign is
+        # still running at all.
+        if inside and not announcement_service.template_is_live(template):
+            inside = False
+
+        target_stores = announcement_service.stores_for_template(
+            engine, template_id=template["id"])
+        first_item = (template.get("items") or [None])[0]
+        first_audio = (first_item or {}).get("audio_id")
+
+        for store_id in target_stores:
+            current = announcement_service.get_playback(engine, store_id=store_id)
+            state = current["state"]
+            if inside:
+                if state != announcements.STATE_STOPPED:
+                    continue          # already running, ducked, or paused by a person
+                row = announcement_service.set_state(
+                    engine, store_id=store_id,
+                    state=announcements.STATE_PLAYING,
+                    template_id=template["id"], audio_id=first_audio,
+                    actor_id=None, reachable=store_id in connected)
+                await _dispatch_announcement(store_id, row)
+                started.append(store_id)
+            else:
+                if (state == announcements.STATE_STOPPED
+                        or current.get("template_id") != template["id"]):
+                    continue
+                row = announcement_service.stop(engine, store_id=store_id,
+                                                actor_id=None)
+                await _dispatch_announcement(store_id, row)
+                stopped.append(store_id)
+
+    return {"started": started, "stopped": stopped}
+
+
+async def _announcement_schedule_loop() -> None:
+    """The clock, running for as long as HQ does.
+
+    Every failure is caught and logged rather than ending the loop: a
+    scheduler that dies on one bad template stops opening every OTHER
+    campaign's window, and does it silently.
+    """
+    while True:
+        try:
+            outcome = await _apply_announcement_schedules()
+            if outcome["started"] or outcome["stopped"]:
+                logger.info(
+                    "Announcement schedule: started %s, stopped %s",
+                    len(outcome["started"]), len(outcome["stopped"]))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("The announcement scheduler could not run a tick")
+        await asyncio.sleep(SCHEDULE_TICK_SECONDS)
+
 
 async def _dispatch_announcement(store_id: int, row: dict) -> None:
     """Tell one Store Receiver what its announcement should be doing now.
@@ -9110,14 +9433,26 @@ def create_announcement_template(
         except announcements.AnnouncementRefused as refusal:
             raise HTTPException(status_code=400, detail=str(refusal))
 
+    try:
+        daily_start, daily_end = announcement_schedule.validate_window(
+            payload.get("daily_start"), payload.get("daily_end"))
+        daily_days = (announcement_schedule.parse_days(payload.get("daily_days"))
+                      if daily_start else "")
+    except announcement_schedule.ScheduleRefused as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+
     now = announcements.utcnow().isoformat()
     with engine.begin() as connection:
         result = connection.execute(text(
             "INSERT INTO " + announcements.TEMPLATE_TABLE +
             " (name, description, created_by, created_at, updated_at,"
-            "  starts_at, expires_at, status)"
+            "  starts_at, expires_at, daily_start, daily_end, daily_days,"
+            "  status)"
             " VALUES (:name, :description, :created_by, :now, :now,"
-            "         :starts_at, :expires_at, 'active')"), {
+            "         :starts_at, :expires_at, :daily_start, :daily_end,"
+            "         :daily_days, 'active')"), {
+            "daily_start": daily_start, "daily_end": daily_end,
+            "daily_days": daily_days,
             "name": name[:120],
             "description": (payload.get("description") or "")[:500],
             "created_by": user.id, "now": now,
@@ -9142,6 +9477,146 @@ def create_announcement_template(
                f"announcement_template_created id={template_id} "
                f"lines={len(items)} by={user.username}")
     return _template_or_404(template_id)
+
+
+@api.put("/announcements/templates/{template_id}")
+def update_announcement_template(
+    template_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.templates.manage")),
+):
+    """Edit a template in place: its name, its window, and its lines.
+
+    WHY THE LINES ARE REPLACED RATHER THAN PATCHED
+
+    A template's lines are one decision - "this recording, in these places" -
+    and editing them one at a time would mean inventing ids for rows nobody
+    ever refers to. The whole set arrives together and replaces the old set in
+    one transaction, so a half-applied edit cannot leave a campaign playing a
+    recording in shops it was just taken out of.
+
+    Editing does NOT stop what is currently playing. A shop already running
+    this template keeps running, and picks up the new lines the next time it
+    is started - stopping the estate because somebody fixed a typo in a name
+    would be a far worse surprise than the delay.
+    """
+    existing = _template_or_404(template_id)
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="A template needs a name.")
+    items = payload.get("items")
+    if items is not None and not items:
+        raise HTTPException(
+            status_code=400,
+            detail="A template with no lines plays nothing. Add at least one "
+                   "recording and the Store or zone it plays in.")
+    if items is not None:
+        for item in items:
+            try:
+                announcements.item_targets_exactly_one(item.get("store_id"),
+                                                       item.get("zone"))
+                announcements.validate_volume(
+                    item.get("volume_percent", announcements.DEFAULT_VOLUME))
+            except announcements.AnnouncementRefused as refusal:
+                raise HTTPException(status_code=400, detail=str(refusal))
+
+    try:
+        # Absent means "leave the schedule alone"; empty means "no schedule".
+        # Collapsing those would drop a shop-hours window off a template
+        # somebody only renamed.
+        if "daily_start" in payload or "daily_end" in payload:
+            daily_start, daily_end = announcement_schedule.validate_window(
+                payload.get("daily_start"), payload.get("daily_end"))
+            daily_days = (announcement_schedule.parse_days(payload.get("daily_days"))
+                          if daily_start else "")
+        else:
+            daily_start = existing.get("daily_start") or ""
+            daily_end = existing.get("daily_end") or ""
+            daily_days = existing.get("daily_days") or ""
+    except announcement_schedule.ScheduleRefused as refusal:
+        raise HTTPException(status_code=400, detail=str(refusal))
+
+    now = announcements.utcnow().isoformat()
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE " + announcements.TEMPLATE_TABLE +
+            " SET name = :name, description = :description,"
+            "     starts_at = :starts_at, expires_at = :expires_at,"
+            "     daily_start = :daily_start, daily_end = :daily_end,"
+            "     daily_days = :daily_days,"
+            "     updated_at = :now"
+            " WHERE id = :id"), {
+            "id": template_id,
+            "daily_start": daily_start, "daily_end": daily_end,
+            "daily_days": daily_days,
+            "name": name[:120],
+            "description": (payload.get("description") or "")[:500],
+            # Absent means "leave it"; empty string means "no limit". Those are
+            # different intentions and collapsing them would silently drop the
+            # end date off a campaign somebody only renamed.
+            "starts_at": (payload["starts_at"] or None
+                          if "starts_at" in payload else existing.get("starts_at")),
+            "expires_at": (payload["expires_at"] or None
+                           if "expires_at" in payload else existing.get("expires_at")),
+            "now": now,
+        })
+        if items is not None:
+            connection.execute(text(
+                "DELETE FROM " + announcements.ITEM_TABLE +
+                " WHERE template_id = :id"), {"id": template_id})
+            for position, item in enumerate(items):
+                connection.execute(text(
+                    "INSERT INTO " + announcements.ITEM_TABLE +
+                    " (template_id, audio_id, store_id, zone, position,"
+                    "  volume_percent)"
+                    " VALUES (:template_id, :audio_id, :store_id, :zone,"
+                    "         :position, :volume)"), {
+                    "template_id": template_id, "audio_id": item.get("audio_id"),
+                    "store_id": item.get("store_id"), "zone": item.get("zone"),
+                    "position": position,
+                    "volume": announcements.validate_volume(
+                        item.get("volume_percent", announcements.DEFAULT_VOLUME)),
+                })
+    _write_log(db, "info",
+               f"announcement_template_updated id={template_id} by={user.username}")
+    return _template_or_404(template_id)
+
+
+@api.put("/announcements/audio/{audio_id}")
+def update_announcement_audio(
+    audio_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.upload")),
+):
+    """Rename a recording.
+
+    The title only. The FILE is deliberately not replaceable: templates,
+    history and every Store's cache all point at this recording by id and by
+    content hash, and swapping the audio underneath would rewrite what a shop
+    played last week without leaving a trace. To play something else, upload
+    it and point the template at it - which is one action longer and honest.
+
+    Behind announcements.upload rather than templates.manage: this is the
+    right that says who owns the library of recordings.
+    """
+    title = (payload.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="A recording needs a title.")
+    with engine.begin() as connection:
+        changed = connection.execute(text(
+            "UPDATE " + announcements.AUDIO_TABLE +
+            " SET title = :title WHERE id = :id"),
+            {"id": audio_id, "title": title[:200]}).rowcount
+    if not changed:
+        raise HTTPException(status_code=404, detail="No such recording.")
+    _write_log(db, "info",
+               f"announcement_audio_renamed id={audio_id} by={user.username}")
+    for row in announcement_service.list_audio(engine, status="all"):
+        if row["id"] == audio_id:
+            return row
+    raise HTTPException(status_code=404, detail="No such recording.")
 
 
 async def _stop_stores_running_template(template_id: int, *, actor_id=None) -> list[int]:
@@ -9234,7 +9709,7 @@ def announcement_history(
     """
     page, page_size = normalize_paging(page, page_size)
     rows = announcement_service.list_history(
-        engine, search=q or "", zone=zone or "", reason=reason or "",
+        engine, connected_store_ids=manager.online_store_ids(), search=q or "", zone=zone or "", reason=reason or "",
         store_id=store_id, template_id=template_id,
         since=since or "", until=until or "",
         include_archived=include_archived)
@@ -9648,7 +10123,8 @@ def announcement_status(
     page, page_size = normalize_paging(page, page_size)
     rows = announcement_service.live_status(
         engine, search=q or "", zone=zone or "", state=state or "",
-        store_id=store_id)
+        store_id=store_id,
+        connected_store_ids=manager.online_store_ids())
     rows = sort_rows(rows, sort, dir, ANNOUNCEMENT_STATUS_SORTS)
     offset = (page - 1) * page_size
     return Page(items=rows[offset:offset + page_size], total=len(rows),
@@ -9690,6 +10166,10 @@ async def play_announcement_template(
     first_audio = (template["items"][0].get("audio_id")
                    if template.get("items") else None)
     started, refused = [], []
+    # Read once, not per Store: this is a live registry, and forty lookups
+    # against a moving set is forty chances for the same run to be half
+    # recorded and half not.
+    connected_now = manager.online_store_ids()
     for store_id in targets:
         current = announcement_service.get_playback(engine, store_id=store_id)
         try:
@@ -9699,7 +10179,8 @@ async def play_announcement_template(
             continue
         row = announcement_service.set_state(
             engine, store_id=store_id, state=state, template_id=template_id,
-            audio_id=first_audio, actor_id=user.id)
+            audio_id=first_audio, actor_id=user.id,
+            reachable=store_id in connected_now)
         await _dispatch_announcement(store_id, row)
         started.append(store_id)
     _write_log(db, "info",
@@ -9746,12 +10227,58 @@ async def play_announcement_in_store(
         state = announcements.next_state_for_play(current["state"])
     except announcements.AnnouncementRefused as refusal:
         raise HTTPException(status_code=409, detail=str(refusal))
-    row = announcement_service.set_state(engine, store_id=store_id, state=state,
-                                         actor_id=user.id)
+    row = announcement_service.set_state(
+        engine, store_id=store_id, state=state, actor_id=user.id,
+        reachable=store_id in manager.online_store_ids())
     await _dispatch_announcement(store_id, row)
     _write_log(db, "info",
                f"announcement_resumed store={store_id} by={user.username}")
     return row
+
+
+@api.post("/announcements/stores/{store_id}/stop")
+async def stop_announcement_in_store(
+    store_id: int,
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.control")),
+):
+    """Stop one Store, and forget what it was playing.
+
+    Its own action rather than a pause with a flag: after this the Store has
+    nothing chosen, and the console's Play button refuses instead of quietly
+    resuming a campaign somebody finished.
+    """
+    row = announcement_service.stop(engine, store_id=store_id, actor_id=user.id)
+    await _dispatch_announcement(store_id, row)
+    _write_log(db, "info",
+               f"announcement_stopped store={store_id} by={user.username}")
+    return row
+
+
+@api.post("/announcements/stop-all")
+async def stop_all_announcements(
+    db: Session = Depends(get_db),
+    user: HQUser = Depends(require("announcements.control_all")),
+):
+    """Every Store at once, and nothing left selected anywhere.
+
+    Behind control_all for the same reason Pause All is: reaching every shop
+    in the estate in one action has the reach of an emergency stop, and is
+    grantable separately from running one shop's announcements.
+    """
+    stopped = []
+    for row in announcement_service.live_status(engine):
+        if row["state"] == announcements.STATE_STOPPED:
+            # Already stopped. Rewriting it would put a second identical entry
+            # in the history for a shop where nothing changed.
+            continue
+        updated = announcement_service.stop(
+            engine, store_id=row["store_id"], actor_id=user.id)
+        await _dispatch_announcement(row["store_id"], updated)
+        stopped.append(row["store_id"])
+    _write_log(db, "warn",
+               f"announcement_stop_all stores={len(stopped)} by={user.username}")
+    return {"stopped": stopped, "count": len(stopped)}
 
 
 @api.post("/announcements/pause-all")
@@ -9795,6 +10322,7 @@ async def play_all_announcements(
     """
     rows = announcement_service.live_status(engine)
     started, skipped = [], []
+    connected_all = manager.online_store_ids()
     for row in rows:
         if row.get("template_id") is None:
             skipped.append(row["store_id"])
@@ -9805,7 +10333,8 @@ async def play_all_announcements(
             skipped.append(row["store_id"])
             continue
         updated = announcement_service.set_state(
-            engine, store_id=row["store_id"], state=state, actor_id=user.id)
+            engine, store_id=row["store_id"], state=state, actor_id=user.id,
+            reachable=row["store_id"] in connected_all)
         await _dispatch_announcement(row["store_id"], updated)
         started.append(row["store_id"])
     _write_log(db, "info",

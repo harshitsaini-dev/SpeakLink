@@ -17,11 +17,13 @@ resumes, or resumes something it was never playing.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Iterable
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Engine
 
+import announcement_schedule
 import announcements
 from admin_search import int_list, matches_any, value_list
 from announcements import (
@@ -131,8 +133,15 @@ def describe_template_window(row: dict, *, now: str | None = None) -> str:
         return f"scheduled - starts {starts}"
     if expires and moment >= expires:
         return f"expired {expires}"
+    daily = announcement_schedule.describe(row.get("daily_start"),
+                                           row.get("daily_end"),
+                                           row.get("daily_days"))
+    if expires and daily:
+        return f"live until {expires}, {daily}"
     if expires:
         return f"live until {expires}"
+    if daily:
+        return f"live, {daily}"
     return "live - no end date"
 
 
@@ -179,10 +188,47 @@ def _write_playback(connection, *, store_id: int, **fields) -> None:
     """), {"store_id": store_id, **fields})
 
 
+def stop(engine: Engine, *, store_id: int,
+         actor_id: int | None = None) -> dict[str, Any]:
+    """Stop one Store: silent, back to the beginning, still assigned.
+
+    STOP IS NOT PAUSE, AND IT IS NOT UNASSIGN.
+
+    Pause holds the campaign where it is, so Play carries on from that point.
+    Stop ends this run - the next Play starts the recording from its
+    beginning - but the Store KEEPS the template it was given.
+
+    I built the first version so that stopping also cleared the assignment,
+    and that was wrong: the console then showed "nothing chosen" for shops
+    that were still very much part of a live campaign, and getting them back
+    meant re-targeting the whole template. Which template a shop belongs to is
+    a decision somebody made on the Templates page; a transport button has no
+    business undoing it. Removing a Store from a campaign is that page's job.
+    """
+    now = _now()
+    previous = get_playback(engine, store_id=store_id)
+    with engine.begin() as connection:
+        _write_playback(connection, store_id=store_id,
+                        state=STATE_STOPPED, ducked_from=None,
+                        started_at=None,
+                        updated_by=actor_id, updated_at=now)
+    # A stop closes the open history row, exactly as set_state does for every
+    # other way of leaving PLAYING - so a campaign that was stopped is not the
+    # one entry in the record that never ended.
+    try:
+        if previous["state"] == STATE_PLAYING:
+            close_history(engine, store_id=store_id, reason="stopped",
+                          actor_id=actor_id)
+    except Exception:  # noqa: BLE001 - history must never fail a live action
+        pass
+    return get_playback(engine, store_id=store_id)
+
+
 def set_state(engine: Engine, *, store_id: int, state: str,
               template_id: int | None = None, audio_id: int | None = None,
               ducked_from: str | None = None, actor_id: int | None = None,
-              volume_percent: int | None = None) -> dict[str, Any]:
+              volume_percent: int | None = None,
+              reachable: bool = True) -> dict[str, Any]:
     """Write one Store's new state. Callers pass a state the pure transition
     functions produced; this does not decide, only records."""
     if state not in announcements.PLAYBACK_STATES:
@@ -210,7 +256,20 @@ def set_state(engine: Engine, *, store_id: int, state: str,
     # recording it per-caller means the one nobody remembers is the one that
     # leaves a gap in the history.
     try:
-        if state == STATE_PLAYING and previous["state"] != STATE_PLAYING:
+        # HISTORY IS WHAT PLAYED, NOT WHAT WAS SENT.
+        #
+        # Opening a row for a shop with no Receiver connected put minutes -
+        # and then hours - of "playing" into the record for shops that were
+        # silent the whole time. Nothing confirmed those runs started, and
+        # with nothing connected nothing would ever close them, so every
+        # report built on this table drifted further from the truth the longer
+        # the shop stayed offline.
+        #
+        # The state is still recorded, and the shop still picks it up when it
+        # reconnects - at which point that IS a run, and gets its own row.
+        if state == STATE_PLAYING and not reachable:
+            pass
+        elif state == STATE_PLAYING and previous["state"] != STATE_PLAYING:
             open_history(engine, store_id=store_id,
                          template_id=fields.get("template_id",
                                                 previous.get("template_id")),
@@ -371,7 +430,8 @@ def list_templates(engine: Engine, *, search: str = "", status: str = "active",
 
 
 def live_status(engine: Engine, *, search: str = "", zone: str = "",
-                state: str = "", store_id=None) -> list[dict[str, Any]]:
+                state: str = "", store_id=None,
+                connected_store_ids=None) -> list[dict[str, Any]]:
     """What every Store is doing right now, for the status table.
 
     A LEFT JOIN from stores, not from the playback table: a Store that has
@@ -396,6 +456,22 @@ def live_status(engine: Engine, *, search: str = "", zone: str = "",
             ORDER BY s.store_code
         """, stopped=STATE_STOPPED, default_volume=announcements.DEFAULT_VOLUME)
 
+    # PLAYING is a claim about a shop's speaker, and HQ can only make it for a
+    # shop it is actually connected to. Where nothing is connected, what is
+    # true is that HQ ASKED - so `reachable` carries that, and the table says
+    # "asked to play" instead of asserting audio nobody can hear.
+    #
+    # None means the caller did not tell us who is connected. Marking every
+    # row unreachable in that case would be its own lie, so the flag stays
+    # True and nothing changes.
+    if connected_store_ids is not None:
+        connected = set(connected_store_ids)
+        for row in rows:
+            row["reachable"] = row["store_id"] in connected
+    else:
+        for row in rows:
+            row["reachable"] = True
+
     needle = (search or "").strip().lower()
     if needle:
         rows = [row for row in rows
@@ -403,6 +479,21 @@ def live_status(engine: Engine, *, search: str = "", zone: str = "",
                 or needle in (row.get("store_name") or "").lower()
                 or needle in (row.get("template_name") or "").lower()
                 or needle in (row.get("audio_title") or "").lower()]
+    # How long each run lasted, computed once here rather than in the browser.
+    # A row still playing has no duration yet and says None - putting "0" or
+    # the time so far under a column headed "Duration" would read as a
+    # finished run of that length.
+    connected = None if connected_store_ids is None else set(connected_store_ids)
+    for row in rows:
+        row["duration_seconds"] = _elapsed_seconds(row.get("started_at"),
+                                                   row.get("ended_at"))
+        # An open row for a shop HQ is not connected to is not "still
+        # playing": nothing ever confirmed it started, and nothing will close
+        # it. Saying so here rather than letting the page read an absent end
+        # time as sound in a shop.
+        row["reachable"] = (True if connected is None
+                            else row.get("store_id") in connected)
+
     if zone:
         rows = [row for row in rows if matches_any(row.get("zone") or "", zone)]
     if state:
@@ -481,7 +572,26 @@ def close_history(engine: Engine, *, store_id: int, reason: str,
              "store_id": store_id})
 
 
-def list_history(engine: Engine, *, search: str = "", zone: str = "",
+def _elapsed_seconds(started, ended):
+    """Seconds between two stored timestamps, or None if it is still running.
+
+    Tolerant of the stored shape - these are written as ISO strings and read
+    back as strings or datetimes depending on the driver - and returns None
+    rather than raising when a value cannot be read, because a history page
+    must not fail over one unparseable row.
+    """
+    if not started or not ended:
+        return None
+    try:
+        first = started if isinstance(started, datetime) else datetime.fromisoformat(str(started))
+        last = ended if isinstance(ended, datetime) else datetime.fromisoformat(str(ended))
+    except (TypeError, ValueError):
+        return None
+    return max(0, int((last - first).total_seconds()))
+
+
+def list_history(engine: Engine, *, connected_store_ids=None,
+                 search: str = "", zone: str = "",
                  reason: str = "", store_id=None, template_id=None,
                  since: str = "", until: str = "",
                  include_archived: bool = False) -> list[dict]:
@@ -512,6 +622,22 @@ def list_history(engine: Engine, *, search: str = "", zone: str = "",
                 or needle in (row.get("store_name") or "").lower()
                 or needle in (row.get("template_name") or "").lower()
                 or needle in (row.get("audio_title") or "").lower()]
+
+    # How long each run lasted, computed once here rather than in the browser.
+    # A row that is still open has no duration - putting "0", or the time so
+    # far, under a column headed Duration would read as a finished run of that
+    # length.
+    #
+    # And whether HQ is connected to that shop at all. An open row for a shop
+    # nothing is connected to is NOT "still playing": nothing confirmed it
+    # started and nothing will ever close it, so the page would go on claiming
+    # sound in a shop for as long as anybody looked at it.
+    connected = None if connected_store_ids is None else set(connected_store_ids)
+    for row in rows:
+        row["duration_seconds"] = _elapsed_seconds(row.get("started_at"),
+                                                   row.get("ended_at"))
+        row["reachable"] = (True if connected is None
+                            else row.get("store_id") in connected)
     if zone:
         rows = [row for row in rows if matches_any(row.get("zone") or "", zone)]
     if reason:

@@ -215,7 +215,7 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
     PermissionDefinition("menu.announcements.view", "Announcements",
                         "View Announcements"),
     PermissionDefinition("announcements.control", "Announcements",
-                        "Play / Pause Announcements"),
+                        "Play / Pause / Stop Announcements"),
     #: Play All and Pause All, across the estate in one action.
     #:
     #: Separate from announcements.control on purpose. Pausing one Store is a
@@ -223,7 +223,7 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
     #: at once is an estate-wide action with the same reach as an emergency
     #: stop, and it should be possible to grant the first without the second.
     PermissionDefinition("announcements.control_all", "Announcements",
-                        "Play All / Pause All"),
+                        "Play All / Pause All / Stop All"),
     PermissionDefinition("announcements.volume", "Announcements",
                         "Set Announcement Volume"),
     PermissionDefinition("announcements.templates.manage", "Announcements",

@@ -340,14 +340,32 @@ def _matches_search(row: ActiveRow, term: str, visibility: Visibility) -> bool:
     return any(needle in value.lower() for value in haystack)
 
 
+def _as_id_set(value) -> set[int]:
+    """One id, several ids, or a comma-separated string of them."""
+    if value is None or value == "":
+        return set()
+    if isinstance(value, (list, tuple, set, frozenset)):
+        parts = list(value)
+    elif isinstance(value, str):
+        parts = value.split(",")
+    else:
+        parts = [value]
+    out = set()
+    for part in parts:
+        text = str(part).strip()
+        if text:
+            out.add(int(text))
+    return out
+
+
 def filter_and_sort(
     rows: list[ActiveRow],
     *,
     visibility: Visibility,
     search: str | None = None,
     owner_filter: str = "all",
-    owner_user_id: int | None = None,
-    store_id: int | None = None,
+    owner_user_id=None,
+    store_id=None,
     sort: str = SORT_NEWEST,
 ) -> list[ActiveRow]:
     """Apply the permitted filters. Unauthorized ones raise rather than being
@@ -371,10 +389,15 @@ def filter_and_sort(
     elif owner_filter == "others":
         out = [r for r in out if not r.is_mine]
 
-    if owner_user_id is not None:
-        out = [r for r in out if r.owner_user_id == owner_user_id]
-    if store_id is not None:
-        out = [r for r in out if any(t.store_id == store_id for t in r.visible_targets)]
+    # One value or several. A single id is a set of one, so the two spellings
+    # cannot drift apart into different meanings of "filter by Store".
+    owners = _as_id_set(owner_user_id)
+    if owners:
+        out = [r for r in out if r.owner_user_id in owners]
+    picked_stores = _as_id_set(store_id)
+    if picked_stores:
+        out = [r for r in out
+               if any(t.store_id in picked_stores for t in r.visible_targets)]
     if search:
         out = [r for r in out if _matches_search(r, search, visibility)]
 

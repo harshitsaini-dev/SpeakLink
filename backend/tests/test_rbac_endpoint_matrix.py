@@ -284,6 +284,97 @@ EXPECTED: dict[str, object] = {
     "supervised_deny_participant": "broadcast.active_view",
     "supervised_kick_participant": "broadcast.active_view",
     "supervised_set_auto_approve": "broadcast.active_view",
+
+    # ---- Remote speaker switching -------------------------------------
+    # Reading which output a shop is using is part of watching the estate;
+    # CHANGING it reaches into a shop and moves the sound to another device,
+    # which is why it sits behind the Store-management right rather than the
+    # viewing one.
+    "get_store_audio_output": "menu.receivers.view",
+    # Asking a shop to re-enumerate its devices, and then moving its sound to
+    # one of them, are both the same act of reaching into that shop - so both
+    # sit behind the right that names it rather than a general Store edit.
+    "refresh_store_audio_output": "receiver.set_output_device",
+    "set_store_audio_output": "receiver.set_output_device",
+
+    # ---- Group broadcasting -------------------------------------------
+    # Joining is gated INSIDE the route rather than here: somebody holding
+    # broadcast.join walks in, and somebody without it may still ask the host.
+    # A permission on the route itself would remove the second path entirely,
+    # which is the whole feature.
+    "list_group_participants": "menu.broadcast.view",
+    # Coarse here, decided in the route: broadcast.start says this account
+    # broadcasts at all; whether THIS person walks in or has to ask the host
+    # is broadcast.join, checked per request. A single permission on the route
+    # would delete the "ask the host" path, which is the whole feature.
+    "join_group_broadcast": "broadcast.start",
+    "leave_group_broadcast": "menu.broadcast.view",
+    # Answering a request is the host's job, and hosting is its own right.
+    "approve_group_request": "broadcast.group_host",
+    "deny_group_request": "broadcast.group_host",
+
+    # ---- Export -------------------------------------------------------
+    # One route, many datasets. It cannot name a single permission here: each
+    # dataset carries the permission of the PAGE it exports, checked per
+    # request against EXPORTS - so exporting Users needs the right to read
+    # Users, not a blanket "may export".
+    "export_dataset": None,
+
+    # ---- Dashboard ----------------------------------------------------
+    "dashboard_summary": "menu.dashboard.view",
+
+    # ---- Recorded announcements ---------------------------------------
+    "list_announcement_audio": "menu.announcements.view",
+    "list_announcement_templates": "menu.announcements.view",
+    "announcement_status": "menu.announcements.view",
+    "announcement_history": "menu.announcements.view",
+    "stream_announcement_audio": "menu.announcements.view",
+
+    "upload_announcement_audio": "announcements.upload",
+    # Renaming a recording is librarian's work, not campaign work.
+    "update_announcement_audio": "announcements.upload",
+    "archive_announcement_audio": "announcements.upload",
+    "archive_announcement_audio_bulk": "announcements.upload",
+
+    "create_announcement_template": "announcements.templates.manage",
+    "update_announcement_template": "announcements.templates.manage",
+    "archive_announcement_template": "announcements.templates.manage",
+    "archive_announcement_templates_bulk": "announcements.templates.manage",
+    "archive_announcement_history": "announcements.templates.manage",
+    "archive_announcement_history_bulk": "announcements.templates.manage",
+    "unarchive_announcement_history_bulk": "announcements.templates.manage",
+
+    # Permanent deletion is its own right everywhere in this product: archive
+    # is recoverable and this is not.
+    "delete_announcement_audio_permanently": "announcements.delete_permanently",
+    "delete_announcement_audio_bulk": "announcements.delete_permanently",
+    "delete_announcement_template_permanently": "announcements.delete_permanently",
+    "delete_announcement_templates_bulk": "announcements.delete_permanently",
+    "delete_announcement_history_permanently": "announcements.delete_permanently",
+    "delete_announcement_history_bulk": "announcements.delete_permanently",
+
+    # Running a campaign in ONE shop.
+    "play_announcement_template": "announcements.control",
+    "play_announcement_in_store": "announcements.control",
+    "pause_announcement_in_store": "announcements.control",
+    "stop_announcement_in_store": "announcements.control",
+    "set_announcement_volume": "announcements.volume",
+
+    # Reaching EVERY shop in one action. Separate from announcements.control
+    # on purpose: it has the reach of an emergency stop, and should be
+    # grantable without it.
+    "play_all_announcements": "announcements.control_all",
+    "pause_all_announcements": "announcements.control_all",
+    "stop_all_announcements": "announcements.control_all",
+
+    # Listening links. Reading them is part of the page; opening one hands a
+    # campaign to somebody with no account, from anywhere, until it is closed
+    # - so it is its own right, and so is throwing somebody off one.
+    "list_announcement_rooms": "menu.announcements.view",
+    "list_announcement_room_listeners": "menu.announcements.view",
+    "create_announcement_room": "announcements.rooms.manage",
+    "close_announcement_room": "announcements.rooms.manage",
+    "remove_announcement_room_listener": "announcements.rooms.manage",
 }
 
 #: Routes that take no HTTP session, each for a stated reason.
@@ -298,6 +389,20 @@ DELIBERATELY_UNAUTHENTICATED = {
     # they issue is scoped to one participant in one room and is accepted
     # nowhere else.
     "public_room_lookup",         # "does this Broadcast exist" - nothing more
+
+    # The announcement listening link, for the same reason as the broadcast
+    # one: whoever holds it is not a user of this product and must never need
+    # to be. The token they get names one room, dies when that room is closed,
+    # and opens no recording except the one that room plays.
+    "join_announcement_room",
+    "announcement_room_state",
+    "announcement_room_audio",
+    "leave_announcement_room",
+
+    # A Store Receiver fetching a recording it was told to play. Not an HQ
+    # session: it presents its own device credential, checked inside the
+    # route, and the same computer is already trusted to receive live audio.
+    "download_announcement_for_receiver",
     "public_room_join",           # the join password is the authorisation
     "public_room_request_access", # asking the broadcaster to be let in
     "listener_admission_state",   # a listener's own state, via its own cookie
