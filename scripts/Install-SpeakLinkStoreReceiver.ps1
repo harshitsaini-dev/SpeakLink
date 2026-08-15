@@ -332,12 +332,76 @@ if (Test-Path $credentialPath) {
 }
 
 # ---------------------------------------------------------------------------
+# Removing a scheduled task, on a machine where somebody else may own it
+# ---------------------------------------------------------------------------
+#
+# `Unregister-ScheduledTask` fails with "Access is denied" in two ordinary
+# situations, and the raw error names neither of them:
+#
+#   * the task is RUNNING - Windows will not delete a task while its action is
+#     alive, which is exactly the case on a repair or an upgrade, because the
+#     Receiver this installer is replacing is on air at that moment;
+#   * the task belongs to ANOTHER account - the pilot task was registered by
+#     whoever first set the shop up, and the person re-running the installer is
+#     signed in as somebody else.
+#
+# The first is ours to fix and this does. The second is not - and the honest
+# response is to say whose task it is and what to do, rather than to fail with
+# a stack trace that reads like the installer is broken.
+function Remove-SpeakLinkTask {
+    param(
+        [Parameter(Mandatory = $true)][string] $Name,
+        [switch] $Quiet
+    )
+
+    $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+    if (-not $task) { return $true }
+
+    # Stop it first. A running task cannot be deleted, and stopping one that is
+    # not running is not an error.
+    try { Stop-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue } catch { }
+
+    foreach ($attempt in 1..3) {
+        try {
+            Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction Stop
+            return $true
+        } catch {
+            $reason = $_.Exception.Message
+            Start-Sleep -Milliseconds (300 * $attempt)
+        }
+    }
+
+    # schtasks.exe goes through a different path from the cmdlet's COM object
+    # and succeeds in cases the cmdlet refuses. Tried second, not first,
+    # because when it fails it says less.
+    $output = & schtasks.exe /Delete /TN $Name /F 2>&1
+    if ($LASTEXITCODE -eq 0) { return $true }
+
+    $owner = try { (Get-ScheduledTask -TaskName $Name).Principal.UserId } catch { 'unknown' }
+    if (-not $Quiet) {
+        Write-Output "  could not remove the scheduled task '$Name'"
+        Write-Output "    it is registered to: $owner"
+        Write-Output "    you are signed in as: $env:USERDOMAIN\$env:USERNAME"
+        Write-Output '    Windows refuses to let one account delete another account''s task.'
+        Write-Output '    Fix it in one of two ways, then run this installer again:'
+        Write-Output "      - sign in as $owner and run this installer, or"
+        Write-Output '      - open an Administrator PowerShell and run:'
+        Write-Output "          schtasks /Delete /TN `"$Name`" /F"
+    }
+    return $false
+}
+
+# ---------------------------------------------------------------------------
 # The scheduled task
 # ---------------------------------------------------------------------------
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($existing) {
     Write-Output '  replacing the earlier task of the same name'
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    if (-not (Remove-SpeakLinkTask -Name $TaskName)) {
+        # Registering over a task that could not be removed would leave the
+        # shop running the OLD Receiver while this installer reported success.
+        throw "The existing scheduled task '$TaskName' could not be replaced. See the lines above."
+    }
 }
 
 # The earlier pilot task runs SpeakLinkReceiver.exe - the CONSOLE build - so a
@@ -361,7 +425,12 @@ foreach ($obsolete in @('SpeakLink Receiver LAN Pilot (disposable)',
         Write-Output "    stopping its console Receiver, PID $($process.ProcessId)"
         Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
     }
-    Unregister-ScheduledTask -TaskName $obsolete -Confirm:$false
+    # Best effort: an obsolete task that cannot be removed is a nuisance, not
+    # a reason to abandon an otherwise good installation - the new task is
+    # what actually runs the shop.
+    if (-not (Remove-SpeakLinkTask -Name $obsolete)) {
+        Write-Output "  leaving '$obsolete' in place; the new task is unaffected"
+    }
 }
 
 # Short and boring on purpose: everything else is in the config file, so the
@@ -405,7 +474,7 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers `
 $xml = Export-ScheduledTask -TaskName $TaskName
 foreach ($pattern in @('speaklink_rcv_v1', 'ECHO(-[A-Z0-9]{4}){2,}', '(?i)password', '(?i)bearer')) {
     if ($xml -match $pattern) {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        Remove-SpeakLinkTask -Name $TaskName -Quiet | Out-Null
         throw "The registered task matched /$pattern/ and was removed rather than left in place."
     }
 }

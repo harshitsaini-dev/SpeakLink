@@ -652,3 +652,70 @@ def test_uninstall_removes_the_receiver_as_well_as_the_kit():
 
     body = inspect.getsource(installer_module().do_uninstall)
     assert "receiver_install_root()" in body
+
+
+# ===========================================================================
+# Removing a scheduled task somebody else owns
+# ===========================================================================
+
+RECEIVER_INSTALLER = SCRIPTS / "Install-SpeakLinkStoreReceiver.ps1"
+RECEIVER_UNINSTALLER = SCRIPTS / "Uninstall-SpeakLinkStoreReceiver.ps1"
+
+
+def test_a_running_task_is_stopped_before_it_is_removed():
+    """Windows will not delete a task whose action is still running.
+
+    On a repair or an upgrade it always IS running - that is the Receiver this
+    installer is replacing, on air at that moment - and the raw failure said
+    only "Access is denied", which reads as a broken installer rather than as
+    a program that is doing its job.
+    """
+    source = RECEIVER_INSTALLER.read_text(encoding="utf-8")
+    helper = source[source.index("function Remove-SpeakLinkTask"):]
+    stop_at = helper.index("Stop-ScheduledTask")
+    remove_at = helper.index("Unregister-ScheduledTask")
+    assert stop_at < remove_at, "the task must be stopped before it is removed"
+
+
+def test_no_task_is_removed_with_the_bare_cmdlet_any_more():
+    """Every removal goes through the one helper, so the next one written
+    cannot quietly skip the stopping and the explaining."""
+    source = RECEIVER_INSTALLER.read_text(encoding="utf-8")
+    body = source[source.index("# The scheduled task"):]
+    assert "Unregister-ScheduledTask" not in body, (
+        "a task is being removed outside Remove-SpeakLinkTask")
+    assert body.count("Remove-SpeakLinkTask") >= 3
+
+
+def test_a_task_owned_by_another_account_is_explained_not_thrown():
+    """This one is NOT the installer's to fix, and pretending otherwise sends
+    somebody hunting through a stack trace for a permission problem."""
+    source = RECEIVER_INSTALLER.read_text(encoding="utf-8")
+    helper = source[source.index("function Remove-SpeakLinkTask"):
+                    source.index("# The scheduled task")]
+    assert "it is registered to:" in helper
+    assert "you are signed in as:" in helper
+    # And a way out, in one line somebody can paste.
+    assert "schtasks /Delete" in helper
+
+
+def test_replacing_the_main_task_fails_loudly_when_it_cannot():
+    """Registering over a task that could not be removed would leave the shop
+    running the OLD Receiver while the installer reported success."""
+    source = RECEIVER_INSTALLER.read_text(encoding="utf-8")
+    assert "could not be replaced" in source
+
+
+def test_an_obsolete_task_that_will_not_go_does_not_fail_the_install():
+    """A leftover pilot task is a nuisance, not a reason to abandon an
+    otherwise good installation - the new task is what runs the shop."""
+    source = RECEIVER_INSTALLER.read_text(encoding="utf-8")
+    assert "leaving '$obsolete' in place" in source
+
+
+def test_the_uninstaller_stops_the_task_too():
+    source = RECEIVER_UNINSTALLER.read_text(encoding="utf-8")
+    stop_at = source.index("Stop-ScheduledTask")
+    remove_at = source.index("Unregister-ScheduledTask")
+    assert stop_at < remove_at
+    assert "schtasks.exe /Delete" in source

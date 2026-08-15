@@ -43,7 +43,18 @@ if ($task) {
                'executable. Refusing to remove a task this script did not install.')
     }
     if ($PSCmdlet.ShouldProcess($TaskName, 'Unregister the scheduled task')) {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        # Stopped first, then removed: Windows will not delete a task whose
+        # action is still running, which on an uninstall it always is.
+        try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } catch { }
+        try {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+        } catch {
+            & schtasks.exe /Delete /TN $TaskName /F 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Output "  could not remove the task '$TaskName' - it belongs to another account."
+                Write-Output "  Sign in as that account, or run: schtasks /Delete /TN `"$TaskName`" /F"
+            }
+        }
         Write-Output '  scheduled task removed'
     }
 } else {
