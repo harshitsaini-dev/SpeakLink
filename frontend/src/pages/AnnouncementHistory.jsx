@@ -334,10 +334,19 @@ export default function AnnouncementHistory() {
                hasMore={list.hasMore} onPage={list.setPage} />
       </div>
 
+      {/* AN OVERLAY, NOT A PANEL AT THE BOTTOM OF THE PAGE.
+          It used to render below the table. With 279 rows on screen that put
+          the confirmation somewhere nobody could see, so pressing Delete
+          looked like it did nothing at all - and the honest reading of "the
+          delete button does not work" is that the button did not work. */}
       {deleting && (
-        <div className="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 space-y-2"
+        <div className="scrim fixed inset-0 z-50 flex items-center justify-center p-4"
+             data-testid="announcement-history-delete-scrim"
+             onClick={() => setDeleting(false)}>
+        <div className="glass w-full max-w-lg px-4 py-3 space-y-2 border-l-4 border-l-rose-500"
+             onClick={(event) => event.stopPropagation()}
              data-testid="announcement-history-delete-confirm">
-          <p className="text-sm text-rose-900">
+          <p className="text-sm text-rose-800 dark:text-rose-200">
             Delete <strong>{chosenCount}</strong> history{" "}
             {chosenCount === 1 ? "entry" : "entries"} permanently? Unlike a
             recording there is nothing to re-upload - this destroys the answer
@@ -345,8 +354,11 @@ export default function AnnouncementHistory() {
             passed.
           </p>
           <div className="flex flex-wrap items-center gap-2">
-            <label className="text-sm text-rose-900">Type DELETE to confirm:</label>
+            <label className="text-sm text-rose-800 dark:text-rose-200">
+              Type DELETE to confirm:
+            </label>
             <input value={word} onChange={(event) => setWord(event.target.value)}
+                   autoFocus
                    data-testid="announcement-history-delete-word"
                    className="px-3 py-2 border border-rose-300 rounded-md text-sm w-32" />
             <button data-testid="announcement-history-delete-confirm-btn"
@@ -366,6 +378,7 @@ export default function AnnouncementHistory() {
               Cancel
             </button>
           </div>
+        </div>
         </div>
       )}
     </div>

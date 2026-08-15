@@ -1,0 +1,415 @@
+/* Light, dark, and the glass the whole product is drawn on.
+ *
+ * WHY VARIABLES AND NOT A SECOND SET OF CLASSES
+ *
+ * Every page in this application was written against literal Tailwind colours
+ * - bg-white, text-slate-900, border-slate-200. Adding `dark:` variants to
+ * each of them, one page at a time, would mean that for as long as the work
+ * took, half the product had a dark mode and half of it was a white rectangle
+ * in a dark window. So the colours are named ONCE here, and the bridge at the
+ * bottom of this file re-points the literal classes at those names.
+ *
+ * The bridge is a bridge. As a page is rewritten in semantic classes
+ * (`surface`, `text-body`, `border-line`) it stops depending on it. It is not
+ * a permanent trick and it is not hidden: it is one block, it says what it
+ * does, and a page that opts out simply stops matching its selectors.
+ *
+ * WHY GLASS IS A UTILITY AND NOT A COMPONENT
+ *
+ * "Glassmorphism" is three properties - a translucent surface, a blur behind
+ * it, and a hairline that catches light - and the moment they are copied into
+ * twenty files they drift. One class, used everywhere, means the whole
+ * product changes together when the recipe changes.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* The ground the app sits on. Two stops rather than one, so the glass has
+     something to be glass ABOUT - a panel over a flat fill just looks grey. */
+  --app-bg: #eef2f7;
+  --app-bg-accent: #dbe4f0;
+
+  /* Surfaces */
+  --surface: 255 255 255;              /* rgb triplet, so opacity can vary */
+  --surface-solid: #ffffff;
+  --surface-muted: #f1f5f9;
+  --surface-raised: #ffffff;
+
+  /* Text */
+  --text-strong: #0f172a;
+  --text-body: #334155;
+  --text-muted: #64748b;
+  --text-faint: #94a3b8;
+
+  /* Lines */
+  --line: #e2e8f0;
+  --line-strong: #cbd5e1;
+
+  /* The glass recipe */
+  --glass-tint: 255 255 255;
+  --glass-alpha: 0.72;
+  --glass-blur: 14px;
+  --glass-hairline: rgba(255, 255, 255, 0.75);
+  --glass-sheen: rgba(255, 255, 255, 0.9);
+  --glass-shadow: 0 8px 30px rgba(15, 23, 42, 0.08);
+
+  /* The sidebar is its own dark surface in BOTH themes: it is the product's
+     identity, and a shell that inverts with the content loses the one fixed
+     point on the screen. */
+  --shell: #0f172a;
+  --shell-top: #16233c;
+  --shell-text: #e2e8f0;
+  --shell-heading: #64748b;
+  --shell-edge: rgba(148, 163, 184, 0.16);
+
+  --scroll-thumb: rgba(100, 116, 139, 0.45);
+  --scroll-thumb-hover: rgba(71, 85, 105, 0.7);
+}
+
+.dark {
+  color-scheme: dark;
+
+  --app-bg: #0b1220;
+  --app-bg-accent: #131c2e;
+
+  --surface: 30 41 59;
+  --surface-solid: #111827;
+  --surface-muted: #1e293b;
+  --surface-raised: #16213a;
+
+  --text-strong: #f1f5f9;
+  --text-body: #cbd5e1;
+  --text-muted: #94a3b8;
+  --text-faint: #64748b;
+
+  --line: #24324a;
+  --line-strong: #334155;
+
+  --glass-tint: 30 41 59;
+  --glass-alpha: 0.6;
+  --glass-blur: 16px;
+  --glass-hairline: rgba(148, 163, 184, 0.22);
+  --glass-sheen: rgba(226, 232, 240, 0.14);
+  --glass-shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
+
+  --shell: #060b16;
+  --shell-top: #0e1729;
+  --shell-text: #e2e8f0;
+  --shell-heading: #5b6b85;
+  --shell-edge: rgba(148, 163, 184, 0.12);
+
+  --scroll-thumb: rgba(148, 163, 184, 0.28);
+  --scroll-thumb-hover: rgba(148, 163, 184, 0.5);
+}
+
+html, body {
+  background-color: var(--app-bg);
+  color: var(--text-body);
+}
+
+/* The ground. A quiet gradient, fixed, so scrolling a long table does not
+   drag a pattern along with it. */
+body {
+  background-image:
+    radial-gradient(1200px 600px at 12% -10%, var(--app-bg-accent), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, var(--app-bg-accent), transparent 55%);
+  background-attachment: fixed;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Glass                                                                    */
+/* ---------------------------------------------------------------------- */
+
+.glass {
+  position: relative;
+  /* A gradient rather than a flat fill. Flat translucency over a flat page is
+     just a slightly different grey - the sheen from top-left is what makes a
+     panel read as a pane of glass rather than a box. */
+  background-image: linear-gradient(
+    160deg,
+    rgb(var(--glass-tint) / calc(var(--glass-alpha) + 0.12)),
+    rgb(var(--glass-tint) / var(--glass-alpha)) 55%
+  );
+  backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  border: 1px solid var(--glass-hairline);
+  /* One radius for every panel in the product. Panels were written with
+     rounded-md, rounded-lg and rounded-xl by different hands on different
+     days, and a wall of cards with three different corners reads as
+     carelessness even to somebody who cannot say why. */
+  border-radius: 14px;
+  box-shadow: var(--glass-shadow);
+}
+
+/* The lit edge: ONE HAIRLINE, one pixel tall, along the top.
+ *
+ * I first wrote this as a gradient over `inset: 0`, which painted a pale wash
+ * across the top 40% of every panel - and in the light theme that wash sat on
+ * top of the table text and made it almost unreadable. A highlight is an edge,
+ * not a veil. Height, not inset, and it can never cover content again.
+ */
+.glass::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 12px;
+  right: 12px;
+  height: 1px;
+  background: linear-gradient(to right, transparent, var(--glass-sheen), transparent);
+  pointer-events: none;
+  border-radius: inherit;
+}
+
+/* Nested glass - a panel inside a panel - must not stack two blurs and two
+   shadows into mud. */
+.glass .glass {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+
+/* A browser without backdrop-filter gets a solid surface rather than a
+   washed-out translucent one that makes text unreadable. Said here rather
+   than hoped for. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass {
+    background-color: var(--surface-solid);
+  }
+}
+
+.surface {
+  background-color: var(--surface-solid);
+  border: 1px solid var(--line);
+}
+
+/* A surface that is dark whatever the theme says.
+ *
+ * The listener pages keep their own night ground - they are watched in a dim
+ * shop or on a phone, and they have no navigation to orient anybody if they
+ * changed colour underneath them. But `.glass` reads its tint from the
+ * theme, so on a light HQ those panels came out WHITE with white text on
+ * them. The variables are re-declared here rather than the class being
+ * forked, so there is still one glass recipe.
+ */
+/* The listener shell.
+ *
+ * It carries the toggle, so it has to CHANGE when the toggle is used - a
+ * control that does nothing on the screen it sits on is a lie. In dark it
+ * keeps the night ground it was designed with; in light it becomes a light
+ * page, and the pale text written for the night is re-pointed here rather
+ * than rewritten in seventeen places.
+ */
+.listener-shell {
+  background-color: var(--app-bg);
+  background-image:
+    radial-gradient(900px 500px at 50% -10%, var(--app-bg-accent), transparent 60%);
+}
+
+.dark .listener-shell,
+.listener-shell.night {
+  background-color: #070c17;
+  background-image:
+    radial-gradient(900px 500px at 50% -10%, #16233c, transparent 60%);
+}
+
+.night {
+  --glass-tint: 30 41 59;
+  --glass-alpha: 0.55;
+  --glass-hairline: rgba(148, 163, 184, 0.22);
+  --glass-sheen: rgba(226, 232, 240, 0.16);
+  --glass-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
+  --scroll-thumb: rgba(148, 163, 184, 0.28);
+  --scroll-thumb-hover: rgba(148, 163, 184, 0.5);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Scrollbars                                                               */
+/*                                                                          */
+/* A pale system scrollbar down the side of a dark page is the single       */
+/* loudest thing on the screen, and it is not content.                      */
+/* ---------------------------------------------------------------------- */
+
+* {
+  scrollbar-color: var(--scroll-thumb) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background-color: var(--scroll-thumb);
+  border-radius: 999px;
+  /* Inset by a transparent border rather than a narrower bar, so the thumb
+     keeps a full-size hit area while looking slim. */
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background-color: var(--scroll-thumb-hover); }
+*::-webkit-scrollbar-corner { background: transparent; }
+
+/* ---------------------------------------------------------------------- */
+/* The bridge is gone.                                                      */
+/*                                                                          */
+/* It used to live here: forty lines of `.dark .bg-white { ... }` that      */
+/* re-pointed literal Tailwind colours so that pages written before dark    */
+/* mode existed were legible in it. It did its job - the whole product got  */
+/* a dark mode in one step instead of page by page - and it leaked exactly  */
+/* the way overrides leak: a rule for `green` while the page used           */
+/* `emerald`, a rule for `input` that painted over a slider meant to be     */
+/* transparent.                                                             */
+/*                                                                          */
+/* Every page now names what a thing IS - see semantic.css - so the colours */
+/* come from the variables at the top of this file and there is nothing     */
+/* left to correct downstream. What remains below is a palette for the      */
+/* colours that carry MEANING (a green pill means fine, a red one does      */
+/* not), which is a different thing from a page's surface.                  */
+/* ---------------------------------------------------------------------- */
+
+/* ---------------------------------------------------------------------- */
+/* Status pills                                                             */
+/*                                                                          */
+/* ACTIVE, ADMIN, "Asked, no Receiver" - every one of these is a pastel     */
+/* -100 background with -700/-800 text, which is a good pair on paper and   */
+/* an unreadable one on a dark page: dark text on a pale chip, glowing out  */
+/* of the table it is meant to annotate.                                    */
+/*                                                                          */
+/* Inverted here rather than restyled per page. The pill keeps its MEANING  */
+/* - the same hue in the same place - and swaps which half carries the      */
+/* colour: a translucent tint of the hue behind, the bright end of the hue  */
+/* in front, and a hairline of it around the edge so the chip still has a   */
+/* shape against the surface.                                               */
+/* ---------------------------------------------------------------------- */
+
+.dark .bg-emerald-100 { background-color: rgba(16, 185, 129, 0.18) !important; }
+.dark .bg-amber-100   { background-color: rgba(245, 158, 11, 0.18) !important; }
+.dark .bg-rose-100    { background-color: rgba(244, 63, 94, 0.18) !important; }
+.dark .bg-red-100     { background-color: rgba(239, 68, 68, 0.18) !important; }
+.dark .bg-blue-100    { background-color: rgba(59, 130, 246, 0.20) !important; }
+.dark .bg-sky-100     { background-color: rgba(14, 165, 233, 0.20) !important; }
+.dark .bg-violet-100, .dark .bg-purple-100 { background-color: rgba(139, 92, 246, 0.22) !important; }
+.dark .bg-indigo-100  { background-color: rgba(99, 102, 241, 0.22) !important; }
+.dark .bg-green-100   { background-color: rgba(34, 197, 94, 0.18) !important; }
+
+/* The text on them. Bright enough to read at 10px, which is the size these
+   are actually set in. */
+.dark .text-emerald-800, .dark .text-emerald-700 { color: #6ee7b7 !important; }
+.dark .text-green-800, .dark .text-green-700 { color: #86efac !important; }
+.dark .text-amber-800, .dark .text-amber-700 { color: #fcd34d !important; }
+.dark .text-rose-800, .dark .text-rose-700 { color: #fda4af !important; }
+.dark .text-red-800, .dark .text-red-700 { color: #fca5a5 !important; }
+.dark .text-blue-800, .dark .text-blue-700 { color: #93c5fd !important; }
+.dark .text-sky-800, .dark .text-sky-700 { color: #7dd3fc !important; }
+.dark .text-violet-800, .dark .text-violet-700,
+.dark .text-purple-800, .dark .text-purple-700 { color: #c4b5fd !important; }
+.dark .text-indigo-800, .dark .text-indigo-700 { color: #a5b4fc !important; }
+
+/* And the hairline, so a chip is still a chip and not a smudge of colour. */
+.dark .border-emerald-200 { border-color: rgba(16, 185, 129, 0.35) !important; }
+.dark .border-amber-200 { border-color: rgba(245, 158, 11, 0.35) !important; }
+.dark .border-rose-200, .dark .border-rose-300 { border-color: rgba(244, 63, 94, 0.35) !important; }
+.dark .border-red-200, .dark .border-red-300 { border-color: rgba(239, 68, 68, 0.35) !important; }
+.dark .border-blue-200, .dark .border-blue-300 { border-color: rgba(59, 130, 246, 0.38) !important; }
+.dark .border-sky-200 { border-color: rgba(14, 165, 233, 0.35) !important; }
+.dark .border-emerald-300 { border-color: rgba(16, 185, 129, 0.4) !important; }
+.dark .border-amber-300 { border-color: rgba(245, 158, 11, 0.4) !important; }
+.dark .border-violet-200, .dark .border-purple-200 { border-color: rgba(139, 92, 246, 0.35) !important; }
+.dark .border-indigo-200 { border-color: rgba(99, 102, 241, 0.35) !important; }
+.dark .border-green-200 { border-color: rgba(34, 197, 94, 0.35) !important; }
+
+/* A pill with no border of its own gets one, faintly, from its own colour -
+   otherwise a translucent tint on a translucent panel has no edge at all. */
+.dark .bg-emerald-100, .dark .bg-amber-100, .dark .bg-rose-100,
+.dark .bg-red-100, .dark .bg-blue-100, .dark .bg-sky-100,
+.dark .bg-violet-100, .dark .bg-purple-100, .dark .bg-indigo-100,
+.dark .bg-green-100 {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+
+/* ---------------------------------------------------------------------- */
+/* Sliders that are their own control                                       */
+/*                                                                          */
+/* The volume sliders in the tables are plain range inputs with no drawn    */
+/* track behind them, so they need one - and the browser default is a pale  */
+/* bar that shouts on a dark row.                                           */
+/* ---------------------------------------------------------------------- */
+
+input[type="range"] {
+  accent-color: #3b82f6;
+  background-color: transparent;
+}
+
+/* ---------------------------------------------------------------------- */
+/* The colours the pill sweep missed                                        */
+/*                                                                          */
+/* Tailwind ships `green` AND `emerald`, `red` AND `rose`, and this product */
+/* uses both pairs - so a rule written for one leaves the other as a white  */
+/* chip on a dark table. Listed rather than guessed at.                     */
+/* ---------------------------------------------------------------------- */
+
+.dark .bg-green-50   { background-color: rgba(34, 197, 94, 0.14) !important; }
+.dark .bg-teal-50, .dark .bg-teal-100 { background-color: rgba(20, 184, 166, 0.16) !important; }
+.dark .bg-violet-50, .dark .bg-purple-50 { background-color: rgba(139, 92, 246, 0.16) !important; }
+.dark .bg-indigo-50  { background-color: rgba(99, 102, 241, 0.16) !important; }
+
+.dark .text-green-900, .dark .text-emerald-900 { color: #6ee7b7 !important; }
+.dark .text-red-900, .dark .text-rose-900 { color: #fda4af !important; }
+.dark .text-amber-900 { color: #fcd34d !important; }
+.dark .text-blue-900 { color: #93c5fd !important; }
+.dark .text-teal-800, .dark .text-teal-700 { color: #5eead4 !important; }
+
+.dark .border-green-200 { border-color: rgba(34, 197, 94, 0.35) !important; }
+.dark .border-teal-200 { border-color: rgba(20, 184, 166, 0.35) !important; }
+
+/* Anything red on a dark page needs the tint AND the text, or it reads as a
+   maroon smear - which is what the EMERGENCY rows in the log looked like. */
+.dark .bg-red-900\/20, .dark .bg-red-950\/60 {
+  background-color: rgba(239, 68, 68, 0.16) !important;
+}
+.dark .text-red-200, .dark .text-red-300 { color: #fecaca !important; }
+
+/* ---------------------------------------------------------------------- */
+/* Disabled controls                                                        */
+/*                                                                          */
+/* `disabled:bg-slate-400` is a mid-grey slab: on a light page it reads as  */
+/* "off", and on a dark one it is the brightest thing in the panel - the    */
+/* unavailable button shouting over the available ones.                     */
+/* ---------------------------------------------------------------------- */
+
+.dark button:disabled.disabled\:bg-slate-400:disabled,
+.dark .disabled\:bg-slate-400:disabled {
+  background-color: rgba(148, 163, 184, 0.16) !important;
+  color: var(--text-faint) !important;
+}
+
+/* And in light, it stops being a solid grey brick. */
+html:not(.dark) .disabled\:bg-slate-400:disabled {
+  background-color: #e2e8f0 !important;
+  color: #94a3b8 !important;
+}
+
+/* ---------------------------------------------------------------------- */
+/* The lightest tints                                                       */
+/*                                                                          */
+/* -50 is the shade this product uses for a whole BLOCK - an upload         */
+/* confirmation, a warning panel - rather than for a chip. On a dark page   */
+/* it is nearly white, and a pale block with pale text on it is the one     */
+/* combination that cannot be read at all.                                  */
+/*                                                                          */
+/* These belong to the palette, not to the bridge that was removed: a green */
+/* notice is green because the news is good, and that meaning survives the  */
+/* theme. What changes is how much light the tint carries.                  */
+/* ---------------------------------------------------------------------- */
+
+.dark .bg-emerald-50 { background-color: rgba(16, 185, 129, 0.12) !important; }
+.dark .bg-green-50   { background-color: rgba(34, 197, 94, 0.12) !important; }
+.dark .bg-amber-50   { background-color: rgba(245, 158, 11, 0.12) !important; }
+.dark .bg-rose-50    { background-color: rgba(244, 63, 94, 0.12) !important; }
+.dark .bg-red-50     { background-color: rgba(239, 68, 68, 0.12) !important; }
+.dark .bg-blue-50    { background-color: rgba(59, 130, 246, 0.14) !important; }
+.dark .bg-sky-50     { background-color: rgba(14, 165, 233, 0.14) !important; }
+.dark .bg-indigo-50  { background-color: rgba(99, 102, 241, 0.14) !important; }
+.dark .bg-violet-50, .dark .bg-purple-50 { background-color: rgba(139, 92, 246, 0.14) !important; }
+.dark .bg-teal-50    { background-color: rgba(20, 184, 166, 0.14) !important; }
+.dark .bg-blue-50\/60 { background-color: rgba(59, 130, 246, 0.14) !important; }
