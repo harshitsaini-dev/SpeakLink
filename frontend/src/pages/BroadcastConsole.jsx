@@ -1133,7 +1133,9 @@ export default function BroadcastConsole() {
                 // console.
                 const busyElsewhere = isStoreBusyForOthers(s.id);
                 return (
-                  <tr key={s.id} data-testid={`store-row-${s.store_code}`} className={`border-b border-line even:bg-surface-alt ${isTarget ? "bg-blue-50/40" : ""} ${busyElsewhere ? "bg-amber-50/60" : ""}`}>
+                  <tr key={s.id} data-testid={`store-row-${s.store_code}`} className={`border-b border-line even:bg-surface-alt ${
+                    isTarget ? "row-in-broadcast" : ""} ${
+                    busyElsewhere ? "row-busy-elsewhere" : ""}`}>
                     {targetMode === "selected" && (
                       <td className="px-3 py-2">
                         <input type="checkbox" data-testid={`store-checkbox-${s.store_code}`}
@@ -1332,21 +1334,21 @@ function LiveTargetAction({
             <button type="button" data-testid={`resume-store-${code}`}
                     onClick={onResume} disabled={disabled || busy}
                     title={`Bring ${code} back into this broadcast. It rejoins at the live edge.`}
-                    className="rounded border border-emerald-300 bg-surface px-2 py-1 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-40">
+                    className="row-action row-action-ok">
               {busy ? "Resuming…" : "Resume"}
             </button>
           ) : (
             <button type="button" data-testid={`pause-store-${code}`}
                     onClick={onPause} disabled={disabled || busy}
                     title={`Silence ${code} without taking it out. Its place in this broadcast is kept.`}
-                    className="rounded border border-amber-300 bg-surface px-2 py-1 text-xs font-semibold text-amber-800 hover:bg-amber-50 disabled:opacity-40">
+                    className="row-action row-action-caution">
               {busy ? "Pausing…" : "Pause"}
             </button>
           )}
           <button type="button" data-testid={`remove-store-${code}`}
                   onClick={onRemove} disabled={disabled || busy}
                   title={`Take ${code} out of this broadcast. The other Stores keep playing.`}
-                  className="rounded border border-red-300 bg-surface px-2 py-1 text-xs font-semibold text-red-800 hover:bg-red-50 disabled:opacity-40">
+                  className="row-action row-action-danger">
             {busy ? "Removing…" : "Remove"}
           </button>
           {(settling || paused) && (
@@ -1380,7 +1382,7 @@ function LiveTargetAction({
                     : !online
                     ? `${code} has no Receiver connected, so it cannot join a broadcast.`
                     : `Add ${code} to this broadcast. It joins at the live edge, not from the beginning.`}
-                  className="rounded border border-blue-300 bg-surface px-2 py-1 text-xs font-semibold text-blue-800 hover:bg-blue-50 disabled:opacity-40">
+                  className="row-action row-action-info">
             {busy ? "Adding…" : "Add"}
           </button>
           {/* Says WHAT, never WHO - the same rule the In-use badge follows. */}

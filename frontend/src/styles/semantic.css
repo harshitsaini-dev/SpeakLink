@@ -216,3 +216,23 @@ input[type="checkbox"], input[type="radio"] { accent-color: #2563eb; }
 .player-bar .border-line, .player-bar .border-line-strong {
   border-color: var(--shell-edge);
 }
+
+
+/* --------------------------------------------------------------- row state */
+
+/* A row that is IN the broadcast, and one held by somebody else's.
+ *
+ * These were pale washes - bg-blue-50/40 and bg-amber-50/60 - which is a fine
+ * highlight on a white table and a grey band on a dark one. A tint of the
+ * meaning colour works at either brightness, and the marker on the leading
+ * edge survives even when the tint is too subtle to notice at a glance.
+ */
+.row-in-broadcast {
+  background-color: rgba(59, 130, 246, 0.10) !important;
+  box-shadow: inset 3px 0 0 rgba(59, 130, 246, 0.85);
+}
+
+.row-busy-elsewhere {
+  background-color: rgba(245, 158, 11, 0.10) !important;
+  box-shadow: inset 3px 0 0 rgba(245, 158, 11, 0.75);
+}

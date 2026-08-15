@@ -1587,3 +1587,45 @@ def test_editing_a_name_keeps_the_daily_window(client):
                          json={"name": "Renamed", "daily_start": "",
                                "daily_end": ""})
     assert cleared.json()["daily_start"] == ""
+
+
+def test_the_clock_does_not_stop_what_a_person_started(client):
+    """Reported from the estate: somebody pressed Play, and twelve seconds
+    later the scheduler stopped it, because the template's daily window had
+    already closed.
+
+    That is the window overruling a person - the thing this scheduler is
+    written not to do at the opening edge, and it was doing it at the closing
+    one. A play started by hand carries the account that started it; one the
+    clock started carries nobody, so the clock only closes its own.
+    """
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"],
+                             daily_start="10:00", daily_end="12:00")
+
+    # Well outside the window, and started by a person anyway.
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+    scheduler_tick(client, "2026-08-14 18:00")
+
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    mine = [row for row in rows if row["store_id"] == store][0]
+    assert mine["state"] == "PLAYING", "the clock stopped somebody else's play"
+
+
+def test_the_clock_does_put_away_its_own(client):
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    make_template(client, headers, audio_id=audio["id"],
+                  daily_start="10:00", daily_end="12:00")
+
+    scheduler_tick(client, "2026-08-14 10:30")
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    assert [r for r in rows if r["store_id"] == store][0]["state"] == "PLAYING"
+
+    scheduler_tick(client, "2026-08-14 12:00")
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    assert [r for r in rows if r["store_id"] == store][0]["state"] == "STOPPED"

@@ -9058,6 +9058,21 @@ async def _apply_announcement_schedules(*, now: datetime | None = None) -> dict:
                 if (state == announcements.STATE_STOPPED
                         or current.get("template_id") != template["id"]):
                     continue
+                # THE CLOCK PUTS AWAY WHAT THE CLOCK STARTED.
+                #
+                # Reported from the estate: somebody pressed Play, and twelve
+                # seconds later the scheduler stopped it, because the
+                # template's daily window had already closed. That is the
+                # window overruling a person - the exact thing this scheduler
+                # is written not to do at the other edge, and I missed it at
+                # this one.
+                #
+                # A play started by hand carries the account that started it;
+                # one the clock started carries nobody. So the clock only ever
+                # closes its own, and a person who starts a campaign outside
+                # its hours keeps it until they stop it themselves.
+                if current.get("updated_by") is not None:
+                    continue
                 row = announcement_service.stop(engine, store_id=store_id,
                                                 actor_id=None)
                 await _dispatch_announcement(store_id, row)
