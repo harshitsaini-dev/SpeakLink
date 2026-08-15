@@ -170,10 +170,36 @@ def ensure_announcement_schema(engine: Engine) -> None:
                 -- somebody has to keep.
                 starts_at VARCHAR(40),
                 expires_at VARCHAR(40),
+                -- A DAILY window, separate from the campaign's start and end
+                -- dates: "this promotion runs all October, 10:00 to 22:00" is
+                -- two different facts, and folding them into one field would
+                -- make either of them unaskable.
+                --
+                -- Stored as HH:MM in the HQ machine's local time. Empty means
+                -- no daily window - the campaign plays until a person stops
+                -- it, which is how every template behaved before this.
+                daily_start VARCHAR(5) NOT NULL DEFAULT '',
+                daily_end VARCHAR(5) NOT NULL DEFAULT '',
+                -- Monday 0 to Sunday 6, comma separated. Empty means every
+                -- day.
+                daily_days VARCHAR(20) NOT NULL DEFAULT '',
                 status VARCHAR(16) NOT NULL DEFAULT 'active'
             )
             """
         )
+        # Added to a table that already exists on every live estate. Checked
+        # column by column rather than assumed from a version number: an
+        # ALTER that runs twice is an error, and one that never runs is a
+        # 500 on a page somebody opened.
+        if connection.engine.dialect.name == "sqlite":
+            existing = {row[1] for row in connection.exec_driver_sql(
+                f"PRAGMA table_info({TEMPLATE_TABLE})")}
+            for column in ("daily_start", "daily_end", "daily_days"):
+                if column not in existing:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {TEMPLATE_TABLE} ADD COLUMN {column} "
+                        f"VARCHAR(20) NOT NULL DEFAULT ''")
+
         connection.exec_driver_sql(
             f"""
             CREATE TABLE IF NOT EXISTS {ITEM_TABLE} (
