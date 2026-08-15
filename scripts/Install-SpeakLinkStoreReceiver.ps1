@@ -374,10 +374,24 @@ function Remove-SpeakLinkTask {
     # schtasks.exe goes through a different path from the cmdlet's COM object
     # and succeeds in cases the cmdlet refuses. Tried second, not first,
     # because when it fails it says less.
-    $output = & schtasks.exe /Delete /TN $Name /F 2>&1
+    #
+    # BY FULL PATH. The setup wizard runs this script from a GUI process whose
+    # PATH does not include System32, so a bare `schtasks.exe` was not found -
+    # and the error that reached the operator was "CommandNotFoundException:
+    # Remove-SpeakLinkTask", which names this function rather than the thing
+    # that was actually missing, and reads as though the installer itself is
+    # broken.
+    $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
+    if (-not (Test-Path $schtasks)) { $schtasks = 'schtasks.exe' }
+    $output = & $schtasks /Delete /TN $Name /F 2>&1
     if ($LASTEXITCODE -eq 0) { return $true }
 
     $owner = try { (Get-ScheduledTask -TaskName $Name).Principal.UserId } catch { 'unknown' }
+    # A marker the wizard can act on, before the sentences a person reads.
+    # Administrator rights are needed to REPLACE this task, and for nothing
+    # else: the task itself is registered to run as this signed-in user at a
+    # limited level, so playing an announcement never asks for anything.
+    Write-Output "NEEDS_ADMIN: $Name"
     if (-not $Quiet) {
         Write-Output "  could not remove the scheduled task '$Name'"
         Write-Output "    it is registered to: $owner"

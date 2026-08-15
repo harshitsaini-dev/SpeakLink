@@ -719,3 +719,48 @@ def test_the_uninstaller_stops_the_task_too():
     remove_at = source.index("Unregister-ScheduledTask")
     assert stop_at < remove_at
     assert "schtasks.exe /Delete" in source
+
+
+def test_schtasks_is_called_by_full_path():
+    """The wizard runs this script from a GUI process whose PATH does not
+    include System32.
+
+    A bare `schtasks.exe` was not found there, and the error that reached the
+    operator named the FUNCTION that could not find it - "CommandNotFound:
+    Remove-SpeakLinkTask" - which reads as though the installer is broken
+    rather than as a missing path.
+    """
+    source = RECEIVER_INSTALLER.read_text(encoding="utf-8")
+    helper = source[source.index("function Remove-SpeakLinkTask"):
+                    source.index("# The scheduled task")]
+    assert "Join-Path $env:SystemRoot 'System32\schtasks.exe'" in helper
+    assert "& $schtasks /Delete" in helper
+
+
+def test_the_installer_says_when_only_permission_is_missing():
+    """A marker the wizard can act on, so "it failed" and "it failed for a
+    reason I can offer to fix" are different outcomes."""
+    source = RECEIVER_INSTALLER.read_text(encoding="utf-8")
+    assert 'Write-Output "NEEDS_ADMIN: $Name"' in source
+
+
+def test_setup_asks_for_administrator_but_playing_never_does():
+    """The prompt exists for ONE thing: Windows will not let one account
+    replace another account's scheduled task.
+
+    The task itself is registered to run as the signed-in shop user at a
+    limited level, so once setup is done, playing an announcement asks nobody
+    for anything.
+    """
+    source = RECEIVER_INSTALLER.read_text(encoding="utf-8")
+    assert "-RunLevel Limited" in source
+    assert 'New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME"' in source
+
+    core = (REPOSITORY_ROOT / "tools" / "store_setup_core.py").read_text(encoding="utf-8")
+    assert "def run_receiver_installer_elevated" in core
+    assert "def install_needs_administrator" in core
+
+    gui = (REPOSITORY_ROOT / "tools" / "store_setup_gui.py").read_text(encoding="utf-8")
+    # Elevation is offered only for that one cause, never as a blanket retry.
+    assert "core.install_needs_administrator(install_result)" in gui
+    assert "run_receiver_installer_elevated" in gui

@@ -991,6 +991,27 @@ class InstallScreen(ttk.Frame):
             if self.app.state_data.get("expected_hq_host"):
                 arguments += ["-ExpectedHqHost", self.app.state_data["expected_hq_host"]]
             install_result = core.run_receiver_installer(arguments)
+            if (install_result.returncode != 0
+                    and core.install_needs_administrator(install_result)):
+                # ASKED ONCE, FOR SETUP ONLY.
+                #
+                # Windows will not let one account replace another account's
+                # scheduled task, which is the only thing here that needs
+                # rights. The task this registers runs as the shop's signed-in
+                # user at a limited level, so playing an announcement never
+                # asks for anything afterwards.
+                code = core.run_receiver_installer_elevated(arguments)
+                if code != 0:
+                    return core.InstallResult(
+                        state=core.InstallState.INSTALL_FAILED,
+                        detail=("Setting up needs one Windows permission: the "
+                                "existing startup task belongs to another "
+                                "account and only an administrator can replace "
+                                "it. Nothing else here needs administrator "
+                                "rights - the Receiver itself runs as this "
+                                "user.\n\nRun the setup again and choose Yes "
+                                "on the Windows prompt."))
+                install_result = core.run_receiver_installer(arguments)
             if install_result.returncode != 0:
                 return core.InstallResult(state=core.InstallState.INSTALL_FAILED,
                                           detail=install_result.stdout[-2000:] +

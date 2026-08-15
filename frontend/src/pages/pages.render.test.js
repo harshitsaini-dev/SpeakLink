@@ -77,6 +77,15 @@ const PAGES = [
   ["BroadcastHistory", null],
   ["ReceiverDeviceFleet", null],
   ["ActiveBroadcasts", null],
+  // The pages OUTSIDE the signed-in shell, added after a syntax error in
+  // Login.jsx passed the whole test suite and failed the build: nothing here
+  // mounted them, so nothing here could have caught it. These are also the
+  // three screens a person meets before they are anybody - the sign-in page
+  // and the two listener pages - which makes them the worst ones to have
+  // untested.
+  ["Login", null],
+  ["Listen", null],
+  ["AnnounceListen", null],
 ];
 
 test.each(PAGES)("%s mounts without throwing", async (name, testId) => {

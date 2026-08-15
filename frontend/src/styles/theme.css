@@ -161,13 +161,23 @@ body {
   border-radius: inherit;
 }
 
-/* Nested glass - a panel inside a panel - must not stack two blurs and two
-   shadows into mud. */
+/* Nested glass - a panel inside a panel.
+ *
+ * Two blurs and two shadows stack into mud, and two hairlines read as a box
+ * drawn inside a box: on the Announcements page the filter bar looked like a
+ * separate card that had been dropped into the Live status panel. A nested
+ * pane keeps the tint and loses the frame, so the section is a division
+ * WITHIN one surface rather than a second surface on top of it. */
 .glass .glass {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   box-shadow: none;
+  border-color: transparent;
+  background-image: none;
+  background-color: rgb(var(--glass-tint) / 0.28);
 }
+
+.glass .glass::after { content: none; }
 
 /* A browser without backdrop-filter gets a solid surface rather than a
    washed-out translucent one that makes text unreadable. Said here rather

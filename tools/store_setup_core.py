@@ -714,6 +714,57 @@ def run_receiver_installer(arguments: "list[str]", *, script_path: "Path | None"
                     **hidden_child_process_options())
 
 
+#: The line the installer prints when the ONLY thing standing between it and a
+#: finished installation is permission to replace a scheduled task.
+NEEDS_ADMIN_MARKER = "NEEDS_ADMIN:"
+
+
+def install_needs_administrator(completed) -> bool:
+    """Did this run fail only for want of administrator rights?
+
+    Read from the installer's own output rather than guessed from an exit
+    code, because "it failed" and "it failed for a reason I can offer to fix"
+    are different things and only the second one is worth a prompt.
+    """
+    text = f"{getattr(completed, 'stdout', '') or ''}{getattr(completed, 'stderr', '') or ''}"
+    return NEEDS_ADMIN_MARKER in text
+
+
+def run_receiver_installer_elevated(arguments: "list[str]", *,
+                                    script_path: "Path | None" = None) -> int:
+    """Run the same installer again, once, with administrator rights.
+
+    WHAT THE PROMPT IS FOR, AND WHAT IT IS NOT FOR
+
+    Windows will not let one account replace another account's scheduled task,
+    and that is the whole reason this exists. The task this installer
+    registers runs as the signed-in shop user at a LIMITED level - so once
+    setup is done, playing an announcement, pausing it, or restarting the
+    Receiver never asks anybody for anything. Setup asks; the shop does not.
+
+    Returns the elevated process's exit code, or a negative number if the
+    person declined the prompt.
+    """
+    import ctypes
+
+    script = script_path or resource_paths.script(
+        "Install-SpeakLinkStoreReceiver.ps1", required=False)
+    parts = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(script)] + list(arguments)
+    quoted = " ".join(f'"{part}"' if " " in str(part) else str(part) for part in parts)
+
+    try:
+        # SW_SHOWNORMAL: the elevated window is visible on purpose. Somebody
+        # who has just approved a prompt should be able to see what it did.
+        handle = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", "powershell.exe", quoted, None, 1)
+    except Exception:  # noqa: BLE001
+        return -1
+    # ShellExecuteW returns > 32 on success; 5 is ERROR_ACCESS_DENIED, which
+    # here means the person said No.
+    return 0 if int(handle) > 32 else -int(handle)
+
+
 def wait_for_connected(
     *,
     status_path: "Path | None" = None,

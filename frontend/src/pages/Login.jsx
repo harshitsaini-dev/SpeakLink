@@ -37,16 +37,21 @@ export default function Login() {
     } finally { setBusy(false); }
   };
 
+  // `night`: this page has a dark photograph behind it in BOTH themes, so its
+  // glass takes its tint from that rather than from the page's theme.
   return (
-    <div className="min-h-screen relative flex items-center justify-center p-6">
-      {/* Before signing in, not after. Somebody who needs dark at six in the
-          morning needs it on the first screen too. */}
-      <div className="absolute right-4 top-4">
-        <ThemeToggle compact />
-      </div>
+    <div className="night min-h-screen relative flex items-center justify-center p-6">
       <div className="absolute inset-0 bg-surface-muted">
         <img src={BG_IMAGE} className="absolute inset-0 w-full h-full object-cover opacity-40" alt="" />
         <div className="absolute inset-0 bg-gradient-to-br from-slate-900/90 via-slate-900/80 to-blue-900/70" />
+      </div>
+      {/* AFTER the background, not before it.
+          It was there all along and painted over: the background is an
+          absolutely positioned layer, so anything declared above it in the
+          markup ends up underneath it. Somebody who needs dark at six in the
+          morning needs it on the first screen too. */}
+      <div className="night absolute right-4 top-4 z-20">
+        <ThemeToggle compact />
       </div>
       <div className="relative z-10 w-full max-w-md">
         <div className="mb-8 text-center">
