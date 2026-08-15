@@ -764,3 +764,26 @@ def test_setup_asks_for_administrator_but_playing_never_does():
     # Elevation is offered only for that one cause, never as a blanket retry.
     assert "core.install_needs_administrator(install_result)" in gui
     assert "run_receiver_installer_elevated" in gui
+
+
+def test_schtasks_stderr_does_not_kill_the_handler_that_reads_it():
+    """The script runs under $ErrorActionPreference = 'Stop'.
+
+    Under Stop, a native program writing to stderr becomes a TERMINATING
+    error - so schtasks printing "ERROR: Access is denied.", which is the
+    exact answer this code exists to handle, killed the script at the line
+    handling it. The operator saw a NativeCommandError where the explanation
+    should have been.
+
+    Verified on this machine while fixing it: the unguarded call throws, the
+    guarded one returns its exit code and its message.
+    """
+    source = RECEIVER_INSTALLER.read_text(encoding="utf-8")
+    helper = source[source.index("function Remove-SpeakLinkTask"):
+                    source.index("# The scheduled task")]
+    call = helper.index("& $schtasks /Delete")
+    guard = helper.index("$ErrorActionPreference = 'Continue'")
+    restore = helper.index("finally { $ErrorActionPreference = $previous }")
+    assert guard < call < restore, (
+        "the schtasks call must sit inside the Continue guard, or its own "
+        "error message terminates the script that was about to explain it")

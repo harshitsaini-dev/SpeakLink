@@ -383,7 +383,18 @@ function Remove-SpeakLinkTask {
     # broken.
     $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
     if (-not (Test-Path $schtasks)) { $schtasks = 'schtasks.exe' }
-    $output = & $schtasks /Delete /TN $Name /F 2>&1
+    # $ErrorActionPreference is 'Stop' for this whole script, and under Stop a
+    # native program writing to stderr becomes a TERMINATING error. So
+    # schtasks printing "ERROR: Access is denied." - the very answer this line
+    # exists to handle - killed the script at the line handling it, and the
+    # operator saw a NativeCommandError instead of the sentence below.
+    #
+    # The same guard the audio probe above uses, for the same reason.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $schtasks /Delete /TN $Name /F 2>&1 | Out-String
+    } finally { $ErrorActionPreference = $previous }
     if ($LASTEXITCODE -eq 0) { return $true }
 
     $owner = try { (Get-ScheduledTask -TaskName $Name).Principal.UserId } catch { 'unknown' }
