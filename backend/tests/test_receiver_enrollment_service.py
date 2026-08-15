@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
+
+from sqlite_settings import apply_sqlite_pragmas
 from sqlalchemy.orm import sessionmaker
 
 
@@ -71,6 +73,10 @@ class Runtime:
     def __init__(self, tmp_path: Path) -> None:
         self.path = tmp_path / "enrol.db"
         self.engine = create_engine(f"sqlite:///{self.path.as_posix()}")
+        # The SAME connection settings the application uses. Without this the
+        # test was exercising a database configuration the product does not
+        # have - and reporting failures nobody could reproduce against it.
+        apply_sqlite_pragmas(self.engine)
         Base.metadata.create_all(bind=self.engine)
         self.Session = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
 

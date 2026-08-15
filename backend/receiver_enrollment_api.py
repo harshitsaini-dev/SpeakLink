@@ -33,6 +33,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from key_custody import KeyRing
@@ -217,6 +218,45 @@ def _require_device_auth_capable_state(engine: Engine) -> None:
         )
 
 
+#: How many times a redemption will wait out a locked database before giving
+#: up. Three short waits covers a shop floor where several Receivers were
+#: switched on together; anything past that is not contention, it is a
+#: problem, and pretending otherwise would hide it.
+_LOCK_ATTEMPTS = 3
+_LOCK_PAUSE_SECONDS = 0.15
+
+
+def _redeem_waiting_for_the_database(db: Session, code: str):
+    """Spend the code, waiting rather than failing if another writer has the
+    database.
+
+    A locked database is NOT a refusal, and must never be reported as one: a
+    Store told "that code has already been used" when in fact HQ was merely
+    busy will go looking for the person who supposedly used it. So this waits,
+    briefly, and if the lock outlives that it raises EnrollmentUnavailable -
+    "try again", which is the truth.
+
+    The connection-level busy_timeout already absorbs most of this; the retry
+    is here for the case that timeout cannot cover, where SQLite fails a
+    transaction that started reading and then needed to write.
+    """
+    last_error = None
+    for attempt in range(_LOCK_ATTEMPTS):
+        try:
+            return redeem_enrollment_code(db, code)
+        except OperationalError as busy:
+            if "locked" not in str(busy).lower() and "busy" not in str(busy).lower():
+                raise
+            last_error = busy
+            db.rollback()
+            if attempt + 1 < _LOCK_ATTEMPTS:
+                time.sleep(_LOCK_PAUSE_SECONDS * (attempt + 1))
+    raise EnrollmentUnavailable(
+        "HQ was busy enrolling another Device and could not finish this one. "
+        "Nothing was used up - try again in a moment."
+    ) from last_error
+
+
 def redeem_and_enroll(
     db: Session,
     engine: Engine,
@@ -250,7 +290,7 @@ def redeem_and_enroll(
     _require_device_auth_capable_state(engine)
 
     try:
-        redeemed = redeem_enrollment_code(db, code)
+        redeemed = _redeem_waiting_for_the_database(db, code)
     except EnrollmentCodeError as refusal:
         raise EnrollmentRefused(str(refusal)) from None
 
