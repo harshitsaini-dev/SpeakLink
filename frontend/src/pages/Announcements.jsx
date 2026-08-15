@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "@/lib/api";
-import { Play, Pause, RefreshCw, Volume2, Upload, Trash2, Plus, X } from "lucide-react";
+import { Play, Pause, Square, RefreshCw, Volume2, Upload, Trash2, Plus, X } from "lucide-react";
 import { useAdminList } from "@/lib/adminList";
 import { FilterBar, SearchInput, FilterSelect, ListState, Pager, SortableTh, ExportButton } from "@/components/AdminFilters";
 import { useAuth } from "@/contexts/AuthContext";
@@ -28,7 +28,7 @@ const STATE_STYLES = {
   PLAYING: "bg-emerald-100 text-emerald-800 border-emerald-200",
   PAUSED: "bg-amber-100 text-amber-800 border-amber-200",
   DUCKED: "bg-sky-100 text-sky-800 border-sky-200",
-  STOPPED: "bg-slate-100 text-slate-600 border-slate-200",
+  STOPPED: "bg-surface-muted text-body border-line",
 };
 
 const STATE_EXPLANATION = {
@@ -38,7 +38,26 @@ const STATE_EXPLANATION = {
   STOPPED: "nothing chosen",
 };
 
-function StateBadge({ state }) {
+/**
+ * What this shop is doing - and only what HQ can actually prove.
+ *
+ * PLAYING is a claim about a speaker in a shop. When no Receiver is connected
+ * to that shop, HQ has not observed anything: it sent a play command into a
+ * gap. The table used to say "Playing" anyway, which is the one thing it must
+ * never do - somebody reads it, believes the promotion is on air, and finds
+ * out from a customer that it is not. So an unreachable shop says what is
+ * true: HQ asked, and nothing has answered.
+ */
+function StateBadge({ state, reachable = true }) {
+  if (!reachable && (state === "PLAYING" || state === "DUCKED")) {
+    return (
+      <span title="HQ sent this, but no Receiver is connected to this shop - nothing here confirms it is audible."
+            data-testid="announcement-state-UNREACHABLE"
+            className="inline-block px-2 py-0.5 text-xs font-medium rounded-full border bg-rose-100 text-rose-800 border-rose-200">
+        Asked, no Receiver
+      </span>
+    );
+  }
   return (
     <span title={STATE_EXPLANATION[state] || ""}
           data-testid={`announcement-state-${state}`}
@@ -50,7 +69,8 @@ function StateBadge({ state }) {
 
 export default function Announcements() {
   const { can } = useAuth();
-  const status = useAdminList("/announcements/status", { q: "", zone: "", state: "", sort: "", dir: "asc" });
+  const status = useAdminList("/announcements/status",
+                { q: "", zone: "", store_id: "", state: "", sort: "", dir: "asc" });
   const [busy, setBusy] = React.useState("");
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");
@@ -82,21 +102,35 @@ export default function Announcements() {
     }
   }
 
-  const zones = Array.from(new Set((status.items || [])
-    .map((row) => row.zone).filter(Boolean)));
+  // The Zones on offer come from the ESTATE, not from the rows on screen.
+  // Deriving them from the current page made the filter single-select in
+  // practice: choosing one Zone narrowed the rows to that Zone, which was the
+  // only option left in the list, so a second one could never be ticked.
+  const [zones, setZones] = React.useState([]);
+  const [storeOptions, setStoreOptions] = React.useState([]);
+  React.useEffect(() => {
+    api.get("/receivers/filter-options")
+      .then(({ data }) => {
+        setZones(data.regions || []);
+        setStoreOptions((data.stores || []).map((store) => ({
+          value: String(store.id),
+          label: `${store.store_name} (${store.store_code})` })));
+      })
+      .catch(() => { setZones([]); setStoreOptions([]); });  // a filter with nothing to offer, not a broken page
+  }, []);
 
   return (
     <div className="space-y-6" data-testid="announcements-page">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Announcements</h1>
-          <p className="text-sm text-slate-500">
+          <h1 className="text-2xl font-bold tracking-tight text-strong">Announcements</h1>
+          <p className="text-sm text-muted">
             Recorded promotions, and what every shop is playing right now.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button data-testid="announcements-refresh" onClick={status.reload}
-                  className="inline-flex items-center gap-1 px-3 py-2 border border-slate-300 rounded-md text-sm hover:bg-slate-50">
+                  className="inline-flex items-center gap-1 px-3 py-2 border border-line-strong rounded-md text-sm hover:bg-surface-muted">
             <RefreshCw className="w-4 h-4" /> Refresh
           </button>
           {mayControlAll && (
@@ -114,6 +148,24 @@ export default function Announcements() {
                         () => api.post("/announcements/pause-all"))}
                       className="inline-flex items-center gap-1 px-3 py-2 rounded-md text-sm text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50">
                 <Pause className="w-4 h-4" /> Pause All
+              </button>
+              {/* Stop is not Pause, and the two sit apart for that reason.
+                  Pause All leaves every shop holding its campaign, ready to
+                  carry on. Stop All lets go of the choice everywhere: after
+                  it nothing is selected anywhere, and Play has nothing to
+                  resume. Confirmed, because it cannot be undone by pressing
+                  the other button. */}
+              <button data-testid="announcements-stop-all"
+                      disabled={busy !== ""}
+                      onClick={() => {
+                        if (!window.confirm(
+                          "Stop announcements in every shop?\n\nThis is not a "
+                          + "pause: each shop lets go of what it was told to "
+                          + "play, and nothing is selected afterwards.")) return;
+                        act("Stop All", () => api.post("/announcements/stop-all"));
+                      }}
+                      className="inline-flex items-center gap-1 px-3 py-2 rounded-md text-sm text-white bg-rose-700 hover:bg-rose-800 disabled:opacity-50">
+                <Square className="w-4 h-4" /> Stop All
               </button>
             </>
           )}
@@ -134,10 +186,10 @@ export default function Announcements() {
       )}
 
       {/* ---- What is playing right now ---- */}
-      <section className="bg-white rounded-lg border border-slate-200">
-        <div className="px-4 py-3 border-b border-slate-200">
-          <h2 className="font-semibold text-slate-900">Live status</h2>
-          <p className="text-xs text-slate-500">
+      <section className="bg-surface rounded-lg border border-line">
+        <div className="px-4 py-3 border-b border-line">
+          <h2 className="font-semibold text-strong">Live status</h2>
+          <p className="text-xs text-muted">
             Every active Store appears here, including shops that have never
             played anything - those are the ones somebody is usually looking for.
           </p>
@@ -153,6 +205,13 @@ export default function Announcements() {
                         value={status.filters.zone}
                         onChange={(value) => status.setFilter("zone", value)}
                         options={zones.map((zone) => ({ value: zone, label: zone }))} />
+          {/* By shop, not only by Zone. "Why is this one shop silent" is the
+              question this page exists for, and answering it by scrolling
+              forty rows is not answering it. */}
+          <FilterSelect label="Store" testId="announcements-store" allLabel="All Stores"
+                        value={status.filters.store_id}
+                        onChange={(value) => status.setFilter("store_id", value)}
+                        options={storeOptions} />
           <FilterSelect label="State" testId="announcements-state" allLabel="Any state"
                         value={status.filters.state}
                         onChange={(value) => status.setFilter("state", value)}
@@ -166,7 +225,7 @@ export default function Announcements() {
 
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="bg-slate-50 text-slate-600">
+            <thead className="bg-surface-muted text-body">
               <tr>
                 <SortableTh column="store_name" label="Store" list={status} />
                 <SortableTh column="zone" label="Zone" list={status} />
@@ -182,21 +241,21 @@ export default function Announcements() {
                          onRetry={status.reload}
                          emptyText="No Store matches these filters." />
               {!status.loading && !status.error && status.items.map((row) => (
-                <tr key={row.store_id} className="border-t border-slate-100"
+                <tr key={row.store_id} className="border-t border-line"
                     data-testid={`announcement-row-${row.store_id}`}>
                   <td className="px-4 py-2">
-                    <div className="font-medium text-slate-900">{row.store_name}</div>
-                    <div className="text-xs text-slate-500">{row.store_code}</div>
+                    <div className="font-medium text-strong">{row.store_name}</div>
+                    <div className="text-xs text-muted">{row.store_code}</div>
                   </td>
-                  <td className="px-4 py-2 text-slate-600">{row.zone}</td>
-                  <td className="px-4 py-2"><StateBadge state={row.state} /></td>
-                  <td className="px-4 py-2 text-slate-600">
+                  <td className="px-4 py-2 text-body">{row.zone}</td>
+                  <td className="px-4 py-2"><StateBadge state={row.state} reachable={row.reachable !== false} /></td>
+                  <td className="px-4 py-2 text-body">
                     {row.template_name
                       ? <>
                           <div>{row.audio_title || "-"}</div>
-                          <div className="text-xs text-slate-400">{row.template_name}</div>
+                          <div className="text-xs text-faint">{row.template_name}</div>
                         </>
-                      : <span className="text-slate-400">nothing chosen</span>}
+                      : <span className="text-faint">nothing chosen</span>}
                   </td>
                   <td className="px-4 py-2">
                     <VolumeControl row={row} disabled={!can("announcements.volume")}
@@ -212,7 +271,7 @@ export default function Announcements() {
                                   : "Resume this Store"}
                                 onClick={() => act(`Play ${row.store_code}`,
                                   () => api.post(`/announcements/stores/${row.store_id}/play`))}
-                                className="p-1.5 rounded border border-slate-300 hover:bg-slate-50 disabled:opacity-50">
+                                className="p-1.5 rounded border border-line-strong hover:bg-surface-muted disabled:opacity-50">
                           <Play className="w-4 h-4" />
                         </button>
                       )}
@@ -221,8 +280,21 @@ export default function Announcements() {
                                 disabled={busy !== ""}
                                 onClick={() => act(`Pause ${row.store_code}`,
                                   () => api.post(`/announcements/stores/${row.store_id}/pause`))}
-                                className="p-1.5 rounded border border-slate-300 hover:bg-slate-50 disabled:opacity-50">
+                                className="p-1.5 rounded border border-line-strong hover:bg-surface-muted disabled:opacity-50">
                           <Pause className="w-4 h-4" />
+                        </button>
+                      )}
+                      {/* Offered wherever there is something to let go of -
+                          including a paused shop, which is still holding a
+                          campaign it would resume. */}
+                      {mayControl && row.template_id && (
+                        <button data-testid={`announcement-stop-${row.store_id}`}
+                                disabled={busy !== ""}
+                                title="Stop this Store and let go of what it was told to play"
+                                onClick={() => act(`Stop ${row.store_code}`,
+                                  () => api.post(`/announcements/stores/${row.store_id}/stop`))}
+                                className="p-1.5 rounded border border-rose-300 text-rose-700 hover:bg-rose-50 disabled:opacity-50">
+                          <Square className="w-4 h-4" />
                         </button>
                       )}
                     </div>
@@ -267,13 +339,13 @@ function VolumeControl({ row, disabled, onDone }) {
 
   return (
     <div className="flex items-center gap-2">
-      <Volume2 className="w-4 h-4 text-slate-400" />
+      <Volume2 className="w-4 h-4 text-faint" />
       <input type="range" min="0" max="100" value={value} disabled={disabled || saving}
              data-testid={`announcement-volume-${row.store_id}`}
              onChange={(event) => setValue(Number(event.target.value))}
              onMouseUp={commit} onTouchEnd={commit} onKeyUp={commit}
              className="w-24" />
-      <span className="text-xs text-slate-500 w-8 tabular-nums">{value}%</span>
+      <span className="text-xs text-muted w-8 tabular-nums">{value}%</span>
     </div>
   );
 }

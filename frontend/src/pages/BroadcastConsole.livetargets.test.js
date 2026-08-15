@@ -129,24 +129,31 @@ test("a Store in the broadcast offers Remove, one outside it offers Add", async 
   await renderConsole();
   expect(screen.getByTestId("remove-store-AAA")).toBeTruthy();
   expect(screen.queryByTestId("add-store-AAA")).toBeNull();
-  expect(screen.getByTestId("add-store-BBB")).toBeTruthy();
+  expect(screen.getByTestId("add-store-BBB").disabled).toBe(false);
   expect(screen.queryByTestId("remove-store-BBB")).toBeNull();
 });
 
-test("an offline Receiver is not offered Add, and says why", async () => {
-  // The backend refuses this anyway. A button that fails when pressed is a
-  // promise the page already knows it cannot keep.
+test("an offline Receiver cannot be added, and the row says why", async () => {
+  // The backend refuses this anyway, so the button is DISABLED rather than
+  // pressable - a control that fails when pressed is a promise the page
+  // already knows it cannot keep.
+  //
+  // It is still on the row, though. Removing it left a table with no actions
+  // at all on an estate where every Receiver was offline, which reads as a
+  // missing feature rather than as forty unreachable shops.
   goLive([target(101)]);
   await renderConsole();
-  expect(screen.queryByTestId("add-store-CCC")).toBeNull();
+  const add = screen.getByTestId("add-store-CCC");
+  expect(add.disabled).toBe(true);
+  expect(add.title).toMatch(/no Receiver connected/i);
   expect(screen.getByTestId("add-blocked-CCC").textContent).toMatch(/offline/i);
 });
 
-test("a Store held by another broadcast is not offered Add, and never names it", async () => {
+test("a Store held by another broadcast cannot be added, and it is never named", async () => {
   mockBroadcast.isStoreBusyForOthers = (id) => id === 102;
   goLive([target(101)]);
   await renderConsole();
-  expect(screen.queryByTestId("add-store-BBB")).toBeNull();
+  expect(screen.getByTestId("add-store-BBB").disabled).toBe(true);
   const blocked = screen.getByTestId("add-blocked-BBB");
   expect(blocked.textContent).toMatch(/another broadcast/i);
   // WHAT, never WHO.

@@ -21,7 +21,7 @@ import React from "react";
 import { Search, RefreshCcw, Square, X } from "lucide-react";
 import SpeakLinkMark from "@/components/SpeakLinkMark";
 import { api } from "@/lib/api";
-import { SearchableSelect, ExportButton, SortableTh } from "@/components/AdminFilters";
+import { FilterSelect, ExportButton, SortableTh } from "@/components/AdminFilters";
 import SupervisedWebAudience from "@/components/SupervisedWebAudience";
 import { useAdminList } from "@/lib/adminList";
 
@@ -61,14 +61,22 @@ export default function ActiveBroadcasts() {
       .catch(() => { /* the list's own error state already reports failures */ });
   }, [meta?.may_view_targets]);
 
+  // The rows call this person `owner_*`; this list asked for `started_by_*`,
+  // which no row has ever carried - so the filter offered "Nothing to choose
+  // from yet" on a page with two live broadcasters on screen.
+  //
+  // Still derived from the rows on purpose, unlike the Zone and Store filters:
+  // the only broadcasters worth offering here are the ones with something
+  // live, and this page IS the list of what is live. It is not a directory of
+  // accounts.
   const broadcasters = React.useMemo(() => {
     const seen = new Map();
     for (const row of items) {
-      if (row.started_by_user_id && !seen.has(row.started_by_user_id)) {
-        seen.set(String(row.started_by_user_id),
-                 row.started_by_display_name || row.started_by_username
-                 || `user ${row.started_by_user_id}`);
-      }
+      const id = row.owner_user_id;
+      if (id === null || id === undefined) continue;
+      const key = String(id);
+      if (seen.has(key)) continue;
+      seen.set(key, row.owner_display_name || row.owner_username || `user ${id}`);
     }
     return Array.from(seen, ([value, label]) => ({ value, label }));
   }, [items]);
@@ -155,22 +163,22 @@ export default function ActiveBroadcasts() {
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div className="flex items-center gap-2">
           <SpeakLinkMark className="text-blue-600" size={22} />
-          <h1 className="text-xl font-bold text-slate-900">Active Broadcasts</h1>
+          <h1 className="text-xl font-bold text-strong">Active Broadcasts</h1>
           <span data-testid="active-total"
-                className="text-xs font-medium bg-slate-200 text-slate-700 rounded-full px-2 py-0.5">
+                className="text-xs font-medium bg-surface-muted text-body rounded-full px-2 py-0.5">
             {total}
           </span>
         </div>
         <button data-testid="active-refresh" onClick={reload}
-                className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-md border border-slate-300 hover:bg-slate-100">
+                className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-md border border-line-strong hover:bg-surface-muted">
           <RefreshCcw size={14} /> Refresh
         </button>
       </div>
 
       {/* ---- search + filters -------------------------------------------- */}
-      <div className="bg-white border border-slate-200 rounded-md p-3 flex flex-wrap items-center gap-3">
+      <div className="glass rounded-xl p-3 flex flex-wrap items-center gap-3">
         <div className="relative flex-1 min-w-[220px]">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-faint" />
           <input
             data-testid="active-search"
             value={filters.q}
@@ -187,7 +195,7 @@ export default function ActiveBroadcasts() {
                     ? "Search broadcast or broadcaster…"
                     : "Search broadcast…"
             }
-            className="w-full pl-9 pr-3 py-1.5 text-sm border border-slate-300 rounded-md"
+            className="w-full pl-9 pr-3 py-1.5 text-sm border border-line-strong rounded-md"
           />
         </div>
 
@@ -200,7 +208,7 @@ export default function ActiveBroadcasts() {
               className={`text-sm px-3 py-1.5 rounded-md border ${
                 filters.owner === option.value
                   ? "bg-blue-700 text-white border-blue-700"
-                  : "border-slate-300 text-slate-700 hover:bg-slate-100"
+                  : "border-line-strong text-body hover:bg-surface-muted"
               }`}
             >
               {option.label}
@@ -214,16 +222,17 @@ export default function ActiveBroadcasts() {
             ignoring it, precisely so a silently-dropped filter cannot read as
             "these are Priya's broadcasts". */}
         {meta?.may_view_ownership && (
-          <SearchableSelect testId="active-broadcaster" placeholder="Any broadcaster"
-                            value={filters.owner_user_id || ""}
-                            onChange={(value) => setFilter("owner_user_id", value)}
-                            options={broadcasters} />
+          <FilterSelect testId="active-broadcaster" label="Broadcaster"
+                        allLabel="Any broadcaster"
+                        value={filters.owner_user_id || ""}
+                        onChange={(value) => setFilter("owner_user_id", value)}
+                        options={broadcasters} />
         )}
         {meta?.may_view_targets && (
-          <SearchableSelect testId="active-store" placeholder="Any Store"
-                            value={filters.store_id || ""}
-                            onChange={(value) => setFilter("store_id", value)}
-                            options={stores} />
+          <FilterSelect testId="active-store" label="Store" allLabel="Any Store"
+                        value={filters.store_id || ""}
+                        onChange={(value) => setFilter("store_id", value)}
+                        options={stores} />
         )}
 
         <ExportButton dataset="active-broadcasts" list={list} testId="active-export" />
@@ -231,7 +240,7 @@ export default function ActiveBroadcasts() {
           data-testid="active-sort"
           value={filters.sort}
           onChange={(e) => setFilter("sort", e.target.value)}
-          className="text-sm border border-slate-300 rounded-md px-2 py-1.5"
+          className="text-sm border border-line-strong rounded-md px-2 py-1.5"
         >
           <option value="newest">Newest first</option>
           <option value="oldest">Oldest first</option>
@@ -241,7 +250,7 @@ export default function ActiveBroadcasts() {
           data-testid="active-page-size"
           value={pageSize}
           onChange={(e) => changePageSize(Number(e.target.value))}
-          className="text-sm border border-slate-300 rounded-md px-2 py-1.5"
+          className="text-sm border border-line-strong rounded-md px-2 py-1.5"
         >
           {/* One text child, deliberately. React splits `{size} / page` into
               several children, and an <option> may contain only text. */}
@@ -265,9 +274,9 @@ export default function ActiveBroadcasts() {
       )}
 
       {/* ---- the table ---------------------------------------------------- */}
-      <div className="bg-white border border-slate-200 rounded-md overflow-x-auto">
+      <div className="glass rounded-xl overflow-x-auto">
         <table className="w-full text-sm">
-          <thead className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200 bg-slate-50">
+          <thead className="text-left text-[11px] uppercase tracking-wider text-muted border-b border-line bg-surface-muted">
             <tr>
               <SortableTh column="status" label="Status" list={list} />
               {/* Absent, not hidden: without view_ownership the response
@@ -284,20 +293,20 @@ export default function ActiveBroadcasts() {
           </thead>
           <tbody>
             {loading && items.length === 0 && (
-              <tr><td colSpan={6} className="px-3 py-6 text-center text-slate-500" data-testid="active-loading">
+              <tr><td colSpan={6} className="px-3 py-6 text-center text-muted" data-testid="active-loading">
                 Loading…
               </td></tr>
             )}
             {!loading && items.length === 0 && (
-              <tr><td colSpan={6} className="px-3 py-6 text-center text-slate-500" data-testid="active-empty">
+              <tr><td colSpan={6} className="px-3 py-6 text-center text-muted" data-testid="active-empty">
                 No active broadcasts match this view.
               </td></tr>
             )}
             {items.map((row) => (
               <tr key={row.session_id} data-testid={`active-row-${row.session_id}`}
-                  className="border-b border-slate-100 hover:bg-slate-50">
+                  className="border-b border-line hover:bg-surface-muted">
                 <td className="px-3 py-2">
-                  <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-red-700">
+                  <span className="row-action row-action-danger">
                     <span className="w-2 h-2 rounded-full bg-red-600 animate-pulse" />
                     LIVE
                   </span>
@@ -308,7 +317,7 @@ export default function ActiveBroadcasts() {
                     {row.is_mine && <span className="ml-2 text-[10px] uppercase tracking-wide text-blue-700">you</span>}
                   </td>
                 )}
-                <td className="px-3 py-2 font-medium text-slate-900"
+                <td className="px-3 py-2 font-medium text-strong"
                     data-testid={`active-campaign-${row.session_id}`}>
                   {row.campaign_name || "—"}
                   {!mayViewOwnership && row.is_mine && (
@@ -321,22 +330,22 @@ export default function ActiveBroadcasts() {
                       present it was authorised, and if it is absent there is
                       nothing to hide. */}
                   {row.web_room && (
-                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-600"
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-body"
                          data-testid={`active-web-room-${row.session_id}`}>
-                      <span className="font-mono font-semibold text-slate-800">
+                      <span className="font-mono font-semibold text-strong">
                         {row.web_room.public_code}
                       </span>
                       <button
                         data-testid={`active-copy-link-${row.session_id}`}
                         onClick={() => copyListenerLink(row.web_room.public_code)}
-                        className="rounded border border-slate-300 px-1.5 py-0.5 hover:bg-slate-100">
+                        className="rounded border border-line-strong px-1.5 py-0.5 hover:bg-surface-muted">
                         Copy Link
                       </button>
                       {row.web_room.password_available ? (
                         <button
                           data-testid={`active-copy-password-${row.session_id}`}
                           onClick={() => copyText(row.web_room.password)}
-                          className="rounded border border-slate-300 px-1.5 py-0.5 hover:bg-slate-100">
+                          className="rounded border border-line-strong px-1.5 py-0.5 hover:bg-surface-muted">
                           Copy Password
                         </button>
                       ) : (
@@ -346,7 +355,7 @@ export default function ActiveBroadcasts() {
                           Password configured
                         </span>
                       )}
-                      <span className="text-slate-500">
+                      <span className="text-muted">
                         {row.web_room.waiting_count} waiting ·{" "}
                         {row.web_room.connected_count} connected ·{" "}
                         {row.web_room.listening_count} listening
@@ -354,7 +363,7 @@ export default function ActiveBroadcasts() {
                     </div>
                   )}
                 </td>
-                <td className="px-3 py-2 text-xs text-slate-600">{row.started_at || "—"}</td>
+                <td className="px-3 py-2 text-xs text-body">{row.started_at || "—"}</td>
                 <td className="px-3 py-2 text-xs" data-testid={`active-store-count-${row.session_id}`}>
                   {row.target_store_count}
                 </td>
@@ -363,7 +372,7 @@ export default function ActiveBroadcasts() {
                     <button
                       data-testid={`active-view-stores-${row.session_id}`}
                       onClick={() => openStores(row)}
-                      className="text-xs px-2.5 py-1 rounded-md border border-slate-300 hover:bg-slate-100"
+                      className="text-xs px-2.5 py-1 rounded-md border border-line-strong hover:bg-surface-muted"
                     >
                       View Stores
                     </button>
@@ -377,7 +386,7 @@ export default function ActiveBroadcasts() {
                     <button
                       data-testid={`active-web-audience-${row.session_id}`}
                       onClick={() => setAudienceFor(row)}
-                      className="ml-2 text-xs px-2.5 py-1 rounded-md border border-slate-300 hover:bg-slate-100"
+                      className="ml-2 text-xs px-2.5 py-1 rounded-md border border-line-strong hover:bg-surface-muted"
                     >
                       Web Audience
                     </button>
@@ -411,18 +420,18 @@ export default function ActiveBroadcasts() {
 
       {/* ---- pagination ---------------------------------------------------- */}
       <div className="flex items-center justify-between text-sm">
-        <div className="text-slate-600" data-testid="active-page-info">
+        <div className="text-body" data-testid="active-page-info">
           Page {page} of {pages || 1} · {total} broadcast{total === 1 ? "" : "s"}
         </div>
         <div className="flex gap-2">
           <button data-testid="active-prev" disabled={page <= 1}
                   onClick={() => setPage(page - 1)}
-                  className="px-3 py-1.5 rounded-md border border-slate-300 disabled:opacity-40 hover:bg-slate-100">
+                  className="px-3 py-1.5 rounded-md border border-line-strong disabled:opacity-40 hover:bg-surface-muted">
             Previous
           </button>
           <button data-testid="active-next" disabled={page >= (pages || 1)}
                   onClick={() => setPage(page + 1)}
-                  className="px-3 py-1.5 rounded-md border border-slate-300 disabled:opacity-40 hover:bg-slate-100">
+                  className="px-3 py-1.5 rounded-md border border-line-strong disabled:opacity-40 hover:bg-surface-muted">
             Next
           </button>
         </div>
@@ -436,39 +445,39 @@ export default function ActiveBroadcasts() {
         </div>
       )}
       {detail && (
-        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"
+        <div className="fixed inset-0 scrim z-50 flex items-center justify-center p-4"
              onClick={() => setDetail(null)}>
           <div data-testid="active-stores-modal"
-               className="bg-white rounded-md shadow-lg max-w-md w-full p-5"
+               className="glass shadow-2xl max-w-md w-full p-5"
                onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between">
               <div>
-                <div className="text-xs uppercase tracking-[0.15em] text-slate-500">Broadcast Stores</div>
-                <div className="text-lg font-semibold text-slate-900 mt-1">
+                <div className="text-xs uppercase tracking-[0.15em] text-muted">Broadcast Stores</div>
+                <div className="text-lg font-semibold text-strong mt-1">
                   {detail.campaign_name || "—"}
                 </div>
                 {detail.owner_username && (
-                  <div className="text-sm text-slate-600" data-testid="active-stores-owner">
+                  <div className="text-sm text-body" data-testid="active-stores-owner">
                     {detail.owner_display_name || detail.owner_username}
                   </div>
                 )}
               </div>
               <button onClick={() => setDetail(null)} data-testid="active-stores-close"
-                      className="p-1 rounded hover:bg-slate-100"><X size={16} /></button>
+                      className="p-1 rounded hover:bg-surface-muted"><X size={16} /></button>
             </div>
             <ul className="mt-4 space-y-1" data-testid="active-stores-list">
               {detail.stores.map((store) => (
                 <li key={store.store_id} data-testid={`active-store-${store.store_id}`}
-                    className="flex items-center gap-3 text-sm border-b border-slate-100 py-1.5">
-                  <span className="font-mono text-xs font-semibold text-slate-500 w-12">
+                    className="flex items-center gap-3 text-sm border-b border-line py-1.5">
+                  <span className="font-mono text-xs font-semibold text-muted w-12">
                     {store.store_code}
                   </span>
-                  <span className="text-slate-900">{store.store_name}</span>
+                  <span className="text-strong">{store.store_name}</span>
                 </li>
               ))}
             </ul>
             {detail.stores.length === 0 && (
-              <p className="mt-3 text-sm text-slate-500" data-testid="active-stores-empty">
+              <p className="mt-3 text-sm text-muted" data-testid="active-stores-empty">
                 No Stores in your Store Scope are targeted by this broadcast.
               </p>
             )}
@@ -484,29 +493,29 @@ export default function ActiveBroadcasts() {
           why a supervisor with stop_any but no view_targets sees a count and
           no Store names. */}
       {confirmStop && (
-        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-          <div data-testid="active-stop-modal" className="bg-white rounded-md shadow-lg max-w-md w-full p-5">
-            <h2 className="text-lg font-bold text-slate-900">Stop this broadcast?</h2>
-            <p className="mt-1 text-sm text-slate-600">
+        <div className="fixed inset-0 scrim z-50 flex items-center justify-center p-4">
+          <div data-testid="active-stop-modal" className="glass shadow-2xl max-w-md w-full p-5">
+            <h2 className="text-lg font-bold text-strong">Stop this broadcast?</h2>
+            <p className="mt-1 text-sm text-body">
               This ends only this one broadcast. Every other live broadcast keeps running.
             </p>
             <dl className="mt-4 text-sm space-y-1">
               {mayViewOwnership && (
                 <div className="flex gap-2" data-testid="stop-modal-owner">
-                  <dt className="text-slate-500 w-28">Broadcaster</dt>
+                  <dt className="text-muted w-28">Broadcaster</dt>
                   <dd className="font-medium">{confirmStop.owner_display_name || confirmStop.owner_username}</dd>
                 </div>
               )}
               <div className="flex gap-2">
-                <dt className="text-slate-500 w-28">Broadcast</dt>
+                <dt className="text-muted w-28">Broadcast</dt>
                 <dd className="font-medium">{confirmStop.campaign_name || "—"}</dd>
               </div>
               <div className="flex gap-2">
-                <dt className="text-slate-500 w-28">Started</dt>
+                <dt className="text-muted w-28">Started</dt>
                 <dd>{confirmStop.started_at || "—"}</dd>
               </div>
               <div className="flex gap-2" data-testid="stop-modal-store-count">
-                <dt className="text-slate-500 w-28">Stores</dt>
+                <dt className="text-muted w-28">Stores</dt>
                 <dd>{confirmStop.target_store_count}</dd>
               </div>
             </dl>
@@ -518,7 +527,7 @@ export default function ActiveBroadcasts() {
             )}
             <div className="mt-5 flex justify-end gap-2">
               <button data-testid="active-stop-cancel" onClick={() => setConfirmStop(null)}
-                      className="px-3 py-1.5 text-sm rounded-md border border-slate-300 hover:bg-slate-100">
+                      className="px-3 py-1.5 text-sm rounded-md border border-line-strong hover:bg-surface-muted">
                 Cancel
               </button>
               <button data-testid="active-stop-confirm" onClick={doStop} disabled={stopping}
