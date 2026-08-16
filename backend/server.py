@@ -6234,6 +6234,21 @@ async def ws_receiver(websocket: WebSocket):
                 # Pushing them through a parser built for session
                 # acknowledgements would mean either inventing a fake session
                 # for them or loosening a validator that exists to be strict.
+                if data.get("type") == "store_volume":
+                    # What the shop's own speaker is set to, reported by the
+                    # Receiver whenever somebody at the till changes it. It
+                    # carries no session because there need not be one: a shop
+                    # plays recorded announcements all day without ever
+                    # preparing a broadcast, and its volume is still a fact.
+                    try:
+                        STORE_MASTER_VOLUME[store_id] = {
+                            "volume_percent": int(data.get("volume_percent")),
+                            "muted": bool(data.get("muted")),
+                        }
+                    except (TypeError, ValueError):
+                        pass
+                    continue
+
                 if data.get("type") == "receiver_version":
                     # Kept in memory beside the connection: it describes the
                     # process on the other end of THIS socket, and a restart
@@ -7797,6 +7812,14 @@ def _supports_announcements(version: str) -> bool:
     while len(parts) < 3:
         parts.append(0)
     return tuple(parts[:3]) >= ANNOUNCEMENTS_NEED_VERSION
+
+
+#: What each connected Store's own speaker is set to, by store id.
+#:
+#: In memory beside the connection, like the version: it describes a machine
+#: that is on the end of a socket right now. A remembered volume for an
+#: offline Store would be a claim about a computer nobody is talking to.
+STORE_MASTER_VOLUME: dict[int, dict] = {}
 
 
 #: What each connected Store says it is running, by store id.
@@ -10264,6 +10287,15 @@ def announcement_status(
         row["receiver_version"] = RECEIVER_VERSIONS.get(row["store_id"], "")
         row["announcements_supported"] = _supports_announcements(
             row["receiver_version"])
+        # THE SHOP'S OWN LEVEL, when it has told us.
+        #
+        # `volume_percent` is what HQ last SET. This is what the speaker is
+        # actually on, including a change somebody made at the till - which
+        # the console could not see at all, so it showed a number nobody had
+        # touched in hours as though it were the shop's.
+        reported = STORE_MASTER_VOLUME.get(row["store_id"])
+        row["store_volume_percent"] = (reported or {}).get("volume_percent")
+        row["store_muted"] = (reported or {}).get("muted")
     rows = sort_rows(rows, sort, dir, ANNOUNCEMENT_STATUS_SORTS)
     offset = (page - 1) * page_size
     return Page(items=rows[offset:offset + page_size], total=len(rows),

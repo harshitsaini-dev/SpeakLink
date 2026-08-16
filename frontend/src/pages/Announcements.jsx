@@ -360,11 +360,22 @@ export default function Announcements() {
  * level stepping rather than moving.
  */
 function VolumeControl({ row, disabled, onDone }) {
-  const [value, setValue] = React.useState(row.volume_percent ?? 80);
+  // THE SHOP'S OWN LEVEL WINS, when the Store has reported one.
+  //
+  // `volume_percent` is what HQ last SET. `store_volume_percent` is what the
+  // speaker is actually on - including a change somebody made at the till,
+  // which HQ could not see at all, so this slider sat on a number nobody had
+  // touched in hours and pretended it was the shop's.
+  const shopLevel = row.store_volume_percent;
+  const known = shopLevel !== null && shopLevel !== undefined;
+  const [value, setValue] = React.useState(
+    known ? shopLevel : (row.volume_percent ?? 80));
   const [saving, setSaving] = React.useState(false);
 
-  React.useEffect(() => { setValue(row.volume_percent ?? 80); },
-                  [row.volume_percent]);
+  React.useEffect(() => {
+    if (saving) return;              // do not fight the hand on the slider
+    setValue(known ? shopLevel : (row.volume_percent ?? 80));
+  }, [shopLevel, known, row.volume_percent, saving]);
 
   async function commit() {
     setSaving(true);
@@ -386,6 +397,15 @@ function VolumeControl({ row, disabled, onDone }) {
              onMouseUp={commit} onTouchEnd={commit} onKeyUp={commit}
              className="w-24" />
       <span className="text-xs text-muted w-8 tabular-nums">{value}%</span>
+      {/* Said out loud when this is a reading rather than a setting: the two
+          look identical on a slider, and only one of them is what the shop
+          can hear. */}
+      {row.store_muted && (
+        <span className="text-[10px] uppercase tracking-wider text-amber-700"
+              data-testid={`announcement-muted-${row.store_id}`}>
+          muted at the shop
+        </span>
+      )}
     </div>
   );
 }

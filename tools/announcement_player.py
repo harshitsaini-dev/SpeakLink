@@ -47,6 +47,7 @@ except ImportError:  # pragma: no cover - a checkout laid out differently
             return {}
 import sys
 import threading
+import time
 from pathlib import Path
 
 logger = logging.getLogger("speaklink.receiver.announcement")
@@ -201,6 +202,13 @@ class AnnouncementPlayback:
         self._thread = None
         self._playing = threading.Event()
         self._finished = threading.Event()
+        #: Set when the SPEAKER has taken a frame. Not when the thread starts,
+        #: and not when ffmpeg starts - both of those are claims about intent,
+        #: and a shop reported as playing on the strength of them was silent
+        #: for a whole day.
+        self._audible = threading.Event()
+        self._failed = False
+        self._failure_reason = ""
         self._stopping = False
 
     @property
@@ -212,6 +220,8 @@ class AnnouncementPlayback:
             self.resume()
             return
         self._failed = False
+        self._failure_reason = ""
+        self._audible.clear()
         self._playing.set()
         self._thread = threading.Thread(target=self._pump, daemon=True,
                                         name="speaklink-announcement")
@@ -234,6 +244,26 @@ class AnnouncementPlayback:
             except Exception:  # noqa: BLE001
                 pass
         self._finished.set()
+
+    def wait_until_audible(self, timeout: float) -> bool:
+        """Wait for the first frame the speaker accepted.
+
+        Returns False if that never happens within the timeout - which is the
+        honest answer to "is this shop playing", and the one the Receiver
+        sends to HQ instead of a hopeful yes.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        while time.monotonic() < deadline:
+            if self._audible.is_set():
+                return True
+            if self._failed or self._finished.is_set():
+                return False
+            time.sleep(0.02)
+        return self._audible.is_set()
+
+    def failure_reason(self) -> str:
+        """Why it did not start, in a sentence, or empty if it did."""
+        return self._failure_reason
 
     def set_volume(self, percent: int) -> None:
         """Change the level of THIS announcement, from the next chunk on.
@@ -303,6 +333,10 @@ class AnnouncementPlayback:
             except FileNotFoundError:
                 logger.error("ffmpeg is not installed, so the announcement "
                              "cannot be decoded.")
+                self._failed = True
+                self._failure_reason = (
+                    "the audio decoder is missing from this installation - "
+                    "reinstall the Store Kit on this computer")
                 self._finished.set()
                 return
             try:
@@ -318,7 +352,14 @@ class AnnouncementPlayback:
                     chunk = self._process.stdout.read(CHUNK_BYTES)
                     if not chunk:
                         break
-                    if self._sink.write(self._at_volume(chunk)) is False:
+                    accepted = self._sink.write(self._at_volume(chunk))
+                    if accepted is not False:
+                        # One frame the speaker took. This is the only
+                        # evidence anywhere in this program that a recording
+                        # is actually audible-bound rather than merely
+                        # started.
+                        self._audible.set()
+                    if accepted is False:
                         # The sink REFUSED the audio - a closed device, or a
                         # format it cannot take. Looping on that is how a shop
                         # stays silent while every layer reports success.
@@ -326,6 +367,10 @@ class AnnouncementPlayback:
                             "The Store's speaker refused the announcement "
                             "audio; stopping rather than pretending to play.")
                         self._failed = True
+                        self._failure_reason = (
+                            "the Store's speaker refused the audio - it may be "
+                            "in use by something else, or set to a format this "
+                            "recording cannot be played in")
                         self._stopping = True
                         break
             finally:

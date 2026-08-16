@@ -767,6 +767,14 @@ class AudioReceiverPilot:
         # Receiver waiting for an operator-driven browser broadcast is closed
         # by the backend after OFFLINE_AFTER_SECONDS and simply disappears.
         heartbeat = asyncio.create_task(self._heartbeat_loop(connection))
+        # Watch the shop's own speaker from the moment we know which one it
+        # is - see _start_endpoint_observer. A Store playing announcements all
+        # day never prepares a broadcast, and used to be unwatched all day.
+        try:
+            self._start_endpoint_observer()
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not start the endpoint observer", exc_info=True)
+
         # Report changes made at the till back to HQ.
         #
         # Everything this needs was already here - the Core Audio observer, the
@@ -1046,6 +1054,33 @@ class AudioReceiverPilot:
             path=path, sink=sink, volume_percent=volume)
         self._apply_master_volume(volume)
         self._announcement.start()
+
+        # WAIT FOR THE FIRST FRAME THE SPEAKER ACCEPTED.
+        #
+        # "playing" used to be sent the instant the thread was started, which
+        # is a claim about intent, not about sound. A decoder that dies on its
+        # first read and a sink that refuses every write both looked identical
+        # to success from here - and that is how a silent shop was reported as
+        # playing for a whole day.
+        #
+        # Two seconds is far longer than starting ffmpeg and writing one
+        # buffer, and far shorter than an operator wondering whether the
+        # button worked.
+        started = await asyncio.to_thread(
+            self._announcement.wait_until_audible, 2.0)
+        if not started:
+            reason = (self._announcement.failure_reason()
+                      or "the recording did not start playing on this computer")
+            self._announcement.stop()
+            self._announcement = None
+            self._release_announcement_sink()
+            await self._send(connection, {
+                "type": "announcement_failed",
+                "audio_id": payload.get("audio_id"),
+                "error": reason[:500],
+            })
+            return
+
         await self._send(connection, {
             "type": "announcement_playing",
             "audio_id": payload.get("audio_id"),
@@ -1427,7 +1462,14 @@ class AudioReceiverPilot:
         return True
 
     def _start_endpoint_observer(self) -> bool:
-        """Watch the saved endpoint for the duration of this broadcast."""
+        """Watch the saved endpoint whenever we know which one it is.
+
+        It used to start at PREPARE and stop at restoration, so a shop turning
+        its own volume down was invisible to HQ unless a broadcast happened to
+        be running - which, for a shop playing recorded announcements all day,
+        is almost never. The console then showed a level nobody had touched in
+        hours as though it were the shop's.
+        """
         if not self.windows_endpoint_id:
             # Nothing safe to watch. Falling back to the Windows DEFAULT
             # endpoint would silently observe - and later control - whatever
@@ -1527,10 +1569,20 @@ class AudioReceiverPilot:
             reading = observer.take()
             if reading is None:
                 continue
-            # Only meaningful inside a broadcast. Observation is started at
-            # PREPARE and stopped at restoration, so a reading with no session
-            # would be one nothing asked for and nothing could attribute.
             if self.session_id is None:
+                # OUTSIDE a broadcast this is still worth saying. It carries no
+                # session and no sequence, because there is no session to
+                # attribute it to - it is simply what the speaker is set to
+                # now, which is exactly what the Announcements console has to
+                # show while a recording plays all day.
+                try:
+                    await self._send(connection, {
+                        "type": "store_volume",
+                        "volume_percent": reading.volume_percent,
+                        "muted": reading.muted,
+                    })
+                except Exception:
+                    return
                 continue
             self._endpoint_state_sequence += 1
             try:
