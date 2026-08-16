@@ -539,6 +539,41 @@ def live_status(engine: Engine, *, search: str = "", zone: str = "",
         for row in rows:
             row["reachable"] = True
 
+    # WHAT THIS SHOP WOULD PLAY, for the shops that are not playing anything.
+    #
+    # The console reads the PLAYBACK row, which does not exist until somebody
+    # presses Play - so a shop that a template was built for showed "nothing
+    # chosen", and the only way to find out what it was going to play was to
+    # play it. That is the opposite of the promise this feature makes: decide
+    # once, then only press play and pause.
+    #
+    # Kept separate from `template_name` on purpose. What a shop IS playing
+    # and what it WOULD play are different facts, and collapsing them is how a
+    # console starts describing intentions as sound.
+    assignments: dict[int, dict[str, Any]] = {}
+    for template in list_templates(engine, status="active"):
+        if not template_is_live(template):
+            continue
+        first = (template.get("items") or [None])[0] or {}
+        # `targeted`, NOT `store_id`.
+        #
+        # `store_id` is this function's own parameter - the filter somebody
+        # passed for one shop - and using it as a loop variable left it
+        # pointing at the last store of the last template. The filter below
+        # then narrowed 46 rows to 1, and the console showed a single shop.
+        # Nothing failed; the list was simply wrong, which is the shape of
+        # bug shadowing always makes.
+        for targeted in stores_for_template(engine, template_id=template["id"]):
+            assignments.setdefault(targeted, {
+                "assigned_template_id": template["id"],
+                "assigned_template_name": template["name"],
+                "assigned_audio_title": first.get("audio_title"),
+            })
+
+    for row in rows:
+        if row.get("template_id") is None:
+            row.update(assignments.get(row["store_id"], {}))
+
     for row in rows:
         # THREE DIFFERENT FACTS, and the console needs all three.
         #

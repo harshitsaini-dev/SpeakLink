@@ -610,3 +610,25 @@ def test_every_name_this_module_uses_when_things_go_wrong_exists():
 
     # And it is a real logger, not something that happens to be truthy.
     pilot.logger.debug("exercised by the test suite")
+
+
+def test_the_level_is_read_even_when_no_observer_is_running():
+    """A Store where Core Audio's change notification never arrives.
+
+    The loop used to sleep and continue when there was no observer, which
+    skipped the read entirely - so HQ received exactly one level, the one
+    taken at connect, and never another. A shop moving its dial from 83 to 100
+    changed nothing on the console, and the console was showing a real
+    reading, which is the most convincing way to be wrong.
+    """
+    import inspect
+    from tools import audio_receiver_pilot as pilot
+
+    source = inspect.getsource(pilot.AudioReceiverPilot._endpoint_state_loop)
+    no_observer = source.index("if observer is None or not observer.started")
+    take = source.index("observer.take()")
+    poll_in_that_branch = source.index("_report_store_volume_if_changed",
+                                       no_observer)
+    assert poll_in_that_branch < take, (
+        "the no-observer branch must still read the level, or a Store without "
+        "a working notification never reports again")

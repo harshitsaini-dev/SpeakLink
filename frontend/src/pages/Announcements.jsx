@@ -295,10 +295,27 @@ export default function Announcements() {
                                 supported={row.announcements_supported !== false}
                                 version={row.receiver_version || ""} /></td>
                   <td className="px-4 py-2 text-body">
+                    {/* WHAT IT IS PLAYING, or - for a shop that is not -
+                        what a template has already chosen FOR it.
+                        Kept visibly apart: the console read the playback row,
+                        which does not exist until somebody presses Play, so a
+                        shop a template was built for said "nothing chosen"
+                        and the only way to learn what it would play was to
+                        play it. That is the opposite of "decide once, then
+                        only press play and pause". */}
                     {row.template_name
                       ? <>
                           <div>{row.audio_title || "-"}</div>
                           <div className="text-xs text-faint">{row.template_name}</div>
+                        </>
+                      : row.assigned_template_name
+                      ? <>
+                          <div className="text-muted">
+                            {row.assigned_audio_title || "-"}
+                          </div>
+                          <div className="text-xs text-faint">
+                            {row.assigned_template_name} · ready, not playing
+                          </div>
                         </>
                       : <span className="text-faint">nothing chosen</span>}
                   </td>

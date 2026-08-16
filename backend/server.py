@@ -10430,6 +10430,23 @@ async def pause_announcement_in_store(
     return row
 
 
+def _assignment_for_store(store_id: int):
+    """The live template this Store is part of, and its first recording.
+
+    Returns None when no template reaches this shop - which is a different
+    answer from "it has not been played yet", and the one worth refusing on.
+    """
+    for template in announcement_service.list_templates(engine, status="active"):
+        if not announcement_service.template_is_live(template):
+            continue
+        if store_id not in announcement_service.stores_for_template(
+                engine, template_id=template["id"]):
+            continue
+        first = (template.get("items") or [None])[0] or {}
+        return template["id"], first.get("audio_id")
+    return None
+
+
 @api.post("/announcements/stores/{store_id}/play")
 async def play_announcement_in_store(
     store_id: int,
@@ -10437,17 +10454,31 @@ async def play_announcement_in_store(
     user: HQUser = Depends(require("announcements.control")),
 ):
     current = announcement_service.get_playback(engine, store_id=store_id)
-    if current.get("template_id") is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Nothing has been chosen for this Store yet. Start a "
-                   "template first, then this button resumes it.")
+    template_id = current.get("template_id")
+    audio_id = current.get("audio_id")
+
+    if template_id is None:
+        # NOT "nothing has been chosen". A template built for this shop HAS
+        # chosen something - the console says so on the row - and this button
+        # refused anyway, because it only knew how to resume a playback row
+        # that a previous play had created. The whole promise of a template is
+        # "decide once, then only press play", and refusing here made the
+        # first play a different, harder action than every later one.
+        chosen = _assignment_for_store(store_id)
+        if chosen is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No template plays in this Store, so there is nothing "
+                       "to start. Add this Store to a template first.")
+        template_id, audio_id = chosen
+
     try:
         state = announcements.next_state_for_play(current["state"])
     except announcements.AnnouncementRefused as refusal:
         raise HTTPException(status_code=409, detail=str(refusal))
     row = announcement_service.set_state(
         engine, store_id=store_id, state=state, actor_id=user.id,
+        template_id=template_id, audio_id=audio_id,
         reachable=store_id in manager.online_store_ids())
     await _dispatch_announcement(store_id, row)
     _write_log(db, "info",

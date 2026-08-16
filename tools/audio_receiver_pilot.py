@@ -1704,13 +1704,23 @@ class AudioReceiverPilot:
         while True:
             observer = self._endpoint_observer
             if observer is None or not observer.started:
-                # Not observing YET, which is the normal state between
-                # connecting and PREPARE - the observer is started when a
-                # broadcast is prepared and stopped again at restoration. This
-                # waits for that rather than returning, because returning would
-                # end the only task that can ever report a change and there is
-                # nothing to start it a second time.
+                # NO OBSERVER IS NOT A REASON TO STOP LOOKING.
+                #
+                # This used to sleep and `continue`, which skipped the read
+                # below - so on a computer where Core Audio's change
+                # notification never arrives, or where the observer could not
+                # start at all, HQ received exactly one level (the one taken
+                # at connect) and never another. A shop moving its dial from
+                # 83 to 100 changed nothing on the console, and the console
+                # was showing a real reading, which is the most convincing way
+                # to be wrong.
+                #
+                # The read is throttled to a few seconds and costs one local
+                # property call, so a Store with no observer is a Store that
+                # reports a little later rather than not at all.
                 await asyncio.sleep(windows_endpoint_observer.COALESCE_SECONDS)
+                if not await self._report_store_volume_if_changed(connection):
+                    return
                 continue
             # Waking on the event rather than polling: the wait returns
             # immediately when something changed and otherwise costs nothing.

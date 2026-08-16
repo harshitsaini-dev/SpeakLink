@@ -362,12 +362,21 @@ def test_pausing_and_resuming_one_store(client):
 
 
 def test_resuming_a_store_with_nothing_chosen_says_what_to_do(client):
+    """The refusal now names the real problem.
+
+    It used to say "start a template first", which was advice about the wrong
+    thing: the button refused even when a template HAD been built for this
+    shop, because it could only resume a playback row an earlier play had
+    created. It now starts what the template chose, and refuses only when
+    nothing reaches this Store at all - which is a different sentence and a
+    different fix.
+    """
     headers = sign_in(client)
     store_id = make_store(client, headers, "NA")
     response = client.post(f"/api/announcements/stores/{store_id}/play",
                            headers=headers)
     assert response.status_code == 400
-    assert "Start a template first" in response.json()["detail"]
+    assert "No template plays in this Store" in response.json()["detail"]
 
 
 def test_volume_does_not_start_or_stop_anything(client):
@@ -1793,3 +1802,80 @@ def test_expiry_is_the_only_thing_that_takes_a_template_off_a_shop(client):
     client.post(f"/api/announcements/stores/{store}/stop", headers=headers)
     rows = client.get("/api/announcements/status", headers=headers).json()["items"]
     assert [r for r in rows if r["store_id"] == store][0]["template_id"] == template["id"]
+
+
+def test_a_shop_a_template_targets_says_what_it_would_play(client):
+    """Reported: after building a template, the console said "nothing chosen"
+    until somebody pressed Play.
+
+    The row is read from the PLAYBACK table, which does not exist until a
+    play - so the only way to learn what a shop would play was to play it,
+    which is the opposite of what this feature promises: decide once, then
+    only press play and pause.
+
+    Kept as its own field. What a shop IS playing and what it WOULD play are
+    different facts, and collapsing them is how a console starts describing
+    intentions as sound.
+    """
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers, title="Diwali Offer")
+    template = make_template(client, headers, audio_id=audio["id"],
+                             name="Festival")
+
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    mine = [row for row in rows if row["store_id"] == store][0]
+
+    assert mine["state"] == "STOPPED", "nothing is playing, and it should say so"
+    assert mine["template_id"] is None
+    assert mine["assigned_template_name"] == "Festival"
+    assert mine["assigned_audio_title"] == "Diwali Offer"
+
+
+def test_an_expired_template_is_not_offered_as_what_a_shop_would_play(client):
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    make_template(client, headers, audio_id=audio["id"],
+                  expires_at="2020-01-01T00:00:00+00:00")
+
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    mine = [row for row in rows if row["store_id"] == store][0]
+    assert mine.get("assigned_template_name") is None
+
+
+def test_the_row_play_button_starts_what_the_template_already_chose(client):
+    """Reported: the console showed the shop as ready with a recording named,
+    and pressing Play answered "Nothing has been chosen for this Store yet".
+
+    Both were true of different things. A template HAD chosen something; the
+    button only knew how to resume a playback row that a previous play had
+    created - so the first play was a different, harder action than every
+    later one, which is the opposite of what a template promises.
+    """
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers, title="Diwali Offer")
+    template = make_template(client, headers, audio_id=audio["id"])
+
+    started = client.post(f"/api/announcements/stores/{store}/play",
+                          headers=headers)
+    assert started.status_code == 200, started.text
+    assert started.json()["state"] == "PLAYING"
+    assert started.json()["template_id"] == template["id"]
+    assert started.json()["audio_id"] == audio["id"]
+
+
+def test_a_shop_no_template_reaches_is_refused_with_the_reason(client):
+    """"It has not been played yet" and "nothing plays here at all" are
+    different answers, and only the second one is worth refusing on."""
+    headers = sign_in(client)
+    store = make_store(client, headers, "SB", region="SOUTH")
+    audio = upload(client, headers)
+    make_template(client, headers, audio_id=audio["id"],
+                  items=[{"audio_id": audio["id"], "zone": "NORTH"}])
+
+    refused = client.post(f"/api/announcements/stores/{store}/play",
+                          headers=headers)
+    assert refused.status_code == 400
+    assert "No template plays in this Store" in refused.json()["detail"]
