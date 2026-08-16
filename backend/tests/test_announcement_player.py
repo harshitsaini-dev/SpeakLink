@@ -141,11 +141,20 @@ def test_a_download_path_outside_the_announcement_route_is_refused():
 
 def test_the_decoder_produces_the_shape_the_broadcast_sink_expects():
     """One device selection, one level, one thing making sound - which only
-    holds if both paths hand the sink the same PCM."""
+    holds if both paths hand the sink the same PCM.
+
+    THIS TEST SHIPPED THE BUG. Its sentence was right and its number was
+    wrong: it asserted two channels while the Store's output stream is opened
+    with one, so it agreed with a decoder whose every write the sink refused.
+    It now reads the channel count FROM the sink's own constant, which is the
+    only version of this assertion that cannot drift.
+    """
+    from tools.audio_receiver_pilot import OUTPUT_CHANNELS, OUTPUT_SAMPLE_RATE
+
     command = decode_command(Path("x.mp3"))
-    assert "48000" in command
+    assert str(OUTPUT_SAMPLE_RATE) in command
     assert "s16le" in command
-    assert command[command.index("-ac") + 1] == "2"
+    assert command[command.index("-ac") + 1] == str(OUTPUT_CHANNELS)
     assert "-nostdin" in command, (
         "without this a background Receiver blocks on a console nobody is "
         "attached to")
@@ -384,3 +393,79 @@ def test_the_decoder_starts_with_no_console_window():
         # Nothing to hide on a platform without consoles, and the option set
         # is empty rather than wrong.
         assert "creationflags" not in seen
+
+
+def test_the_decoder_matches_the_sink_it_is_writing_into():
+    """MONO, because that is what the Store's sink accepts.
+
+    The announcement decoder asked ffmpeg for STEREO while the shop's output
+    stream is opened with one channel. Every write of interleaved stereo into
+    a mono stream failed, the sink marked itself failed, and the Receiver went
+    on reporting the announcement as playing - which is exactly why broadcasts
+    worked and announcements did not: the broadcast decoder has always taken
+    its channel count from the sink.
+    """
+    from pathlib import Path
+    from tools.announcement_player import decode_command
+
+    command = decode_command(Path("promo.mp3"))
+    assert command[command.index("-ac") + 1] == "1"
+
+    # And it asks the sink rather than assuming, so a device that wants
+    # something else gets it.
+    other = decode_command(Path("promo.mp3"), channels=2, sample_rate=44100)
+    assert other[other.index("-ac") + 1] == "2"
+    assert other[other.index("-ar") + 1] == "44100"
+
+
+def test_a_refused_write_stops_rather_than_looping_in_silence():
+    """A sink that refuses the audio - a closed device, a format it cannot
+    take - used to be ignored: the pump kept writing into it and everything
+    upstream reported success."""
+    import time
+    from pathlib import Path
+    from tools.announcement_player import AnnouncementPlayback
+
+    class RefusingSink:
+        configuration = None
+
+        def write(self, _pcm):
+            return False
+
+    class FakeStdout:
+        def __init__(self):
+            self._left = 3
+
+        def read(self, _size):
+            self._left -= 1
+            return b"\x00\x00" * 64 if self._left > 0 else b""
+
+        def close(self):
+            return None
+
+    class FakeProcess:
+        stdout = FakeStdout()
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            return None
+
+        def terminate(self):
+            return None
+
+    playback = AnnouncementPlayback(path=Path("promo.mp3"), sink=RefusingSink(),
+                                    spawn=lambda *a, **k: FakeProcess())
+    playback.start()
+    for _ in range(200):
+        if getattr(playback, "_failed", False):
+            break
+        time.sleep(0.01)
+    playback.stop()
+
+    assert getattr(playback, "_failed", False), (
+        "the playback kept writing into a sink that was refusing every frame")

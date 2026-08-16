@@ -500,3 +500,47 @@ def test_a_receiver_with_no_audio_output_says_so_rather_than_claiming_to_play():
     assert sent, "nothing was reported at all"
     assert sent[0]["type"] == "announcement_failed"
     assert "no audio output" in sent[0]["error"]
+
+
+def test_the_console_volume_moves_the_shop_master_not_only_our_samples():
+    """Asked for directly, twice.
+
+    The slider on the Announcements console is what an operator reaches for
+    when a shop is too loud. It scaled only the announcement's own samples, so
+    the Windows master stayed exactly where it was - the shop's own music
+    stayed loud and the change looked like it had done nothing.
+
+    It is NOT restored afterwards, unlike the broadcast's ducking of this same
+    control: a broadcast borrows the volume for a minute; this is somebody
+    deciding how loud this shop should be.
+    """
+    import asyncio
+    from tools import audio_receiver_pilot as pilot
+
+    applied = {}
+
+    class Playback:
+        def set_volume(self, percent):
+            applied["software"] = percent
+
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver._announcement = Playback()
+    receiver._announcement_volume_percent = 80
+    receiver.windows_endpoint_id = "{endpoint-1}"
+    receiver._endpoint_backend = None
+    receiver._apply_master_volume = lambda percent: applied.update(master=percent)
+
+    asyncio.run(receiver._on_announcement_set_volume(None, {"volume_percent": 20}))
+
+    assert applied["software"] == 20, "the recording's own level"
+    assert applied["master"] == 20, "the shop's master volume"
+
+
+def test_a_store_with_no_endpoint_still_plays_at_the_software_level():
+    """A control that is not the audio must never stop the audio."""
+    from tools import audio_receiver_pilot as pilot
+
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver.windows_endpoint_id = None
+
+    receiver._apply_master_volume(30)      # must not raise

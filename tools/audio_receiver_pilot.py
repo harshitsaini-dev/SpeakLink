@@ -1044,6 +1044,7 @@ class AudioReceiverPilot:
 
         self._announcement = announcement_player.AnnouncementPlayback(
             path=path, sink=sink, volume_percent=volume)
+        self._apply_master_volume(volume)
         self._announcement.start()
         await self._send(connection, {
             "type": "announcement_playing",
@@ -1082,6 +1083,44 @@ class AudioReceiverPilot:
         self._announcement_volume_percent = max(0, min(100, percent))
         if self._announcement is not None:
             self._announcement.set_volume(self._announcement_volume_percent)
+        # AND THE SHOP'S MASTER VOLUME.
+        #
+        # Asked for twice from the estate: this slider is what an operator
+        # reaches for when a shop is too loud, and scaling only our own
+        # samples left the Windows master exactly where it was - so the shop's
+        # own music stayed loud and the change looked like it had done
+        # nothing.
+        #
+        # NOT restored afterwards, unlike the broadcast's ducking of this same
+        # control: a broadcast borrows the volume for a minute, whereas this
+        # is somebody deciding how loud this shop should be.
+        self._apply_master_volume(self._announcement_volume_percent)
+
+    def _apply_master_volume(self, percent: int) -> None:
+        """Set the Windows endpoint's own volume for this Store.
+
+        The same control, backend and endpoint id the broadcast path already
+        uses - not a second way of doing it.
+
+        Best effort and never fatal: a Store whose master volume cannot be set
+        still plays the announcement, and raising here would stop the audio
+        over a control that is not the audio.
+        """
+        endpoint_id = getattr(self, "windows_endpoint_id", None)
+        if not endpoint_id:
+            return
+        try:
+            from tools import windows_endpoint_volume as volume
+        except ImportError:  # pragma: no cover - not on Windows
+            return
+        try:
+            volume.apply_state(endpoint_id, volume_percent=percent,
+                               muted=False,
+                               backend=getattr(self, "_endpoint_backend", None))
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not set the master volume for this Store to "
+                           "%s%%; the announcement is still scaled in software.",
+                           percent)
 
     async def _on_list_output_devices(self, connection, payload: dict) -> None:
         """Tell HQ what this computer actually has.

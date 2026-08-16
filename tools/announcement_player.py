@@ -52,8 +52,15 @@ from pathlib import Path
 logger = logging.getLogger("speaklink.receiver.announcement")
 
 #: The PCM shape the broadcast path already produces, so both feed one sink.
+#:
+#: The comment was right and the number was wrong. The broadcast decoder asks
+#: ffmpeg for OUTPUT_CHANNELS - one - because the Store's output stream is
+#: opened mono. This said two, so every announcement wrote interleaved stereo
+#: into a mono stream: the write failed, the sink marked itself failed, and
+#: the Receiver reported the shop as playing while it sat in silence. That is
+#: the whole difference between "broadcast works and announcements do not".
 SAMPLE_RATE = 48000
-CHANNELS = 2
+CHANNELS = 1
 SAMPLE_FORMAT = "s16le"
 
 #: How much decoded audio to hand the sink at a time. Small enough that a
@@ -157,7 +164,8 @@ def ffmpeg_executable() -> str:
     return str(resolve_packaged_ffmpeg())
 
 
-def decode_command(path: Path) -> list[str]:
+def decode_command(path: Path, *, channels: int = CHANNELS,
+                   sample_rate: int = SAMPLE_RATE) -> list[str]:
     """ffmpeg arguments to turn any accepted format into the sink's PCM.
 
     ``-nostdin`` matters: without it ffmpeg competes for the console's input
@@ -167,7 +175,7 @@ def decode_command(path: Path) -> list[str]:
     return [
         ffmpeg_executable(), "-nostdin", "-loglevel", "error",
         "-i", str(path),
-        "-f", SAMPLE_FORMAT, "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
+        "-f", SAMPLE_FORMAT, "-ar", str(sample_rate), "-ac", str(channels),
         "-",
     ]
 
@@ -203,6 +211,7 @@ class AnnouncementPlayback:
         if self._thread is not None:
             self.resume()
             return
+        self._failed = False
         self._playing.set()
         self._thread = threading.Thread(target=self._pump, daemon=True,
                                         name="speaklink-announcement")
@@ -279,7 +288,15 @@ class AnnouncementPlayback:
                 # The broadcast decoder already does this; the announcement
                 # decoder was the one place that did not, and the window
                 # flashing on the Store PC was exactly that.
-                self._process = self._spawn(decode_command(self._path),
+                # ASKED, NOT ASSUMED. A sink carries its own rate and
+                # channel count; a second opinion hard-coded here is what
+                # produced a stereo stream for a mono device.
+                configuration = getattr(self._sink, "configuration", None)
+                command = decode_command(
+                    self._path,
+                    channels=getattr(configuration, "channels", CHANNELS),
+                    sample_rate=getattr(configuration, "sample_rate", SAMPLE_RATE))
+                self._process = self._spawn(command,
                                             stdout=subprocess.PIPE,
                                             stderr=subprocess.DEVNULL,
                                             **hidden_child_process_options())
@@ -301,7 +318,16 @@ class AnnouncementPlayback:
                     chunk = self._process.stdout.read(CHUNK_BYTES)
                     if not chunk:
                         break
-                    self._sink.write(self._at_volume(chunk))
+                    if self._sink.write(self._at_volume(chunk)) is False:
+                        # The sink REFUSED the audio - a closed device, or a
+                        # format it cannot take. Looping on that is how a shop
+                        # stays silent while every layer reports success.
+                        logger.error(
+                            "The Store's speaker refused the announcement "
+                            "audio; stopping rather than pretending to play.")
+                        self._failed = True
+                        self._stopping = True
+                        break
             finally:
                 try:
                     self._process.kill()
