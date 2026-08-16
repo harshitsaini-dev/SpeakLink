@@ -1879,3 +1879,70 @@ def test_a_shop_no_template_reaches_is_refused_with_the_reason(client):
                           headers=headers)
     assert refused.status_code == 400
     assert "No template plays in this Store" in refused.json()["detail"]
+
+
+def test_taking_a_store_out_of_a_template_lets_that_store_go(client):
+    """Reported: a Store removed from a template still showed the recording.
+
+    The playback row kept naming the template it had been removed from, so
+    the console went on showing a shop as playing a campaign it was no longer
+    part of - and the only controls offered were Pause and Stop for something
+    nobody could explain.
+    """
+    headers = sign_in(client)
+    kept = make_store(client, headers, "NA", region="NORTH")
+    dropped = make_store(client, headers, "NB", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"], items=[
+        {"audio_id": audio["id"], "store_id": kept},
+        {"audio_id": audio["id"], "store_id": dropped},
+    ])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    edited = client.put(f"/api/announcements/templates/{template['id']}",
+                        headers=headers, json={
+                            "name": "Festival",
+                            "items": [{"audio_id": audio["id"], "store_id": kept}]})
+    assert edited.status_code == 200, edited.text
+
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    by_store = {row["store_id"]: row for row in rows}
+
+    assert by_store[dropped]["state"] == "STOPPED"
+    assert by_store[dropped]["template_id"] is None
+    assert by_store[dropped].get("assigned_template_name") is None
+
+    # And the shop that is still in the campaign is untouched.
+    assert by_store[kept]["state"] == "PLAYING"
+    assert by_store[kept]["template_id"] == template["id"]
+
+
+def test_the_clock_clears_a_shop_that_drifted_out_of_its_campaign(client):
+    """The sweep for rows that were left pointing at a template which no
+    longer includes them - written because one was, and somebody had to ask
+    why a shop was playing something it had been taken out of."""
+    import announcement_service
+
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    # Retarget the template behind the route's back, the way an older edit
+    # path did.
+    engine = client.server_module.engine
+    from sqlalchemy import text
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE announcement_template_items SET zone = 'SOUTH' "
+            "WHERE template_id = :id"), {"id": template["id"]})
+
+    scheduler_tick(client, "2026-08-16 12:00")
+
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    mine = [row for row in rows if row["store_id"] == store][0]
+    assert mine["template_id"] is None
+    assert mine["state"] == "STOPPED"

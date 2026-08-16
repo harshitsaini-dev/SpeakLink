@@ -9166,6 +9166,28 @@ async def _apply_announcement_schedules(*, now: datetime | None = None) -> dict:
 
     retired: list[int] = []
 
+    # A SHOP POINTING AT A CAMPAIGN THAT NO LONGER INCLUDES IT.
+    #
+    # The edit route releases these at the moment somebody removes a Store,
+    # which is where it belongs. This is the sweep for rows that drifted
+    # before that existed - and for any future path that changes targeting
+    # without going through it. It costs one comparison per shop and it is
+    # the difference between a stale row clearing itself and somebody having
+    # to ask why a shop is playing something it was taken out of.
+    reach: dict[int, set] = {}
+    for template in announcement_service.list_templates(engine, status="active"):
+        reach[template["id"]] = set(announcement_service.stores_for_template(
+            engine, template_id=template["id"]))
+    for row in announcement_service.live_status(engine):
+        assigned = row.get("template_id")
+        if assigned is None:
+            continue
+        if row["store_id"] in reach.get(assigned, set()):
+            continue
+        released = announcement_service.retire(engine, store_id=row["store_id"])
+        await _dispatch_announcement(row["store_id"], released)
+        retired.append(row["store_id"])
+
     for template in announcement_service.list_templates(engine, status="active"):
         # AN EXPIRED CAMPAIGN STOPS, AND STOPS BEING CHOSEN.
         #
@@ -9688,7 +9710,7 @@ def create_announcement_template(
 
 
 @api.put("/announcements/templates/{template_id}")
-def update_announcement_template(
+async def update_announcement_template(
     template_id: int,
     payload: dict,
     db: Session = Depends(get_db),
@@ -9710,6 +9732,15 @@ def update_announcement_template(
     would be a far worse surprise than the delay.
     """
     existing = _template_or_404(template_id)
+    # WHO THIS CAMPAIGN REACHED BEFORE THE EDIT.
+    #
+    # Taking a Store out of a template must let that Store go. Without this
+    # the playback row kept naming the template it had been removed from, so
+    # the console went on showing a shop as playing a campaign it was no
+    # longer part of - and the only controls offered were Pause and Stop for
+    # something nobody could explain.
+    reached_before = set(announcement_service.stores_for_template(
+        engine, template_id=template_id))
     name = (payload.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="A template needs a name.")
@@ -9786,8 +9817,24 @@ def update_announcement_template(
                     "volume": announcements.validate_volume(
                         item.get("volume_percent", announcements.DEFAULT_VOLUME)),
                 })
+    reached_now = set(announcement_service.stores_for_template(
+        engine, template_id=template_id))
+    released = []
+    for store_id in sorted(reached_before - reached_now):
+        current = announcement_service.get_playback(engine, store_id=store_id)
+        if current.get("template_id") != template_id:
+            continue
+        # Retire rather than stop: this shop is not part of the campaign at
+        # all now, so keeping the assignment would be keeping a pointer to
+        # something that no longer includes it. Stop is for "not right now".
+        row = announcement_service.retire(engine, store_id=store_id,
+                                          actor_id=user.id)
+        await _dispatch_announcement(store_id, row)
+        released.append(store_id)
+
     _write_log(db, "info",
-               f"announcement_template_updated id={template_id} by={user.username}")
+               f"announcement_template_updated id={template_id} "
+               f"released={len(released)} by={user.username}")
     return _template_or_404(template_id)
 
 
