@@ -659,3 +659,82 @@ def test_every_connect_path_says_the_same_first_words():
     said = inspect.getsource(audio_receiver_pilot.AudioReceiverPilot._announce_self)
     assert "receiver_version" in said
     assert "_report_store_volume_if_changed" in said
+
+
+def test_stopping_a_broadcast_leaves_the_announcement_its_speaker():
+    """Reported from the estate: after Stop Broadcast the announcement never
+    came back.
+
+    Ducking is what makes an announcement stand aside for a live broadcast,
+    and HQ dutifully sent the resume when the broadcast ended. The Store
+    accepted it and stayed silent - because stopping the broadcast had closed
+    the output device the announcement was ducked on. The resume then wrote
+    into a closed speaker.
+
+    Stop releases the BROADCAST's claim on the speaker. The announcement's
+    claim keeps it open.
+    """
+    import asyncio
+    from unittest.mock import create_autospec
+    from tools import audio_receiver_pilot as pilot
+
+    sink = create_autospec(pilot.WindowsPcmSink, instance=True)
+    sink.frames_written = 1234
+
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver.pcm_sink = sink
+    receiver.decoder = None
+    receiver.queue = None
+    receiver.session_id = 7
+    receiver.report = {}
+    receiver._announcement = object()          # ducked, still assigned
+    receiver._pcm_sink_users = {"broadcast", "announcement"}
+    receiver._sequence = 0
+    receiver._states = []
+    receiver.device_public_id = "dev-test"
+    receiver.store_id = 1
+    receiver.restore_windows_endpoint = lambda: None
+
+    class Silent:
+        async def send(self, _message):
+            return None
+
+    asyncio.run(receiver._on_stop(Silent(), {"session_id": 7}))
+
+    sink.close.assert_not_called()
+    assert receiver.pcm_sink is sink
+    # And the broadcast's own reporting still happened.
+    assert receiver.report["output_frames_written"] == 1234
+
+
+def test_stopping_a_broadcast_does_close_the_speaker_when_nothing_else_wants_it():
+    """A Store with nothing to play must not hold an output device open."""
+    import asyncio
+    from unittest.mock import create_autospec
+    from tools import audio_receiver_pilot as pilot
+
+    sink = create_autospec(pilot.WindowsPcmSink, instance=True)
+    sink.frames_written = 10
+
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver.pcm_sink = sink
+    receiver.decoder = None
+    receiver.queue = None
+    receiver.session_id = 7
+    receiver.report = {}
+    receiver._announcement = None
+    receiver._pcm_sink_users = {"broadcast"}
+    receiver._sequence = 0
+    receiver._states = []
+    receiver.device_public_id = "dev-test"
+    receiver.store_id = 1
+    receiver.restore_windows_endpoint = lambda: None
+
+    class Silent:
+        async def send(self, _message):
+            return None
+
+    asyncio.run(receiver._on_stop(Silent(), {"session_id": 7}))
+
+    sink.close.assert_called_once_with()
+    assert receiver.pcm_sink is None

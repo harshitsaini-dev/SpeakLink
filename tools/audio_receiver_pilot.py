@@ -1940,8 +1940,16 @@ class AudioReceiverPilot:
             self.report["ffmpeg_returncode"] = returncode
             self.report["ffmpeg_decoded_microseconds"] = self.decoder.decoded_microseconds
         if self.pcm_sink is not None:
-            self.pcm_sink.close()
+            # THE FRAME COUNT FIRST, then let go of the speaker - and only if
+            # nothing else is using it.
+            #
+            # This closed the device outright. When an announcement had been
+            # ducked for the broadcast, stopping the broadcast closed the
+            # speaker underneath it: HQ dutifully sent the resume, the Store
+            # accepted it, and the shop stayed silent. "The announcement never
+            # comes back after Stop Broadcast" was exactly this line.
             self.report["output_frames_written"] = self.pcm_sink.frames_written
+            self._release_pcm_sink("broadcast")
         if self.queue is not None:
             self.queue.close()
 
@@ -2053,7 +2061,12 @@ class AudioReceiverPilot:
         if self.decoder is not None and self.decoder.running:
             self.report["ffmpeg_returncode"] = await asyncio.to_thread(self.decoder.close)
         if self.pcm_sink is not None:
-            self.pcm_sink.close()
+            # The connection is going away, so everything using this speaker
+            # is going with it. Both users are released rather than the device
+            # being closed behind their backs, so the register cannot be left
+            # claiming a sink that no longer exists.
+            self._release_pcm_sink("broadcast")
+            self._release_pcm_sink("announcement")
         if self.queue is not None and not self.queue.closed:
             self.queue.close()
         try:
