@@ -1,0 +1,36 @@
+# WHAT A MACHINE RUNNING THE TESTS NEEDS.
+#
+# Installed on top of the other two - it does not repeat them:
+#
+#     python -m pip install -r backend/requirements.txt
+#     python -m pip install -r backend/requirements-dev.txt
+#
+# The FULL suite needs requirements-receiver.txt as well. Four tests in
+# backend/tests enumerate real Windows audio devices through
+# tools/windows_audio_devices, and without sounddevice they fail rather than
+# skip - measured, not assumed. On a Linux CI box those four cannot pass at
+# all and should be deselected; everything else does:
+#
+#     4 failed, 4270 passed, 97 skipped   (server + dev only, on Windows)
+#
+# A deployment host installs neither this file nor a test runner. That is the
+# point of the split: pytest, mypy and a linter on a production server are
+# three more things to install, none of which are ever run there.
+
+pytest==9.1.1
+pytest-xdist==3.8.0
+# Starlette's TestClient is built on httpx. Proving that a refusal is a real
+# 403 rather than a hidden button means going through the HTTP layer, so this
+# is not optional for the RBAC suite.
+httpx==0.28.1
+# The Receiver simulators in backend/tests connect as a Store would.
+websockets==16.0
+# tests/backend_test.py drives a running server over real HTTP rather than
+# through TestClient. Nothing in backend/ imports it - only the tests do.
+requests==2.34.2
+
+# --- lint and format ---------------------------------------------------------
+black==26.5.1
+flake8==7.3.0
+isort==8.0.1
+mypy==2.1.0

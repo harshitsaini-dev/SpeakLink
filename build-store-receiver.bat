@@ -44,7 +44,8 @@ echo.
 echo   Python was not found on this computer.
 echo.
 echo   Building the Store Kit needs Python 3.11 or newer, plus PyInstaller
-echo   from backend\requirements.txt and an ffmpeg.exe to ship.
+echo   from requirements-build.txt, the Receiver's own dependencies from
+echo   backend\requirements-receiver.txt, and an ffmpeg.exe to ship.
 echo.
 popd
 echo %CMDCMDLINE% | find /i "/c" >nul && pause

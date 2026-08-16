@@ -1,0 +1,32 @@
+# WHAT A STORE DESKTOP NEEDS. Windows only.
+#
+# The Receiver connects out to HQ, decodes audio and plays it into a Windows
+# audio endpoint. It serves nothing, so it needs no web framework, and it
+# talks to no database, so it needs no driver. Kept separate from
+# requirements.txt for that reason: a server installing Core Audio bindings
+# and a Store desktop installing PostgreSQL are both installing something
+# they will never call.
+#
+# Note that a Store computer normally installs NONE of this - it runs the
+# packaged Receiver built by scripts/Build-SpeakLinkReceiver.ps1, which has
+# these frozen inside it. This file is for building that package, and for
+# running the Receiver from source while working on it.
+#
+#     python -m pip install -r backend/requirements-receiver.txt
+
+# The client side of the connection to HQ.
+websockets==16.0
+
+# Audio out. PortAudio via sounddevice; the endpoint's own master volume and
+# mute via Windows Core Audio, which is what HQ's per-Store slider moves.
+sounddevice==0.5.2
+# Pinned together and deliberately: the slider now changes a real setting on a
+# real till, and a COM binding that shifts underneath that is not something
+# anybody would think to look for during a rollout. comtypes is pycaw's
+# transport, so it is pinned with it.
+pycaw==20240210
+comtypes==1.4.6
+
+# ffmpeg is NOT a Python package and is not listed here. The packaged Receiver
+# ships its own; from source it is found on PATH. See
+# tools/receiver_agent.prefer_packaged_ffmpeg.

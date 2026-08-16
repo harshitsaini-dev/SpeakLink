@@ -1,151 +1,72 @@
-# emergentintegrations and litellm were removed on the repo-native checkpoint.
+# WHAT THE HQ SERVER NEEDS TO RUN. Nothing else.
 #
-# Neither is imported anywhere in backend/ or tools/, and neither was present
-# in the virtual environment that has been running this product - so they were
-# scaffold left over from the project template, not dependencies.
+# This file used to be a freeze of the whole virtual environment - 140 pins,
+# including openai, stripe, pandas, motor, boto3, huggingface_hub and the
+# google-generativeai stack. Not one of them is imported anywhere in backend/
+# or tools/; they are scaffold from the project template that a `pip freeze`
+# faithfully wrote down. They cost nothing on this Windows machine, where they
+# are already installed, which is exactly why they survived so long.
 #
-# They had to go because they made this file uninstallable from scratch:
-# emergentintegrations==0.2.0 is not on PyPI at all, and litellm was pinned to
-# a wheel URL on a third-party asset host. A requirements file that cannot be
-# installed on a new machine defeats the point of a repository-native
-# deployment, where recreating the environment from these pins IS the
-# portability story. Nothing that the product imports was changed or upgraded.
+# They stop being free the moment this product is installed somewhere else: a
+# fresh machine, a container, a free-tier host with a build timeout and a
+# 512 MB memory limit. Then they are hundreds of megabytes and several minutes
+# spent installing an LLM client, a dataframe library and two cloud SDKs that
+# no line of this codebase calls. Every name below was found by parsing the
+# import statements of backend/, tools/ and scripts/ - not by freezing.
+#
+# THREE FILES, because there are three different machines:
+#   requirements.txt           - the HQ server (this file)
+#   requirements-receiver.txt  - a Store desktop running the Receiver
+#   requirements-dev.txt       - a machine running the tests
+# The Store desktop needs no web framework and no database driver; the server
+# needs no Windows Core Audio bindings. A host that installs this file gets
+# what serves HTTP and WebSockets, and stops there.
+#
+# Direct dependencies are pinned exactly. Their own dependencies are left to
+# pip, which is the difference between "we chose this version" and "this is
+# what resolved on the day somebody ran freeze" - the second was how greenlet
+# and pycparser ended up looking like decisions.
+#
+#     python -m pip install -r backend/requirements.txt
+#
+# PYTHON 3.12. Not a preference - psycopg-binary 3.2.3 publishes no wheel for
+# 3.13 or 3.14, so this file does not install at all on a newer interpreter
+# (verified: pip offers 3.2.10 and up on 3.14). A deployment image must say
+# python:3.12 rather than inherit whatever the host defaults to, which is the
+# kind of thing that turns into a build failure on somebody else's machine
+# months later. Moving to 3.13+ means moving that pin, deliberately.
 
-aiohappyeyeballs==2.7.1
-aiohttp==3.14.1
-aiosignal==1.4.0
-aiosqlite==0.22.1
-annotated-doc==0.0.4
-annotated-types==0.7.0
-anyio==4.14.1
-ast_serialize==0.6.0
-attrs==26.1.0
-bcrypt==4.1.3
-black==26.5.1
-boto3==1.43.39
-botocore==1.43.39
-certifi==2026.6.17
-cffi==2.1.0
-charset-normalizer==3.4.7
-click==8.4.2
-cryptography==49.0.0
-distro==1.9.0
-dnspython==2.8.0
-ecdsa==0.19.2
-email-validator==2.3.0
-execnet==2.1.2
+# --- the web layer -----------------------------------------------------------
 fastapi==0.110.1
-fastuuid==0.14.0
-filelock==3.29.4
-flake8==7.3.0
-frozenlist==1.8.0
-fsspec==2026.6.0
-google-ai-generativelanguage==0.6.15
-google-api-core==2.31.0
-google-api-python-client==2.198.0
-google-auth-httplib2==0.4.0
-google-auth==2.55.1
-google-genai==2.10.0
-google-generativeai==0.8.6
-googleapis-common-protos==1.75.0
-greenlet==3.5.3
-grpcio-status==1.71.2
-grpcio==1.81.1
-h11==0.16.0
-hf-xet==1.5.1
-httpcore==1.0.9
-httplib2==0.32.0
-httpx==0.28.1
-huggingface_hub==1.21.0
-idna==3.18
-importlib_metadata==9.0.0
-iniconfig==2.3.0
-isort==8.0.1
-Jinja2==3.1.6
-jiter==0.16.0
-jmespath==1.1.0
-jq==1.11.0
-jsonschema-specifications==2025.9.1
-jsonschema==4.26.0
-librt==0.12.0
-markdown-it-py==4.2.0
-MarkupSafe==3.0.3
-mccabe==0.7.0
-mdurl==0.1.2
-motor==3.3.1
-multidict==6.7.1
-mypy==2.1.0
-mypy_extensions==1.1.0
-numpy==2.4.6
-oauthlib==3.3.1
-openai==1.99.9
-packaging==26.2
-pandas==3.0.3
-passlib==1.7.4
-pathspec==1.1.1
-pillow==12.3.0
-platformdirs==4.10.0
-pluggy==1.6.0
-propcache==0.5.2
-proto-plus==1.28.0
-protobuf==5.29.6
+# Pinned alongside FastAPI rather than left to it: 0.110.1 accepts a narrow
+# range, and Starlette is imported directly here (StaticFiles, WebSocket,
+# responses), so it is a dependency of ours and not only of FastAPI's.
+starlette==0.37.2
+pydantic==2.13.4
+uvicorn==0.25.0
+# NOT optional, despite looking like it. Plain uvicorn speaks no WebSocket at
+# all; it loads this at startup and every Store Receiver's connection rides on
+# it. Left out, the console starts, the pages load, and no shop ever connects.
+websockets==16.0
+# Multipart form parsing - recording uploads and chat attachments.
+python-multipart==0.0.32
+
+# --- storage -----------------------------------------------------------------
+SQLAlchemy==2.0.51
+# PostgreSQL, required in production: APP_ENV=production refuses to start
+# without a DATABASE_URL, and SQLite is a development convenience only. See
+# backend/db_config.py and docs/SUPABASE_PRODUCTION_CUTOVER.md. The -binary
+# distribution is what avoids needing libpq and a compiler on the host.
 psycopg==3.2.3
 psycopg-binary==3.2.3
-pyasn1==0.6.3
-pyasn1_modules==0.4.2
-pycodestyle==2.14.0
-pycparser==3.0
-pydantic==2.13.4
-pydantic_core==2.46.4
-pyflakes==3.4.0
-Pygments==2.20.0
-PyJWT==2.13.0
-pymongo==4.6.3
-pyparsing==3.3.2
-pytest-xdist==3.8.0
-pytest==9.1.1
-python-dateutil==2.9.0.post0
-python-dotenv==1.2.2
-python-jose==3.5.0
-python-multipart==0.0.32
-pytokens==0.4.1
-PyYAML==6.0.3
-referencing==0.37.0
-regex==2026.6.28
-requests-oauthlib==2.0.0
-requests==2.34.2
-rich==15.0.0
-rpds-py==2026.6.3
-rsa==4.9.1
-s3transfer==0.19.0
-s5cmd==0.2.0
-shellingham==1.5.4
-six==1.17.0
-sniffio==1.3.1
-sounddevice==0.5.2
-SQLAlchemy==2.0.51
-starlette==0.37.2
-stripe==14.4.1
-tenacity==9.1.4
-tiktoken==0.13.0
-tokenizers==0.23.1
-tqdm==4.68.3
-typer==0.25.1
-typing-inspection==0.4.2
-typing_extensions==4.16.0
-tzdata==2026.2
-uritemplate==4.2.0
-urllib3==2.7.0
-uvicorn==0.25.0
-watchfiles==1.2.0
-websockets==16.0
-yarl==1.24.2
-zipp==4.1.0
-httpx==0.28.1
 
-# Windows Core Audio, for the Store Receiver's endpoint master volume/mute.
-# Pinned: HQ's per-Store slider now moves a real Windows setting on a till, and
-# an unpinned COM binding is not something to discover a change in during a
-# rollout. comtypes is pycaw's transport and is pinned with it.
-pycaw==20240210
-comtypes==1.4.6
+# --- identity ----------------------------------------------------------------
+PyJWT==2.13.0
+bcrypt==4.1.3
+
+# --- everything else the server actually imports -----------------------------
+python-dotenv==1.2.2
+# Image handling for chat attachments and enrolment artefacts.
+pillow==12.3.0
+# Process supervision in tools/hq_runtime.py - it owns the uvicorn child.
+psutil==7.2.2
