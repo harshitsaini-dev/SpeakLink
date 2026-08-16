@@ -225,6 +225,41 @@ def stop(engine: Engine, *, store_id: int,
     return get_playback(engine, store_id=store_id)
 
 
+def retire(engine: Engine, *, store_id: int,
+           actor_id: int | None = None) -> dict[str, Any]:
+    """The campaign is over: silent, and no longer chosen.
+
+    RETIRE IS NOT STOP.
+
+    Stop ends a run and keeps the assignment, because somebody will press Play
+    again - that distinction was itself a correction from the estate. Expiry
+    is the opposite: the promotion has finished, its end date was decided in
+    advance, and a shop still listed as playing it is a shop somebody will ask
+    about. So this clears the choice as well as the sound.
+
+    It is the only thing in this file that clears an assignment, and it is
+    driven by the clock rather than by a person - which is exactly why it can
+    be trusted to: nobody is going to be surprised by an end date they set.
+    """
+    now = _now()
+    previous = get_playback(engine, store_id=store_id)
+    with engine.begin() as connection:
+        _write_playback(connection, store_id=store_id,
+                        state=STATE_STOPPED, ducked_from=None,
+                        template_id=None, audio_id=None,
+                        started_at=None,
+                        confirmed_kind=None, confirmed_at=None,
+                        confirmed_error="",
+                        updated_by=actor_id, updated_at=now)
+    try:
+        if previous["state"] == STATE_PLAYING:
+            close_history(engine, store_id=store_id, reason="expired",
+                          actor_id=actor_id)
+    except Exception:  # noqa: BLE001 - history must never fail a live action
+        pass
+    return get_playback(engine, store_id=store_id)
+
+
 def set_state(engine: Engine, *, store_id: int, state: str,
               template_id: int | None = None, audio_id: int | None = None,
               ducked_from: str | None = None, actor_id: int | None = None,

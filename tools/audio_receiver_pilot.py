@@ -214,15 +214,55 @@ def ffmpeg_available() -> bool:
 
 
 def _receiver_version() -> str:
-    """This build's version string, or "unknown" rather than a guess."""
+    """This build's version AND the commit it was built from.
+
+    The version alone is not enough to answer "is this shop running today's
+    Receiver". Six builds went out in one day, every one of them 1.7.5,
+    because the version names the release and not the build - so HQ could see
+    a version, believe the Store was current, and be wrong. The commit is in
+    the package manifest already; this reads it back out.
+    """
+    version = "unknown"
     try:
         from tools.speaklink_version import STORE_KIT_VERSION
+        version = str(STORE_KIT_VERSION)
     except ImportError:  # pragma: no cover - a checkout laid out differently
         try:
             from speaklink_version import STORE_KIT_VERSION
+            version = str(STORE_KIT_VERSION)
         except ImportError:
-            return "unknown"
-    return str(STORE_KIT_VERSION)
+            pass
+
+    for candidate in _manifest_candidates():
+        try:
+            import json as _json
+
+            data = _json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - a missing manifest is not a fault
+            continue
+        commit = (data.get("source_commit_short")
+                  or str(data.get("source_commit") or "")[:7])
+        if commit:
+            return f"{version} ({commit})"
+    return version
+
+
+def _manifest_candidates():
+    """Where a packaged Receiver's manifest.json might be."""
+    from pathlib import Path as _Path
+
+    here = []
+    try:
+        here.append(_Path(sys.executable).resolve().parent / "manifest.json")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from tools.resource_paths import resource_root
+
+        here.append(_Path(resource_root()) / "manifest.json")
+    except Exception:  # noqa: BLE001
+        pass
+    return [path for path in here if path.is_file()]
 
 
 def hidden_child_process_options() -> dict:

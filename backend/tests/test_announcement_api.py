@@ -1712,3 +1712,84 @@ def test_hq_records_what_the_store_said_rather_than_what_it_sent(client):
     after = row_for(store)
     assert after["confirmed"] is False
     assert "ffmpeg" in after["confirm_error"]
+
+
+def test_both_consoles_read_one_answer_about_a_shop_volume(client):
+    """A broadcast reports the shop's level inside its session; a Receiver
+    reports it outside one. The Announcements console and the Broadcast
+    Console must never disagree about what the speaker is set to, so both
+    readings land in the same place.
+    """
+    import server as server_module
+
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+
+    server_module.STORE_MASTER_VOLUME[store] = {"volume_percent": 69,
+                                                "muted": False}
+    try:
+        rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+        mine = [row for row in rows if row["store_id"] == store][0]
+        assert mine["store_volume_percent"] == 69
+        assert mine["store_muted"] is False
+    finally:
+        server_module.STORE_MASTER_VOLUME.pop(store, None)
+
+
+def test_a_shop_that_has_said_nothing_reports_no_level_rather_than_a_guess(client):
+    headers = sign_in(client)
+    store = make_store(client, headers, "NB", region="NORTH")
+
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    mine = [row for row in rows if row["store_id"] == store][0]
+    assert mine["store_volume_percent"] is None
+
+
+def test_an_expired_campaign_stops_itself_and_lets_the_shops_go(client):
+    """Reported from the estate: an expired template was still playing.
+
+    Playing one was already refused once its end date had passed, and the
+    daily window would not start it - but nothing stopped a shop that was
+    ALREADY playing when the date arrived. It carried on, and the console went
+    on naming a finished promotion as the thing that shop was playing.
+
+    Expiry clears the assignment as well as the sound, unlike Stop: the end
+    date was decided in advance by the person who set it.
+    """
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    assert [r for r in rows if r["store_id"] == store][0]["state"] == "PLAYING"
+
+    # The end date arrives.
+    client.put(f"/api/announcements/templates/{template['id']}",
+               headers=headers,
+               json={"name": "Festival", "expires_at": "2020-01-01T00:00:00+00:00"})
+    scheduler_tick(client, "2026-08-16 14:00")
+
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    mine = [row for row in rows if row["store_id"] == store][0]
+    assert mine["state"] == "STOPPED"
+    assert mine["template_id"] is None, (
+        "the console would go on naming a finished promotion")
+
+
+def test_expiry_is_the_only_thing_that_takes_a_template_off_a_shop(client):
+    """Stop keeps the assignment - that was itself a correction from the
+    estate - and only the clock, at a date somebody set in advance, clears
+    it."""
+    headers = sign_in(client)
+    store = make_store(client, headers, "NA", region="NORTH")
+    audio = upload(client, headers)
+    template = make_template(client, headers, audio_id=audio["id"])
+    client.post(f"/api/announcements/templates/{template['id']}/play",
+                headers=headers)
+
+    client.post(f"/api/announcements/stores/{store}/stop", headers=headers)
+    rows = client.get("/api/announcements/status", headers=headers).json()["items"]
+    assert [r for r in rows if r["store_id"] == store][0]["template_id"] == template["id"]

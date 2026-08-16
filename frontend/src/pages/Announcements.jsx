@@ -401,7 +401,16 @@ function VolumeControl({ row, disabled, onDone }) {
              onChange={(event) => setValue(Number(event.target.value))}
              onMouseUp={commit} onTouchEnd={commit} onKeyUp={commit}
              className="w-24" />
-      <span className="text-xs text-muted w-8 tabular-nums">{value}%</span>
+      {/* WHOSE NUMBER THIS IS.
+          A reading from the shop and a setting from HQ look identical on a
+          slider, and only one of them is what anybody can hear. */}
+      <span className={`text-xs w-8 tabular-nums ${known ? "text-strong" : "text-muted"}`}
+            title={known
+              ? "This is the shop's own master volume, as the Store reported it."
+              : "This Store has not reported its own volume - this is what HQ last set. "
+                + "An older Receiver does not report it at all."}>
+        {value}%
+      </span>
       {/* Said out loud when this is a reading rather than a setting: the two
           look identical on a slider, and only one of them is what the shop
           can hear. */}

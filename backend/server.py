@@ -6315,6 +6315,16 @@ async def ws_receiver(websocket: WebSocket):
                 # fields only and never a command id: a person at the till
                 # moving the slider does not retract the operator's request and
                 # must not look like a reply to it.
+                # ONE PLACE FOR "what is this shop's speaker set to".
+                #
+                # A broadcast reports it inside its session, and a Receiver
+                # reports it outside one - and the Announcements console and
+                # the Broadcast Console must never disagree about it. Both
+                # readings land here.
+                STORE_MASTER_VOLUME[store_id] = {
+                    "volume_percent": acknowledgement.volume_percent,
+                    "muted": bool(acknowledgement.muted),
+                }
                 observed = store_audio_registry.observe_endpoint_state(
                     session_id=acknowledgement.session_id,
                     store_id=store_id,
@@ -7792,7 +7802,15 @@ async def supervised_set_auto_approve(
 #: Anything older connects, broadcasts and ignores every announcement command
 #: it is sent - which is indistinguishable from silence unless somebody says
 #: so out loud.
-ANNOUNCEMENTS_NEED_VERSION = (1, 7, 5)
+#: 1.7.6, not 1.7.5.
+#:
+#: Six Receivers went out on one day carrying the version 1.7.5, and only the
+#: last of them could actually play an announcement - the earlier ones asked
+#: for stereo on a mono device, looked for ffmpeg where it was not, or never
+#: opened the speaker at all. A version names a release, not a build, so every
+#: 1.7.5 in the field is one of those. Requiring 1.7.6 makes the console say
+#: "Receiver too old" for exactly the Stores that cannot play.
+ANNOUNCEMENTS_NEED_VERSION = (1, 7, 6)
 
 
 def _supports_announcements(version: str) -> bool:
@@ -7804,8 +7822,11 @@ def _supports_announcements(version: str) -> bool:
     """
     if not version or version == "unknown":
         return True
+    # The version may carry its build - "1.7.5 (0eddbfa)" - because a version
+    # alone cannot say which of six builds in one day a shop is running.
+    version = str(version).split(" ")[0]
     parts = []
-    for piece in str(version).split("."):
+    for piece in version.split("."):
         digits = "".join(character for character in piece
                          if character.isdigit())
         parts.append(int(digits) if digits else 0)
@@ -9135,7 +9156,32 @@ async def _apply_announcement_schedules(*, now: datetime | None = None) -> dict:
     stopped: list[int] = []
     connected = manager.online_store_ids()
 
+    retired: list[int] = []
+
     for template in announcement_service.list_templates(engine, status="active"):
+        # AN EXPIRED CAMPAIGN STOPS, AND STOPS BEING CHOSEN.
+        #
+        # Playing a template was already refused once its end date had passed,
+        # and the daily window would not start it - but nothing stopped a shop
+        # that was ALREADY playing when the date arrived. It carried on, and
+        # the console went on naming the finished promotion as the thing that
+        # shop was playing, which is how an expired jingle ran into a day it
+        # was never meant to see.
+        #
+        # This clears the assignment, unlike Stop: the end date was decided in
+        # advance by the person who set it, so nobody is surprised by it.
+        if not announcement_service.template_is_live(template):
+            for store_id in announcement_service.stores_for_template(
+                    engine, template_id=template["id"]):
+                current = announcement_service.get_playback(engine,
+                                                            store_id=store_id)
+                if current.get("template_id") != template["id"]:
+                    continue
+                row = announcement_service.retire(engine, store_id=store_id)
+                await _dispatch_announcement(store_id, row)
+                retired.append(store_id)
+            continue
+
         window_start = template.get("daily_start")
         window_end = template.get("daily_end")
         if not window_start or not window_end:
@@ -9190,7 +9236,7 @@ async def _apply_announcement_schedules(*, now: datetime | None = None) -> dict:
                 await _dispatch_announcement(store_id, row)
                 stopped.append(store_id)
 
-    return {"started": started, "stopped": stopped}
+    return {"started": started, "stopped": stopped, "retired": retired}
 
 
 async def _announcement_schedule_loop() -> None:
@@ -9203,10 +9249,12 @@ async def _announcement_schedule_loop() -> None:
     while True:
         try:
             outcome = await _apply_announcement_schedules()
-            if outcome["started"] or outcome["stopped"]:
+            if outcome["started"] or outcome["stopped"] or outcome["retired"]:
                 logger.info(
-                    "Announcement schedule: started %s, stopped %s",
-                    len(outcome["started"]), len(outcome["stopped"]))
+                    "Announcement schedule: started %s, stopped %s, "
+                    "retired %s (expired)",
+                    len(outcome["started"]), len(outcome["stopped"]),
+                    len(outcome["retired"]))
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001

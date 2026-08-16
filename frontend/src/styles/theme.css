@@ -231,6 +231,24 @@ body {
   --glass-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
   --scroll-thumb: rgba(148, 163, 184, 0.28);
   --scroll-thumb-hover: rgba(148, 163, 184, 0.5);
+
+  /* THE TEXT TOO, not only the glass.
+   *
+   * This scope existed to keep a dark surface dark in either theme, and it
+   * redefined the pane and forgot what is written on it - so in light mode
+   * the sign-in card was a dark photograph with dark text on it, which is
+   * unreadable in the most literal sense. A surface and its text are one
+   * decision. */
+  --text-strong: #f1f5f9;
+  --text-body: #cbd5e1;
+  --text-muted: #94a3b8;
+  --text-faint: #64748b;
+  --line: rgba(148, 163, 184, 0.20);
+  --line-strong: rgba(148, 163, 184, 0.32);
+  --surface-solid: #111827;
+  --surface-muted: rgba(255, 255, 255, 0.06);
+  --surface-raised: #16213a;
+  --surface: 30 41 59;
 }
 
 /* ---------------------------------------------------------------------- */
