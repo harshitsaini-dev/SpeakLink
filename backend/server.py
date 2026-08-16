@@ -6245,6 +6245,12 @@ async def ws_receiver(websocket: WebSocket):
                             "volume_percent": int(data.get("volume_percent")),
                             "muted": bool(data.get("muted")),
                         }
+                        # Logged at INFO, once per change. "Is the Store
+                        # sending, or is HQ not listening?" cost a day, and a
+                        # line in the log answers it in one restart.
+                        logger.info("Store %s reports its own volume: %s%%%s",
+                                    store_id, data.get("volume_percent"),
+                                    " (muted)" if data.get("muted") else "")
                     except (TypeError, ValueError):
                         pass
                     continue
@@ -6255,6 +6261,8 @@ async def ws_receiver(websocket: WebSocket):
                     # of either side makes it a fresh question.
                     RECEIVER_VERSIONS[store_id] = str(
                         data.get("version") or "unknown")[:40]
+                    logger.info("Store %s is running Receiver %s",
+                                store_id, RECEIVER_VERSIONS[store_id])
                     continue
 
                 if data.get("type") in ("output_devices", "output_device_result"):

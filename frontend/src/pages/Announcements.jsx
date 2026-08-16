@@ -286,7 +286,30 @@ export default function Announcements() {
                     data-testid={`announcement-row-${row.store_id}`}>
                   <td className="px-4 py-2">
                     <div className="font-medium text-strong">{row.store_name}</div>
-                    <div className="text-xs text-muted">{row.store_code}</div>
+                    <div className="text-xs text-muted">
+                      {row.store_code}
+                      {/* WHICH RECEIVER THIS SHOP IS RUNNING.
+                          Six builds went out in one day, all called 1.7.5,
+                          and only the last could play an announcement or
+                          report the shop's own volume - so "is this Store up
+                          to date" was a question nobody could answer from any
+                          screen. It is answered here, on the row where the
+                          symptom shows. */}
+                      {/* Only for a shop HQ is connected to. A Store that is
+                          offline is not running anything, and "version not
+                          reported" against forty dark shops is noise that
+                          buries the one row it matters on. */}
+                      {row.receiver_version
+                        ? <span className="ml-2 text-faint">
+                            · {row.receiver_version}
+                          </span>
+                        : row.reachable !== false
+                        ? <span className="ml-2 text-amber-700 dark:text-amber-500"
+                                title="This Store is connected but has not said which Receiver it runs. Builds before 1.7.6 do not report it - and do not report the shop's own volume either. Install the current Store Kit on that computer.">
+                            · Receiver older than 1.7.6
+                          </span>
+                        : null}
+                    </div>
                   </td>
                   <td className="px-4 py-2 text-body">{row.zone}</td>
                   <td className="px-4 py-2"><StateBadge state={row.state} reachable={row.reachable !== false}
