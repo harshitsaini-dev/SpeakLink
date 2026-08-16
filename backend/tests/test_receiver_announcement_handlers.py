@@ -544,3 +544,69 @@ def test_a_store_with_no_endpoint_still_plays_at_the_software_level():
     receiver.windows_endpoint_id = None
 
     receiver._apply_master_volume(30)      # must not raise
+
+
+def test_a_store_without_a_saved_endpoint_still_gets_its_master_controlled():
+    """Reported from a live shop, twice, as two different faults.
+
+    `windows_endpoint_id` is written into config when somebody picks an output
+    in Store Setup. A Store set up before that existed has a perfectly good
+    speaker and no endpoint id - and then the volume set from HQ never reaches
+    the shop, and a change made at the till is never reported back. Both look
+    like features that do not work rather than a field nobody filled in.
+    """
+    from tools import audio_receiver_pilot as pilot
+
+    class Device:
+        name = "Speakers (Realtek(R) Audio)"
+
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver.windows_endpoint_id = None
+    receiver._endpoint_backend = None
+    receiver.sink = type("Config", (), {"device": Device()})()
+
+    import tools.windows_endpoint_volume as volume
+    original = volume.resolve_endpoint_for_playback_device
+    volume.resolve_endpoint_for_playback_device = (
+        lambda name, **_kwargs: type("Endpoint", (), {"endpoint_id": "{ep-42}"})())
+    try:
+        resolved = receiver._ensure_windows_endpoint()
+    finally:
+        volume.resolve_endpoint_for_playback_device = original
+
+    assert resolved == "{ep-42}"
+    assert receiver.windows_endpoint_id == "{ep-42}", "it should be remembered"
+
+
+def test_a_store_whose_endpoint_cannot_be_resolved_is_not_broken_by_it():
+    """No endpoint means no master control, which is a degradation - not a
+    reason to stop playing anything."""
+    from tools import audio_receiver_pilot as pilot
+
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver.windows_endpoint_id = None
+    receiver._endpoint_backend = None
+    receiver.sink = type("Config", (), {"device": None})()
+
+    assert receiver._ensure_windows_endpoint() is None
+    receiver._apply_master_volume(50)      # must not raise
+
+
+def test_every_name_this_module_uses_when_things_go_wrong_exists():
+    """`logger` did not exist in audio_receiver_pilot.
+
+    Six calls to it were added with the announcement work, all of them inside
+    except blocks - so on a Store, the first time anything went wrong, the
+    handler for that failure would itself raise NameError. Tests never saw it
+    because tests take the happy path through those lines.
+
+    Compiling the module is not enough; a name is only resolved when the line
+    runs. This asserts the module actually has the names its error paths use.
+    """
+    from tools import audio_receiver_pilot as pilot
+
+    for name in ("logger", "logging"):
+        assert hasattr(pilot, name), f"audio_receiver_pilot has no {name}"
+
+    # And it is a real logger, not something that happens to be truthy.
+    pilot.logger.debug("exercised by the test suite")

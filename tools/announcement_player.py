@@ -145,24 +145,43 @@ def fetch_if_absent(*, state_root: Path, sha256: str, download_path: str,
 
 
 def ffmpeg_executable() -> str:
-    """The FFmpeg this package shipped with, by absolute path.
+    """The FFmpeg this Receiver runs, resolved the way the Receiver resolves it.
 
-    NOT the bare name "ffmpeg".
+    MY OWN CORRECTION, TWICE OVER.
 
-    A Store desktop has no FFmpeg on PATH and no reason to acquire one - the
-    Receiver package carries its own, and every other decoder in this product
-    already resolves it this way. This one asked PATH, so on a real shop
-    computer the decode failed instantly and the announcement was silent while
-    HQ showed it playing.
+    It began as the bare word "ffmpeg", which fails on a Store desktop with
+    nothing on PATH. I then pointed it at `resolve_packaged_ffmpeg`, which
+    resolves against the SETUP PACKAGE's layout (Receiver/ffmpeg.exe) - and
+    the installed Receiver has a different layout, so on a real shop computer
+    it could not find the file and reported "the audio decoder is missing from
+    this installation". The report was honest; the resolver was wrong.
 
-    A checkout falls back to PATH, because that is where a developer's FFmpeg
-    genuinely lives and there is no package to be incomplete.
+    The broadcast decoder has always used `shutil.which("ffmpeg")` and always
+    worked, because `receiver_agent.prefer_packaged_ffmpeg()` puts the
+    packaged binary at the front of this process's PATH at startup. Using the
+    same lookup means the announcement decoder and the broadcast decoder can
+    never disagree about which binary is being run.
     """
+    import shutil
+
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+
+    # Not on PATH: a checkout, or a runtime where prefer_packaged_ffmpeg has
+    # not run. Ask the package layout as a second opinion rather than falling
+    # back to a bare name that cannot work.
     try:
         from tools.resource_paths import resolve_packaged_ffmpeg
     except ImportError:  # pragma: no cover - a checkout laid out differently
-        from resource_paths import resolve_packaged_ffmpeg
-    return str(resolve_packaged_ffmpeg())
+        try:
+            from resource_paths import resolve_packaged_ffmpeg
+        except ImportError:
+            return "ffmpeg"
+    try:
+        return str(resolve_packaged_ffmpeg(allow_path_fallback=True))
+    except Exception:  # noqa: BLE001
+        return "ffmpeg"
 
 
 def decode_command(path: Path, *, channels: int = CHANNELS,

@@ -36,6 +36,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -85,6 +86,9 @@ SINK_MODE_WINDOWS = "windows"
 SUPPORTED_SINK_MODES = (SINK_MODE_NULL, SINK_MODE_WINDOWS)
 
 # Decoded PCM shape for hardware playback.
+
+logger = logging.getLogger("speaklink.receiver.pilot")
+
 OUTPUT_SAMPLE_RATE = 48_000
 OUTPUT_CHANNELS = 1
 OUTPUT_DTYPE = "int16"
@@ -771,6 +775,7 @@ class AudioReceiverPilot:
         # is - see _start_endpoint_observer. A Store playing announcements all
         # day never prepares a broadcast, and used to be unwatched all day.
         try:
+            self._ensure_windows_endpoint()
             self._start_endpoint_observer()
         except Exception:  # noqa: BLE001
             logger.debug("Could not start the endpoint observer", exc_info=True)
@@ -1131,6 +1136,53 @@ class AudioReceiverPilot:
         # is somebody deciding how loud this shop should be.
         self._apply_master_volume(self._announcement_volume_percent)
 
+    def _ensure_windows_endpoint(self) -> str | None:
+        """The Core Audio endpoint for the speaker this Store is set to.
+
+        WHY THIS IS RESOLVED HERE AND NOT ONLY READ FROM CONFIG
+
+        `windows_endpoint_id` is written into the Receiver's config when
+        somebody picks an output in Store Setup. A Store set up before that
+        existed - or upgraded from one - has a perfectly good output device
+        and no endpoint id, and everything that needs the id then silently
+        does nothing:
+
+          * the volume set from HQ never reaches the shop's master;
+          * a change made at the till is never reported back.
+
+        Both were reported from a live shop, and both looked like features
+        that did not work rather than a field that was never filled in. The
+        device name is right there in the sink configuration, and Core Audio
+        can turn it into an endpoint id, so this asks rather than giving up.
+
+        Cached on the instance: it is a property of this computer's hardware,
+        not of the request.
+        """
+        existing = getattr(self, "windows_endpoint_id", None)
+        if existing:
+            return existing
+        device = getattr(getattr(self, "sink", None), "device", None)
+        name = getattr(device, "name", None) or getattr(device, "selector", None)
+        if not name:
+            return None
+        try:
+            from tools import windows_endpoint_volume as volume
+        except ImportError:  # pragma: no cover - not on Windows
+            return None
+        try:
+            resolved = volume.resolve_endpoint_for_playback_device(
+                str(name), backend=getattr(self, "_endpoint_backend", None))
+        except Exception:  # noqa: BLE001
+            logger.info("Could not resolve a Core Audio endpoint for %r; the "
+                        "master volume cannot be read or set on this Store.",
+                        str(name)[:80])
+            return None
+        endpoint_id = getattr(resolved, "endpoint_id", None) or resolved
+        self.windows_endpoint_id = endpoint_id
+        logger.info("Resolved this Store's audio endpoint from its output "
+                    "device; master volume is now controllable.")
+        return endpoint_id
+
     def _apply_master_volume(self, percent: int) -> None:
         """Set the Windows endpoint's own volume for this Store.
 
@@ -1141,7 +1193,7 @@ class AudioReceiverPilot:
         still plays the announcement, and raising here would stop the audio
         over a control that is not the audio.
         """
-        endpoint_id = getattr(self, "windows_endpoint_id", None)
+        endpoint_id = self._ensure_windows_endpoint()
         if not endpoint_id:
             return
         try:
