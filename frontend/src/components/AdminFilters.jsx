@@ -140,37 +140,6 @@ export function FilterSelect({ label, value, onChange, options = [], testId,
   // when it is not.
   React.useEffect(() => { if (!open) setNeedle(""); }, [open]);
 
-  if (!multiple) {
-    return (
-      <label className="flex flex-col gap-1">
-        <span className="text-[10px] uppercase tracking-widest text-muted">{label}</span>
-        <select data-testid={testId} value={value ?? ""}
-                onChange={(e) => onChange(e.target.value)}
-                className="px-2 py-1.5 text-sm border border-line-strong rounded-md bg-surface min-w-[120px]">
-          {allLabel !== null && <option value="">{allLabel}</option>}
-          {normalised.map((option) => (
-            <option key={option.value} value={option.value}>{option.label}</option>
-          ))}
-        </select>
-      </label>
-    );
-  }
-
-  const toggle = (candidate) => {
-    const next = chosen.includes(candidate)
-      ? chosen.filter((entry) => entry !== candidate)
-      : [...chosen, candidate];
-    onChange(next.join(","));
-  };
-
-  const summary = selectedSummary !== null
-    ? selectedSummary
-    : chosen.length === 0
-    ? allLabel
-    : chosen.length === 1
-      ? (normalised.find((option) => option.value === chosen[0])?.label || chosen[0])
-      : `${chosen.length} selected`;
-
   const panel = React.useRef(null);
   const [placement, setPlacement] = React.useState({ top: 0, left: 0 });
 
@@ -212,6 +181,38 @@ export function FilterSelect({ label, value, onChange, options = [], testId,
       window.removeEventListener("resize", place);
     };
   }, [open, shown.length]);
+
+
+  if (!multiple) {
+    return (
+      <label className="flex flex-col gap-1">
+        <span className="text-[10px] uppercase tracking-widest text-muted">{label}</span>
+        <select data-testid={testId} value={value ?? ""}
+                onChange={(e) => onChange(e.target.value)}
+                className="px-2 py-1.5 text-sm border border-line-strong rounded-md bg-surface min-w-[120px]">
+          {allLabel !== null && <option value="">{allLabel}</option>}
+          {normalised.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      </label>
+    );
+  }
+
+  const toggle = (candidate) => {
+    const next = chosen.includes(candidate)
+      ? chosen.filter((entry) => entry !== candidate)
+      : [...chosen, candidate];
+    onChange(next.join(","));
+  };
+
+  const summary = selectedSummary !== null
+    ? selectedSummary
+    : chosen.length === 0
+    ? allLabel
+    : chosen.length === 1
+      ? (normalised.find((option) => option.value === chosen[0])?.label || chosen[0])
+      : `${chosen.length} selected`;
 
   return (
     <div className="flex flex-col gap-1 relative" ref={holder}>
