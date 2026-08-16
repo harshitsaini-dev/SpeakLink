@@ -252,3 +252,38 @@ test("a refused export says so rather than silently never arriving", async () =>
   expect((await screen.findByTestId("export-button-error")).textContent)
     .toMatch(/do not have permission/i);
 });
+
+test("a filter's list is drawn outside the card that would clip it", () => {
+  // Every filter bar in this product sits inside a panel that clips its own
+  // overflow, so an absolutely positioned list was cut off at the bottom of
+  // the card - on every page, for every filter with more than a few options.
+  // No z-index fixes that: an ancestor's overflow wins.
+  render(
+    <FilterSelect testId="zone" label="Zone" value=""
+                  onChange={() => {}}
+                  options={["NORTH", "SOUTH", "EAST", "WEST"]} />);
+
+  fireEvent.click(screen.getByTestId("zone"));
+  const panel = screen.getByTestId("zone-panel");
+
+  // In <body>, not inside the control - which is the whole point.
+  expect(panel.closest('[data-testid="zone"]')).toBeNull();
+  expect(panel.parentElement).toBe(document.body);
+  expect(panel.className).toMatch(/fixed/);
+});
+
+test("clicking inside the list does not close it", () => {
+  // The panel is no longer a child of the control, so an outside-click check
+  // that only knew about the control would treat every checkbox as an
+  // outside click and close the list on the first tick.
+  render(
+    <FilterSelect testId="zone" label="Zone" value=""
+                  onChange={() => {}} options={["NORTH", "SOUTH"]} />);
+
+  fireEvent.click(screen.getByTestId("zone"));
+  fireEvent.mouseDown(screen.getByTestId("zone-option-NORTH"));
+  expect(screen.getByTestId("zone-panel")).toBeTruthy();
+
+  fireEvent.mouseDown(document.body);
+  expect(screen.queryByTestId("zone-panel")).toBeNull();
+});

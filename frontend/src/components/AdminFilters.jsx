@@ -1,4 +1,5 @@
 import React from "react";
+import ReactDOM from "react-dom";
 import { Search, X, Loader2, Download } from "lucide-react";
 import { api } from "@/lib/api";
 
@@ -124,7 +125,12 @@ export function FilterSelect({ label, value, onChange, options = [], testId,
   React.useEffect(() => {
     if (!open) return undefined;
     const away = (event) => {
-      if (holder.current && !holder.current.contains(event.target)) setOpen(false);
+      // The panel is in <body> now, so "inside the control" means inside
+      // EITHER the holder or the panel. Without this, clicking a checkbox
+      // closes the very list it is in.
+      if (holder.current?.contains(event.target)) return;
+      if (panel.current?.contains(event.target)) return;
+      setOpen(false);
     };
     document.addEventListener("mousedown", away);
     return () => document.removeEventListener("mousedown", away);
@@ -165,6 +171,48 @@ export function FilterSelect({ label, value, onChange, options = [], testId,
       ? (normalised.find((option) => option.value === chosen[0])?.label || chosen[0])
       : `${chosen.length} selected`;
 
+  const panel = React.useRef(null);
+  const [placement, setPlacement] = React.useState({ top: 0, left: 0 });
+
+  // DRAWN OUTSIDE THE PAGE, POSITIONED OVER IT.
+  //
+  // The panel used to be an absolutely positioned child of the filter bar,
+  // and every filter bar in this product sits inside a panel that clips its
+  // own overflow - so on every page the list of Zones or Stores was cut off
+  // at the bottom of the card, and a long one was mostly invisible. No amount
+  // of z-index fixes that: an ancestor's overflow wins.
+  //
+  // So it is rendered into <body> and placed against the trigger's rectangle.
+  // It also flips above the button when there is more room up there, which is
+  // what a filter at the bottom of a table needs.
+  React.useLayoutEffect(() => {
+    if (!open) return undefined;
+
+    const place = () => {
+      const trigger = holder.current?.querySelector("button");
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const height = panel.current?.offsetHeight || 260;
+      const below = window.innerHeight - rect.bottom;
+      const flip = below < height + 12 && rect.top > below;
+      setPlacement({
+        top: flip ? Math.max(8, rect.top - height - 4) : rect.bottom + 4,
+        left: Math.min(Math.max(8, rect.left),
+                       Math.max(8, window.innerWidth - 232)),
+      });
+    };
+
+    place();
+    // A scroll or a resize moves the button; the panel has to follow it or it
+    // ends up pointing at nothing.
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, shown.length]);
+
   return (
     <div className="flex flex-col gap-1 relative" ref={holder}>
       <span className="text-[10px] uppercase tracking-widest text-muted">{label}</span>
@@ -173,9 +221,11 @@ export function FilterSelect({ label, value, onChange, options = [], testId,
               className="px-2 py-1.5 text-sm border border-line-strong rounded-md bg-surface min-w-[140px] text-left disabled:opacity-50">
         {summary}
       </button>
-      {open && (
+      {open && ReactDOM.createPortal(
         <div data-testid={`${testId}-panel`}
-             className="absolute z-20 top-full mt-1 w-56 max-h-64 overflow-y-auto
+             ref={panel}
+             style={placement}
+             className="fixed z-50 w-56 max-h-64 overflow-y-auto
                         border border-line-strong rounded-md bg-surface shadow-lg p-2">
           {/* Always, not only on long lists.
               I gated this on the list being long and the reasoning was wrong:
@@ -209,8 +259,8 @@ export function FilterSelect({ label, value, onChange, options = [], testId,
               Nothing here matches “{needle}”.
             </p>
           )}
-        </div>
-      )}
+        </div>,
+        document.body)}
     </div>
   );
 }

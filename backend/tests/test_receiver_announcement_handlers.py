@@ -350,7 +350,14 @@ def test_ending_a_broadcast_does_not_close_a_speaker_an_announcement_is_using():
     receiver.decoder = None
     receiver.queue = None
     receiver.session_id = 7
-    receiver._announcement = object()          # still playing
+    class StillPlaying:
+        def paused(self):
+            return False
+
+        def wait_until_audible(self, _timeout):
+            return True
+
+    receiver._announcement = StillPlaying()    # ducked, still assigned
     # The register is the mechanism: both are using this speaker.
     receiver._pcm_sink_users = {"broadcast", "announcement"}
     receiver.report = {}
@@ -687,7 +694,17 @@ def test_stopping_a_broadcast_leaves_the_announcement_its_speaker():
     receiver.queue = None
     receiver.session_id = 7
     receiver.report = {}
-    receiver._announcement = object()          # ducked, still assigned
+    class StillPlaying:
+        """The surface the teardown asks about - it now checks whether the
+        shop is genuinely audible once the broadcast is gone."""
+
+        def paused(self):
+            return False
+
+        def wait_until_audible(self, _timeout):
+            return True
+
+    receiver._announcement = StillPlaying()    # ducked, still assigned
     receiver._pcm_sink_users = {"broadcast", "announcement"}
     receiver._sequence = 0
     receiver._states = []
@@ -738,3 +755,97 @@ def test_stopping_a_broadcast_does_close_the_speaker_when_nothing_else_wants_it(
 
     sink.close.assert_called_once_with()
     assert receiver.pcm_sink is None
+
+
+def test_after_a_broadcast_the_shop_checks_it_is_really_audible():
+    """Reported: stop the broadcast, HQ shows the announcement playing, and
+    the shop is silent until somebody presses Pause and then Play - which does
+    nothing the resume had not already done, and that is the clue.
+
+    The resume lands while the Receiver is still tearing the broadcast down.
+    Rather than reason about the order of two teardowns and a resume, the
+    Receiver checks the one thing that matters afterwards: is a frame actually
+    reaching the speaker?
+    """
+    import asyncio
+    from tools import audio_receiver_pilot as pilot
+
+    sent = []
+
+    class Connection:
+        async def send(self, message):
+            sent.append(message)
+
+    class Silent:
+        """Started, never audible - the state that used to go unnoticed."""
+        _path = __import__("pathlib").Path("promo.mp3")
+        _volume_percent = 70
+        stopped = False
+
+        def paused(self):
+            return False
+
+        def wait_until_audible(self, _timeout):
+            return False
+
+        def failure_reason(self):
+            return ""
+
+        def stop(self):
+            self.__class__.stopped = True
+
+        def start(self):
+            return None
+
+    restarted = {}
+
+    class Restarted(Silent):
+        def wait_until_audible(self, _timeout):
+            return True
+
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver._announcement = Silent()
+    receiver._announcement_volume_percent = 70
+    receiver.pcm_sink = object()
+    receiver._pcm_sink_users = {"announcement"}
+    receiver._send = lambda connection, payload: connection.send(payload)
+    receiver._ensure_pcm_sink = lambda user="announcement": receiver.pcm_sink
+
+    import tools.announcement_player as player
+    original = player.AnnouncementPlayback
+
+    def rebuild(**kwargs):
+        restarted.update(kwargs)
+        return Restarted()
+
+    player.AnnouncementPlayback = rebuild
+    try:
+        asyncio.run(receiver._ensure_announcement_audible(Connection()))
+    finally:
+        player.AnnouncementPlayback = original
+
+    assert Silent.stopped, "the silent playback should have been torn down"
+    assert restarted["volume_percent"] == 70, "it restarts at the shop's level"
+    assert sent and sent[-1]["type"] == "announcement_playing"
+
+
+def test_a_person_who_paused_a_shop_is_not_overruled_by_the_check():
+    """The same rule as every other edge of this feature."""
+    import asyncio
+    from tools import audio_receiver_pilot as pilot
+
+    class Paused:
+        def paused(self):
+            return True
+
+        def wait_until_audible(self, _timeout):  # pragma: no cover
+            raise AssertionError("a paused shop must not be examined further")
+
+    receiver = pilot.AudioReceiverPilot.__new__(pilot.AudioReceiverPilot)
+    receiver._announcement = Paused()
+
+    class Connection:
+        async def send(self, _message):  # pragma: no cover
+            raise AssertionError("nothing should be reported")
+
+    asyncio.run(receiver._ensure_announcement_audible(Connection()))

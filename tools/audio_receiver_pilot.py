@@ -1237,6 +1237,68 @@ class AudioReceiverPilot:
         except Exception:  # noqa: BLE001
             logger.debug("Could not start the endpoint observer", exc_info=True)
 
+    async def _ensure_announcement_audible(self, connection) -> None:
+        """After a broadcast, make sure the announcement is really playing.
+
+        A person's pause is left alone: this is about a recording that HQ and
+        this Receiver both believe is running, not about overruling somebody.
+        """
+        playback = self._announcement
+        if playback is None:
+            return
+        if playback.paused():
+            # Somebody paused this shop. A broadcast ending is not a reason to
+            # overrule them - that rule is the same at every edge of this
+            # feature.
+            return
+        if playback.wait_until_audible(1.5):
+            return
+
+        from tools import announcement_player
+
+        path = getattr(playback, "_path", None)
+        volume = getattr(playback, "_volume_percent",
+                         self._announcement_volume_percent)
+        if path is None:
+            return
+
+        logger.warning("The announcement was not audible after the broadcast "
+                       "ended; starting it again.")
+        try:
+            playback.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        self._announcement = None
+
+        try:
+            sink = self._ensure_pcm_sink("announcement")
+        except Exception as failure:  # noqa: BLE001
+            sink = None
+            logger.warning("The speaker could not be reopened: %s", failure)
+
+        if sink is None:
+            await self._send(connection, {
+                "type": "announcement_failed",
+                "error": "the recording could not be restarted after the "
+                         "broadcast ended - the speaker could not be opened.",
+            })
+            return
+
+        self._announcement = announcement_player.AnnouncementPlayback(
+            path=path, sink=sink, volume_percent=volume)
+        self._announcement.start()
+        if await asyncio.to_thread(self._announcement.wait_until_audible, 2.0):
+            await self._send(connection, {"type": "announcement_playing"})
+            return
+
+        reason = (self._announcement.failure_reason()
+                  or "the recording did not restart after the broadcast ended")
+        self._announcement.stop()
+        self._announcement = None
+        self._release_announcement_sink()
+        await self._send(connection, {
+            "type": "announcement_failed", "error": reason[:500]})
+
     def _ensure_windows_endpoint(self) -> str | None:
         """The Core Audio endpoint for the speaker this Store is set to.
 
@@ -1953,6 +2015,12 @@ class AudioReceiverPilot:
         if self.queue is not None:
             self.queue.close()
 
+        # The broadcast is over. Whatever was ducked for it has to be audible
+        # again - checked here rather than assumed, because "HQ sent a resume"
+        # and "the shop is making a sound" are different claims and only the
+        # second one is the job.
+        await self._ensure_announcement_audible(connection)
+
         if isinstance(session_id, int) and session_id > 0:
             await self._send(connection, {
                 **self._envelope("stopped"),
@@ -1988,6 +2056,7 @@ class AudioReceiverPilot:
             self.queue = None
 
         self.stood_down = True
+        await self._ensure_announcement_audible(connection)
         if isinstance(session_id, int) and session_id > 0:
             await self._send(connection, {
                 **self._envelope("stood_down"),

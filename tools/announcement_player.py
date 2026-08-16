@@ -246,6 +246,16 @@ class AnnouncementPlayback:
                                         name="speaklink-announcement")
         self._thread.start()
 
+    def paused(self) -> bool:
+        """Is this recording paused right now?
+
+        Asked by the Receiver after a broadcast, so that checking whether the
+        shop is audible again cannot overrule a person who pressed Pause. The
+        state was already here as an event; this is the question it answers,
+        given a name instead of read as an internal.
+        """
+        return not self._playing.is_set()
+
     def pause(self) -> None:
         self._playing.clear()
 
