@@ -106,7 +106,12 @@ function StateBadge({ state, reachable = true, confirmed = true, error = "",
 export default function Announcements() {
   const { can } = useAuth();
   const status = useAdminList("/announcements/status",
-                { q: "", zone: "", store_id: "", state: "", sort: "", dir: "asc" });
+                { q: "", zone: "", store_id: "", state: "", sort: "", dir: "asc" },
+                // This table is the answer to "what is every shop doing right
+                // now" - including a level somebody just changed at the till.
+                // Five seconds is quicker than anybody walks back to a
+                // counter, and the request is one small query.
+                { refreshSeconds: 5 });
   const [busy, setBusy] = React.useState("");
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");

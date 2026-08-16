@@ -71,7 +71,9 @@ export function countActiveFilters(filters, { ignore = [] } = {}) {
  * `path` is a /search endpoint. `initialFilters` defines the screen's own
  * controls. Everything else is identical across screens on purpose.
  */
-export function useAdminList(path, initialFilters = {}, { pageSize = DEFAULT_PAGE_SIZE } = {}) {
+export function useAdminList(path, initialFilters = {},
+                             { pageSize = DEFAULT_PAGE_SIZE,
+                               refreshSeconds = 0 } = {}) {
   const [filters, setFiltersRaw] = React.useState(initialFilters);
   const [page, setPage] = React.useState(1);
   const [data, setData] = React.useState({ items: [], total: 0, pages: 0, has_more: false });
@@ -117,6 +119,27 @@ export function useAdminList(path, initialFilters = {}, { pageSize = DEFAULT_PAG
   }, [path, filters, page, pageSize]);
 
   React.useEffect(() => { load(); }, [load]);
+
+  // A LIST THAT DESCRIBES THE PRESENT HAS TO KEEP LOOKING.
+  //
+  // Opt-in per page, because most of these lists describe records - a Store,
+  // a user, an entry in the history - and re-fetching those on a timer is
+  // work nobody asked for. The Announcements live status is the opposite: it
+  // says what every shop is doing RIGHT NOW, including a volume somebody just
+  // turned down at the till, and a page that only updates when a button is
+  // pressed reports the past with a straight face.
+  //
+  // The tab being hidden stops it. A console left open overnight on a back
+  // office screen should not poll until morning.
+  React.useEffect(() => {
+    if (!refreshSeconds) return undefined;
+    const tick = () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      load();
+    };
+    const timer = setInterval(tick, refreshSeconds * 1000);
+    return () => clearInterval(timer);
+  }, [refreshSeconds, load]);
 
   // Any filter change returns to page 1 - see rule 1 above.
   const setFilters = React.useCallback((next) => {

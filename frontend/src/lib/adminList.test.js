@@ -195,3 +195,52 @@ describe("a slow earlier response must not overwrite a newer one", () => {
     expect(screen.getByTestId("rows").textContent).toBe("ACTIVE");
   });
 });
+
+test("a list can keep looking, and stops while the tab is hidden", async () => {
+  // The Announcements live status answers "what is every shop doing right
+  // now" - including a volume somebody just changed at the till. A page that
+  // only updates when a button is pressed reports the past with a straight
+  // face.
+  jest.useFakeTimers();
+  api.get.mockResolvedValue({ data: { items: [], total: 0, pages: 1 } });
+
+  function Live() {
+    useAdminList("/announcements/status", {}, { refreshSeconds: 5 });
+    return null;
+  }
+
+  await act(async () => { render(<Live />); });
+  const initial = api.get.mock.calls.length;
+  expect(initial).toBeGreaterThan(0);
+
+  await act(async () => { jest.advanceTimersByTime(11000); });
+  expect(api.get.mock.calls.length).toBeGreaterThan(initial);
+
+  // A console left open overnight on a back-office screen should not poll
+  // until morning.
+  const hidden = jest.spyOn(document, "hidden", "get").mockReturnValue(true);
+  const before = api.get.mock.calls.length;
+  await act(async () => { jest.advanceTimersByTime(30000); });
+  expect(api.get.mock.calls.length).toBe(before);
+
+  hidden.mockRestore();
+  jest.useRealTimers();
+});
+
+test("a list without refreshSeconds does not poll at all", async () => {
+  // Most of these lists describe records - a Store, a user, a history entry -
+  // and re-fetching those on a timer is work nobody asked for.
+  jest.useFakeTimers();
+  api.get.mockResolvedValue({ data: { items: [], total: 0, pages: 1 } });
+
+  function Static() {
+    useAdminList("/stores/search", {});
+    return null;
+  }
+
+  await act(async () => { render(<Static />); });
+  const initial = api.get.mock.calls.length;
+  await act(async () => { jest.advanceTimersByTime(60000); });
+  expect(api.get.mock.calls.length).toBe(initial);
+  jest.useRealTimers();
+});

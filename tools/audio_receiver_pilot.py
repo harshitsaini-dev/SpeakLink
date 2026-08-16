@@ -43,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import replace
 import tempfile
 import uuid
@@ -777,6 +778,10 @@ class AudioReceiverPilot:
         try:
             self._ensure_windows_endpoint()
             self._start_endpoint_observer()
+            # The first reading, immediately: otherwise the console shows
+            # whatever HQ last set until somebody at the shop happens to move
+            # the dial.
+            await self._report_store_volume_if_changed(connection, force=True)
         except Exception:  # noqa: BLE001
             logger.debug("Could not start the endpoint observer", exc_info=True)
 
@@ -1135,6 +1140,60 @@ class AudioReceiverPilot:
         # control: a broadcast borrows the volume for a minute, whereas this
         # is somebody deciding how loud this shop should be.
         self._apply_master_volume(self._announcement_volume_percent)
+
+    async def _report_store_volume(self, connection, percent, muted) -> bool:
+        """Tell HQ what the shop's speaker is set to. False if the socket died."""
+        self._last_reported_volume = (percent, bool(muted))
+        try:
+            await self._send(connection, {
+                "type": "store_volume",
+                "volume_percent": percent,
+                "muted": bool(muted),
+            })
+        except Exception:  # noqa: BLE001 - the session loop owns reconnection
+            return False
+        return True
+
+    #: How often the shop's level is READ, as a backstop to the callback.
+    #:
+    #: The observer's own wait coalesces at 150ms, which is right for a dial
+    #: being dragged and far too fast for a property read every time nothing
+    #: happened. Three seconds is quicker than anybody walks back to the till
+    #: and slow enough to be free.
+    STORE_VOLUME_POLL_SECONDS = 3.0
+
+    async def _report_store_volume_if_changed(self, connection,
+                                              *, force: bool = False) -> bool:
+        """Read the endpoint and report only a change.
+
+        Cheap - one Core Audio property read - and silent when nothing moved,
+        so an idle Store costs one local call every few seconds and no traffic
+        at all.
+        """
+        now = time.monotonic()
+        if not force:
+            due = getattr(self, "_next_volume_poll", 0.0)
+            if now < due:
+                return True
+        self._next_volume_poll = now + self.STORE_VOLUME_POLL_SECONDS
+
+        endpoint_id = self._ensure_windows_endpoint()
+        if not endpoint_id:
+            return True
+        try:
+            from tools import windows_endpoint_volume as volume
+        except ImportError:  # pragma: no cover - not on Windows
+            return True
+        try:
+            state = await asyncio.to_thread(
+                volume.read_state, endpoint_id,
+                backend=getattr(self, "_endpoint_backend", None))
+        except Exception:  # noqa: BLE001
+            return True
+        current = (state.volume_percent, bool(state.muted))
+        if current == getattr(self, "_last_reported_volume", None):
+            return True
+        return await self._report_store_volume(connection, *current)
 
     def _ensure_windows_endpoint(self) -> str | None:
         """The Core Audio endpoint for the speaker this Store is set to.
@@ -1620,6 +1679,18 @@ class AudioReceiverPilot:
                 windows_endpoint_observer.COALESCE_SECONDS)
             reading = observer.take()
             if reading is None:
+                # NOTHING FROM THE CALLBACK. That is usually because nothing
+                # changed - and sometimes because the Core Audio notification
+                # never arrived at all: the callback is delivered on an
+                # apartment this process does not control, and a Store where
+                # it goes missing looks exactly like a Store where nobody
+                # touched the dial.
+                #
+                # So the level is also READ, on a slow beat, and reported when
+                # it differs from what HQ was last told. Polling as a backstop
+                # to an event, not instead of one: the callback still gives an
+                # immediate answer when it works.
+                await self._report_store_volume_if_changed(connection)
                 continue
             if self.session_id is None:
                 # OUTSIDE a broadcast this is still worth saying. It carries no
@@ -1627,13 +1698,8 @@ class AudioReceiverPilot:
                 # attribute it to - it is simply what the speaker is set to
                 # now, which is exactly what the Announcements console has to
                 # show while a recording plays all day.
-                try:
-                    await self._send(connection, {
-                        "type": "store_volume",
-                        "volume_percent": reading.volume_percent,
-                        "muted": reading.muted,
-                    })
-                except Exception:
+                if not await self._report_store_volume(
+                        connection, reading.volume_percent, reading.muted):
                     return
                 continue
             self._endpoint_state_sequence += 1
