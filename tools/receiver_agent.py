@@ -1331,6 +1331,12 @@ class DeviceReceiverSession(AudioReceiverPilot):
         self._record_state("CONNECTED")
         self._write_status("CONNECTED", detail="the backend accepted this Device credential")
 
+        # The same first words as the pilot's own connect path - see
+        # AudioReceiverPilot._announce_self. This class overrides run(), and
+        # anything said only in the parent's run() is never said by a real
+        # Store.
+        await self._announce_self(connection)
+
         heartbeat = asyncio.create_task(self._heartbeat_loop(connection))
         # Reports what the Windows output is actually doing, so a change made
         # at the till reaches HQ. Started alongside the heartbeat and torn down

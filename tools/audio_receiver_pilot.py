@@ -793,37 +793,7 @@ class AudioReceiverPilot:
         self.report["connected"] = True
         self._record_state("CONNECTED")
 
-        # WHAT THIS COMPUTER IS ACTUALLY RUNNING, said on every connection.
-        #
-        # Not the version recorded at enrolment - that is the version of
-        # whatever installed this Store, possibly months ago. A day was spent
-        # fixing announcements that could not have worked because the shop was
-        # running a build from before the feature existed, and HQ could not
-        # say so because nobody had ever told it.
-        try:
-            await self._send(connection, {
-                "type": "receiver_version",
-                "version": _receiver_version(),
-            })
-        except Exception:  # noqa: BLE001 - a version report never blocks audio
-            logger.debug("Could not report the Receiver version", exc_info=True)
-
-        # Keep the socket fresh while nothing is happening. Without this a
-        # Receiver waiting for an operator-driven browser broadcast is closed
-        # by the backend after OFFLINE_AFTER_SECONDS and simply disappears.
-        heartbeat = asyncio.create_task(self._heartbeat_loop(connection))
-        # Watch the shop's own speaker from the moment we know which one it
-        # is - see _start_endpoint_observer. A Store playing announcements all
-        # day never prepares a broadcast, and used to be unwatched all day.
-        try:
-            self._ensure_windows_endpoint()
-            self._start_endpoint_observer()
-            # The first reading, immediately: otherwise the console shows
-            # whatever HQ last set until somebody at the shop happens to move
-            # the dial.
-            await self._report_store_volume_if_changed(connection, force=True)
-        except Exception:  # noqa: BLE001
-            logger.debug("Could not start the endpoint observer", exc_info=True)
+        await self._announce_self(connection)
 
         # Report changes made at the till back to HQ.
         #
@@ -1234,6 +1204,38 @@ class AudioReceiverPilot:
         if current == getattr(self, "_last_reported_volume", None):
             return True
         return await self._report_store_volume(connection, *current)
+
+    async def _announce_self(self, connection) -> None:
+        """Everything a Receiver says the moment it is connected.
+
+        ONE method because there are TWO connect paths: this class's `run()`
+        and `DeviceReceiverSession.run()`, which is the one a real Store runs.
+        Adding this to the first only meant a shop reported nothing at all,
+        and the console accused it of running an old build when it was
+        running today's.
+
+        Nothing here is allowed to stop the connection: a Receiver that cannot
+        say its version still has to carry audio.
+        """
+        try:
+            await self._send(connection, {
+                "type": "receiver_version",
+                "version": _receiver_version(),
+            })
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not report the Receiver version", exc_info=True)
+
+        try:
+            # Watch the shop's own speaker from the moment we know which one
+            # it is. A Store playing announcements all day never prepares a
+            # broadcast, and used to be unwatched all day.
+            self._ensure_windows_endpoint()
+            self._start_endpoint_observer()
+            # The first reading immediately, so the console is right before
+            # anybody touches anything.
+            await self._report_store_volume_if_changed(connection, force=True)
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not start the endpoint observer", exc_info=True)
 
     def _ensure_windows_endpoint(self) -> str | None:
         """The Core Audio endpoint for the speaker this Store is set to.

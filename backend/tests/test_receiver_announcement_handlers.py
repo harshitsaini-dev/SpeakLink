@@ -632,3 +632,30 @@ def test_the_level_is_read_even_when_no_observer_is_running():
     assert poll_in_that_branch < take, (
         "the no-observer branch must still read the level, or a Store without "
         "a working notification never reports again")
+
+
+def test_every_connect_path_says_the_same_first_words():
+    """A real Store runs DeviceReceiverSession, which OVERRIDES run().
+
+    Everything added to the pilot's run() - the version report, the endpoint
+    resolution, the first volume reading - therefore never executed on a shop
+    computer. The console then said "Receiver older than 1.7.6" about a Store
+    running exactly 1.7.6, which is worse than saying nothing: it accuses the
+    person who has just done the install.
+
+    Both paths now call one method. This asserts they still do, because the
+    next override will be written by somebody who never read this.
+    """
+    import inspect
+    from tools import audio_receiver_pilot, receiver_agent
+
+    pilot_run = inspect.getsource(audio_receiver_pilot.AudioReceiverPilot.run)
+    agent_run = inspect.getsource(receiver_agent.DeviceReceiverSession.run)
+
+    assert "_announce_self" in pilot_run
+    assert "_announce_self" in agent_run, (
+        "the class a real Store runs must say what the pilot says")
+
+    said = inspect.getsource(audio_receiver_pilot.AudioReceiverPilot._announce_self)
+    assert "receiver_version" in said
+    assert "_report_store_volume_if_changed" in said
