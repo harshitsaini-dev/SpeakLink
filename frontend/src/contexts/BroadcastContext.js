@@ -139,12 +139,32 @@ export function BroadcastProvider({ children }) {
 
   useEffect(() => () => guardRef.current.teardown(), []);
 
+  //: Which targets were still connected on the LAST poll of the readiness
+  //: gate. A ref rather than state: nothing renders from it, and it must be
+  //: readable immediately after the wait returns.
+  const lastOnlineDuringWait = useRef([]);
+
   const waitForReceiverReady = useCallback(async (targetIdList, timeoutMs = 20000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
-        const { data } = await api.get("/broadcast/current");
+        // A TIMEOUT, because the deadline above is not one on its own.
+        //
+        // The loop only re-checks the clock between requests, and this axios
+        // client has no timeout configured - so one request that stalls rather
+        // than fails is waited on forever, and the twenty-second gate never
+        // expires. That is the "Starting… forever" report: not a slow shop, a
+        // request nobody ever gave up on. Failures here are already swallowed
+        // and retried, so a timeout is just another failed poll.
+        const { data } = await api.get("/broadcast/current", { timeout: 5000 });
         const ready = (data?.ready_receivers || []).filter((id) => targetIdList.includes(id));
+        // Remembered so the refusal can say WHICH failure this was. A Store
+        // that stayed connected and never acknowledged is a Receiver problem;
+        // a Store that disappeared from the online list mid-wait is a dropped
+        // link, and telling that operator to check FFmpeg sends them to the
+        // wrong machine entirely.
+        lastOnlineDuringWait.current =
+          (data?.online_receivers || []).filter((id) => targetIdList.includes(id));
         if (ready.length > 0) return ready;
       } catch { /* keep polling until the deadline */ }
       // eslint-disable-next-line no-await-in-loop
@@ -228,9 +248,25 @@ export function BroadcastProvider({ children }) {
       setBroadcasterStatus("waiting for receiver readiness");
       const readyIds = await waitForReceiverReady(ids);
       if (readyIds.length === 0) {
+        // TWO DIFFERENT FAILURES, AND THEY SEND YOU TO DIFFERENT MACHINES.
+        //
+        // This said one thing: check the Receiver and check FFmpeg. That is
+        // right when a connected Store never acknowledged. It is wrong, and
+        // costly, when the Store's connection simply dropped during the wait -
+        // then the Receiver and FFmpeg are both fine and the fault is on the
+        // network between here and the shop. Seen in the HQ log as
+        // "WinError 121, the semaphore timeout period has expired" on a Store
+        // that reconnected minutes later, while the console still showed it
+        // as online because the dead socket had not been noticed yet.
+        const stillConnected = lastOnlineDuringWait.current.length > 0;
         throw new Error(
-          "No Receiver reported READY, so no audio was sent. Check that the " +
-          "Receiver is running and that FFmpeg is available on it."
+          stillConnected
+            ? "No Receiver reported READY, so no audio was sent. The Store is " +
+              "connected but did not acknowledge. Check that the Receiver is " +
+              "running and that FFmpeg is available on it."
+            : "The Store's connection dropped before it could report READY, so " +
+              "no audio was sent. The Receiver itself may be fine - check the " +
+              "network link between HQ and that shop, then try again."
         );
       }
     } else {

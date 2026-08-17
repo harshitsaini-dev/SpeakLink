@@ -1280,10 +1280,36 @@ export default function BroadcastConsole() {
                 Warning: this will broadcast to <b>ALL {stores.length} stores</b>.
               </div>
             )}
+            {/* WHAT IS ACTUALLY HAPPENING DURING THOSE TWENTY SECONDS.
+
+                Going live is not one step. The session is created, then the
+                page waits for a Store's Receiver to report READY - a poll that
+                runs for up to twenty seconds before it gives up. The console
+                behind this dialog has been narrating that the whole time
+                ("waiting for receiver readiness"), but the scrim covers it, so
+                the operator was left with the word "Starting…" and no way to
+                tell a slow shop from a dead button. Twenty silent seconds reads
+                as a hang, and the report was exactly that.
+
+                So the narration is repeated here, where it can be seen. */}
+            {busy && (
+              <p className="text-xs text-muted mt-3" data-testid="confirm-progress">
+                {broadcasterStatus && broadcasterStatus !== "idle"
+                  ? `${broadcasterStatus[0].toUpperCase()}${broadcasterStatus.slice(1)}…`
+                  : "Creating the broadcast session…"}
+                {" "}
+                A Store's Receiver has to confirm it is ready, which can take up
+                to 20 seconds.
+              </p>
+            )}
             <div className="flex gap-2 mt-4">
-              <button data-testid="confirm-cancel-btn" onClick={() => setConfirmOpen(false)} className="flex-1 px-4 py-2 rounded-md border border-line-strong text-sm hover:bg-surface-muted">Cancel</button>
+              {/* Disabled rather than left working while this runs. The session
+                  already exists by then, so closing the dialog would cancel
+                  nothing - it would only hide the thing that says so. */}
+              <button data-testid="confirm-cancel-btn" onClick={() => setConfirmOpen(false)} disabled={busy}
+                      className="flex-1 px-4 py-2 rounded-md border border-line-strong text-sm hover:bg-surface-muted disabled:opacity-50 disabled:cursor-not-allowed">Cancel</button>
               <button data-testid="confirm-start-btn" onClick={startBroadcast} disabled={busy}
-                      className="flex-1 px-4 py-2 rounded-md bg-red-600 hover:bg-red-700 text-white text-sm font-semibold flex items-center justify-center gap-2">
+                      className="flex-1 px-4 py-2 rounded-md bg-red-600 hover:bg-red-700 text-white text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-80">
                 <Play size={16}/> {busy ? "Starting…" : "Go Live"}
               </button>
             </div>

@@ -593,7 +593,12 @@ test("a physical broadcast still waits for a Receiver", async () => {
     return { data: {} };
   });
   // Never ready, so the gate must refuse rather than open a microphone.
-  api.get.mockResolvedValue({ data: { ready_receivers: [] } });
+  // Connected throughout: the refusal now distinguishes a Store that stayed
+  // on the line and never acknowledged from one whose link dropped mid-wait,
+  // and this test is the first of those. Without online_receivers here it
+  // would silently become the second.
+  api.get.mockResolvedValue({
+    data: { ready_receivers: [], online_receivers: [101] } });
 
   let thrown = null;
   await act(async () => {
@@ -604,4 +609,5 @@ test("a physical broadcast still waits for a Receiver", async () => {
   });
   expect(thrown).toBeTruthy();
   expect(String(thrown.message)).toMatch(/No Receiver reported READY/i);
+  expect(String(thrown.message)).toMatch(/connected but did not acknowledge/i);
 }, 30000);
