@@ -37,7 +37,15 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$FfmpegPath,
-    [string]$Version = '1.0.0',
+    # DEFAULTED FROM tools/speaklink_version.py, not typed here.
+    #
+    # This was '1.0.0', so every real build had to pass -Version by hand - a
+    # second place a version gets typed, which is the exact thing that file
+    # was written to stop. It happened: a Receiver package built as 1.7.7
+    # while the installer, which reads the constant, went on saying 1.7.6.
+    # Left overridable for a deliberate one-off, but the default is now the
+    # one number.
+    [string]$Version,
     [switch]$AllowDirty,
     [switch]$DryRun
 )
@@ -45,6 +53,12 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
+if (-not $Version) {
+    $versionFile = Join-Path $repositoryRoot 'tools\speaklink_version.py'
+    $match = Select-String -Path $versionFile -Pattern 'STORE_KIT_VERSION\s*=\s*"([^"]+)"'
+    if (-not $match) { throw "Could not read STORE_KIT_VERSION from $versionFile" }
+    $Version = $match.Matches[0].Groups[1].Value
+}
 $venvPython = Join-Path $repositoryRoot 'backend\.venv\Scripts\python.exe'
 $spec = Join-Path $repositoryRoot 'receiver_agent.spec'
 
