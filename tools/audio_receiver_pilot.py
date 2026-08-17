@@ -1171,6 +1171,10 @@ class AudioReceiverPilot:
     #: happened. Three seconds is quicker than anybody walks back to the till
     #: and slow enough to be free.
     STORE_VOLUME_POLL_SECONDS = 3.0
+    #: How long a failed endpoint resolution is believed before trying again.
+    #: The poll above runs every three seconds; enumerating every playback
+    #: endpoint that often, on the event loop, is what starved the heartbeat.
+    ENDPOINT_RESOLVE_RETRY_SECONDS = 60.0
 
     async def _report_store_volume_if_changed(self, connection,
                                               *, force: bool = False) -> bool:
@@ -1187,7 +1191,12 @@ class AudioReceiverPilot:
                 return True
         self._next_volume_poll = now + self.STORE_VOLUME_POLL_SECONDS
 
-        endpoint_id = self._ensure_windows_endpoint()
+        # OFF THE EVENT LOOP. Resolution enumerates Core Audio endpoints
+        # through COM, which blocks, and a blocked loop is a heartbeat that
+        # does not go out - which HQ reads as a Store that has stopped
+        # answering and closes. The read below was already threaded; this was
+        # the half that was not.
+        endpoint_id = await asyncio.to_thread(self._ensure_windows_endpoint)
         if not endpoint_id:
             return True
         try:
@@ -1324,6 +1333,30 @@ class AudioReceiverPilot:
         existing = getattr(self, "windows_endpoint_id", None)
         if existing:
             return existing
+
+        # A FAILED RESOLUTION IS REMEMBERED, TOO - for a while.
+        #
+        # Only success was cached. A Store whose device name Core Audio cannot
+        # match therefore re-enumerated every playback endpoint on the machine
+        # every three seconds, forever, from the volume poll - and that
+        # enumeration is a blocking COM call sitting on the event loop. When
+        # one of those calls is slow (an endpoint that has gone away is the
+        # usual reason) the heartbeat is late, and HQ closes a socket whose
+        # snapshot has aged past thirty seconds.
+        #
+        # That is the shape seen from a live shop: the Store reconnecting
+        # every sixty to eighty seconds, no volume reports at all in the log,
+        # and a broadcast that never got its READY because the connection did
+        # not survive the twenty-second wait. WinError 121 at the HQ end is
+        # what a socket dropped that way looks like from here.
+        #
+        # So a failure is held for a minute before trying again. The retry
+        # still happens - somebody may have switched the speaker back on - but
+        # twenty times a minute was never the way to notice that.
+        blocked_until = getattr(self, "_endpoint_resolve_retry_at", 0.0)
+        if blocked_until and time.monotonic() < blocked_until:
+            return None
+
         device = getattr(getattr(self, "sink", None), "device", None)
         name = getattr(device, "name", None) or getattr(device, "selector", None)
         if not name:
@@ -1336,11 +1369,20 @@ class AudioReceiverPilot:
             resolved = volume.resolve_endpoint_for_playback_device(
                 str(name), backend=getattr(self, "_endpoint_backend", None))
         except Exception:  # noqa: BLE001
+            self._endpoint_resolve_retry_at = (
+                time.monotonic() + self.ENDPOINT_RESOLVE_RETRY_SECONDS)
             logger.info("Could not resolve a Core Audio endpoint for %r; the "
-                        "master volume cannot be read or set on this Store.",
-                        str(name)[:80])
+                        "master volume cannot be read or set on this Store. "
+                        "Trying again in %.0f seconds.",
+                        str(name)[:80], self.ENDPOINT_RESOLVE_RETRY_SECONDS)
             return None
         endpoint_id = getattr(resolved, "endpoint_id", None) or resolved
+        if not endpoint_id:
+            # Resolved to nothing is a failure too - it just does not raise.
+            # Without this it was the one path that retried at full speed.
+            self._endpoint_resolve_retry_at = (
+                time.monotonic() + self.ENDPOINT_RESOLVE_RETRY_SECONDS)
+            return None
         self.windows_endpoint_id = endpoint_id
         logger.info("Resolved this Store's audio endpoint from its output "
                     "device; master volume is now controllable.")
